@@ -1,0 +1,703 @@
+====== Request for Comments: Traits for PHP ======
+  * Version: 1.5
+  * First Published at: http://www.stefan-marr.de/artikel/rfc-traits-for-php.html
+  * reST TXT: http://www.stefan-marr.de/rfc-traits-for-php.txt
+  * Author: Stefan Marr <php.at.stefan-marr.de>
+
+This RFC will discuss at first the motivation for Traits describing the rationals
+and presenting a short real world use case. The main part will describe the
+concept of Traits in detail using the syntax for Traits implemented in a patch
+which is part of this proposal. In the end, the URL of the patch and 
+additional resources about Traits are given.
+
+===== Introduction =====
+
+//Traits// is a mechanism for code reuse in single inheritance languages such
+as PHP. A Trait is intended to reduce some limitations of single inheritance
+by enabling a developer to reuse sets of methods freely in several independent
+classes living in different class hierarchies.
+The semantics of the combination of Traits and classes is defined in a way,
+which reduces complexity and avoids the typical problems associated with multiple
+inheritance and Mixins.
+
+They are recognized for their potential in supporting better composition
+and reuse, hence their integration in newer versions of languages 
+such as Perl 6, Squeak, Scala, Slate and Fortress.
+Traits have also been ported to Java and C#.
+
+==== Why do we need Traits? ====
+
+Code reuse is one of the main goals that object-oriented languages try to achieve
+with inheritance. Unfortunately, single inheritance often forces the developer
+to take a decision in favor for either code reuse *or* conceptual clean class
+hierarchies. To achieve code reuse, methods have either to be duplicated or
+to be moved near the root of the class hierarchy, but this hampers
+understandability and maintainability of code.
+
+To circumvent this problems multiple inheritance and Mixins have been invented.
+But both of them are complex and hard to understand. PHP5
+has been explicitly designed with the clean and successful model of Java in
+mind: single inheritance, but multiple interfaces. This decision has been taken
+to avoid the known problems of for example C++.
+Traits have been invented to avoid those problems, too. They enable designer to build
+conceptually clean class hierarchies without the need to consider code reuse or
+complexity problems, but focusing on the real problem domain and maintainability
+instead.
+
+===== Traits: A Mechanism for Fine-grained Reuse =====
+
+A Trait is a unit of reuse much like a class, but only intended to group
+functionality in a fine-grained and consistent way. It is not possible to
+instantiate a Trait on its own. It is an addition to traditional inheritance
+and enables horizontal composition of behavior.
+
+The following code illustrates the current implementation of an extended
+version of the PHP reflection API which provides detailed access to doc comment
+blocks.
+
+ReflectionMethod and ReflectionFunction are classes from the reflection API and
+have to be extended with exactly the same code. In some situations it
+would be possible to add a common base class, but in this case it is
+impossible, because the extended classes are not under our control, i.e., they
+are implemented in third party code or even in C, like it is the case here.
+
+<code php>
+ <?php
+ class ezcReflectionMethod extends ReflectionMethod {
+   /* ... */
+   function getReturnType() { /*1*/ }
+   function getReturnDescription() { /*2*/ }
+   /* ... */
+ }
+
+ class ezcReflectionFunction extends ReflectionFunction {
+   /* ... */
+   function getReturnType() { /*1*/ }
+   function getReturnDescription() { /*2*/ }
+   /* ... */
+ }
+ ?>
+</code>
+
+With Traits it is possible to refactor this redundant code out.
+
+<code php>
+ <?php
+ trait ezcReflectionReturnInfo {
+   function getReturnType() { /*1*/ }
+   function getReturnDescription() { /*2*/ }
+ }
+
+ class ezcReflectionMethod extends ReflectionMethod {
+   use ezcReflectionReturnInfo;
+   /* ... */
+ }
+
+ class ezcReflectionFunction extends ReflectionFunction {
+   use ezcReflectionReturnInfo;
+   /* ... */
+ }
+ ?> 
+</code>
+
+This is just a small example of what Traits are useful for.
+The next sections will discuss on more advanced techniques and describe how the
+current implementation of Traits for PHP works.
+
+==== The Flattening Property ====
+
+As already mentioned, multiple inheritance and Mixins are complex mechanisms.
+Traits are an alternative which have been designed to impose no
+additional semantics on classes. Traits are only entities of the literal code
+written in your source files. There is no notion about Traits at runtime.
+They are used to group methods and reuse code and are totally flattened 
+into the classes composed from them. It is almost like a language supported and
+failsafe copy'n'paste mechanism to build classes.
+
+=== Precedence Order ===
+
+Flattening is achieved by applying some simple rules on the composition
+mechanism. Instead of implementing a fancy and awkward algorithm to solve
+problems, the entire control about the composition is left in the hand of the
+developer and fits nicely into the known inheritance model of PHP.
+The following examples illustrate the semantics of Traits and their relation
+to methods defined in classes.
+
+<code php>
+ <?php
+ class Base {
+   public function sayHello() {
+     echo 'Hello ';
+   }
+ }
+ 
+ trait SayWorld {
+   public function sayHello() {
+     parent::sayHello();
+     echo 'World!';
+   }
+ }
+
+ class MyHelloWorld extends Base {
+   use SayWorld;
+ }
+
+ $o = new MyHelloWorld();
+ $o->sayHello(); // echos Hello World!
+ ?>
+</code>
+
+As shown in the above code, an inherited method from a base class is overridden
+by the method inserted into ''MyHelloWorld'' from the ''SayWorld'' Trait.
+The behavior is the same for methods defined in the ''MyHelloWorld'' class.
+The precedence order is that methods from the current class override Trait methods,
+which in return override methods from the base class.
+
+<code php>
+ <?php
+ trait HelloWorld {
+   public function sayHello() {
+     echo 'Hello World!';
+   }
+ }
+
+ class TheWorldIsNotEnough {
+   use HelloWorld;
+   public function sayHello() {
+     echo 'Hello Universe!';
+   }
+ }
+
+ $o = new TheWorldIsNotEnough();
+ $o->sayHello(); // echos Hello Universe!
+ ?>
+</code>
+
+=== Multiple Traits Usage ===
+
+To keep things simple in the beginning, there has only one Trait being used at
+a time, but obviously a class could use multiple Traits at the same time.
+
+<code php>
+ <?php
+ trait Hello {
+   public function sayHello() {
+     echo 'Hello ';
+   }
+ }
+
+ trait World {
+   public function sayWorld() {
+     echo ' World';
+   }
+ }
+ 
+ class MyHelloWorld {
+   use Hello, World;
+   public function sayExclamationMark() {
+     echo '!';
+   }
+ }
+ 
+ $o = new MyHelloWorld();
+ $o->sayHello();
+ $o->sayWorld();
+ $o->sayExclamationMark();
+ // Results eventually in: Hello World!
+</code>
+
+=== Conflict Resolution ===
+
+But now a problem will occur, if different Traits provide methods with the
+same name.
+
+<code php>
+ <?php
+ trait A {
+   public function smallTalk() {
+     echo 'a';
+   }
+   public function bigTalk() {
+     echo 'A';
+   }
+ }
+
+ trait B {
+   public function smallTalk() {
+     echo 'b';
+   }
+   public function bigTalk() {
+     echo 'B';
+   }
+ }
+ ?>
+</code>
+
+Both classes have to be used in a class named ''Talker''. Multiple inheritance
+and Mixins define an algorithm to resolve this conflict. Traits don't. Conflicts
+are not solved implicitly by any kind of precedence. Instead, to avoid implicit
+complexity, the developer has full control over class composition.
+
+<code php>
+ <?php
+ class Talker {
+   use A, B;
+ }
+ ?>
+</code>
+ 
+In case of the above definition of ''Talker'', PHP will show a notice that there
+have been conflicts and name the methods ''smallTalk()'' and ''bigTalk()'' 
+as the reason of this conflict. Therefore, neither of the given implementations
+will be available in the class.
+
+Instead, the developer can exactly define which methods are used and how the
+conflict is resolved.
+
+<code php>
+ <?php
+ class Talker {
+   use A, B {
+     B::smallTalk instead A::smallTalk,
+     A::bigTalk instead B::bigTalk
+   }
+ }
+ ?>
+</code>
+
+This definition will result in the exclusion of ''smallTalk()'' from the Trait A
+and ''bigTalk()'' from Trait B. Therefore, the resulting class Talker would 
+echo ''"b"'' for ''smallTalk()'' and ''"A"'' for ''bigTalk().''
+But simple exclusion of methods is not the best choice for all situations.
+
+<code php>
+ <?php
+ class Talker {
+   use A, B {
+     B::smallTalk instead A::smallTalk, 
+     A::bigTalk instead B::bigTalk,
+     A::bigTalk as talk
+   }
+ }
+ ?>
+</code>
+
+Beside the exclusion an alias operation is available, too. This alias
+operation, notated like ''originalMethodName as additionalMethodName''
+for arrays even has a similar semantics like the array notation.
+The definition ''A::bigTalk as talk'' lets the new name ''talk'' refer
+to the method body of ''bigTalk'' of the Trait B. The resulting ''Talker'' 
+class will consist of following three methods:
+
+* ''bigTalk() { echo 'A'; }''
+* ''smallTalk() { echo 'b'; }''
+* ''talk() { echo 'B'; }''
+
+Since the alias operation adds a new name to an existing method body, the
+''bigTalk'' method still has to be excluded. Otherwise, PHP would print
+a notice that two methods from Traits have a conflict and are excluded.
+Aliasing is not renaming and references in methods to a given method name
+aren't changed either. On the first look this may sound strange, but it
+provides the opportunity to build Traits and even hierarchies of Traits which
+fit together very well.
+
+=== Traits Composed from Traits ===
+
+Not explicitly mentioned jet, but implied by the flattening property is the
+composition of Traits from Traits.
+Since Traits are fully flattened away at compile time it is possible to use
+Traits to compose Traits without any additional impact on the semantics.
+The following code illustrates this:
+<code php>
+ <?php
+ trait Hello {
+   public function sayHello() {
+     echo 'Hello ';
+   }
+ }
+
+ trait World {
+   public function sayWorld() {
+     echo 'World!';
+   }
+ }
+
+ trait HelloWorld {
+   use Hello, World;
+ }
+
+ class MyHelloWorld {
+   use HelloWorld;
+ }
+
+ $o = new MyHelloWorld();
+ $o->sayHello();
+ $o->sayWorld();
+ // Results eventually in: Hello World!
+ ?>
+</code>
+
+Traits itself can take part in arbitrary compositions, but Traits are not part
+of the inheritance tree i.e., it is not possible to inherit from a Trait to
+avoid confusion and misuse of Traits.
+
+=== Express Requirements by Abstract Methods ===
+
+Since Traits do not contain any state/properties, there is a need to describe
+the requirements a Trait will rely on. In PHP it would be possible to utilize
+the dynamic language features, but it is a common practice to give this
+requirements explicitly.
+This is possible with abstract methods like it is used for abstract classes.
+
+<code php> 
+ <?php
+ trait Hello {
+   public function sayHelloWorld() {
+     echo 'Hello'.$this->getWorld();
+   }
+   abstract public function getWorld();
+ }
+
+ class MyHelloWorld {
+   private $world;
+   use Hello;
+   public function getWorld() {
+     return $this->world;
+   }
+   public function setWorld($val) {
+     $this->world = $val;
+   }
+ }
+ ?>
+</code>
+ 
+The usage of abstract methods allows to state not always obvious relation ships
+and requirements explicitly. It is favored over the implicit usage of the
+dynamic method resolution and property creation in the context of complex
+projects for the sake of readability.
+
+==== Traits Semantics Summarized ====
+
+  - Traits do not add runtime semantics, they only take part in the process of building a class.
+  - Traits integrate into the precedence order of method overriding.
+  - To avoid complexity, conflicts between Trait methods have to be solved explicitly. Otherwise a notice is generated and the conflicting methods are excluded.
+  - Specific methods can be excluded from a composition to handle conflicts.
+  - Aliases can be defined for methods to enable reuse of conflicting methods.
+  - Traits can be composed from Traits.
+  - Traits can state requirements explicitly by the use of abstract methods.
+
+As a result of this semantics, at runtime, classes build using Traits are not distinguishable 
+from classes not using Traits but traditional code duplication instead.
+Semantics of ''parent'' and ''$this'' hasn't changed, too. Used in a Trait
+method, they behave exactly the same as if the method has been defined in the
+class directly.
+
+==== Visibility ====
+
+Visibility modifiers have not been discussed so far. Since Traits are meant as
+units of reuse, modifiers should be changeable easily in the context of a
+composed class. Therefore, the aliasing operation is able to change the
+visibility modifier of a method, too.
+
+<code php>
+ <?php
+ trait HelloWorld {
+   public function sayHello() {
+     echo 'Hello World!';
+   }
+ }
+
+ class MyClass1 {
+   use HelloWorld { sayHello as protected }
+ }
+
+ class MyClass2 {
+   use HelloWorld { doHelloWorld as private sayHello }
+ }
+ ?>
+</code>
+
+The final modifier is supported, too. The static modifier is not supported,
+because it would change the methods semantics and references to ''$this''
+would break.
+
+===== Common Misconceptions =====
+
+==== Aliasing vs. Renaming ====
+
+The presented aliasing operation has not a semantic of renaming.
+Instead it does only provide a new name to be able to invoke the original
+method with this new name even if the original name was excluded.
+
+<code php>
+ <?php
+ trait A {
+   public function a() {
+     echo 'a';
+     $this->b();
+   }
+   public function b() {
+     echo 'b';
+   }
+ }
+
+ class Foo {
+   use A {
+     c => b
+   }
+ }
+
+ $foo = new Foo();
+ $foo->a();            //echos ab
+ $foo->b();            //echos b
+ $foo->c();            //echos b
+ ?>
+</code>
+
+Since it is not renaming the original method b is still available and has not
+been influenced at all.
+
+Furthermore, aliasing implies that the method body of an aliased method is not
+changed in any kind. From this it follows that a recursion available in the
+original method wont result in a recursion in the alias method:
+<code php>
+ <?php
+ trait A {
+   public function foo() {
+     echo 'a';
+     $this->foo();
+   }
+ }
+
+ class MyA {
+   use A { foo as bar }
+   public function foo() {
+     echo 'b';
+     $this->foo();
+   }
+ }
+ ?>
+</code>
+The result to a call on ''bar()'' would echo ''abbbbb...'' theoretically as infinity
+recursion on ''foo()'', but not on ''bar()'', since it is only executed once.
+
+===== Proposal and Patch =====
+
+This Request for Comments proposes a new language feature for PHP named Traits.
+Traits are a nice approach to enhance the capabilities to design conceptual
+consistent class hierarchies and avoid code duplication.
+
+Patches:
+
+  * against PHP_5_2: http://toolslave.net/snapshots/traits/traits.patch
+  * against PHP_5_3: http://toolslave.net/snapshots/traits/traits-5.3.patch
+  * Test Cases: http://toolslave.net/snapshots/traits/traits-tests.zip
+  * SVN: https://instantsvc.svn.sourceforge.net/svnroot/instantsvc/branches/php-extension/traits-php/ 
+
+==== Alternative Syntax Proposals ====
+
+This section collects proposals for alternative Traits syntaxes.
+
+=== Alternative Keywords for use ===
+
+The keyword use is already reserved for the new namespace feature.
+Thus, alternative keywords has been proposed on the mailing list.
+The general idea remains the same, Trait usage is defined in the class body
+like this:
+
+<code php>
+ class Foo {        class Foo {
+   exhibit Bar;        possess Bar;
+ }                  }
+</code>
+
+Proposed keywords:
+  * use (but already used for namespaces)
+  * exhibit or exhibits (not basic vocabulary?)
+  * possess or possesses (hard to write?)
+  * attach
+  * acquire
+  * adopt
+  * apply
+  * has
+  * consume
+  * implement (almost the like ''implements'')
+  * include (but also ambiguous)
+  * inline
+  * import
+  * inject
+  * trait 
+
+=== Alternatives for the ''instead'' keyword ===
+
+There has been the proposal of the keyword ''over'' instead of the ''instead''
+keyword:
+
+<code php>
+ use A, B, C, D {
+     B::smallTalk over A, C, D; // to be read like: use B::smallTalk
+                                // instead the implementations form A, C, D
+ }
+</code>
+
+
+=== Alternatives for the Aliasing Notation ===
+
+Aliasing is often misunderstood as renaming.
+May be some of the following notations will help:
+
+<code php>
+ [1] is keyword instead of the arrow 
+ use Trait {
+  bar is foo1;  //methodAlias is method
+ }
+</code>
+
+Interpretation: ''is'' state something about ''bar'', there is nothing stated
+about ''foo1''.
+
+Alternative keyword for the same notation meaning:
+  * as
+  * alias
+  * from
+
+Or some explicit variations:
+
+<code php>
+ use Trait {
+   alias bar as foo1;
+   clone bar as foo1;
+ }
+
+ [3] with method as methodAlias
+ use Trait {
+   without foo3;
+   with bar as foo1,
+        boo as foo2;
+ }
+</code>
+
+Think the proposal [3] reads very well, since, the keyword pair with/without
+expresses the opposed semantics. The Trait is partially modified in this
+composition by removing some thing (''foo3'') and adding something (''bar'',
+''boo'').
+
+==== Rejected Features ====
+
+=== Interfaces Propagation ===
+
+Another important feature of PHP is the support of interfaces. A often used
+metaphor to describe Traits is *Traits are interfaces with implementation*.
+Traits can be utilized to provide the implementation for a specific interface
+and since an interface is a guarantee that some methods are available it fits
+in the concept of Traits which provides those methods very well.
+
+To underpin this relationship, it is possible to declare that a Trait
+implements an interface like this:
+
+<code php>
+ <?php
+ interface IHello {
+   public function sayHello();
+ }
+ 
+ trait SayHello implements IHello {
+   public function sayHello() {
+     echo 'Hello World!';
+   }
+ }
+
+ class MyHelloWorld {
+   use SayHello;
+ }
+ 
+ $o = new MyHelloWorld();
+ var_dump($o instanceof IHello);  // bool(true)
+</code>
+
+If a Trait implements an interface, this definition is propagated to the class
+using the Trait. Therefore, it is possible to provide implementations for an interface
+and reuse them in different classes.
+
+=== Traits Use Definition in the Class Header ===
+
+Instead of declaring the Trait composition in the class body, it could be
+defined in the class prologue like this:
+ 
+<code php>
+ <?php
+ trait Hello {
+   public function sayHello() {}
+ }
+
+ class MyHelloWorld extends BaseClass
+   uses Hello (hello => sayHello, !sayHello) 
+ {
+   public function foo() {}
+ }
+ ?>
+</code>
+
+The drawback of this notation is the implied notation of Traits as some kind of
+a type changing construct. Since they do not influence the type as their major
+feature, this notion would be misleading. Furthermore, this notation seams to
+have readability problems. Complex compositions are not as clearly arranged as
+they are with the *In-Body* notation.
+A patch implementing this notation is available at: http://toolslave.net/snapshots/traits/traits-head-syntax.patch
+
+=== Alternative Expression of Exclusion (Exclusion is rejected at all) ===
+
+Some people do not like the notation with the exclamation mark.
+Possible alternative keywords for following notation style:
+<code php>
+ use Trait {          use Trait {
+   not foo1, foo2;      without foo1, foo2;
+ }                    }
+</code>
+Keywords:
+  * !      (not readable?)
+  * not
+  * hide   (not exactly the meaning of exclusion)
+  * ignore
+  * without
+  * unset
+  * except (may be mistaken with exception stuff)
+
+
+==== More about Traits ====
+
+As already mentioned, Traits is not a totally new concept, but the semantics
+used in this proposal has been fully defined at first in 2003. For scientific
+information and papers about Traits http://www.iam.unibe.ch/~scg/Research/Traits/
+is a good starting point. Since it isn't a purely academic concepts, there are
+already languages supporting Traits out there. Squeak, Perl6, Scala, Slate,
+Fortress and even for C#/Rotor implementation are available.
+
+A detailed technical report has been published at 
+http://www.iam.unibe.ch/~scg/Archive/Papers/Duca06bTOPLASTraits.pdf
+It explains Traits and gives some formal proves about the soundness of Traits, too.
+
+Last but not least, in this Phd thesis http://www.iam.unibe.ch/~scg/Archive/PhD/schaerli-phd.pdf
+two case studies have been publish illustrating the benefits Traits are providing.
+
+===== Changelog =====
+
+gron 2008-03-05 14:15:45
+- added new style of traits composition and replaced the notion of an explicit exclude operator in favor for a very explicit conflict resolution
+
+gron 2008-02-25 16:08:35
+- fixed version number and some typos
+
+gron 2008-02-23 18:57:21
+- added an example to the aliasing vs renaming part illustrating the effect on recursion
+- added a syntax proposal which expresses the opposing character of aliasing(add) and excluding(remove) very well
+
+gron 2008-02-21 23:02:01
+- added several new notation proposals
+- added link to patch for PHP_5_3
+
+gron 2008-02-20 18:47:17
+- introduced explicit description of abstract methods to be used as requirements specification for traits (useful to access state)
+- moved part about interface propagation to the section of rejected features
+- added a section about common misconceptions i.e. aliasing is not renaming
+- added various syntax proposals
