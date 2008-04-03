@@ -200,6 +200,7 @@ Most of this taint propagation is finished, but there are a few minor issues tha
 
 While adding taint propagation I found that a lot of PHP source code fails to use the official macros when initializing a zval. In these cases I added another line of code to initialize the taint bits by hand. Also, more internal documentation (other than empty man page skeletons) could have reduced development time.
 
+
 ===== PHP core changes =====
 
 To make the implementation manageable, most of the taint-specific code is implemented as one-line macro calls that either implement taint support, or that expand into nothing. This avoids massive amounts of scar tissue with "#ifdef . . #endif" around small pieces of code. These macros are defined (and documented!) in the file "Zend/taint_marks.h".
@@ -209,25 +210,22 @@ In some cases an internal API had to be extended with an extra argument to propa
 Old API:
 
 <code c>
-ZEND_API int add_assoc_string_ex(zval *arg, char *key, uint key_len,
-char *str, int duplicate);
+ZEND_API int add_assoc_string_ex(zval *arg, char *key, uint key_len, char *str, int duplicate);
 </code>
 
 New API:
 
 <code c>
-#define add_assoc_string_ex(__arg, __key, __len, __str, __duplicate)
-add_assoc_string_ex_t(__arg, __key, __len, __str TAINT_MARKS_CC(TC_NONE),
-__duplicate)
-ZEND_API int add_assoc_string_ex_t(zval *arg, char *key, uint key_len,
-char *str TAINT_MARKS_DC(taint_marks), int duplicate);
+#define add_assoc_string_ex(__arg, __key, __len, __str, __duplicate) \ 
+        add_assoc_string_ex_t(__arg, __key, __len, __str TAINT_MARKS_CC(TC_NONE), __duplicate)
+ZEND_API int add_assoc_string_ex_t(zval *arg, char *key, uint key_len, char *str TAINT_MARKS_DC(taint_marks), int duplicate);
 </code>
 
 The "zend_parse_parameters()" API was also extended, so that I could propagate the taint bits from function input arguments to function outputs, and so that I could enforce taint checks on input arguments. To the existing list of existing type modifiers: "|!/" I added another two: "`'". Their meaning is defined in the table below. The example after the table is a fragment from the "basename()" function.
 
-> ^ TypeA modifier ^ Meaning ^
-> | ` | Copy taint marks from the current PHP-level argument. The destination pointer is specified with the next C-level "zend_parse_parameters()" argument. |
-> | ' | Apply taint check to the current PHP-level argument. The allowed taint marks are specified with the next C-level "zend_parse_parameters()" argument. |
+^ TypeA modifier ^ Meaning ^
+| ` | Copy taint marks from the current PHP-level argument. The destination pointer is specified with the next C-level "zend_parse_parameters()" argument. |
+| ' | Apply taint check to the current PHP-level argument. The allowed taint marks are specified with the next C-level "zend_parse_parameters()" argument. |
 
 <code c>
 PHP_FUNCTION(basename)
@@ -236,8 +234,8 @@ PHP_FUNCTION(basename)
 #ifdef HAVE_TAINT
 TAINT_MARKS_T taint_marks = 0;
 if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s`|s'",
-&amp;string, &amp;string_len, &amp;taint_marks,
-&amp;suffix, &amp;suffix_len, EG(taint_checks_self)) == FAILURE) {
+&string, &string_len, &taint_marks,
+&suffix, &suffix_len, EG(taint_checks_self)) == FAILURE) {
 return;
 }
 #else
