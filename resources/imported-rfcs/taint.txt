@@ -1,0 +1,436 @@
+====== Taint support for PHP ======
+
+Wietse Venema \\  IBM T.J. Watson Research Center \\  Hawthorne, NY, USA
+
+===== Introduction =====
+
+This is a preliminary implementation of support for tainted variables in PHP. The goal is to help PHP application programmers find and eliminate opportunities for HTML script injection, SQL or shell code injection, or PHP control hijacking, before other people can exploit them. The implementation provides taint support for basic operators and for a selection of built-functions and extensions. A list of what is implemented sofar is at the end of this document.
+
+The good news is that performance is better than I hoped it would be. However, the implementation is incomplete, so please don't be surprised when something is still missing. For example, I have not yet implemented taint support for object-specific operations, and taint checks assume that output has a Content-Type: of text/html. It also does not yet fully adhere to coding and documentation conventions. All this needs to be taken care of in future releases.
+
+I need your feedback to make this code complete. I hope to do several quick 1-2 month release cycles in which I collect feedback, fill in missing things, and adjust course until things stabilize.
+
+This document covers the following topics:
+
+  * [[#example| A quick example ]]
+  * [[#flavors| Introducing multiple flavors of taint ]]
+  * [[#testing| Using taint support with real PHP applications ]]
+  * [[#performance| Performance ]]
+  * [[#low_level| Low-level implementation ]]
+  * [[#propagation| Taint propagation policy ]]
+  * [[#core| PHP core changes ]]
+  * [[#promises| Loose ends ]]
+  * [[#dreams| Distant future ]]
+  * [[#features| Feature summary ]]
+
+===== A quick example =====
+
+To give an idea of the functionality, consider this simple PHP program with an obvious HTML script injection bug:
+
+> &lt;?php
+$inputfield = $_GET['inputfield'];
+echo "You entered: $inputfield\n";
+?&gt;
+
+With default .ini settings, this program does exactly what the programmer wrote: it echos the contents of the client's inputfield request attribute, including all the HTML script code that an attacker may have supplied along with it.
+
+When I add one setting to a php.ini file, or the equivalent "ini_set()" call to the script itself, the program still produces the same output, but it also produces a warning:
+
+> | Add to php.ini: | "taint_error_level = E_WARNING" |
+> | Add to script: | "ini_set("taint_error_level", E_WARNING);" |
+> | A  |
+> | " Warning: echo(): Argument contains data that is not converted with htmlspecialchars() or htmlentities() in /path/to/script on line 3 " ||
+
+When I change the taint error level from "E_WARNING" into "E_ERROR", script execution terminates before "echo" produces any output.
+
+Finally, when I honor the warning message and convert the "$inputfield" value as shown below, the program becomes immune to HTML script injection and the warning message disappears.
+
+<code php>
+$inputfield = htmlspecialchars($_GET['inputfield']);
+echo "You entered: $inputfield\n";
+</code>
+
+At this point I can either leave taint support turned on as a safety net in case someone introduces new mistakes, or I can disable taint support altogether. The run-time performance will not differ measurably, as long as the application does not trigger any alarms.
+
+===== Introducing multiple flavors of taint =====
+
+Conversion functions such as "htmlspecialchars()" exist not only for boring security reasons! They are also required for robustness. Without the proper output conversion, shell or SQL commands fail when given a legitimate name such as O'Reilly. Bugs like this are easily overlooked, because they trigger only with unusual data. However, these bugs are trivial to find with taint support, because you get the "missing conversion" warning message even when you test the program with //ordinary// data. This point is worth repeating, so I will repeat it now:
+
+> With taint support, you don't need malicious inputs to find out where a PHP script may have opportunities for HTML script injection, shell or SQL code injection, or PHP control hijacking.
+
+To encourage programmers to use the RIGHT conversion function, I have implemented multiple flavors of taint. Each time data enters a PHP application from the web, from database or from elsewhere, it may be "tainted" with zero or more taint flavors, so that the PHP engine can warn the programmer and suggest an appropriate conversion function.
+
+In the case of the buggy example program, data is marked as "dangerous for use in HTML" (and other contexts :-) when it is received from the web. The "echo()" primitive detects the presence of this taint flavor in one of its arguments, issues a warning, and suggests using "htmlspecialchars()" or "htmlentities()".
+
+The table below summarizes a number of taint flavors: it shows where a specific flavor may be added to data, where its presence may raise warnings, and how you get rid of the taint flavor. Please ignore the ugly TC_XXX names for now. That's low-level stuff that still needs to be hidden behind a user interface.
+
+> ^ Taint flavor ^ When added ^ Where it may raise warnings ^ How to remove ^
+> | TC_HTML | Input from web or database | HTML output | "htmlspecialchars()",\\ "htmlentities()" |
+> | TC_SHELL | Input from web or database | Shell command arguments | "escapeshellcmd()",\\ "escapeshellarg()" |
+> | TC_MYSQL | Input from web or database | mysql query parameters | "mysql_escape_string()",\\ "mysql_real_escape_string()" |
+> | TC_MYSQLI | Input from web or database | mysqli query parameters | "mysqli_escape_string()" |
+> | TC_SELF | Input from web | Parameters to "eval()", "include()" and other operations that affect the PHP application itself | " untaint($var, TC_SELF) " |
+
+The fifth flavor, TC_SELF, is different from the other four. Instead of code injection, its purpose is to detect opportunities to hijack control over the PHP application itself. Currently, there is no conversion function that makes all data safe as input for "eval()", "include()" etc. Instead, the application itself is supposed to verify that data is "good" and mark it as such. Until a better user interface exists, this means calling the low-level "untaint()" function directly.
+
+===== Using taint support with real PHP applications =====
+
+I have built taint support with the following SAPIs: cli, cgi and apache1 and apache2 DSO (loadable module); and with the the following extensions: mysqli, mysql and mbstring. Other SAPIs and extensions will follow as time permits.
+
+What about the other SAPIs and extensions? The SAPIs need work because some SAPI functions need an extra taint argument, and I could not hide this with macros in some central #include file. The other extensions will work just fine as long as they don't depend on the changed SAPI interface, and as long as you leave "taint_error_level" at its default setting. They may trigger false warnings when you raise the taint error level, because they don't know how to properly initialize certain bits that taint support relies on. This problem should not exist, but unfortunately there is a lot of PHP source code that does not use standard macros when initializing PHP data structures.
+
+Extensions that haven't been updated with taint support will ignore taint information in their inputs, and will therefore not propagate taint information from their inputs to their outputs.
+
+To build PHP with taint support:
+
+<coe>
+# Stand-alone CLI and CGI programs
+$ make distclean
+$ ./configure --enable-taint --with-mysqli --with-mysql ...
+$ make
+# Apache2 module
+$ make distclean
+$ ./configure --enable-taint --with-apxs2=/path/to/apxs ...
+$ make
+# Apache1 module
+$ make distclean
+$ ./configure --enable-taint --with-apxs=/path/to/apxs ...
+$ make
+</code>
+
+To experiment with taint support, copy the file "taint_ini.php" from the top-level PHP source directory to your PHP script directory, edit the file per the instructions below, and "include" it into the PHP script. The file begins like this:
+
+> # Enable warning messages without messing up web pages.
+ini_set("taint_error_level", E_WARNING);
+ini_set("log_errors", true);
+ini_set("display_errors", false);
+# Uncomment one of these if you don't want to log to the server's log.
+# ini_set("error_log", "syslog");
+# ini_set("error_log", "/path/to/errorlog");
+# Temporary workaround to avoid false alarms. Unfortunately, $_SERVER[]
+# contains a mixed bag of data: some is safe, and some highly dangerous.
+untaint($_SERVER["SCRIPT_FILENAME"]);
+untaint($_SERVER["PHP_SELF"]);
+untaint($_SERVER["DOCUMENT_ROOT"]);
+untaint($_SERVER["HTTP_HOST"]);	# Not entirely safe.
+. . . several other lines . . .
+
+Notes:
+
+  * If you use an error level of E_USER_WARNING, you can use "set_error_handler()" and report taint conflicts in more detail, complete with symbol table and stack trace. For an example, see the file " taint_trace.php " in the top-level source directory.
+  * If you specify your own error logfile, make sure this file is writable by the server process. You may have to do something ugly like this:
+  >$ touch /path/to/errorlog
+  >  $ chmod a+w /path/to/errorlog
+  * The "untaint($_SERVER...)" workarounds won't be needed in a future release.
+
+While testing code for the first time with PHP taint support you will find that you will sometimes need to explicitly mark data as "safe". Usually this happens immediately after successful input validation.
+
+<code php>
+if (some expression to make sure $data is safe) {
+untaint($data);
+do something with $data;
+} else {
+error ...
+}
+</code>
+
+This is admittedly imperfect: it would be better to specify what context the data is safe for. A proper user interface for this will have to be developed in a future version of PHP taint support.
+
+===== Performance =====
+
+The performance is quite good: the overhead for "make test" is within 1-2% when comparing the user-mode CPU time of unmodified PHP against a PHP version with taint support (the number depends on the CPU used and on build options). I know that a fraction of that time is spent in non-PHP processing, but the bulk is spent in PHP and that is what really matters. If a better "macro" benchmark exists then I am of course interested.
+
+The "bench.php" script that comes with PHP source is even less representative of applications: it is a loop-intensive affair that doesn't do any input or output. Nevertheless, it suffers only a modest overhead of 1-3%. This is good enough for a start; I can try to squeeze out more CPU cycles later if necessary.
+
+As long as the application triggers no warnings, it does not make a measurable difference whether taint support is turned on or not. This is due to the way the support is implemented. Without going into detail, the trick is to avoid introducing extra conditional or unconditional jumps in the critical path.
+
+===== Low-level implementation =====
+
+Taint support is implemented with some of the unused bits in the zval data structure. The zval is the PHP equivalent of a memory cell. Besides a type (string, integer, etc.) and value, each zval has a reference count and a flag that says whether the zval is a reference to yet another zval that contains the actual value.
+
+Right now I am using seven bits, but there is room for more: 32-bit UNIX compilers such as GCC add 16 bits of padding to the current zval data structure, and this amount of padding isn't going to be smaller on 64-bit architectures. If I really have to squeeze the taint bits in-between the existing bits, the taint support performance hit goes up. If squeezing is necessary, all PHP code will need to be changed to use official initialization macros, so that expensive shift/mask operations can be avoided as much as possible.
+
+The preliminary configuration user interface is rather low-level, somewhat like MS-DOS file permissions :-( This is good enough for testing and debugging the taint support itself, but I would not want to have wires hanging out of the machine like this forever. The raw bits will need to be encapsulated so that applications can work with meaningful names and abstractions.
+
+To give an idea of what the nuts and bolts look like, this is the preliminary list of bits, or should I say: binary properties, together with the parameters that control their handling:
+
+  * TC_HTML:
+    * This bit is set on all data from the web (ini setting: "taint_marks_egpcs") or from DBMS (ini setting: "taint_marks_dbms").
+    * This bit is tested when producing HTML output (ini setting: "taint_checks_html"). This test is not enforced with the default setting of "taint_error_level = 0".
+    * The "htmlspecialchars()" and "htmlentities()" functions produce output without this bit.
+  * TC_SHELL:
+    * This bit is set on all data from the web (ini setting: "taint_marks_egpcs") or from DBMS (ini setting: "taint_marks_dbms").
+    * This bit is tested in shell commands (ini setting: "taint_checks_shell"). This test is not enforced with the default setting of "taint_error_level = 0".
+    * The "escapeshellarg()" and "escapeshellcmd()" functions produce output without this bit.
+  * TC_MYSQL:
+    * This bit is set on all data from the web (ini setting: "taint_marks_egpcs") or from DBMS (ini setting: "taint_marks_dbms").
+    * This bit is tested in "mysql_query()" (ini setting: taint_checks_mysql). This test is not enforced with the default setting of "taint_error_level = 0".
+    * The "mysql_real_escape_string()" function produces output without this bit.
+  * TC_MYSQLI:
+    * Like TC_MYSQL, except this bit is for the "mysqli_query()" API. The "mysqli_real_escape_string()" function produces output without this bit.
+  * TC_SELF:
+    * This bit is set on all data from the web (ini setting: "taint_marks_egpcs").
+    * This bit is tested in internal control operations such as "eval", "include", as file name argument, as network destination, or in other contexts where someone could take away control from the application (ini setting: "taint_checks_self"). This test is not enforced with the default setting of taint_error_level = 0.
+    * Currently, there is no dedicated conversion function. To silence warnings, this data needs to be marked as "safe" with an ugly low-level "untaint($var, TC_SELF)" call.
+  * TC_USER1, TC_USER2: These are labels that an application can set on specific data. For example, it could set these bits when credit card or social security numbers come out of a database. The "taint_checks_html" policy for HTML output (see above) would then be configured to disallow data with not only with the TC_HTML property, but also with TC_USER1 or TC_USER2. This just gives an idea of that taint support can detect more than code injection or control hijacking opportunities. Obviously some polished user interface would need to be built on top of this to make application-defined attributes usable.
+
+===== Taint propagation policy =====
+
+Before implementing the above policies, the first order of business was adding taint propagation to the PHP core: for each operator, including type conversion, a decision had to made how to propagate taint from source operands to results.
+
+The general taint propagation rules are:
+
+  * Arithmetic, bit-wise and and string operations propagate all the taint bits from their operands to their results. The rules become more complicated with operators whose operands have different types.
+  * Conversions from string to non-string remove all but a few taint bits (by default, only the TC_SELF bit stays). This prevents silly warnings about having to use "htmlspecialchars()" or "mysql_real_escape_string()" when rendering numeric data in SQL/HTML/shell context, while still detecting application control hijacking opportunities.
+  * Conversions from non-string to string preserve all the taint bits.
+  * Comparison operators don't propagate taint bits.
+
+Most of this taint propagation is finished, but there are a few minor issues that still need to be resolved.
+
+  * Something needs to be done when functions like "parse_str()" are given tainted data: the question is how to represent the taintedness of the resulting hash table //lookup keys//. These strings could be harmful when used as file names, as database names, or when used in other sensitive contexts.
+  * Taint is not propagated when the result is a zero-length string. This prevents silly warnings about having to convert zero-length data with "htmlspecialchars()" etc. On the other hand, a null string does change the syntactical structure of information, so we have to be careful.
+
+While adding taint propagation I found that a lot of PHP source code fails to use the official macros when initializing a zval. In these cases I added another line of code to initialize the taint bits by hand. Also, more internal documentation (other than empty man page skeletons) could have reduced development time.
+
+===== PHP core changes =====
+
+To make the implementation manageable, most of the taint-specific code is implemented as one-line macro calls that either implement taint support, or that expand into nothing. This avoids massive amounts of scar tissue with "#ifdef . . #endif" around small pieces of code. These macros are defined (and documented!) in the file "Zend/taint_marks.h".
+
+In some cases an internal API had to be extended with an extra argument to propagate taint information. Where possible I preserved the old API as a "#define" that invokes the new API with a default taint argument, so that old code still compiles and works (unfortunately this trick is not possible with SAPI calls that are made through function pointers that are being passed around via data structures). Here is an example for the core function that copies a string into a hash. The change is an extra argument with the taint marks of the input string. In the example, the TAINT_MARKS_CC and TAINT_MARKS_DC macros are very much like to the macros used by ZTS (thread-safe resources) support. They expand into nothing when taint support is not compiled in.
+
+Old API:
+
+<code c>
+ZEND_API int add_assoc_string_ex(zval *arg, char *key, uint key_len,
+char *str, int duplicate);
+</code>
+
+New API:
+
+<code c>
+#define add_assoc_string_ex(__arg, __key, __len, __str, __duplicate)
+add_assoc_string_ex_t(__arg, __key, __len, __str TAINT_MARKS_CC(TC_NONE),
+__duplicate)
+ZEND_API int add_assoc_string_ex_t(zval *arg, char *key, uint key_len,
+char *str TAINT_MARKS_DC(taint_marks), int duplicate);
+</code>
+
+The "zend_parse_parameters()" API was also extended, so that I could propagate the taint bits from function input arguments to function outputs, and so that I could enforce taint checks on input arguments. To the existing list of existing type modifiers: "|!/" I added another two: "`'". Their meaning is defined in the table below. The example after the table is a fragment from the "basename()" function.
+
+> ^ TypeA modifier ^ Meaning ^
+> | ` | Copy taint marks from the current PHP-level argument. The destination pointer is specified with the next C-level "zend_parse_parameters()" argument. |
+> | ' | Apply taint check to the current PHP-level argument. The allowed taint marks are specified with the next C-level "zend_parse_parameters()" argument. |
+
+<code c>
+PHP_FUNCTION(basename)
+{
+. . .
+#ifdef HAVE_TAINT
+TAINT_MARKS_T taint_marks = 0;
+if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s`|s'",
+&amp;string, &amp;string_len, &amp;taint_marks,
+&amp;suffix, &amp;suffix_len, EG(taint_checks_self)) == FAILURE) {
+return;
+}
+#else
+. . . old zend_parse_parameters() call . . .
+#endif
+</code>
+
+With this change, the taint bits are copied from the "string" input argument to the "taint_marks" variable, which is used later to update the taint marks of the function result value. The "suffix" input argument is checked whether it could be under attacker control. This could give a malicious user control over what part is removed from the end of the function result value, which may be undesirable. In this case I haven't figured out a way to hide the changes behind a bunch of macros. Perhaps someone will have a stroke of genius after seeing this.
+
+===== Loose ends =====
+
+I already mentioned the loose wires hanging out of the machine; the user interface for taint policy control will need to be made more suitable for people who aren't primarily interested in PHP core hacking.
+
+Support for tainted objects is still incomplete. In particular, conversions between objects and non-objects may lose taint bits.
+
+For now, I manually added taint support to a number of standard built-ins (file, process, *scanf, *printf, and a subset of the string functions) and extensions (mysql, mysli). I hope this will be sufficient to get some experience with taint support.
+
+Taint-unaware SAPIs and extensions will work properly as long as the taint error level is left at its default (i.e. disabled), and as long as these extensions are recompiled with the patched PHP header files. When taint checking is turned on, some SAPIs or extensions may trigger false alarms when they fail to use the official macros to initialize zval structures, thereby leaving some taint bits at uninitialized values.
+
+I still hope that it will somehow be possible to annotate extensions so that taint support can be added without modifying lots of extension source code. However, having multiple flavors of taint, instead of just one, will make the job so much more interesting.
+
+Other items on the TODO list:
+
+  * Deploy PHP Code and documentation conventions where this isn't done already.
+  * Look at the Content-Type: header information to avoid false alarms when the output is not in HTML format.
+  * Don't taint safe constants such as $PHP_SELF, $_SERVER['PHP_SELF'] (php_cli.c, sapi_apache.c, etc.)
+
+===== Distant future =====
+
+Currently, only data is labeled (and only with binary attributes). No corresponding attributes exist for sources and sinks (files, network connections, databases, authenticated users, etc.). If we knew that a connection is encrypted, or whether something is an intranet or extranet destination, or who the user is at the other end, then we could implement more sophisticated policies than the simple MS-DOS like file permissions that I have implemented now.
+
+But all this is miles beyond the immediate problem that I am trying to solve today: helping programmers find the holes in their own code before other people do.
+
+===== Feature summary =====
+
+This is the preliminary list of implemented features. The default taint marking and checking policies are good enough to gain some experience with taint support, and will have to be refined in the light of experience.
+
+| ---- ||
+| php.ini settings ||
+| ---- ||
+| "taint_error_level" (default: 0) | error level for taint check warnings |
+| A  |
+| "taint_checks_shell" (default: TC_SHELL) | taint flavors detected in shell commands; use TC_SHELL to detect code injection opportunities |
+| "taint_checks_html" (default: TC_HTML) | taint flavors detected in HTML output; use TC_HTML to detect code injection opportunities. |
+| "taint_checks_mysql" (default: TC_MYSQL) | taint flavors detected in mysql commands; use TC_MYSQL to detect code injection opportunities. |
+| "taint_checks_mysqli" (default: TC_MYSQLI) | taint flavors detected in mysqli commands; use TC_MYSQLI to detect code injection opportunities |
+| "taint_checks_self" (default: TC_SELF) | taint flavors detected in eval(), include(), etc.; use TC_SELF to detect control hijack possibility |
+| "taint_checks_user1" (default: TC_USER1) | application-controlled taint flavor |
+| "taint_checks_user2" (default: TC_USER2) | application-controlled taint flavor |
+| A  |
+| "taint_marks_egpcs" (default: TC_ALL) | taint flavors added to data from the web (environment, get, post, cookie, server) |
+| "taint_marks_dbms" (default: TC_SHELL &#124; TC_HTML &#124; TC_MYSQL &#124; TC_MYSQLI) | taint flavors added to data from database |
+| "taint_marks_other" (default: 0) | taint flavors added to data from other external sources |
+| A  |
+| "taint_marks_non_str" (default: TC_SELF) | taint flavors preserved when converting string to number or bool |
+| ---- ||
+| core ||
+| ---- ||
+| arithmetic operators | propagate taint marks |
+| bit-wise operators | propagate taint marks |
+| relational operators | don't propagate taint marks |
+| boolean operators | partial propagation, may be removed entirely |
+| "func_get_arg(), func_get_args() " | propagate taint to result variable or array |
+| "zend_parse_parameters() " | additional type modifiers: ` reports the taint marks of a PHP argument, and ' enforces a taint check on a PHP argument |
+| "echo, print" | detect html injection possibility |
+| "eval, include, require, require_once" | detect control hijack possibility |
+| "exit" | detect html injection possibility |
+| ---- ||
+| dir extension ||
+| ---- ||
+| "opendir()" | detect control hijack possibility via pathname argument |
+| ---- ||
+| exec extension ||
+| ---- ||
+| "exec()", "system()", "passthru()" | detect shell command injection possibility \\  detect html injection possibility \\  taint mark input from command depending on "taint_marks_other" setting |
+| "escapeshellcmd()", "escapeshellarg()" | propagate taint marks except TC_SHELL |
+| "shell_exec()" | detect shell command injection possibility \\  taint mark input from command depending on "taint_marks_other" setting |
+| "proc_nice()" | detect control hijack possibility via priority argument |
+| ---- ||
+| file extension ||
+| ---- ||
+| "flock()" | detect control hijack possibility via operation argument |
+| "get_meta_tags()" | detect control hijack possibility via pathname, include_path \\  taint mark input from file depending on "taint_marks_other" setting |
+| "file_get_contents()" | detect control hijack possibility via pathname, include path, offset, maxlen \\  taint mark input from file depending on "taint_marks_other" setting |
+| "file_put_contents()" | detect control hijack possibility via pathname, flags |
+| "file()" | detect control hijack possibility via pathname, flags \\  taint mark input from file depending on "taint_marks_other" setting |
+| "tempnam()" | detect control hijack possibility via both arguments |
+| "fopen()" | detect control hijack possibility via pathname, mode, include path arguments |
+| "popen()" | detect shell command injection possibility \\  detect control hijack possibility via mode argument |
+| "fgets()" | detect control hijack possibility via length argument \\  taint mark input from stream depending on "taint_marks_other" setting |
+| "fgetc()" | taint mark input from stream depending on "taint_marks_other" setting |
+| "fgetss()" | detect control hijack possibility via length, allowable tags \\  taint mark input from stream depending on "taint_marks_other" setting |
+| "fscanf()" | detect control hijack possibility via format string \\  taint mark input from stream depending on "taint_marks_other" setting |
+| "fseek()" | detect control hijack possibility via offset, whence |
+| "mkdir()" | detect control hijack possibility via pathname, mode, recursive arguments |
+| "rmdir()" | detect control hijack possibility via pathname argument |
+| "readfile()" | detect control hijack possibility via pathname, include path arguments\\  taint mark input from file depending on "taint_marks_other" setting \\  detect html injection possibility (depending on "taint_marks_other" setting) |
+| "umask()" | detect control hijack possibility via mode argument |
+| "fpassthru()" | taint mark input from file depending on "taint_marks_other" setting \\  detect html injection possibility (depending on "taint_marks_other" setting) |
+| "rename()" | detect control hijack possibility via old name and new name arguments |
+| "unlink()" | detect control hijack possibility via pathname |
+| "ftruncate()" | detect control hijack possibility via size argument |
+| "copy()" | detect control hijack possibility via source or target arguments |
+| "fread()" | detect control hijack possibility via length argument \\  taint mark input from stream depending on "taint_marks_other" setting |
+| "fgetcsv()" | taint mark input from stream depending on "taint_marks_other" setting |
+| "realpath()" | propagate taint marks from input argument |
+| "fnmatch()" | detect control hijack possibility via pattern or flags arguments. |
+| ---- ||
+| formatted_print extension ||
+| ---- ||
+| "printf()", "fprintf()", "sprintf()" | detect control hijack possibility via format string \\  propagate taint marks from input arguments \\  detect html injection possibility ("printf()" only) |
+| ---- ||
+| head extension ||
+| ---- ||
+| "header()" | detect control hijack possibility via header name, replace, response code arguments |
+| ---- ||
+| html extension ||
+| ---- ||
+| "htmlentities()", "htmlspecialchars()" | detect control hijack possibility via quote_style, charset, double_encode arguments \\  propagate all taint marks except TC_HTML |
+| ---- ||
+| mbstring extension ||
+| ---- ||
+| "mb_ereg(), mb_eregi() " | copy taint marks from input string (UNTESTED) |
+| "mb_ereg_replace(), mb_ereg_search() " | TODO |
+| "mb_parse_str()" | propagate taint from input string to global variables (UNTESTED) |
+| " mb_strstr() " | copy taint marks from input string (UNTESTED) |
+| " mb_strrchr() " | copy taint marks from input string (UNTESTED) |
+| " mb_stristr() " | copy taint marks from input string (UNTESTED) |
+| " mb_strrichr() " | copy taint marks from input string (UNTESTED) |
+| " mb_substr() " | copy taint marks from input string (UNTESTED) |
+| " mb_strcut() " | copy taint marks from input string (UNTESTED) |
+| " mb_strimwidth() " | copy taint marks from input string (UNTESTED) |
+| " mb_convert_encoding() " | copy taint marks from input string (UNTESTED) |
+| " mb_convert_case() " | copy taint marks from input string (UNTESTED) |
+| " mb_strtoupper() " | copy taint marks from input string (UNTESTED) |
+| " mb_strtolower() " | copy taint marks from input string (UNTESTED) |
+| " mb_encode_mimeheader() " | copy taint marks from input string (UNTESTED) |
+| " mb_decode_mimeheader() " | copy taint marks from input string (UNTESTED) |
+| " mb_convert_kana() " | copy taint marks from input string (UNTESTED) |
+| " mb_decode_numericentity() " | TODO |
+| " mb_send_mail() " | TODO |
+| ---- ||
+| mysql extension ||
+| ---- ||
+| "mysql_connect()" | detect control hijack possibility via host, username, password |
+| "mysql_escape_string()", "mysql_real_escape_string()" | propagate taint marks except TC_MYSQL |
+| "mysql_select_db()" | detect control hijack possibility via database name argument |
+| "mysql_query()" | detect sql injection possibility via query argument |
+| "mysql_fetch_array()" | detect control hijack possibility via result_type argument |
+| ---- ||
+| mysqli extension ||
+| ---- ||
+| "mysqli_connect()" | detect control hijack possibility via host, username, password |
+| "mysqli_real_escape_string()" | propagate taint marks except TC_MYSQLI |
+| "mysqli_select_db()" | detect control hijack possibility via database name argument |
+| "mysqli_query()" | detect sql injection possibility via query argument |
+| "mysqli_fetch_array()" | detect control hijack possibility via result_type argument |
+| ---- ||
+| pcre extension ||
+| ---- ||
+| "preg_grep()" | propagate taint marks from input string argument \\  detect control hijack possibility via regex or flags argument |
+| "preg_match(), preg_match_all()" | propagate taint marks from input string argument \\  detect control hijack possibility via regex, flags, start_offset arguments |
+| "preg_quote()" | propagate taint marks from input string argument \\  detect control hijack possibility via flags argument |
+| "preg_replace(), preg_replace_callback()" | propagate taint marks from input string argument and replacement \\  detect control hijack possibility via regex, replace (if /pattern/e or callback), subject (if /pattern/e), or limit arguments |
+| "preg_split()" | propagate taint marks from input string argument \\  detect control hijack possibility via regex, limit, flags arguments |
+| ---- ||
+| proc_open extension ||
+| ---- ||
+| "proc_open()" | detect shell command injection possibility \\  detect control hijack possibility via pathname argument |
+| ---- ||
+| string extension ||
+| ---- ||
+| "strcspn()", "strspn()" | detect control hijack possibility via string2, start, length |
+| "trim()", "rtrim()", "ltrim()" | detect control hijack possibility via charlist argument \\  propagate taint marks from input string |
+| "wordwrap()" | detect control hijack possibility via line width, break and cut arguments \\  propagate taint marks from input string |
+| "explode()" | detect control hijack possibility via delimiter and limit arguments \\  propagate taint marks from input string |
+| "implode()" | propagate taint marks from delimiter and input array members |
+| "strtok()" | detect control hijack possibility via delimiter argument \\  propagate taint marks from input string |
+| "basename()" | detect control hijack possibility via suffix \\  propagate taint marks from input pathname |
+| "dirname()" | propagate taint marks from input pathname |
+| "pathinfo()" | propagate taint marks from input pathname to dirname, basename, extension, filename results |
+| "stristr()", "strstr()" | propagate taint marks from haystack argument |
+| "strpos()" | propagate taint marks from haystack argument |
+| "strchr()", "strrchr()" | propagate taint marks from haystack argument |
+| "chunk_split()" | detect control hijack possibility via chunklen, end arguments \\  propagate taint marks from input string |
+| "substr()" | detect control hijack possibility via start, length arguments \\  propagate taint marks from input string |
+| "quotemeta()" | propagate taint marks from input string |
+| "ord()" | propagate taint marks from input string, subject to "taint_marks_non_str" setting |
+| "chr()" | propagate taint marks from input argument |
+| "ucfirst()", "ucwords()" | propagate taint marks from input argument |
+| "strip_tags()" | detect control hijack possibility via allowable_tags argument \\  propagate taint marks from input argument |
+| "parse_str()" | detect control hijack possibility if target is global name space \\  propagate taint marks from input string |
+| "sscanf()" | detect control hijack possibility via format string \\  propagate taint from input string |
+| "str_word_count()" | detect control hijack possibility via format, charlist arguments \\  propagate taint from input string |
+| "money_format()" | detect control hijack possibility via format, charlist arguments \\  propagate taint from number argument |
+| "str_split()" | detect control hijack possibility via length argument \\  propagate taint from input string |
+| "substr_compare()" | detect control hijack possibility via offset, length, case sensitivity argument \\ |
+| ---- ||
+| taint extension ||
+| ---- ||
+| " istainted(mixed expr)" | return taint bits from argument |
+| "taint(variable [, taint_mark])" | raise the specified taint bits on a variable (default: all) |
+| "untaint(variable [, taint_mark])" | clear the specified taint bits on a variable (default: all) |
+| ---- ||
