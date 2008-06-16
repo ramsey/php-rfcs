@@ -1,0 +1,183 @@
+====== Request for Comments: Lambda functions and closures ======
+  * Version: 1.0
+  * Date: 2008-06-16
+  * Author: Christian Seiler <chris_se@gmx.net>
+  * Status: Under Discussion
+
+This RFC discusses the introduction of compile-time lambda functions and closures in PHP.
+
+===== Introduction =====
+
+End of 2007 a patch was proposed that would add lambda functions (but without closures) to PHP. During the discussion on the mailing list, several people suggested that without support for closures, lambda functions are not useful enough to add them to PHP. This proposal describes a viable method of adding lambda functions with closure support to PHP.
+
+===== Why do we need closures and lambda functions? =====
+
+Closures and lambda functions can make programming much easier in several ways:
+
+==== Lambda Functions ====
+
+Lambda functions allow the quick definition of throw-away functions that are not used elsewhere. Imaging for example a piece of code that needs to call preg_replace_callback(). Currently, there are three possibilities to acchieve this:
+
+   - Define the callback function elsewhere. This distributes code that belongs together throughout the file and decreases readability.
+
+   - Define the callback function in-place (but with a name). In that case one has to use function_exists() to make sure the function is only defined once. Here, the additional if() around the function definition makes the source code difficult to read. Example code:
+
+   <?php
+   function replace_spaces ($text) {
+     if (!function_exists ('replace_spaces_helper')) {
+       function replace_spaces_helper ($matches) {
+         return str_replace ($matches[1], ' ', '&nbsp;').' ';
+       }
+     }
+     return preg_replace_callback ('/( +) /', 'replace_spaces_helper', $text);
+   }
+   ?>
+
+   - Use the present create_function() in order to create a function at runtime. This approach has several disadvantages: First of all, syntax highlighting does not work because a string is passed to the function. It also compiles the function at run time and not at compile time so opcode caches can't cache the function.
+
+==== Closures ====
+
+Closures provide a very useful tool in order to make lambda functions even more useful. Just imagine you want to replace 'hello' through 'goodbye' in all elements of an array. PHP provides the array_map() function which accepts a callback. If you don't wan't to hard-code 'hello' and 'goodbye' into your sourcecode, you have only four choices:
+
+   - Use create_function(). But then you may only pass literal values (strings, integers, floats) into the function, objects at best as clones (if var_export() allows for it) and resources not at all. And you have to worry about escaping everything correctly. Especially when handling user input this can lead to all sorts of security issues.
+
+   - Write a function that uses global variables. This is ugly, non-reentrant and bad style.
+
+   - Create an entire class, instantiate it and pass the member function as a callback. This is perhaps the cleanest solution for this problem with current PHP but just think about it: Creating an entire class for this extremely simple purpose and nothing else seems overkill.
+
+   - Don't use array_map() but simply do it manually (foreach). In this simple case it may not be that much of an issue (because one simply wants to iterate over an array) but there are cases where doing something manually that a function with a callback as parameter does for you is quite tedious.
+
+Note: str_replace also accepts arrays as a third parameter so this example may be a bit useless. But imagine you want to do a more complex operation than simple search and replace.
+
+===== Common misconceptions =====
+
+?
+
+===== Proposal and Patch =====
+
+The following proposal and patch implement compile-time lambda functions and closures for PHP while keeping the patch as simple as possible.
+
+==== Userland perspective ====
+
+=== Lambda function syntax ===
+
+The patch adds the following syntax as a valid expression:
+
+   function & (parameters) { body }
+
+(The & is optional and indicates - just as with normal functions - that the anonymous function returns a reference instead of a value)
+
+Example usage:
+
+   $lambda = function () { echo "Hello World!\n"; };
+
+The variable $lambda then contains a callable resource that may be called through different means:
+
+   $lambda ();
+   call_user_func ($lambda);
+   call_user_func_array ($lambda, array ());
+
+This allows for simple lambda functions, for example:
+
+   function replace_spaces ($text) {
+     $replacement = function ($matches) {
+       return str_replace ($matches[1], ' ', '&nbsp;').' ';
+     };
+     return preg_replace_callback ('/( +) /', $replacement, $text);
+   }
+
+=== Closure support via ''lexical'' keyword ===
+
+The patch implements closures by defining an additional keyword 'lexical' that allows an lambda function (and *only* an lambda function) to import a variable from the "parent scope" to the lambda function scope. Example:
+
+   function replace_in_array ($search, $replacement, $array) {
+     $map = function ($text) {
+       lexical $search, $replacement;
+       if (strpos ($text, $search) > 50) {
+         return str_replace ($search, $replacement, $text);
+       } else {
+         return $text;
+       }
+     };
+     return array_map ($map, array);
+   }
+
+The variables $search and $replacement are variables in the scope of the function replace_in_array() and the lexical keyword imports these variables into the scope of the closure. The variables are imported as a reference, so any change in the closure will result in a change in the variable of the function itself.
+
+=== Interaction with OOP ===
+
+If a closure is defined inside an object, the closure has full access to the current object through $this (without the need to use 'lexical' to import it seperately) and all private and protected methods of that class. This also applies to nested closures. Essentially, closures inside methods are added as public methods to the class that contains the original method.
+
+=== Closure lifetime ===
+
+Closures may live longer as the methods that declared them. It is perfectly possible to have something like this:
+
+   function getAdder($x) {
+     return function ($y) {
+       lexical $x;
+       return $x + $y;
+     };
+   }
+
+==== Zend internal perspective ====
+
+The patch basically changes the following in the Zend engine:
+
+When the compiler reaches a lambda function, it creates a unique name for that function (''"\0__compiled_lambda_FILENAME_N"'' where FILENAME is the name of the file currently processed and N is a per-file counter). The use of the filename in the function name ensures compability with opcode caches. The lambda function is then immediately added to the function table (either the global function table or that of the current class if declared inside a class method). Instead of a normal ZEND_DECLARE_FUNCTION opcode the new ZEND_DECLARE_LAMBDA_FUNC is used as an opcode at this point. The op_array of the new function is initialized with is_lambda = 1 and is_closure = 0.
+
+When parsing a 'lexical' declaration inside an anonymous function the parser saves the name of the variable that is to be imported in an array stored as a member of the op_array structure (lexical_names).
+
+The opcode handler for ZEND_DECLARE_LAMBDA_FUNC does the following: First of all it creates a new op_array and copies the entire memory structure of the lambda function into it (the opcodes themselves are not copied since they are only referenced in the op_array structure). Then it sets is_closure = 1 on the new op_array, and for each lexical variable name that the compiler added to the original op_array it creates a reference to that variable from the current scope into a HashTable member in the new op_array. It also saves the current object pointer ($this) as a member of the op_array in order to allow for the closure to access $this. Finally it registers the new op_array as a resource and returns that resource.
+
+The opcode handler of the 'lexical' construct simply fetches the variable from that HashTable and imports it into local scope of the inner function (just like with 'global' only with a different hash table).
+
+Some hooks were added that allow the 'lambda function' resource to be called. Also, there are several checks in place that make sure the lambda function is not called directly, i.e. if someone explicitely tries to use the internal function name instead of using the resource return value of the declaration.
+
+==== The patch ====
+
+The patch for PHP 5.3 is available here:
+
+   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-16-1.diff]]
+
+A patch for PHP 6 (HEAD) will be added as soon as the unicode_semantics removal is complete.
+
+**Note** The patch does not contain the diff for ''zend_language_scanner.c'' since that file can easily be regenerated from ''zend_language_scanner.l''.
+
+==== BC breaks ====
+
+   * Introduction of a new keyword 'lexical'. But note that it is very improbable that someone should use it as a function, method, class or property name.
+   * ''No'' tests are broken by the patch.
+
+==== Caveats / possible WTFs ====
+
+=== Trailing '';'' ===
+
+On writing ''$func = function () { };'' there is a semicolon necessary. If left out it will produce a compile error. Since any attempt to remove that necessity would unecessarily bloat the grammar, I suggest we simply keep it the way it is. Also, Lukas Kahwe Smith pointed out that a single trailing semicolon after a closing brace already exists: ''do { } while ();''
+
+=== References ===
+
+The fact that 'lexical' creates references may cause certain WTFs:
+
+   for ($i = 0; $i < 10; $i++) {
+     $arr[$i] = function () { lexical $i; return $i; };
+   }
+
+This will not work as expected since $i is a reference and thus all created closures would reference the same variable. In order to get this right one has to do:
+
+   for ($i = 0; $i < 10; $i++) {
+     $loopIndex = $i;
+     $arr[$i] = function () { lexical $loopIndex; return $loopIndex; };
+     unset ($loopIndex);
+   }
+
+This can be a WTF for people that don't expect lexical to create an actual reference, especially since other languages such as JavaScript don't do it. On the other hand, global and static both DO create references so that behaviour is consistent with current PHP.
+
+But complex constructions such as this will probably not be used by beginners so maintaining a good documentation should solve this.
+
+=== ''lexical'' keyword itself ===
+
+The fact that 'lexical' is needed at all may cause WTFs. Other languages such as JavaScript implicitely have the entire scope visible to child functions. But since PHP does the same thing with global variables, I find a keyword like 'lexical' much more consistent than importing the entire scope (and always importing the entire scope costs unnecessary performance).
+
+===== Changelog ====
+
+   * 2008-06-16 Christian Seiler: Initial creation
