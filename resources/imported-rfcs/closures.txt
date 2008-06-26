@@ -1,7 +1,8 @@
 ====== Request for Comments: Lambda functions and closures ======
-  * Version: 1.0
-  * Date: 2008-06-16
+  * Version: 1.1
+  * Date: 2008-06-26
   * Author: Christian Seiler <chris_se@gmx.net>
+  * Thanks to: Dmitry Stogov <dmitry@zend.com>
   * Status: Under Discussion
 
 This RFC discusses the introduction of compile-time lambda functions and closures in PHP.
@@ -94,7 +95,11 @@ This allows for simple lambda functions, for example:
    }
  </code>
 
-=== Closure support via ''lexical'' keyword ===
+=== Closure support ===
+
+Since there was some discussion on the PHP internals list on about what the best syntax for importing parent-scoped variables into closures would be, several patches are proposed, mainly to demonstrate that the basic code can remain exactly the same while only the grammar of PHP has to change in order for a different syntax.
+
+== Closure support via ''lexical'' keyword ==
 
 The patch implements closures by defining an additional keyword 'lexical' that allows an lambda function (and *only* an lambda function) to import a variable from the "parent scope" to the lambda function scope. Example:
 
@@ -112,11 +117,34 @@ The patch implements closures by defining an additional keyword 'lexical' that a
    }
  </code>
 
-The variables $search and $replacement are variables in the scope of the function replace_in_array() and the lexical keyword imports these variables into the scope of the closure. The variables are imported as a reference, so any change in the closure will result in a change in the variable of the function itself.
+The variables $search and $replacement are variables in the scope of the function replace_in_array() and the lexical keyword imports these variables into the scope of the closure.
+
+The current patch imports variables as a value and allows to import them as a reference if an & is supplied before the variable name. The referencing behaviour is still subject to discussion.
+
+== Closures support via ''use'' keyword ==
+
+Another patch implements closures by using the 'use' keyword to specify the to-be-imported variables in the function declaration:
+
+ <code php>
+   function replace_in_array ($search, $replacement, $array) {
+     $map = function ($text) use ($search, $replacement) {
+       if (strpos ($text, $search) > 50) {
+         return str_replace ($search, $replacement, $text);
+       } else {
+         return $text;
+       }
+     };
+     return array_map ($map, array);
+   }
+ </code>
+
+The variables $search and $replacement are variables in the scope of the function replace_in_array() and they are imported into the scope of the closure upon creation of the closure.
+
+The current patch imports variables as a value and allows to import them as a reference if an & is supplied before the variable name. The referencing behaviour is still subject to discussion.
 
 === Interaction with OOP ===
 
-If a closure is defined inside an object, the closure has full access to the current object through $this (without the need to use 'lexical' to import it seperately) and all private and protected methods of that class. This also applies to nested closures. Example:
+If a closure is defined inside an object, the closure has full access to the current object through $this (without the need to import it explicitely) and all private and protected methods of that class. This also applies to nested closures. Example:
 
  <code php>
      class Example {
@@ -131,7 +159,8 @@ If a closure is defined inside an object, the closure has full access to the cur
        }
 
        public function getReplacer ($replacement) {
-         return function ($text) {
+         return function ($text) use ($replacement) {
+           // or: lexical $replacement;
            return str_replace ($this->search, $replacement, $text);
          };
        }
@@ -152,8 +181,8 @@ Closures may live longer as the methods that declared them. It is perfectly poss
 
  <code php>
    function getAdder($x) {
-     return function ($y) {
-       lexical $x;
+     return function ($y) use ($x) {
+       // or: lexical $x;
        return $x + $y;
      };
    }
@@ -163,30 +192,44 @@ Closures may live longer as the methods that declared them. It is perfectly poss
 
 The patch basically changes the following in the Zend engine:
 
-When the compiler reaches a lambda function, it creates a unique name for that function (''"\0__compiled_lambda_FILENAME_N"'' where FILENAME is the name of the file currently processed and N is a per-file counter). The use of the filename in the function name ensures compability with opcode caches. The lambda function is then immediately added to the function table (either the global function table or that of the current class if declared inside a class method). Instead of a normal ZEND_DECLARE_FUNCTION opcode the new ZEND_DECLARE_LAMBDA_FUNC is used as an opcode at this point. The op_array of the new function is initialized with is_lambda = 1 and is_closure = 0.
+(Quite a lot here is based on an updated patch provided by Dmitry Stogov.)
 
-When parsing a 'lexical' declaration inside an anonymous function the parser saves the name of the variable that is to be imported in an array stored as a member of the op_array structure (lexical_names).
+When the compiler reaches a lambda function, except for details in the grammar, a new function zend_do_begin_lambda_function_declaration is called - which itself calls zend_do_begin_function_declaration with "lambda" as a predefined function name. Immediately hereafter, the ZEND_DECLARE_FUNCTION opcode is replaced with a new ZEND_DECLARE_LAMBDA_FUNCTION opcode, early binding will therefore never occur for lambda functions (and traditional function binding at runtime neither, since the ZEND_DECLARE_LAMBDA_FUNCTION opcode does something else, see below).
 
-The opcode handler for ZEND_DECLARE_LAMBDA_FUNC does the following: First of all it creates a new op_array and copies the entire memory structure of the lambda function into it (the opcodes themselves are not copied since they are only referenced in the op_array structure). Then it sets is_closure = 1 on the new op_array, and for each lexical variable name that the compiler added to the original op_array it creates a reference to that variable from the current scope into a HashTable member in the new op_array. It also saves the current object pointer ($this) as a member of the op_array in order to allow for the closure to access $this. Finally it registers the new op_array as a resource and returns that resource.
+Lexical variables are done via static variables: For each lexical variable an entry in the static variables hash table is added with the special semantics for the default value being either an empty string or a string containing a single 0-char. But instead of a normal string zval, the type is forced to be IS_CONSTANT. An empty constant or a constant containing only a 0-char will never be added by normal PHP so with this it is possible to distinguish them from normal constants as values. The len 0 strings indicate that the variable should be referenced from parent scope and the len 1 strings indicate it should be copied.
 
-The opcode handler of the 'lexical' construct simply fetches the variable from that HashTable and imports it into local scope of the inner function (just like with 'global' only with a different hash table).
+An additional internal class "Closure" is added which will be used for saving closures. It contains basically only the constructor and a toString method that currently doesn't do very much. The toString method could later be used to display useful debugging information on the closure.
 
-Some hooks were added that allow the 'lambda function' resource to be called. Also, there are several checks in place that make sure the lambda function is not called directly, i.e. if someone explicitely tries to use the internal function name instead of using the resource return value of the declaration.
+The ZEND_DECLARE_LAMBDA_FUNCTION opcode looks up the function in the function table (it still has its runtime function key the compiler gave it and is thus cacheable by any opcode cache), creates a new object of the Closure type and stores a copy of the op_array inside. It correctly sets the scope of the copied op_array to be the current class scope and makes sure all lexical variables are imported from the parent scope into the copied hash table of the new op_array. It also creates a reference to the current $this object. It returns the newly created object.
+
+Some hooks were added to the opcode handlers, zend_call_function and zend_is_callable_ex that allow the 'Closure' object to be called.
+
+Note that since closures that don't use $this may potentially carry on the object far too long. Therefore an additional patch variant is provided in which the compiler remembers for each lambda function whether $this is used. For that, an additional op_array->this_used field is added to the op_array. If that field is true, the ZEND_DECLARE_LAMBDA_FUNCTION stores the current $this pointer in the closure, else it does not. Nested closures are treated properly.
 
 ==== The patch ====
 
-The patch for PHP 5.3 is available here:
+There are six variants of the patch:
 
-   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-17-3.diff]] (Revised patch)
+   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-use.diff|Patch for PHP 5.3, use ($var) syntax, $this always stored]]
+   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-use-this.diff|Patch for PHP 5.3, use ($var) syntax, $this only stored when necessary]]
+   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-lexical-this.diff|Patch for PHP 5.3, lexical $var syntax, $this only stored when necessary]]
+   * (The combination lexical + $this always stored is of course also possible)
+   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-use.diff|Patch for PHP 6.0, use ($var) syntax, $this always stored]]
+   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-use-this.diff|Patch for PHP 6.0, use ($var) syntax, $this only stored when necessary]]
+   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-lexical-this.diff|Patch for PHP 6.0, lexical $var syntax, $this only stored when necessary]]
+
+All patches contain a series of additional tests that ensure the correct functioning of closures.
+
+Older patches for completeness:
+
+   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-17-3.diff]]
    * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-16-1.diff]]
-
-A patch for PHP 6 (HEAD) will be added as soon as the unicode_semantics removal is complete.
 
 **Note** The patch does not contain the diff for ''zend_language_scanner.c'' since that file can easily be regenerated from ''zend_language_scanner.l''.
 
 ==== BC breaks ====
 
-   * Introduction of a new keyword 'lexical'. But note that it is very improbable that someone should use it as a function, method, class or property name.
+   * (lexical variant) Introduction of a new keyword 'lexical'. But note that it is very improbable that someone should use it as a function, method, class or property name.
    * **No** tests are broken by the patch.
 
 ==== Caveats / possible WTFs ====
@@ -197,7 +240,9 @@ On writing ''$func = function () { };'' there is a semicolon necessary. If left 
 
 === References ===
 
-The fact that 'lexical' creates references may cause certain WTFs:
+References seem to be a major WTF w.r.t. closures. The problem is that unlike other languages, PHPs local scope is always that of the current function, an "inner-loop-scope" as other languages have does not exist. This will cause headaches in loops if the loop index is to be used in a series of closures.
+
+The previous proposals had the notion of always creating references, so the following would be a WTF:
 
  <code php>
    for ($i = 0; $i < 10; $i++) {
@@ -205,7 +250,7 @@ The fact that 'lexical' creates references may cause certain WTFs:
    }
  </code>
 
-This will not work as expected since $i is a reference and thus all created closures would reference the same variable. In order to get this right one has to do:
+This would not have worked as expected since $i is a reference and thus all created closures would reference the same variable. In order to get this right one would have had to do:
 
  <code php>
    for ($i = 0; $i < 10; $i++) {
@@ -217,12 +262,19 @@ This will not work as expected since $i is a reference and thus all created clos
 
 This can be a WTF for people that don't expect lexical to create an actual reference. On the other hand, global and static both DO create references so that behaviour is consistent with current PHP **and** (as pointed out on the mailing list) other languages such as JavaScript also behave the same way, so we really should stay consistent.
 
-=== ''lexical'' keyword itself ===
+== Current proposal ==
 
-The fact that 'lexical' is needed at all may cause WTFs. Other languages such as JavaScript implicitely have the entire scope visible to child functions. But since PHP does the same thing with global variables, I find a keyword like 'lexical' much more consistent than importing the entire scope (and always importing the entire scope costs unnecessary performance).
+For the sake of discussion, all the current patches allow the programmer to choose whether variables are to be referenced or copied. The current patches default to copying them and allowing the use of an & to reference variables. **The only reason this is done** is to demonstrate that both is easily possible and that it is **only** the grammar that needs to be changed in order to change the behaviour, not the code itself.
+
+The discussion on the mailing list will have to come to a conclusion on which behaviour would be the best for PHP.
+
+=== ''lexical'' keyword itself (or ''use'') ===
+
+The fact that 'lexical' (or ''use'') is needed at all may cause WTFs. Other languages such as JavaScript implicitely have the entire scope visible to child functions. But since PHP does the same thing with global variables, I find a keyword like 'lexical' much more consistent than importing the entire scope (and always importing the entire scope costs unnecessary performance).
 
 ===== Changelog ====
 
+   * 2008-06-26 Christian Seiler: Revised patch, using objects instead of resources, added tests
    * 2008-06-18 Christian Seiler: OOP clarifications
    * 2008-06-17 Christian Seiler: Updated patch
    * 2008-06-17 Christian Seiler: Clarified interaction with OOP
