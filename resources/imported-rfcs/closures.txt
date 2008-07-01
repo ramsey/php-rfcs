@@ -1,8 +1,7 @@
 ====== Request for Comments: Lambda functions and closures ======
-  * Version: 1.1
-  * Date: 2008-06-26
-  * Author: Christian Seiler <chris_se@gmx.net>
-  * Thanks to: Dmitry Stogov <dmitry@zend.com>
+  * Version: 1.2
+  * Date: 2008-07-01
+  * Author: Christian Seiler <chris_se@gmx.net>, Dmitry Stogov <dmitry@zend.com>
   * Status: Under Discussion
 
 This RFC discusses the introduction of compile-time lambda functions and closures in PHP.
@@ -10,6 +9,8 @@ This RFC discusses the introduction of compile-time lambda functions and closure
 ===== Introduction =====
 
 End of 2007 a patch was proposed that would add lambda functions (but without closures) to PHP. During the discussion on the mailing list, several people suggested that without support for closures, lambda functions are not useful enough to add them to PHP. This proposal describes a viable method of adding lambda functions with closure support to PHP.
+
+The initial posting of this proposal has created quite a bit of discussion on the list. This updated proposal including an updated patch intends to incorporate the result of that discussion. A lot of changes to the original patch by Christian Seiler were made by Dmitry Stogov.
 
 ===== Why do we need closures and lambda functions? =====
 
@@ -32,7 +33,7 @@ Lambda functions allow the quick definition of throw-away functions that are not
      }
      return preg_replace_callback ('/( +) /', 'replace_spaces_helper', $text);
    }
- </code>
+</code>
 
    - Use the present create_function() in order to create a function at runtime. This approach has several disadvantages: First of all, syntax highlighting does not work because a string is passed to the function. It also compiles the function at run time and not at compile time so opcode caches can't cache the function.
 
@@ -52,7 +53,9 @@ Note: str_replace also accepts arrays as a third parameter so this example may b
 
 ===== Common misconceptions =====
 
-?
+   - Lambda functions / closures are **not** a way of dynamically extending classes by additional methods at runtime. There are several other possibilities to do this, including the already present _ _call semantic.
+
+   - PHPs notion of scope is quite differnet than the notion of scope other languages define. Combine this with variable variables ($$var) and it becomes clear that automatically detecting which variables from the outer scope are referenced inside are closure is impossible. Also, since for example global variables are not visible inside functions either by default, automatically making the parent scope available would break with the current language concept PHP follows.
 
 ===== Proposal and Patch =====
 
@@ -64,68 +67,50 @@ The following proposal and patch implement compile-time lambda functions and clo
 
 The patch adds the following syntax as a valid expression:
 
- <code php>
-   function & (parameters) { body }
- </code>
+<code php>
+   function & (parameters) use (lexical vars) { body }
+</code>
 
-(The & is optional and indicates - just as with normal functions - that the anonymous function returns a reference instead of a value)
+The & is optional and indicates that the function should return a refernce. The use followed by the paranthesis is optional and indicates that several variables from the current scope should be imported into the closure.
 
 Example usage:
 
- <code php>
+<code php>
    $lambda = function () { echo "Hello World!\n"; };
- </code>
+</code>
 
 The variable $lambda then contains a callable resource that may be called through different means:
 
- <code php>
+<code php>
    $lambda ();
    call_user_func ($lambda);
    call_user_func_array ($lambda, array ());
- </code>
+</code>
 
 This allows for simple lambda functions, for example:
 
- <code php>
+<code php>
    function replace_spaces ($text) {
      $replacement = function ($matches) {
        return str_replace ($matches[1], ' ', '&nbsp;').' ';
      };
      return preg_replace_callback ('/( +) /', $replacement, $text);
    }
- </code>
+</code>
 
 === Closure support ===
 
-Since there was some discussion on the PHP internals list on about what the best syntax for importing parent-scoped variables into closures would be, several patches are proposed, mainly to demonstrate that the basic code can remain exactly the same while only the grammar of PHP has to change in order for a different syntax.
+In order to make use of variables defined in the parent scope, this patch proposes the following syntax to import variables from the parent scope into the closure scope:
 
-== Closure support via ''lexical'' keyword ==
+<code php>
+  function (normal parameters) use ($var1, $var2, &$refvar) {}
+</code>
 
-The patch implements closures by defining an additional keyword 'lexical' that allows an lambda function (and *only* an lambda function) to import a variable from the "parent scope" to the lambda function scope. Example:
+The variables $var1, $var2 and $refvar defined in the parent scope will be visible inside the lambda function. For the behaviour with regard to references, see below.
 
- <code php>
-   function replace_in_array ($search, $replacement, $array) {
-     $map = function ($text) {
-       lexical $search, $replacement;
-       if (strpos ($text, $search) > 50) {
-         return str_replace ($search, $replacement, $text);
-       } else {
-         return $text;
-       }
-     };
-     return array_map ($map, array);
-   }
- </code>
+Simple example:
 
-The variables $search and $replacement are variables in the scope of the function replace_in_array() and the lexical keyword imports these variables into the scope of the closure.
-
-The current patch imports variables as a value and allows to import them as a reference if an & is supplied before the variable name. The referencing behaviour is still subject to discussion.
-
-== Closures support via ''use'' keyword ==
-
-Another patch implements closures by using the 'use' keyword to specify the to-be-imported variables in the function declaration:
-
- <code php>
+<code php>
    function replace_in_array ($search, $replacement, $array) {
      $map = function ($text) use ($search, $replacement) {
        if (strpos ($text, $search) > 50) {
@@ -136,17 +121,50 @@ Another patch implements closures by using the 'use' keyword to specify the to-b
      };
      return array_map ($map, array);
    }
- </code>
+</code>
 
-The variables $search and $replacement are variables in the scope of the function replace_in_array() and they are imported into the scope of the closure upon creation of the closure.
+The variables $search and $replacement are variables in the scope of the function replace_in_array() and they are imported into the scope of the closure upon creation of the closure. 
 
-The current patch imports variables as a value and allows to import them as a reference if an & is supplied before the variable name. The referencing behaviour is still subject to discussion.
+=== Closure lifetime ===
+
+Closures may live longer as the methods that declared them. It is perfectly possible to have something like this:
+
+<code php>
+   function getAdder($x) {
+     return function ($y) use ($x) {
+       // or: lexical $x;
+       return $x + $y;
+     };
+   }
+</code>
+
+=== Refernces vs. Copies ===
+
+By default, all imported variables are copied as values into the closure. This makes it impossible for a closure to modify the variable in the parent scope. By prepending an & in front of the variable name in the use declaration, the variable is imported as a refernce instead. In that case, changes to the variable inside the closure will affect the outside scope.
+
+Example:
+
+<code php>
+  $x = 1;
+  $lambda1 = function () use ($x) {
+    $x *= 2;
+  };
+  $lambda2 = function () use (&$x) {
+    $x *= 3;
+  };
+  $lambda1 ();
+  var_dump ($x); // gives: 1
+  $lambda2 ();
+  var_dump ($x); // gives: 3
+</code>
+
+Support for references are necessary in order to achieve true closures (like in Javascript, where a variable originating in parent scope can be modified by closures) while copying per default fits best with the current semantics of PHP and does not cause headaches in loops (for example, when importing a loop index into a closure).
 
 === Interaction with OOP ===
 
 If a closure is defined inside an object, the closure has full access to the current object through $this (without the need to import it explicitely) and all private and protected methods of that class. This also applies to nested closures. Example:
 
- <code php>
+<code php>
      class Example {
        private $search;
 
@@ -160,7 +178,6 @@ If a closure is defined inside an object, the closure has full access to the cur
 
        public function getReplacer ($replacement) {
          return function ($text) use ($replacement) {
-           // or: lexical $replacement;
            return str_replace ($this->search, $replacement, $text);
          };
        }
@@ -171,57 +188,110 @@ If a closure is defined inside an object, the closure has full access to the cur
      echo $replacer ('hello world'); // goodbye world
      $replacer->setSearch ('world');
      echo $replacer ('hello world'); // hello goodbye
- </code>
+</code>
 
-As one can see, defining a closure inside a class method does not change the semantics at all - it simply does not matter if a closure is defined in global scope, within a function or within a class method. The only small difference is that closures defined in class methods may also access the class and the current object via $this.
+As one can see, defining a closure inside a class method does not change the semantics at all - it simply does not matter if a closure is defined in global scope, within a function or within a class method. The only small difference is that closures defined in class methods may also access the class and the current object via $this. Since $this is saved "within the closure" the corresponding object will live at least as long as the closure.
 
-=== Closure lifetime ===
+Because not all closures defined in class methods need $this, it is possible to declare a lambda function to be static:
 
-Closures may live longer as the methods that declared them. It is perfectly possible to have something like this:
+<code php>
+     class Example {
+       public function doSomething () {
+         $x = 4;
+         $closure = static function ($y) use ($x) {
+           return = $x + $y;
+         };
+         return $closure (6);
+       }
+     }
+</code>
 
- <code php>
-   function getAdder($x) {
-     return function ($y) use ($x) {
-       // or: lexical $x;
-       return $x + $y;
-     };
-   }
- </code>
+In this case, $this is not available inside the closure. This may save a lot of memory if saves many closures that originated in longer needed objects.
+
+==== Additional goody: _ _invoke ====
+
+Since closures implement a new type of variable that may be called dynamically (i.e. objects), the idea came up that generic callable could also be implemented. This patch adds an additional magic method _ _invoke that may be defined in arbitrary classes. If defined, the object itself is callable and the new special method will be invoked instead of the object. Example:
+
+<code php>
+class Example {
+  public function __invoke () {
+    echo "Hello World!\n";
+  }
+}
+$foo = new Example;
+$foo ();
+</code>
+
+==== Interaction with reflection ====
+
+Since closures are anonymous, they do **not** appear in reflection.
+
+However, a new method was added to the ReflectionMethod and ReflectionFunction classes: getClosure. This method returns a dynamically created closure for the specified function. Example:
+
+<code php>
+class Example {
+  static function printer () { echo "Hello World!\n"; }
+}
+
+$class = new ReflectionClass ('Example');
+$method = $class->getMethod ('printer');
+$closure = $method->getClosure ();
+$closure ();
+</code>
+
+This example dynamically creates a callable object of the static method "printer" of the "Example" class. Calling that closure is like calling the method directly. This also works for non-static methods - here getClosure expects a single parameter for the $this pointer:
+
+<code php>
+class Example {
+  public $x = 4;
+  function printer () { echo "Hello World: $this->x!\n"; }
+}
+
+$class = new ReflectionClass ('Example');
+$method = $class->getMethod ('printer');
+
+$object = new Example;
+$closure = $method->getClosure ($object);
+$closure ();
+$object->x = 5;
+$closure ();
+</code>
 
 ==== Zend internal perspective ====
 
 The patch basically changes the following in the Zend engine:
 
-(Quite a lot here is based on an updated patch provided by Dmitry Stogov.)
+When the compiler reaches a lambda function, except for details in the grammar, a new function zend_do_begin_lambda_function_declaration is called - which itself calls zend_do_begin_function_declaration with "lambda" as a predefined function name. Immediately hereafter, the ZEND_DECLARE_FUNCTION opcode is replaced with a new ZEND_DECLARE_LAMBDA_FUNCTION opcode, early binding will therefore never occur for lambda functions (and traditional function binding at runtime neither, since the ZEND_DECLARE_LAMBDA_FUNCTION opcode does something else, see below). The closure has an additional flag ZEND_ACC_CLOSURE.
 
-When the compiler reaches a lambda function, except for details in the grammar, a new function zend_do_begin_lambda_function_declaration is called - which itself calls zend_do_begin_function_declaration with "lambda" as a predefined function name. Immediately hereafter, the ZEND_DECLARE_FUNCTION opcode is replaced with a new ZEND_DECLARE_LAMBDA_FUNCTION opcode, early binding will therefore never occur for lambda functions (and traditional function binding at runtime neither, since the ZEND_DECLARE_LAMBDA_FUNCTION opcode does something else, see below).
+Lexical variables are done via static variables: For each lexical variable an entry in the static variables hash table is added. The entry is default NULL but an additional IS_LEXICAL or IS_LEXICAL_REF is XORed to the zval type.
 
-Lexical variables are done via static variables: For each lexical variable an entry in the static variables hash table is added with the special semantics for the default value being either an empty string or a string containing a single 0-char. But instead of a normal string zval, the type is forced to be IS_CONSTANT. An empty constant or a constant containing only a 0-char will never be added by normal PHP so with this it is possible to distinguish them from normal constants as values. The len 0 strings indicate that the variable should be referenced from parent scope and the len 1 strings indicate it should be copied.
-
-An additional internal class "Closure" is added which will be used for saving closures. It contains basically only the constructor and a toString method that currently doesn't do very much. The toString method could later be used to display useful debugging information on the closure.
+An additional internal class "Closure" is added which will be used for saving closures.
 
 The ZEND_DECLARE_LAMBDA_FUNCTION opcode looks up the function in the function table (it still has its runtime function key the compiler gave it and is thus cacheable by any opcode cache), creates a new object of the Closure type and stores a copy of the op_array inside. It correctly sets the scope of the copied op_array to be the current class scope and makes sure all lexical variables are imported from the parent scope into the copied hash table of the new op_array. It also creates a reference to the current $this object. It returns the newly created object.
 
 Some hooks were added to the opcode handlers, zend_call_function and zend_is_callable_ex that allow the 'Closure' object to be called.
 
-Note that since closures that don't use $this may potentially carry on the object far too long. Therefore an additional patch variant is provided in which the compiler remembers for each lambda function whether $this is used. For that, an additional op_array->this_used field is added to the op_array. If that field is true, the ZEND_DECLARE_LAMBDA_FUNCTION stores the current $this pointer in the closure, else it does not. Nested closures are treated properly.
+In order to make code changes as clean as possible, this logic was mainly abstracted into zend_closures.c which defines two main methods: zend_create_closure and zend_get_closure. zend_create_closure creates a new closure, zend_get_closure retrieves the associated op_array, scope and this pointer from the closure. If some logic needs to be changed (due to design decisions or - for example - a bug), no binary incompatible change will take place but rather those two methods need to be changed.
+
+==== Tests ====
+
+The patch contains additional phpt tests that make sure closures work as designed.
 
 ==== The patch ====
 
-There are six variants of the patch:
+Current patches:
 
-   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-use.diff|Patch for PHP 5.3, use ($var) syntax, $this always stored]]
-   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-use-this.diff|Patch for PHP 5.3, use ($var) syntax, $this only stored when necessary]]
-   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-lexical-this.diff|Patch for PHP 5.3, lexical $var syntax, $this only stored when necessary]]
-   * (The combination lexical + $this always stored is of course also possible)
-   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-use.diff|Patch for PHP 6.0, use ($var) syntax, $this always stored]]
-   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-use-this.diff|Patch for PHP 6.0, use ($var) syntax, $this only stored when necessary]]
-   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-lexical-this.diff|Patch for PHP 6.0, lexical $var syntax, $this only stored when necessary]]
-
-All patches contain a series of additional tests that ensure the correct functioning of closures.
+   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-07-01-1.diff|Patch against PHP_5_3]]
+   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-07-01-1.diff|Patch against HEAD]]
 
 Older patches for completeness:
 
+   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-use.diff]]
+   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-use-this.diff]]
+   * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-lexical-this.diff]]
+   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-use.diff]]
+   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-use-this.diff]]
+   * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-lexical-this.diff]]
    * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-17-3.diff]]
    * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-16-1.diff]]
 
@@ -229,8 +299,7 @@ Older patches for completeness:
 
 ==== BC breaks ====
 
-   * (lexical variant) Introduction of a new keyword 'lexical'. But note that it is very improbable that someone should use it as a function, method, class or property name.
-   * **No** tests are broken by the patch.
+   * None by design. A new previously invalid syntax is added. No additional keywords are defined.
 
 ==== Caveats / possible WTFs ====
 
@@ -238,42 +307,13 @@ Older patches for completeness:
 
 On writing ''$func = function () { };'' there is a semicolon necessary. If left out it will produce a compile error. Since any attempt to remove that necessity would unecessarily bloat the grammar, I suggest we simply keep it the way it is. Also, Lukas Kahwe Smith pointed out that a single trailing semicolon after a closing brace already exists: ''do { } while ();''
 
-=== References ===
+=== Misinterpretations of the goal of closures ===
 
-References seem to be a major WTF w.r.t. closures. The problem is that unlike other languages, PHPs local scope is always that of the current function, an "inner-loop-scope" as other languages have does not exist. This will cause headaches in loops if the loop index is to be used in a series of closures.
-
-The previous proposals had the notion of always creating references, so the following would be a WTF:
-
- <code php>
-   for ($i = 0; $i < 10; $i++) {
-     $arr[$i] = function () { lexical $i; return $i; };
-   }
- </code>
-
-This would not have worked as expected since $i is a reference and thus all created closures would reference the same variable. In order to get this right one would have had to do:
-
- <code php>
-   for ($i = 0; $i < 10; $i++) {
-     $loopIndex = $i;
-     $arr[$i] = function () { lexical $loopIndex; return $loopIndex; };
-     unset ($loopIndex);
-   }
- </code>
-
-This can be a WTF for people that don't expect lexical to create an actual reference. On the other hand, global and static both DO create references so that behaviour is consistent with current PHP **and** (as pointed out on the mailing list) other languages such as JavaScript also behave the same way, so we really should stay consistent.
-
-== Current proposal ==
-
-For the sake of discussion, all the current patches allow the programmer to choose whether variables are to be referenced or copied. The current patches default to copying them and allowing the use of an & to reference variables. **The only reason this is done** is to demonstrate that both is easily possible and that it is **only** the grammar that needs to be changed in order to change the behaviour, not the code itself.
-
-The discussion on the mailing list will have to come to a conclusion on which behaviour would be the best for PHP.
-
-=== ''lexical'' keyword itself (or ''use'') ===
-
-The fact that 'lexical' (or ''use'') is needed at all may cause WTFs. Other languages such as JavaScript implicitely have the entire scope visible to child functions. But since PHP does the same thing with global variables, I find a keyword like 'lexical' much more consistent than importing the entire scope (and always importing the entire scope costs unnecessary performance).
+As the discussion on the mailing list showed, there were quite a few misconceptions on what closures may or may not achieve. One often used suggestion was to use closures in order to extend classes by additional methods at run time. This is **not** the goal of closures **and** it can already be achieved without closures just by using _ _call, see for example [[http://phpfi.com/328105]].
 
 ===== Changelog ====
 
+   * 2008-07-01 Christian Seiler: Updated patch yet again
    * 2008-06-26 Christian Seiler: Revised patch, using objects instead of resources, added tests
    * 2008-06-18 Christian Seiler: OOP clarifications
    * 2008-06-17 Christian Seiler: Updated patch
