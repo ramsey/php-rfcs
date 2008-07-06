@@ -8,10 +8,19 @@
 
 ===== Introduction =====
 
-This idea came about at Facebook while investigating ways to optimize Zend Engine calls to ap_block/unblock_alarms running under Apache 1.x. After some research I discovered Rasmus' original proposal. The purpose of this extension is as follows:
+This idea came about at Facebook while investigating ways to optimize Zend Engine calls to ap_block/unblock_alarms running under Apache 1.x. After some research Rasmus Lerdorf's original proposal to the internals list was found and it matched our plans. The purpose of which is as follows:
 
   * Make HANDLE_BLOCK/UNBLOCK_INTERRUPTIONS macros useful to extensions running under all SAPIs. (ie: php+apache2-prefork w/ apc)
+  
   * Improve performance of PHP running under SAPI's that currently implement block/unblock hooks. (apache 1.x)
+
+===== Improved Stability =====
+
+The Zend Engine exposes an alarm blocking mechanism via macros however the specific implementation is left up to each SAPI, many of which do not provide the necessary functionality. In a standard PHP environment this is likely to be acceptable as the PHP engine only implements a single alarm based feature, the max_execution_time timeout. A survey of bundled SAPI's shows that almost all implement STANDARD_SAPI_MODULE_PROPERTIES in their sapi_module_struct, which does not provide any alarm blocking callback functionality. Only apache and apache_hooks define the alarm blocking callbacks, and only if !PHP_WIN32. The chance of being in a critical section while timing out is low and even if so it may not be problematic as the timeout triggers an immediate shutdown.
+
+As extensions such as APC are introduced the need for stable alarm handling increases. The likelihood of being within within a critical section increases as an extension may be maintaining a shared memory segment using a variety of locking mechanisms, some of which may in fact further increase these odds such as spinlocking. 
+
+Extensions will now be able implement the zend alarm blocking macros in their critical sections and be assured that these critical sections will be protected.
 
 ===== Details =====
 
@@ -30,27 +39,54 @@ If a signal is received, //zend_signal_handler_defer()// will check to see if ex
 
 If execution is within a critical section, execution of the previous handler will be deferred until the HANDLE_UNBLOCK_INTERRUPTIONS macro is reached. During deferred execution if any additional signals are received they are queued. All queued signals handlers will be invoked when HANDLE_UNBLOCK_INTERRUPTIONS is reached.
 
-=== zend_signal() ===
+=== Zend Alarm Blocking Macros ===
 
-The //zend_signal()// function allows registration of arbitrary signals within the zend engine to be deferred while executing critical sections. This is now used to register the SIGALRM and SIGPROF signals that provide the maximum_execution timeout functionality within PHP.
-
-=== HANDLE_BLOCK/UNBLOCK_INTERRUPTIONS ===
-
-For optimal performance the new blocking macros account for critical sections by incrementing and decrementing the //zend_signal_globals_t.depth// counter. No functions are called until depth==0 in HANDLE_UNBLOCK_INTERRUPTIONS.
+For optimal performance the new HANDLE_BLOCK/UNBLOCK_INTERRUPTIONS macros account for critical sections by incrementing and decrementing the //zend_signal_globals_t.depth// counter. No functions are called until depth==0 in HANDLE_UNBLOCK_INTERRUPTIONS.
 
 This accounting will not work in ZTS enabled mode thus support for deferred signal handling is automatically disabled when ZTS is enabled.
 
+=== zend_signal() ===
+
+The //zend_signal()// function allows registration of arbitrary signals within the zend engine to be deferred while executing critical sections. This is now used to register the SIGALRM and SIGPROF signals that provide the max_execution_time timeout functionality within PHP.
+
 ===== Performance =====
 
-Benchmarks in valgrind/callgrind show that the new block/unblock macros can reduce the total number of instructions by 3.6%. On a heavyweight page this can equal 100,000,000 instructions and 10,000,000 function calls into the apache block/unblock callback handlers. In a test user space script designed to stress memory allocation by assigning a million integers into an array I have consistently measured a 2.5% real time improvement.
+=== zend_alloc ===
 
-===== APC =====
+Using [[http://sizzo.org/~screen/patches/alarms_alloc.php|this php test]] designed to stress memory allocation by assigning a million integers into an array a real time time improvement is measurable.
 
-With the newer locking mechanisms now available in the APC extension this type of internal handling is now extremely important. APC spinlocks, although in faster overall page generation, spend more user time towards accounting by the ITIMER_PROF interval timer than mutex locking. This may trigger an increased number of php execution timeouts. When this timeout occurs, APC is more likely than be in a spinlock. This implementation enables deferred signal protection for SIGPROF which solves this problem and adds a greater level of stability for APC users within all locking mechanisms.
+^      Average of 10 runs           ^^
+|php-5.2.5         | 938.9716|
+|php-5.2.5-patched | 915.8652|
+|difference        |  23.1063|
+|improvement       |    2.46%|
+
+Note: Although within the range of error these measurements seem consistent. The same script executed via ApacheBench showed no detectible request time improvement once transit cost was introduced.
+
+=== callgrind ===
+
+Benchmarks using Valgrind/Callgrind show the following results on a heavyweight page with a total of almost 3 billion instructions.
+
+^    Callgrind           ^^
+^php-5.2.5               ^^
+|total instructions      |2,707,532,005 |
+|ap_block_alarms calls   |4,998,851|
+|ap_unblock_alarms calls |4,998,851|
+^php-5.2.5-patched       ^^
+|total instructions      |2,607,562,502 |
+|ap_block_alarms calls   |0 |
+|ap_unblock_alarms calls |0 |
+
+  - 9,997,702 less function calls
+  - 99,969,503 less instructions (3.6%)
+
+Although some measure of improved performance is expected and measurable this functionality should at the very least improve stability at no cost.
 
 ===== Considerations =====
 
   - Zend Signal Handling support has not been implemented for ZTS enabled php builds. While this is likely to improve PHP stability under Apache 2 using the prefork MPM, there will be no such improvement under the worker MPM.
+
+  - The current implementation is not enabled by default, to enable pass --enable-zend-signals to PHP configure.
  
   - The proposal has only been implemented for PHP_5_3 and will need to be ported to PHP 6.
  
