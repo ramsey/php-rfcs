@@ -1,0 +1,65 @@
+
+====== Zend Signal Handling ======
+  * Version: 1.0
+  * Date: 2008-07-05
+  * Author: Lucas Nealan <lucas@facebook.com>
+  * Status: Under Discussion
+  * First Proposed by: [[http://markmail.org/message/3jg6cwqfghdlydhy|Rasmus Lerdorf]]
+
+===== Introduction =====
+
+This idea came about at Facebook while investigating ways to optimize Zend Engine calls to ap_block/unblock_alarms running under Apache 1.x. After some research I discovered Rasmus' original proposal. The purpose of this extension is as follows:
+
+  * Make HANDLE_BLOCK/UNBLOCK_INTERRUPTIONS macros useful to extensions running under all SAPIs. (ie: php+apache2-prefork w/ apc)
+  * Improve performance of PHP running under SAPI's that currently implement block/unblock hooks. (apache 1.x)
+
+===== Details =====
+
+=== Startup ===
+
+During startup the zend engine will register handlers for following signals
+
+  - SIGALRM, SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2
+  - SIGPROF, if not compiled for windows or cygwin.
+
+If any of these signals have previously registered handlers they will be stored internally.
+
+=== Deferred Signals ===
+
+If a signal is received, //zend_signal_handler_defer()// will check to see if execution is in a critical section. If not the previously registered handler will be called via //zend_signal_handler()//. This supports basic handlers as well as extended siginfo style handler functions.
+
+If execution is within a critical section, execution of the previous handler will be deferred until the HANDLE_UNBLOCK_INTERRUPTIONS macro is reached. During deferred execution if any additional signals are recieved they are queued. All queued signals handlers will be invoked when HANDLE_UNBLOCK_INTERRUPTIONS is reached.
+
+=== zend_signal() ===
+
+The //zend_signal()// function allows registration of arbitrary signals within the zend engine to be deffered while executing critical sections. This is now used to register the SIGALRM and SIGPROF signals that provide the maximum_execution timeout functionality within PHP.
+
+=== HANDLE_BLOCK/UNBLOCK_INTERRUPTIONS ===
+
+For optimal performance the new blocking macros account for cricital sections by incrementing and decrementing the //zend_signal_globals_t.depth// counter. No functions are called until depth==0 in HANDLE_UNBLOCK_INTERRUPTIONS.
+
+This accounting will not work in ZTS enabled mode thus support for deferred signal handling is automatically disabled when ZTS is enabled.
+
+===== Performance =====
+
+Benchmarks in valgrind/callgrind show that the new block/unblock macros can reduce the total number of instructions by 3.6%. On a heavyweight page this can equal 100,000,000 instructions and 10,000,000 function calls into the apache block/unblock callback handlers. In a test userspace script designed to strees memory allocation by assigning a million intgers into an array I have consistantly measured a 2.5% real time improvement.
+
+===== APC =====
+
+With the newer locking mechanisms now available in the APC extension this type of internal handling is now extremely important. APC spinlocks, although in faster overall page generation, spend more user time towards accounting by the ITIMER_PROF interval timer than mutex locking. This may trigger an increased number of php execution timeouts. When this timeout occurs, APC is more likely than be in a spinlock. This implementation enables deferred signal protection for SIGPROF which solves this problem and adds a greater level of stability for APC users within all locking mechanisms.
+
+===== Patch =====
+
+The patch against PHP_5_3 is [[http://sizzo.org/~screen/patches/php-5.3.0-alarms.patch|available here]].
+
+===== Considerations =====
+
+  - Zend Signal Handling support has not been implemented for ZTS enabled php builds. While this is likely to improve PHP stability under Apache 2 using the preform MPM, there will be no such improvement under the worker MPM.
+ 
+  - The proposal has only been implemented for PHP_5_3 and will need to be ported to PHP 6.
+ 
+  - For simplicity the //_zend_signal_info_t.prev// structure is implemented as a static vector of NSIG size. On some systems NSIG may not be defined and 65 will be used as the default vector size.
+
+===== Changelog =====
+
+   - 2008-07-05 Lucas Nealan: Initial creation
