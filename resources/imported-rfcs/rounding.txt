@@ -1,0 +1,601 @@
+====== Request for Comments: Rounding in PHP ======
+  * Version: 1.0
+  * Date: 2008-08-23
+  * Author: Christian Seiler <chris_se@gmx.net>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/rounding
+
+This RFC discusses the situation on floating point rounding in PHP, explains
+why it is currently borken and proposes a fix to solve these problems.
+
+Parts of this proposal are based on a
+[[http://marc.info/?l=php-internals&m=109057070829170&w=2|proposal by George Whiffen]].
+Below there is an analysis the differences.
+
+===== Introduction =====
+
+PHP offers a method [[http://www.php.net/round|round]] to round floating point
+numbers to a certain precision. This, however, does not always work as a user
+would expect. This is due to the fact that IEEE 754 floating point values are
+stored in the binary system which cannot represent every decimal value exactly.
+
+==== Rounding methods ====
+
+Rounding is traditionally seen as round to integer so that no fractions are
+left over. If the number is already an integer, this is not a problem. But
+if the number is not an integer, it depends on the chosen algorithm on what
+is done depending on the fraction.
+
+The following rounding methods exist:
+
+=== Round to negative infinitiy ===
+
+This method always rounds toward negative infinity, should be obvious. Some examples:
+<code>
+-0.5     ->  -1
+ 0.5     ->   0
+ 2.4     ->   2
+-3.6     ->  -4
+ 4.8     ->   4
+</code>
+The [[http://www.php.net/floor|floor]] function does this.
+
+=== Round to positive infinitiy ===
+
+This method always rounds toward positive infinity, should be obvious. Some examples:
+<code>
+-0.5     ->   0 [actually, -0]
+ 0.5     ->   1
+ 2.4     ->   3
+-3.6     ->  -3
+ 4.8     ->   5
+</code>
+The [[http://www.php.net/ceil|ceil]] function does this.
+
+=== Round to zero ===
+
+Some examples:
+<code>
+-0.5     ->   0 [actually, -0]
+ 0.5     ->   0
+ 2.4     ->   2
+-3.6     ->  -3
+ 4.8     ->   4
+</code>
+
+=== Round away from zero ===
+
+Some examples:
+<code>
+-0.5     ->  -1
+ 0.5     ->   1
+ 2.4     ->   3
+-3.6     ->  -4
+ 4.8     ->   5
+</code>
+
+=== Round to nearest ===
+
+This method rounds fractions to the nearest integer. This is fine except when
+the fraction is exactly .5. Some examples not including the edge case
+.5:
+
+<code>
+ 2.4     ->   2
+-3.2     ->  -3
+-3.6     ->  -4
+ 4.8     ->   5
+ 2.501   ->   3
+-2.501   ->  -3
+ 2.499   ->   2
+-2.499   ->  -2
+</code>
+
+There are four main variants of this algorithm when it comes to treating .5:
+
+== Round half up ==
+
+This rounds .5 away from zero, some examples:
+
+<code>
+-1.5     ->  -2
+ 1.5     ->   2
+-2.5     ->  -3
+ 2.5     ->   3
+</code>
+
+This is also called //arithmetic rounding// and is the traditional rounding
+method that is taught in school.
+
+== Round half down ==
+
+This rounds .5 toward zero, some examples:
+
+<code>
+-1.5     ->  -1
+ 1.5     ->   1
+-2.5     ->  -2
+ 2.5     ->   2
+</code>
+
+== Round half even ==
+
+This rouds .5 towards the next //even// integer, some examples:
+
+<code>
+-1.5     ->  -2
+ 1.5     ->   2
+-2.5     ->  -2
+ 2.5     ->   2
+</code>
+
+This is also called //banker's rounding//.
+
+== Round half odd ==
+
+This rounds .5 towards the next //odd// integer, some examples:
+
+<code>
+-1.5     ->  -1
+ 1.5     ->   1
+-2.5     ->  -3
+ 2.5     ->   3
+</code>
+
+==== Where rounding occurs in PHP ====
+
+Rounding of floating point values occurs in PHP in several different places:
+
+=== Explicit rounding ===
+
+There are several places where explicit rounding occurs, i.e. where the user
+specifies that a floating point number is to be rounded:
+
+  * [[http://www.php.net/round|round]]
+  * [[http://www.php.net/number_format|number_format]]
+  * [[http://www.php.net/sprintf|(s|f)printf]] with %f as modifier
+
+round() and number_format() use an explicit floating point algorithm in math.c,
+while the printf() functions do rounding while converting the float to a string
+using an algorithm that uses bigints (zend_strtod.c).
+
+=== Implicit rounding ===
+
+  * float to string conversion (this is essentially sprintf("%g", $float))
+  * [[http://www.php.net/sprintf|(s|f)printf]] with %g as modifier
+
+Here, only the biginit algorithm is used.
+
+==== History of round() in PHP ====
+
+In the following section, I will outline the history of the round() function
+in PHP in order to provide thorough background information for the
+discussion.
+
+=== Frist version of math.c in CVS ===
+
+   * Signature: round($float), rounds to integer, no precision argument
+   * Uses rint() for rounding.
+   * On systems without rint(), rint() is emulated with an algorithm that does arithmetic rounding.
+
+ISO C specifies that rint() rounds according to the current rounding direction
+of the CPU, which is round-to-nearest round-half-even (banker's rounding) by
+default on any system that I know of but may be changed during runtime.
+IEEE 754 does not specify arithmetic rounding as a rounding method, but
+IEEE 754r will.
+
+This first version already shows discrepancies on different systems. (arithmetic
+rounding on systems without rint(), banker's rounding on every system with sane
+defaults and rint())
+
+=== Version 1.22 (May 17, 2000) ===
+
+A second parameter is added to the function signature: round($float, $places)
+where $places specifies the precision. It now implements an algorithm that does
+arithmetic rounding only.
+
+=== Version 1.104 (Aug 8, 2003) ===
+
+Due to incorrect results on some systems (for reasons, see below) the algorithm
+is modified slightly using a "fuzz" (here too: see below).
+
+=== Version 1.106 (Aug 9, 2003) ===
+
+Fuzz is always disabled on Win32, a (useless) configure check is added on UNIX.
+
+==== General information on floating point arithmetics ====
+
+This section tries to gather general information on floating point arithmetics.
+
+=== Representation of floating point values ===
+
+IEEE 754 specifies that floating point values are represented through three
+different numbers: The sign of the number, the exponent and the fraction. A
+floating point number is to be interpreted as:
+
+<code>
+(-1)^sign * fraction * 2^exponent
+</code>
+
+IEEE 754 specifies several different floating point data types, of which two
+are relevant here:
+
+  * Double precision: The fraction is 52 bits, the exponent 11 bits and one sign bit.
+  * Extended precision: The fraction is 64 bits, the exponent 15 bits and one sign bit.
+
+=== Representation of decimal numbers ===
+
+Since IEEE 754 uses the binary (base 2) system rather than the decimal (base 10)
+system for storing floating point values, it is not always possible to exactly
+represent a decimal number as a floating point value. Take, for example, the
+number 0.1. It cannot be represented exactly as a binary floating point number
+with finite precision just as 1/3rd can't be represented as a decimal number
+with finite precision. The closest floating point number within double precision
+is
+
+<code>
+0.1000000000000000055511151231257827021181583404541015625
+</code>
+
+The closest floating point number within extended precision is
+
+<code>
+0.1000000000000000000013552527156068805425093160010874271392822265625
+</code>
+
+However, when rounded as integers or strings, the first 15 significant digits
+of a floating point number are always exact. So when converting the number 0.1
+with a precision of 14 digits after the first significant digit to a string,
+it will still yield 0.1. So within 15 digits precision, floating point numbers
+can be used to exactly represent a decimal number.
+
+=== Precision relevancy of arithmetics with FP numbers ===
+
+Consider the following piece of C code:
+
+<code c>
+// volatile to disable compile-time optimizations for this example
+volatile double v = 2877.0;
+double d = v / 1000000.0;
+</code>
+
+The question here is: What does the double variable d contain? The answer is
+compiler-dependent. The Microsoft C Compiler on any system will have d
+contain the closest double representation of 0.002877. The GNU C Compiler will
+do so on x86_64 systems. But on 32 bit x86 systems the GNU C Compiler will
+have d contain the closest extended precision representation of 0.002877
+truncated to double which is NOT the same as the closest double representation.
+This is due to the fact that internal calculations are done using extended
+precision and results are truncated to double precision only when they are
+stored in memory.
+
+This can be avoided, however. The trick is to force the FPU to **always** use
+double precision for calculations. The problem is that this is not possible
+in a platform-independent way. The GNU C library offers the _FPU_SETCW and
+_FPU_GETCW macros in fpu_control.h while on Windows Systems a function named
+_controlfp is available for this job.
+
+Please note that zend_strtod() is also affected by this problem: On systems
+with the GCC and a 32 bit x86 processor, zend_strtod() will yield different
+results than strtod(). See below.
+
+==== Analysis of the problems of the previous round() implementation ====
+
+The previous round() implementations does not work properly on several cases.
+
+First of all, it is nowhere clearly defined, which rounding method round()
+uses. Let's assume arithmetic rounding since the current algorithm tries to
+do that.
+
+The problem with round() is not the rounding algorithm itself, that is very
+straight-forward (for brevity, only the version for positive values is
+included here):
+
+<code c>
+double result = floor(value + 0.5);
+</code>
+
+This algorithm correctly rounds a floating point number to integer using
+arithmetic rounding.
+
+However, the rounding algorithm in PHP supports arbitrary precision. Thus
+the algorithm actually looks like this:
+
+<code c>
+double result = floor(value * pow(10.0, places) + 0.5) / pow(10.0, places);
+</code>
+
+In a world with infinite precision this is completely correct. But due to the
+finite precision of doubles, it introduces two areas which cause problems:
+
+  * The multiplication with 10^places.
+  * The division by 10^places.
+
+In an attempt to solve these problems, the so-called "fuzz" was added. The
+fuzz simply means that instead of adding 0.5, a small bit more is added:
+0.50000000001. This, however, does not solve the problem but introduces a new
+one.
+
+Let us have a look at the problems introduced by those three steps:
+
+=== Multiplication with 10^places ===
+
+Multiplication with 10^places is problemtic because of the fact that if the
+previous floating point representation was not exact, after multiplying with
+10^places the resulting floating point number may not be the exact
+representation of the intended number.
+
+Take, for example, the number 0.285. Its floating point representation is
+0.284999999999999975575093458246556110680103302001953125. If you multiply
+that with 100, the resulting number has the floating point representation
+28.499999999999996447286321199499070644378662109375. This is not the exact
+representation of 28.5 - which is actually 28.5 in this case.
+
+The same happens for 1.255: The representation is
+1.25499999999999989341858963598497211933135986328125. Multiply that by 100
+and get 125.4999999999999857891452847979962825775146484375. The exact
+representation of 125.5 however is 125.5.
+
+If 0.5 is now added to that number and that number is then rounded with floor,
+the result will be 28 and not 29 which would be the naive expected value.
+
+=== Division through 10^places ===
+
+Division through 10^places is problematic because of two possible effects:
+
+  * If the internal calculation is done in extended precision, the truncated value may not be the exact double representation of the chosen value, see above.
+  * If places > 22 then 10^places itself cannot be represented as an exact floating point number and thus the division will be inaccurate. After dividing by 10^places, the result may deviate from the nearest floating point representation of the exact result - try var_dump(2e-23 - round(2e-23,23));. Thus, even if the rounding is exact, the result after the division is not the nearest representation as would be expected.
+
+=== The round fuzz ===
+
+The round fuzz tries to correct the multiplication problem but causes another
+one: round(0.9499999999999,1) will return 1.0 instead of the expected 0.9. Also,
+since the fuzz is not activated on all platforms (but these problems are
+platform-independent - with the exception of the extended precision then
+truncation problem during the division), this does not actually fix the issue.
+
+=== Summary of the problem analysis ===
+
+The addition of the places parameter of the round() function is the actual
+cause of the calculation errors. Furthermore, the fact that PHP does not
+clearly specify which rounding method is used (the manual only states that
+the number is "rounded") has been cause for quite a bit of confusion.
+
+===== Proposal and Patch =====
+
+This proposal suggests how to fix the round function in order to make it work
+properly and reduce the confusing among users.
+
+First of all, this proposal does **not** want to "fix" the printf() functions.
+printf() does round internally using the float-to-string converion algorithm
+in zend_strtod.c which uses bigints to do the conversion. So when it comes to
+0.285 which is represented as 0.284999something, it will return 0.28 instead of
+0.29 if used with %2f as format string. But the problem with fixing printf() is
+portability: Every other language supporting printf() or similar format strings
+do it wrong in the exact same way, PHP should not deviate from that (in my yes).
+It is always possible to do printf("%.2f", round($float, 2)); if one really
+wants correct results, as long as round() works properly. Also, changing the
+printf() bigint algorithm may have adverse effects when debugging floating
+point algorithms where a extremely high precision is wanted.
+
+However, the PHP manual should contain a warning for printf() that rounding may
+not work as expected and that explicit rounding should be done prior to passing
+the value to printf() if chosen so.
+
+Second, %g in printf() and implicit float-to-string conversion in PHP a la
+(string)$float shouldn't be fixed either. They only actually round at the
+15th significant digit (if the precision ini setting is not touched). If
+somebody really operates with floating point values at the edge of decimal
+precision, other problems occur anyway, so one shouldn't bother. But also here,
+the manual for the precision ini setting should be changed that manually
+lowering the setting will not always result in correct rounding and that the
+round function should be used instead.
+
+==== Building an abstraction layer for FP control register manipulation ====
+
+In a first step, my patch introduces 3 macros:
+
+   * _ZEND_FPU_CW_DECLARE
+   * _ZEND_FPU_CW_SET
+   * _ZEND_FPU_CW_RESTORE
+
+The DECLARE macro declares certain necessary variables, the SET macro modifies
+the FPU control word so that double precision is used for calculation and
+RESTORE restores the previous state of the control word. The following example
+illustrates how these macros are to be used:
+
+<code c>
+double somefunction (double val)
+{
+	_ZEND_FPU_CW_DECLARE;
+	double foo;
+
+	_ZEND_FPU_CW_SET;
+
+	/* some calculations... */
+	foo = val / 100.0;
+
+	/* ... */
+
+	_ZEND_FPU_CW_RESTORE;
+	return foo;
+}
+</code>
+
+These macros expand to the correct versions for each platform or to NOPs if
+the method for the corresponding platform could not be determined.
+
+==== Fix of zend_strtod ====
+
+Since the introduction of zend_strtod() (instead of strtod() which is locale
+dependent) the function suffers from the same problem as round(): It calculates
+in extended precision and then truncates the result to double on some platforms.
+Example:
+
+<code c>
+printf ("%.20f\n", 0.002877);
+</code>
+
+Run that in C and run that in PHP on a Linux x86 32 bit box - you will get
+different results.
+
+For this reason, my patch also fixes zend_strtod() by adding the _ZEND_FPU_CW
+macros to the function. Then, C and PHP will yield the same results on all
+platforms (that support IEEE 754 arithmetics anyway).
+
+==== New implementation of the round algorithm ====
+
+This proposal proposes the following change to PHPs round() function to
+eliminate all the problems:
+
+=== Usage of FP control word manipulation ===
+
+The round function uses the new _ZEND_FPU_CW macros in order to ensure double
+precision arithmetics within the function body. This will make sure the final
+division works properly.
+
+=== Create a function that does the actual integer rounding ===
+
+A new static inline function php_round_helper(double value, int mode) was
+added that rounds a number to integer. It basically does the simple arithmetic
+rounding floor(value + 0.5) or ceil(value - 0.5). But it also supports the
+other rounding methods round-half-even, round-half-odd and round-half-down
+via the mode parameter.
+
+=== Special handling for large places difference ===
+
+This was taken from the 2004 proposal: If the numer of places are very large,
+then 10^places is very large, too, and cannot be represented in an exact manner
+anymore. This will cause inaccuracies with the final division, as explained
+earlier.
+
+The solution for that is that the rounded double is converted to a string
+and e-places is added to that string. Take, for example, the number 5.3e-24
+which you may want to round to 24 places precision (which it of course already
+is). After rounding, the float value is 1.0 and that has to be divided by
+1e24. But 1e24 is too large to be exactly represented, so instead a string
+1.0e-24 is generated and passed through strtod(). strtod() on the other hand
+will make sure that the nearest double representation for that number is
+chosen. This of course has a performance penalty, but anybody wanting to round
+such small numbers will probaby be willing to pay for it.
+
+This change will make sure that very small (< 1e-22) or large (> 1e22) numbers
+will be rounded correctly to the given precision.
+
+=== Pre-rounding to the value's precision if possible ===
+
+The previous measures only concern the problems with the division but not the
+problem with the multiplication. Here, another measure is taken:
+
+If the requested number of places to round the number is smaller than the
+precision of the number, then the number will be first rounded to its own
+precision and then rounded to the requested number of places.
+
+Example: Round 1.255 to 2 places precision, expected value is 1.26. First step:
+Calculate 10^places = 10^2 = 100. Second step: Calculate
+14 - floor(log10(value)) = 14 - 0 = 14 which indicates the number of places
+after the decimal point which are guaranteed to be exact by IEEE 754. Now,
+2 < 14, so the condition applies. So, calculate 10^14 and multiply the number
+by that: 1.255 * 1e14 = 125499999999999.984375... Now, round that number to
+integer, i.e. 125500000000000. Now, divide that number by 10^(14 - 2) = 10^12
+(the difference) and get 125.5 (exact). NOW round that number to decimal which
+yields 126 and divide it by 10^2 = 100 which gives 1.26 which is the expected
+result for that rounding operation.
+
+Of course, one may argue that pre-rounding is not necessary and that this is
+simply the problem with FP arithmetics. This is true on the one hand, but the
+introduction of the places parameter made it clear that round() is to operate
+as if the numbers were stored as decimals. We can't revert that and this seems
+to me to be the best solutions for FP numbers one can get.
+
+=== Additional parameter for the round() function ===
+
+The round function now has an additional optional parameter for the selected
+rounding mode. The default mode is arithmetic rounding but other rounding
+modes may be selected.
+
+=== Some optimizations ===
+
+The 2004 proposal introduced some optimizations that this proposal has chosen
+to use, just in a slightly shorter form. In order to calculate floor(log10(v))
+a quick binary search lookup is used for small enough powers of 10. The same
+goes for calculating 10^places for small enough values: These are looked up
+in a table if they are small enough.
+
+==== Patch =====
+
+The patch is available under
+[[http://www.christian-seiler.de/temp/php/2008-08-23-rounding/rounding-5.3-1.patch]].
+It applies against the current CVS branch of 5.3, porting it to HEAD should
+be extremely trivial (since this only affects math-related stuff).
+
+I tested the patch under Linux 32 bit x86, Linux 64 bit x86_64 and Windows
+32 bit x86. Please note that MinGW does not define _controlfp_s but does
+define _controlfp. Thus I added a conditional ifdef to use _controlfp instead
+if _controlfp_s is not present. This is not relevant now but may be relevant
+when CMake is used as build system for PHP and thus PHP starts to support
+MinGW.
+
+The _ZEND_FPU_CW macros are currently defined in zend_strtod.h, but there may
+be a better place for that. Also, the configure checks for those makros are
+currently in ext/standard/config.{m4,w32} while they are probably better
+located somewhere else.
+
+===== Comparison with the 2004 proposal =====
+
+Quite a few ideas in this proposal came from the 2004 proposal:
+
+   * Conversion to string and back for places too large.
+   * The performance optimizations for log10 and pow(10)
+   * The FPU control word manipulation.
+
+But there are four main differences between the 2004 proposal and this one:
+
+==== Patching printf ====
+
+The 2004 proposal also patches printf() in order to make rounding consistent.
+However, as I already explained, I don't think that changing printf()s
+behaviour is such a good idea since printf behaves a certain way in every other
+programming language that supports that function.
+
+A note in the manual that the precision specifier in printf() is not suitable
+for rounding the values should be sufficient.
+
+==== No pre-rounding to precision ====
+
+The 2004 proposal does not pre-round after the multiplication and thus rounding
+1.255 to 2 places with the 2004 code will not work correctly either.
+
+==== Additional ini settings ====
+
+The 2004 proposal also adds additional ini settings for rounding mode etc. In
+my eyes this is superfluous since the rounding mode can always be set as an
+additional parameter to the round() function.
+
+==== Altering floating point arithmetics in PHP core ====
+
+The 2004 proposal goes way beyond traditional rounding by altering FP
+arithmetics in PHP in such a way that after **any** operation (add, subtract,
+multiply, divide) the result is rounded to the 15 digits precision guaranteed
+by IEEE 754. This destroys traditional floating point semantics but allows
+simple decimal calculations to work as expected by users not familiar with
+floating point values. It is essentially the same thing some spreadsheet
+applications (e.g. Microsoft Excel) do.
+
+I'm opposed to this kind of change of general semantics since PHP never said
+it implemented a decimal type and if people are using it wrong, it's their
+problem, we shouldn't break other legitimate applications for this.
+
+The round() function is a slightly different case though, since the round()
+function itself claims to be able to round to decimal precision. For this
+reason, changing round()s behaviour in order to accomodate decimal semantics
+is OK, since users will expect it to work that way.
+
+Nevertheless, what could be discussed separately is the introduction of a new
+type that automatically uses an arbitrary precision library internally, since
+writing $a * $b is much more natural than e.g. bcmul($a, $b). This, however,
+goes far beyond the scope of this proposal.
+
+===== Changelog =====
+
+  * 2008-08-23 Christian Seiler: Created RFC
