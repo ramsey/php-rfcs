@@ -1,0 +1,75 @@
+====== Request for Comments: Native TLS for globals in ZTS ======
+  * Version: 1.0
+  * Date: 2008-
+  * Author: Arnaud Le Blanc <arnaud.lb@gmail.com>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/tls
+
+Currently ZTS builds are slower than non-ZTS builds. This RFC is about avoiding some of the major overhead of ZTS builds by using native thread local storage.
+
+===== Introduction =====
+
+Currently the way globals work forces to pass a thread-local-storage pointer across function calls, which involves some overhead. Also, not all functions get the pointer as argument and need to use TSRMLS_FETCH(), which is slow. For instance emalloc() involves a TSRMLS_FETCH(). An other overhead is accessing globals, using multiple pointers in different locations.
+
+The first proposed patch caches each global address in a native TLS variable so that accessing a global is as simple as global_name->member. This removes the requirement of passing the tls pointer across function calls, so that the two major overheads of ZTS builds are avoided.
+
+non-ZTS:                        3.7s
+ZTS unpatched:                  5.2s
+ZTS patched:                    4.0s
+ZTS patched and static globals: 3.8s
+
+non-ZTS-PIC:                    4.7s
+ZTS-PIC:                        6.4s
+ZTS-PIC-patched static globals and dynamic model: 4.8s
+
+So the patch made ZTS builds mostly as fast as non-ZTS builds.
+
+However the TLS model used in these tests was the static model, which is restrictive, and in particular does not allow to use it in shared libraries which will be loaded dynamically. (c.f TLS internals, bellow).
+
+Even if this patch can always be used with the dynamic model (it actually greatly improves the performance of ZTS-PIC builds), it can not be used as-is when building non-PIC code.
+
+The second patch uses only one TLS variable, tsrm_ls_cache, which is used to cache tsrm_ls, so that it is not required to pass it across function calls. Using only one TLS variable allows to use the static model on (at least) Linux, Solaris and FreeBSD, but not on Windows.
+
+The result: 4.6s
+
+This improves the performance (from 5.2s without the patch), but less than the first patch.
+
+The patch also changes the way globals are stored, so that fetching a global requires less instructions and can be made quickly.
+
+The result: 4.4s
+
+This change also improves the performance of builds where the native-tls was not enabled.
+
+===== TLS internals =====
+
+On most systems there are two major models of TLS: A static model, the faster, and a dynamic model (and some sub-models).
+
+==== Static model ====
+
+Each block is allocated at a fixed offset from an address specific to each thread. As this address can be accessed very quickly, this allows very quick access to each TLS block. On most implementations, on IA-32, this thread-specific-address is the Thread Control Block, whose address is stored in offset 0 of the %gs segment register.
+
+The way the static model works requires that the memory needed by each TLS variable to be allocated before program startup. This means that the static model can not be used in shared libraries loaded at runtime. 
+
+=== Implementation ===
+
+Linux, Solaris, FreeBSD, Windows.
+
+Linux, Solaris and FreeBSD implementations allocate a fixed amount of surplus memory especially to allow dynamically loaded libraries to use the static model. Linux allocates 1664 bytes, FreeBSD 64 and Solaris 512.
+
+On GCC this model can be selected by using -ftls-model=initial-exec
+On SunStudio: -xthreadvar=no%dynamic.
+For both, this model is the default one when building non-PIC code.
+
+==== Dynamic model ====
+
+Each TLS block is allocated dynamically when a shared library is loaded. Some data is then stored in the global offset table so that the programm knows where to found each TLS block. This model allows to load libraries at runtime but is slower: It involves a function call (internally) and requires to build position independent code.
+
+=== Implementation ===
+
+Linux, Solaris, FreeBSD. The Windows documentation does not gives many implementation details, but it seems that Windows Vista allows DLLs to use thread local storage (not tested).
+
+On GCC this model can be selected by using -ftls-model=general-dynamic
+On SunStudio: -xthreadvar=dynamic
+For both, this is the default when building PIC code.
+
+
