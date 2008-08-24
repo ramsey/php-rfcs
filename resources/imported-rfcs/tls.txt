@@ -13,7 +13,7 @@ Currently the way globals work forces to pass a thread-local-storage pointer acr
 
 ===== Propositions =====
 
-The first proposed patch caches each global address in a native TLS variable so that accessing a global is as simple as global_name->member. This removes the requirement of passing the tls pointer across function calls, so that the two major overheads of ZTS builds are avoided.
+The first proposed patch makes each global a native TLS variable so that accessing a them is as simple as global_name->member. This removes the requirement of passing the tls pointer across function calls, so that the two major overheads of ZTS builds are avoided.
 
 Results for bench.php:
 
@@ -29,34 +29,58 @@ Results for bench.php:
 
 So the patch made ZTS builds mostly as fast as non-ZTS builds.
 
-However the TLS model used in these tests was the static model, which is restrictive, and in particular does not allow to use it in shared libraries which will be loaded dynamically. (c.f TLS internals, bellow).
+Unfortunately the TLS model used in these tests was the static model, which is restrictive, and in particular does not allow to use it in shared libraries which will be loaded dynamically. (c.f TLS internals bellow).
 
-Even if this patch can always be used with the dynamic model (it actually greatly improves the performance of ZTS-PIC builds), the patch can not be used as-is when building non-PIC code (the dynamic model cannot be used with non-PIC code).
+Even if this patch can still be used with the dynamic model (it actually greatly improves the performance of ZTS-PIC builds), it can not be used as-is when building non-PIC code (the dynamic model cannot be used with non-PIC code).
 
-The second patch uses only one TLS variable, tsrm_ls_cache, which is used to cache tsrm_ls, so that it is not required to pass it across function calls. Using only one TLS variable allows to use the static model on (at least) Linux, Solaris and FreeBSD, but not on Windows.
+The second patch is based on some research I made to see how various implementations of TLS works.
+
+In fact mostly all implementations I tested (Linux, FreeBSD, Solaris) allocate a surplus of TLS memory especially to allow to dlopen() libraries using static TLS. This memory being allocated in addition to any TLS memory needed by libraries loaded before program startup, it is guaranteed that this memory is always available and is reserved for this case.
+
+Based on that, and as long as it can be tested at configure time, it seems reasonable to expect that we will always have space for at least a single TLS pointer. Unfortunately Windows was the only implementation I tested that do not allowed that at all and the following will not work on it.
+
+So the second patch uses only one TLS variable, tsrm_ls_cache, which is used to cache tsrm_ls, so that it is not required to pass it across function calls.
+
+Here are the results after having applied only this change:
 
 ^ Result                              ^^
 |ZTS                             |5.2s|
 |ZTS-patched, native TLS enabled |4.6s|
 
-This improves the performance, but less than the first patch.
+After that I made some more changes so that accessing a global requires less instructions. Actually this mimics the way static TLS works internally, each global is accessed using the following code:
 
-The patch also changes the way globals are stored, so that fetching a global requires less instructions and can be made quickly. 
-This change also improves the performance of builds where the native-tls was not enabled.
+<code c>
+__thread void *tsrm_ls_cache;
+(tsrm_ls_cache + global_offset)->member
+</code>
+
+This needs a few instructions compared to the original way of accessing globals:
+
+<code c>
+void ***tsrm_ls;
+(*tsrm_ls)[global_id - 1]->element
+</code>
+
+This change is also enabled when not using native TLS too, but tsrm_ls needs to be a void** instead of a void*:
+<code c>
+void **tsrm_ls;
+(*tsrm_ls_cache + global_offset)->member
+</code>
+
+Results:
 
 ^ Result                               ^^
 |ZTS                              |5.2s|
 |ZTS-patched, native TLS disabled |5.0s|
-|ZTS-patched, native TLS enabled  |4.4s|
-
+|ZTS-patched, native TLS enabled  |4.2s|
 
 ===== TLS internals =====
 
-On most systems there are two major models of TLS: A static model, the faster, and a dynamic model (and some sub-models).
+On most systems there are two major models of TLS: A static model, the faster, and a dynamic model (and some sub-models). The following briefly explain how it works and what I found while investigating various implementations.
 
 ==== Static model ====
 
-Each block is allocated at a fixed offset from an address specific to each thread. As this address can be accessed very quickly, this allows very quick access to each TLS block. On most implementations, on IA-32, this thread-specific-address is the Thread Control Block, whose address is stored in offset 0 of the %gs segment register.
+Each block is allocated at a fixed (linker-defined) offset from an address specific to each thread. As this address can be accessed very quickly, this allows very quick access to each TLS block. On most implementations, on IA-32, this thread-specific-address is the Thread Control Block, whose address is stored in offset 0 of the %gs segment register.
 
 The way the static model works requires that the memory needed by each TLS variable to be allocated before program startup. This means that the static model can not be used in shared libraries loaded at runtime. 
 
@@ -70,7 +94,7 @@ On GCC this model can be selected by using -ftls-model=initial-exec. On SunStudi
 
 ==== Dynamic model ====
 
-Each TLS block is allocated dynamically when a shared library is loaded. Some data is then stored in the global offset table so that the programm knows where to found each TLS block. This model allows to load libraries at runtime but is slower: It involves a function call (internally) and requires to build position independent code. However the implementation used on Linux seems to be very efficient and that only the fact that the code has been built as position independent makes a difference when comparing to the static model.
+Each TLS block is allocated dynamically when a shared library is loaded. Some data is then stored in the global offset table so that the program knows where to find each TLS block. This model allows to load libraries at runtime but is slower: It involves a function call (internally) and requires to build position independent code. However the implementation used on Linux seems to be very efficient and that only the fact that the code has been built as position independent makes a real difference when comparing to the static model.
 
 === Implementation ===
 
