@@ -19,21 +19,23 @@ The first proposed patch makes each global a native TLS variable so that accessi
 
 Results for bench.php:
 
-^ non-PIC                           ^^
-|non-ZTS                       |3.7s|
-|ZTS unpatched                 |5.2s|
-|ZTS patched                   |4.0s|
-|ZTS patched and static globals|3.8s|
-^ PIC                                         ^^
-|non-ZTS                                 |4.7s|
-|ZTS                                     |6.4s|
-|ZTS patched, static globals, dynamic TLS|4.8s|
+^ non-PIC                      ^    ^ ^^
+|non-ZTS                       |3.7s| |
+|ZTS unpatched                 |5.2s| |
+|ZTS patched                   |4.0s| |
+|ZTS patched and static globals|3.8s| |
+^ PIC                                    ^IA-32^X86_64^^
+|non-ZTS                                 |4.7s |3.7s  |
+|ZTS                                     |6.4s |4.7s  |
+|ZTS patched, static globals, dynamic TLS|4.8s |3.8s  |
 
 So the patch made ZTS builds mostly as fast as non-ZTS builds.
 
 Unfortunately the TLS model used in these tests was the static model, which is restrictive, and in particular does not allow to use it in shared libraries which will be loaded dynamically. (c.f [[tls#tls_internals|TLS internals]] bellow).
 
-Even if this patch can still be used with the dynamic model (it actually greatly improves the performance of ZTS-PIC builds), it can not be used as-is when building non-PIC code (the dynamic model cannot be used with non-PIC code).
+For the PHP module to be able to be loaded at runtime in Apache or an other server with this patch enabled, it has to be built with the static TLS model (on gcc, -ftls-model=global-dynamic), which also requires to build position independent code. While the last makes a big difference on IA-32, this is the default on x86_64 and the results on bench.php on an unpatched PHP are the same as IA-32/PIC builds.
+
+Native TLS can be enabled with %%--with-tsrm-__thread-tls%% or %%--with-tsrm-full__thread-tls%%. The last declares globals statically instead of making them pointers.
 
 ===== Second patch =====
 
@@ -73,14 +75,19 @@ void **tsrm_ls;
 
 Results:
 
-^ Results                               ^^
-|ZTS                              |5.2s|
-|ZTS-patched, native TLS disabled |5.0s|
-|ZTS-patched, native TLS enabled  |4.2s|
+^ Results                         ^IA-32/non-PIC^X86_64/PIC^^
+|non-ZTS                          |3.7s         |3.7s      |
 
-Native TLS can be enabled with %%--with-tsrm-__thread-tls%% or %%--with-tsrm-full__thread-tls%% in the first patch.
+|ZTS                              |5.2s         |4.7s      |
+|ZTS-patched, native TLS disabled |5.0s         |4.4s      |
+|ZTS-patched, native TLS enabled  |4.2s         |4.0s      |
 
-For the second patch, the switch is %%--with-tsrm-native-tls%%.
+Native TLS can be enabled with %%--with-tsrm-native-tls%%.
+
+So we have two patches:
+
+  * The first one will work only with position independent code, and is the faster on targets where this is the default or when comparing only to PIC builds. At least Debian builds PHP --with-pic, and I guess this is the case on other distributions too.
+  * The second one does not requires to build PIC code, can not fully take profit of TLS, but is the faster at least on IA-32.
 
 ===== TLS internals =====
 
