@@ -1,0 +1,80 @@
+====== Request for Comments: Upload progress in sessions ======
+  * Version: 1.0
+  * Date: 2008-09-08
+  * Author: Arnaud Le Blanc <arnaud.lb@gmail.com>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/session_upload_progress
+  * Patch: http://arnaud.lb.s3.amazonaws.com/session_upload_progress.patch
+
+
+===== Introduction =====
+
+The file upload feature in PHP allows extensions to be called back on some events. A few extensions use this to implement some sort of upload progress feedback, but none of them are released with PHP, which makes this feature unsuable in many environments.
+
+==== Upload progress in sessions ====
+
+The patch allows to store upload progress informations in session variables. These informations can be retrieved by an other script while the upload is still in progress, allowing to provide feedback to the user.
+
+Implementing this in the sessions extension makes this feature available to every one.
+
+Using the session extension for this purpose also allows to use the different storage backends available.
+
+The patch comes with 4 ini settings, working just like APC's ones:
+
+  * session.upload_progress.enabled[=1]
+  * session.upload_progress.prefix[=upload_progress_]
+  * session.upload_progress.name[=PHP_SESSION_UPLOAD_PROGRESS]
+  * session.upload_progress.freq[=1%]
+
+When session.upload_progress.enabled is set to 1, and $_POST[session.upload_progress.name] is set and non-empty, upload informations are stored in $_SESSION[session.upload_progress.prefix . $_POST[session.upload_progress.name]].
+
+$_POST[session.upload_progress.name] allows to follow multiple uploading-requests on the same session at the same time. Nothing will be done if it is not set or empty, so that session.upload_progress.enabled can be left to 1 without overhead (also, the upload hook is never called on non multipart/form-data requests).
+
+The session.upload_progress.freq setting controls how often the session data will be updated. This can be given in bytes or in percentage of the size of the POST content length. With a reasonable amount, the patch will have mostly no overhead.
+
+The patch also allows to follow multiple files in the same request. Each file will have its own $_FILES-like array with name, tmp_name, error, bytes processed, etc.
+
+The data stored in the session will looks like this:
+
+<code php>
+$_SESSION["upload_progress_123"] = array(
+ "start_time" => 1234567890,   // The request time
+ "content_length" => 57343257, // POST content length
+ "bytes_processed" => 453489,  // Amount of bytes received and processed
+ "done" => false,              // true when the POST handler has finished, successfully or not
+ "files" => array(
+  0 => array(
+   "field_name" => "file1",       // Name of the <input/> field
+   // The following 3 elements equals those in $_FILES
+   "name" => "foo.avi",
+   "tmp_name" => "/tmp/phpxxxxxx",
+   "error" => 0,
+   "done" => true,                // True when the POST handler has finished handling this file
+   "start_time" => 1234567890,    // When this file has started to be processed
+   "bytes_processed" => 57343250, // Amount of bytes received and processed for this file
+  ),
+  // An other file, not finished uploading, in the same request
+  1 => array(
+   "field_name" => "file2",
+   "name" => "bar.avi",
+   "tmp_name" => NULL,
+   "error" => 0,
+   "done" => false,
+   "start_time" => 1234567899,
+   "bytes_processed" => 54554,
+  ),
+ )
+);
+</code>
+
+A simple form:
+
+<code php>
+<form action="upload.php" method="POST" enctype="multipart/form-data">
+ <input type="hidden" name="<?php echo ini_get("session.upload_progress.name"); ?>" value="123" />
+ <input type="file" name="file1" />
+ <input type="file" name="file2" />
+ <input type="submit" />
+</form>
+</code>
+
