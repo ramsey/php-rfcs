@@ -24,7 +24,7 @@ current namespace functionality.
 It is envisaged that all the issues raised in this document will be resolved in one of the following ways:
 
   - via functional changes to the current implementation
-  - via the introduction of functional limitations (e.g. E_WARNING or E_FATAL errors) that alert php users to problems with there use of namespaces 
+  - via the introduction of functional limitations (e.g. **E_WARNING** or **E_FATAL** errors) that alert php users to problems with there use of namespaces 
   - via user education, to this end a seperate document is being developed in order to define guidelines and 'best practices' with regard to namespaces (see: [[doc:scratchpad:namespaces]])
 
 
@@ -37,9 +37,166 @@ The following issues have been put forwards by various members of the php develo
 ==== global & namespaced code in one file ====
 currently one can declare multiple namespaces per file, but it is not possible to have code in the global scope in a file that declares namespaces, this is seen by some as an artificial limitation that forces some developers to change their project structures and as such breaks system that make use of (automated) source file concatenation (for performance reasons & distrubition), this is issue is being tackled in a seperate rfc and won't be covered here. (see [[rfc:namespacecurlies]]) 
  
-==== Using define() ====
+==== define() & defined() ====
+currently one can declare constants in namespaces (in the same way as can be done in classes) as well as using the **define()** function inside namespaced code,
+but problems arise due to inconsistencies, these are:
 
+  * constants are case-sensitive, but namespaces are case-insensitive.   
+  * **defined()** is not aware of namespace aliases.
+  * the namespace part of constants defined with **const** are lowercased.
 
+the following code tries to demonstrate the issues:
+
+ns.inc:
+<code php>
+<?php
+namespace MY::TEST::NS;
+
+// compile time namespaced constant
+const DEBUG_NS = true;
+// runtime global constant defined in namespaced code
+define('DEBUG', true);
+// runtime namespaced constant defined in namespaced code
+define(__NAMESPACE__.'::DEBUG_2', true);
+?>
+</code>
+
+test1.php:
+<code php>
+<?php
+// include namespaced code
+include './ns.inc';
+// declare an alias for the namespace
+use MY::TEST::NS as MTN;
+// perform some tests
+echo "defined('DEBUG'): "                 .(defined('DEBUG')                  ? 'YES' : 'NO')." (expect YES)\n";
+echo "defined('MY::TEST::NS::DEBUG_2'): " .(defined('MY::TEST::NS::DEBUG_2')  ? 'YES' : 'NO')." (expect YES)\n";
+echo "defined('my::test::ns::DEBUG_2'): " .(defined('my::test::ns::DEBUG_2')  ? 'YES' : 'NO')." (expect NO)\n";
+echo "defined('my::test::ns::debug_2'): " .(defined('my::test::ns::debug_2')  ? 'YES' : 'NO')." (expect NO)\n";
+echo "defined('MY::TEST::NS::DEBUG_NS'): ".(defined('MY::TEST::NS::DEBUG_NS') ? 'YES' : 'NO')." (expect YES)\n";
+echo "defined('my::test::ns::DEBUG_NS'): ".(defined('my::test::ns::DEBUG_NS') ? 'YES' : 'NO')." (expect NO)\n";
+echo "defined('my::test::ns::debug_ns'): ".(defined('my::test::ns::debug_ns') ? 'YES' : 'NO')." (expect NO)\n";
+echo "defined('MTN::DEBUG_NS'): "         .(defined('MTN::DEBUG_NS')          ? 'YES' : 'NO')." (expect YES)\n";
+echo "defined('MTN::DEBUG_2'): "          .(defined('MTN::DEBUG_2')           ? 'YES' : 'NO')." (expect YES)\n";
+echo "defined('mtn::DEBUG_NS'): "         .(defined('mtn::DEBUG_NS')          ? 'YES' : 'NO')." (expect YES)\n";
+echo "defined('mtn::DEBUG_2'): "          .(defined('mtn::DEBUG_2')           ? 'YES' : 'NO')." (expect YES)\n";
+?>
+</code>
+
+test1.php output with expected results given in brackets:
+<code>
+defined('DEBUG'): YES (expect YES)
+defined('my::test::ns::DEBUG_2'): NO (expect YES)
+defined('my::test::ns::DEBUG_2'): NO (expect NO)
+defined('my::test::ns::debug_2'): NO (expect NO)
+defined('MY::TEST::NS::DEBUG_NS'): YES (expect YES)
+defined('my::test::ns::DEBUG_NS'): YES (expect NO)
+defined('my::test::ns::debug_ns'): NO (expect NO)
+defined('MTN::DEBUG_NS'): NO (expect YES)
+defined('MTN::DEBUG_2'): NO (expect YES)
+defined('mtn::DEBUG_NS'): NO (expect YES)
+defined('mtn::DEBUG_2'): NO (expect YES)
+</code>
+
+test2.php:
+<code php>
+<?php
+// include namespaced code
+include './ns.inc';
+// declare an alias for the namespace
+use MY::TEST::NS as MTN;
+// output declared constants
+$cnsts = get_defined_constants(true);
+var_dump($cnsts['user']);
+?>
+</code>
+
+test2.php actual output:
+<code>
+array(3) {
+  ["my::test::ns::DEBUG_NS"]=>
+  bool(true)
+  ["DEBUG"]=>
+  bool(true)
+  ["MY::TEST::NS::DEBUG_2"]=>
+  bool(true)
+}
+</code>
+
+test2.php expected output:
+<code>
+array(3) {
+  ["MY::TEST::NS::DEBUG_NS"]=>
+  bool(true)
+  ["DEBUG"]=>
+  bool(true)
+  ["MY::TEST::NS::DEBUG_2"]=>
+  bool(true)
+}
+</code>
+
+test3.php:
+<code php>
+<?php
+// include namespaced code
+include './ns.inc';
+// declare an alias for the namespace
+use MY::TEST::NS as MTN;
+// attempt to use constants directly
+var_dump(
+    'the following are expected to be TRUE',
+    (DEBUG === true),
+    (MTN::DEBUG_NS === true),
+    (MY::TEST::NS::DEBUG_NS === true)
+);
+var_dump(
+    'the following are expected to be FALSE',
+    (debug === true),
+    (mtn::DEBUG_NS === true),
+    (my::test::ns::DEBUG_NS === true)
+);
+var_dump(
+    'the following are expected to be TRUE (but give Fatal Error: Class not found)',
+    '(MTN::DEBUG_2 === true)',
+    '(MY::TEST::NS::DEBUG_2 === true)'
+);
+/*
+var_dump(
+    'the following are expected to be ??? (and give Fatal Error: Class not found)',
+    '(MY::TEST::NS::debug_ns === true)',
+    '(my::test::ns::debug_ns === true)',
+    '(MY::TEST::NS::debug_2 === true)',
+    '(my::test::ns::DEBUG_2 === true)',
+    '(my::test::ns::debug_2 === true)',
+    '(MTN::debug_ns === true)',
+    '(mtn::debug_ns === true)',
+    '(MTN::debug_2 === true)',
+    '(mtn::DEBUG_2 === true)',
+    '(mtn::debug_2 === true)'
+);
+//*/
+?>
+</code>
+
+test3.php output:
+<code>
+string(37) "the following are expected to be TRUE"
+bool(true)
+bool(true)
+bool(true)
+string(38) "the following are expected to be FALSE"
+bool(false)
+bool(true)
+bool(true)
+string(60) "the following are expected to be TRUE (but give fatal error)"
+string(23) "(MTN::DEBUG_2 === true)"
+string(32) "(MY::TEST::NS::DEBUG_2 === true)"
+</code>
+
+the above examples raise the following questions:
+  * which of the inconsistencies can be resolved through documentation?
+  * which of the inconsistencies can be resolved through changes to the implementation?
+  * given the potential for confusion, and the potential difficulty of implementing a solution, is it worth keeping the ability to define constants (with **const**) directly in namespaces? 
 
 ==== Autoload & functions ====
 
