@@ -472,3 +472,414 @@ The final modifier is supported, too. The static modifier is not supported,
 because it would change the methods semantics and references to ''$this''
 would break.
 
+====== Grafts - Class Composition ======
+
+A //Graft// is a class composed into another class to reuse it avoiding
+inheritance and without an explicit need for delegation. The most important 
+difference to a Trait is the possibility to define state in addition to 
+behavior inside the reused entity. Furthermore, the grafting approach is not 
+about reuse methods in a manner focused on flexibility, but instead it is 
+about reusing small encapsulated units of behavior and state to build classes 
+from them. Thus, it could be viewed as a form of private multiple inheritance 
+which avoids conflicts by keeping everything private to the Graft per default.
+
+Grafts can be used in an similar way as Traits can be used. Thus, the example
+from the introduction can be optimized with Grafts as well.
+
+<code php>
+ <?php
+ class ezcReflectionReturnInfo {
+   function getReturnType() { /*1*/ }
+   function getReturnDescription() { /*2*/ }
+ }
+
+ class ezcReflectionMethod extends ReflectionMethod {
+   use ezcReflectionReturnInfo {
+     public getReturnType();
+     public getReturnDescription();
+   }
+   /* ... */
+ }
+
+ class ezcReflectionFunction extends ReflectionFunction {
+   use ezcReflectionReturnInfo {
+     public getReturnType();
+     public getReturnDescription();
+   }
+   /* ... */
+ }
+ ?> 
+</code>
+
+Since, everything is local to the Graft per default, the methods need to be
+enumerated to be accessible in the class and its interface.
+
+===== Grafting Classes =====
+
+A Graft is a class itself and can be instantiated at will. Compared to a normal
+class, there are no restrictions, it can use state and it can use
+everything else allowed for a class i.e. it is a normal class.
+
+The following class is an example for a simple counter:
+
+<code php>
+ <?php
+ class Counter {
+   private $cnt = 0;
+   public function inc() {
+     $this->cnt++;
+   }
+   public function reset() {
+     $this->cnt = -1;
+     $this->inc();
+   }
+ }
+ ?>
+</code>
+
+The ''reset()'' is defined a bit strange, because it uses the ''inc()''
+function to set the counter value to zero. This is to illustrate the semantics
+of a Graft inside another class. This counter can be used totally on its own.
+Thus, ''$c = new Counter(); $c->inc();'' is valid code and will work as
+expected.
+
+Another example class might be a database helper class to initialize and reset
+a connection:
+
+<code php>
+ <?php
+ class DB {
+   private $db;
+   public function connect() {
+     $this->db = new FooDB('param');
+   }
+   public function reset() {
+     $this->db->flush();
+     unset($this->db);
+   }
+   public function doFoo(){echo 'foo';}
+ }
+</code>
+
+Nothing special in this class. The ''connect()'' function uses some Foo
+database abstraction layer to initialize the connection and ''reset()'' will
+issue a flush operation on the database object and unsets it afterwards.
+
+==== Compose A Class From Classes ====
+
+Inheritance is one of the most misunderstood relationships in object-oriented
+programming. It is often abused to achieve code reuse, but originally it was
+meant to describe the relationship between classes from a conceptual view.
+Thus, apples and oranges might be characterized as subclasses of a class fruit
+and could be subclassed themselves into classes for specific variants.
+
+In a web application where you for instance would like to build a page with a
+language allowing multiple inheritance you could start to model a ''MyPage''
+class as subclass of ''Counter'' and ''DB'', since you like to derive the
+behavior of both of them. But from the conceptual view it is not clear why
+MyPage is a counter or a database. Both relationships are implied by the ''instanceof''
+operation. Technically, this might have its values, but still it sounds strange.
+
+Thus, in single inheritance languages, //delegation// i.e. //forwarding// is used
+instead. The ''MyPage'' class provides the necessary interfaces for ''Counter''
+and ''DB'' but instead of implementing it itself, it forwards the method call
+to another object:
+
+<code php>
+ <?php
+ class MyPage {
+   private $cnt;
+   private $db;
+   /* ... */
+   public function inc() { $cnt->inc(); }
+   public connect() { $db->connect(); }
+   /* ... */
+ }
+ ?>
+</code>
+
+This approach is very common and has its merits. Unfortunately, it requires
+explicit code to implement forwarding and object injection or creation which is
+tedious. In complex cases this might even cause a broken encapsulation, since
+it might be necessary to forward data to another object which should be private
+to the calling object.
+
+Grafts are designed to overcome this situation and provide similar
+opportunities for reuse like Traits do. The following code demonstrates how
+Grafts can be used to compose the ''MyPage'' class from the two other classes:
+
+<code php>
+ <?php
+ class MyPage {
+   use Counter {
+     public incCnt() from inc();
+     public resetCnt() from reset();
+   }
+   use DB {
+     public connect();
+     public reset();
+   }
+   public function inc() {
+     /* next page */
+   }
+ }
+ ?>
+</code>
+
+The example above shows ''MyPage'' using classes ''Counter'' and ''DB'', to
+graft their functionality into it. Since, all methods from a grafted class are
+hidden from the grafting class by default, the methods to be used in the
+grafting class or from another class need to be named explicitly.
+With this approach, conflicts are avoided upfront. In case of methods with the
+same name in a graft and another graft or the class itself, it is possible to
+make a method available by another name. In the given example the method
+''reset()'' is made available by the name ''resetCnt()''. This alias does not
+influence the inner working of the ''Counter'' class in anyway. Thus, recursion
+inside of ''Counter::reset()'' would still work like expected and the call to
+''incCnt()'' results in an invocation of ''Counter::inc()''. This would be not
+true for Traits as explained earlier.
+
+With this attributes of Grafts in mind, the following example shows the results
+of the execution of methods in the context of ''MyPage'':
+
+<code php>
+ <?php
+ $page = new MyPage();
+ $page->connect();
+ $page->incCnt();   // Counter::$cnt == 1
+ $page->resetCnt(); // Counter::$cnt == 0
+ $page->inc();      // goto next page
+ $page->doFoo();    // FATAL ERROR
+ ?>
+</code>
+
+The call to ''connect()'' is forwarded as expected to ''DB::connect()'',
+''incCnt()'' results in a call to ''Counter::inc()'' as already mentioned, the
+call to ''inc()'' will invoke the ''MyPage::inc()'' method defined directly in
+the class. The call to ''doFoo()'' results in an error, since the method
+defined in ''DB'' has not been made available in ''MyPage'' explicitly.
+
+==== Interaction of Grafts with Grafted Classes ====
+
+In class-based languages like PHP, the notion of abstract classes was 
+introduced, to be able to define a unit of reuse in a partial manner and to 
+be able to refine it in a more concrete context.
+
+This notion can be used combined with grafting as well. Thus, abstract methods
+can be fulfilled by a graft or from the grafting class.
+
+The following example shows how a class can be used by grafting to fulfill a
+required abstract method:
+
+<code php>
+ <?php
+ abstract class Base {
+   abstract public function foo();
+ }
+ 
+ class MyGraft {
+   public function foo() { echo 'foo'; }
+ }
+ 
+ class MyGraftedClass extends Base {
+   use MyGraft {
+     public foo();
+   }
+ }
+
+ $o = new MyGraftedClass();
+ $o->foo(); // echos 'foo'
+ ?>
+</code>
+
+In addition, this notion can also be utilized to provide methods to a graft,
+which states a requirement by an abstract class. This case is shown in the 
+code below:
+
+<code php>
+ <?php
+ abstract class MyGraft {
+   abstract public function foo();
+   public function bar() {
+     $this->foo();
+   }
+ }
+
+ class MyGraftedClass {
+   public function foo() { echo 'foo'; }
+   use MyGraft {
+     public bar();
+   }
+ }
+
+ $o = new MyGraftedClass();
+ $o->bar(); // echos 'foo'
+ ?>
+</code>
+
+For properties and methods not explicitly required, it is not possible to 
+provide something similar, since this would lead to ambiguity. The reasons 
+are described in the discussion section.
+
+==== Grafting of the Same Class Multiple Times ====
+
+Since, different grafts are separated from each other, it is possible to graft
+the same class multiple times into one class::
+
+<code php>
+ <?php
+ class MyGraft {
+   public function foo() { echo 'foo'; }
+ }
+ class MyGraftedClass {
+   use MyGraft {
+     public foo();
+   } 
+   use MyGraft {
+     public bar() from foo();
+   }
+ }
+ $o = new MyGraftedClass();
+ $o->foo(); // echos 'foo'
+ $o->bar(); // echos 'foo'
+ ?>
+</code>
+
+This might not be useful for all classes, but could be used to graft data
+structures like lists or maps into a class which are used for multiple
+purposes.
+
+==== Restrictions and Initialization of Grafts ====
+
+Actually an instantiated graft is nothing else but an object. Since grafts are
+full-fledged classes themselves, they could use typical constructors to
+initialize resources or prepare their inner state for further usage. In the
+current form of this proposal, the notion of initializing grafts is not
+supported, thus, only classes with a standard constructor without arguments can
+be used to be grafted into another class.
+
+Another restriction is that classes can not graft themselves and more
+generally, grafting is not allowed to cause recursion in any way. Since, it is
+not meant to be evaluated lazily, it would case an infinite recursion which
+needs to be prevented. 
+
+==== Implementation Idea ====
+
+Eventually, the implementation seems only to be feasible by maintaining the 
+notion of separate objects for classes grafted into another class. Thus, for
+each graft in a class, a normal object is instantiated. This approach will ease
+the implementation and will reduce modification in method lookup and the Zend
+Engine in general. 
+
+Methods propagated to the grafting class will be generated like usual methods
+implemented by hand. Thus, they will contain the opcodes to forward the method
+call to the grafted object. In reverse, it would be the same for methods 
+introduced by abstract methods satisfied by the grafting class. Those methods 
+will call the method provided by the grafting class. 
+
+The most visible problem in this approach will be the handling of object
+identity of grafted objects. Imagine the following code:
+
+<code php>
+ <?php
+ class MyGraft {
+   public function returnThis() {
+     return $this;
+   }
+ }
+ class MyGraftedClass {
+   use MyGraft {
+     public returnThis();
+   }
+ }
+ $o = new MyGraftedClass();
+ var_dump($o->returnThis());
+ ?>
+</code>
+
+The result returned should be definitely equal to ''$o'' i.e. ''$o === $o->returnThis()''. 
+The reason for this requirement is to preserve
+encapsulation and hide implementation details from all clients of
+''MyGraftedClass''. To achieve this property some kind of context dependent
+treatment of the ''$this'' lookup has to be implemented or some kind of data flow
+analysis will have to be done. Neither of them seem to be easy to achieve with
+respect to the fact, that a grafted class cold hold its own ''$this'' value in
+some property, for whatever reason.
+
+The other way around would be to open up the notion of grafts and add
+mechanisms to inject instances of grafts into a class while object
+construction. By the way, this would allow more fancy dependency injection
+and gives a reason to think about grafts not only as implementation
+details, but an interface related i.e. //client visible// characteristic.
+But, this notion is currently not part of this proposal.
+
+===== Grafts Semantics Summarized =====
+
+  - A Graft is a normal class composed into another class.
+  - The encapsulation of grafts is preserved completely.
+  - All methods available as part of the grafting class have to be enumerated explicitly and can have a different name than the method in the grafted class, without breaking inner coherence.
+  - Grafts can interact with grafting classes via abstract methods.
+  - Methods introduced by a Graft can be used to fulfill abstract methods.
+  - Classes can be grafted into a class multiple times.
+  - Classes to be used as Grafts are not allowed to use constructors with arguments.
+
+====== Traits vs. Grafts ======
+
+This section gives a basic overview about the differences of both concepts and
+discusses benefits and drawbacks.
+
+//Traits// are entities of behavioral reuse. Thus, they provide a lightweight way
+to compose methods into classes. They are highly composable themselves, not
+hindered by a strong notion of encapsulation and abandon state for the sake of
+simplicity.
+
+//Grafts// are classes composed into other classes to achieve reuse of
+full-fledged classes. It introduces a stronger notion of composition of classes
+than typical delegation/forwarding does for OOP languages.
+
+**Traits**
+  * stateless
+  * can "break"
+  * notation is DRY
+  * flexible composition of behavior
+  * flattenable, no runtime impact
+
+**Grafts**
+  * complete classes
+  * robust encapsulation
+  * some overhead in notation
+  * convenient composition of classes
+  * language supported delegation/forwarding
+
+This proposal does only suggest Traits without state to avoid the introduction
+of any notion of Traits at runtime. The key idea of Traits is that they provide
+method implementations which are flattened into a class. Thus, all state is
+defined in the class and Traits method have to rely on PHPs dynamic nature or
+have to use abstract method definitions to require getters and setters.
+Since Grafts are full-fledged classes, they have state and handle it as
+expected for distinct objects.
+
+One point of criticism from the community on the notion of Traits is that the
+methods provided by Traits are not reliable connected. This leads to missing
+features like recursion for methods introduced by aliases. From the perspective
+of composition, this is desired, since it provides additional opportunities for
+combination of behavior. Traits are not meant to provide encapsulation on the
+level of classes, but flexibility.
+Grafts do avoid this problem by its nature of being classes, but this comes for
+the cost of flexibility. Grafts can not combined with another. They are
+completely separated entities which only can be combined by abstract methods.
+
+The notion of Traits avoids any impact on the runtime. For Grafts this is not
+feasible. They need to maintain strong encapsulation which is achieved in an
+consistent way only by preserving the notion of internal objects. Thus, there
+is overhead in memory consumption for the objects and runtime cost for
+forwarding method calls compared to Traits.
+
+Another point where Grafts might be improved (see syntax proposals) is the
+syntax for using a class. To avoid conflicts methods are private to a graft per
+default and thus, need to be enumerated explicitly. Compared to Traits this is
+not DRY and implies a little overhead in code, but obviously less overhead than
+typical forwarding cases. With respect to Traits, research has shown that
+conflicts occur only rarely and explicit handling of it is much less overhead
+and brings more power than trying to solve it implicitly.
+
