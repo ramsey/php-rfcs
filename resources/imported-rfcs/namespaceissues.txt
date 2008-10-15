@@ -1,0 +1,183 @@
+====== Request for Comments: Namespace Issues and Greg's Solutions ======
+  * Version: 1.0
+  * Date: 2008-10-15
+  * Author: Greg Beaver <cellog@php.net>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/namespaceissues
+
+
+This RFC discusses issues with the current namespace implementation in PHP, and Greg's proposed solutions
+
+===== Introduction =====
+
+Namespaces are mostly working, but there are a few issues to be resolved.  A short list:
+
+  1. conflict between namespaced functions and static class methods
+  2. resolving access to internal classes
+
+===== Conflict between namespaced functions and static class methods =====
+
+==== The problem ====
+
+The first file "foo.php":
+
+<code php>
+<?php
+namespace one::step;
+function two(){}
+
+namespace one;
+class step {
+static function two(){}
+}
+?>
+</code>
+
+The second file "main.php":
+
+<code php>
+include 'foo.php';
+// is this class one::step or namespace one::step?
+one::step::two();
+</code>
+
+==== The solutions ====
+
+There are 4 easy ways to solve this problem
+
+  1. use ::: as primary namespace separator
+  2. use a different separator between namespace name and element such as one::step:::two() or one:::step::two()
+  3. explicit disambiguation using "use namespace blah::blah;/use class blah::blah;"
+
+     <code php>
+     <?php
+     include 'foo.php';
+     use namespace one::step;
+     // this is now namespace one::step, function two
+     one::step::two();
+     </code>
+
+     If the "use" statement is missing, an E_WARNING should also be thrown to alert the user to the ambiguity
+  4. disallow mixing namespaces and classes with the same name
+
+=== use ::: as primary namespace separator ===
+
+== pros ==
+
+  1. ambiguity is resolved
+
+== cons ==
+
+  1. all existing namespace code must be rewritten with extra : added to all ::
+  2. ::: is visually similar to :: so this:::example:::with::slight:::error:::is:::hard:::to::see();
+
+=== use ::: as separator between namespace name and element ===
+
+== pros ==
+
+  1. ambiguity is resolved
+  2. less chance for visual error (con #2 above)  this::example::with:::slight::error::is::easier:::to::see();
+
+== cons ==
+
+  1. requires new paradigm, a separator between namespace and element name, something no other language does.
+  2. all namespaced code would need to be modified with this difference.
+  3. ::name would probably need to be changed to :::name for consistency.
+
+=== explicit disambiguation with "use namespace blah::blah;" or "use class blah::blah;" ===
+
+== pros ==
+
+  1. no changes need be made to existing syntax
+  2. ambiguity is resolved with a single line of code
+  3. a clear warning is issued when ambiguity exists
+  4. execution never halts on ambiguity
+
+== cons ==
+
+  1. blah::blah(); would trigger autoload in the ambiguity detection, so code that mixes __autoload() with namespaced functions
+     could experience a performance slowdown.
+
+=== disallow mixing namespaces and classes with the same name ===
+
+== pros ==
+
+  1. no changes need be made to existing syntax
+  2. ambiguity is resolved by fatal error - very clear.
+
+== cons ==
+
+  1. namespaces and classes cannot have the same name, a common practice with Underscored_Class_Names
+  2. in autoloaded code, the error would almost always be at runtime, making debugging difficult
+
+===== Resolving access to internal classes =====
+
+==== The Problem ====
+
+Currently, PHP resolves this code as follows:
+
+blah.php:
+<code php>
+namespace blah;
+function __autoload($class)
+{
+    include $class . '.php';
+}
+$a = new Exception('hi');
+</code>
+
+1. if blah::Exception exists, use it
+2. if internal class Exception exists, use it
+3. try to autoload blah::Exception
+
+Thus, $a will be an object of class "Exception" even if blah::Exception exists in "Exception.php" as it will never be autoloaded.  However, if this file were executed:
+
+<code php>
+namespace blah;
+class Exception {}
+include 'blah.php';
+</code>
+
+$a would be an object of class "blah::Exception".
+
+==== The Solution ====
+
+The solution is to change the resolution order to:
+
+1. if blah::Exception exists, use it
+2. try to autoload blah::Exception
+3. if internal class Exception exists, use it
+
+This has the advantage that the above examples will always run the same way, instantiating "blah::Exception."  The only drawback is that for true internal classes, autoload() would still be called, as in the following example.
+
+This will introduce an autoload for RecursiveIteratorIterator and RecursiveDirectoryIterator in this script:
+
+autoload.php:
+<code php>
+<?php
+function __autoload($class) {include $class . '.php';}
+?>
+</code>
+<code php>
+<?php
+namespace blah;
+include 'autoload.php';
+$a = new RecursiveIteratorIterator(new RecursiveDirectoryIterator('.'));
+?>
+</code>
+
+but fortunately it can be easily fixed via a use statement:
+
+<code php>
+<?php
+namespace blah;
+use ::RecursiveIteratorIterator,::RecursiveDirectoryIterator;
+include 'autoload.php';
+$a = new RecursiveIteratorIterator(new RecursiveDirectoryIterator('.'));
+</code>
+
+This will be better for 99% of scripts, as evidenced by the ratio of internal vs. userspace classes (see http://marc.info/?l=php-internals&m=122127176407546&w=2 for detail)
+
+===== Changelog =====
+
+
