@@ -1,0 +1,311 @@
+====== Request for Comments: problems of namespaces and potential solutions ======
+  * Version: 1.0
+  * Date: 2008-10-25
+  * Author: Gregory Beaver <cellog@php.net>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/backslashnamespaces
+
+
+This RFC attempts to document all angles of the problems in namespaces in one location in order to facilitate a solution
+
+===== Introduction =====
+
+The amount of pain and grief all interested developers have undergone to perfect namespaces has got to end.  This RFC provides a close examination of the four potentially viable solutions and the major problems and advantages of each.
+
+First, ways of solving the conflict between namespaced elements and static class elements:
+
+  * remove functions/constants from namespaces
+  * conflict resolution via "use namespace" or other similar proposals
+  * introduce -> as Classname->Method() syntax
+  * use \ as namespace separator
+
+This RFC assumes that since we are in agreement about how to resolve class names, that it is not in need of further discussion.  To be clear, the agreed upon resolution order is:
+
+  * check nsname::classname
+  * autoload nsname::classname if necessary
+  * fail
+
+which requires all internal classes to be ::prefixed (or \prefixed if the separator is changed to \).
+
+===== Remove functions/constants from namespaces =====
+
+==== Advantages ====
+
+  * no naming conflicts possible between functions/static methods, class constants/namespace constants
+  * no syntax changes for those using namespaces for classes
+
+==== Problems ====
+
+  * how to handle
+
+<code php>
+<?php
+namespace foo;
+class blah {}
+function blah(){}
+?>
+</code>
+
+put function in global namespace or fatal error? (code becomes more confusing)
+
+  * those using PHP for functions get no benefit from namespaces, and significant headache
+  * implementation is quite complex because functions can be defined multiple ways at runtime as well as compile-time.
+
+===== Conflict resolution via "use namespace" or other similar proposals =====
+
+Unfortunately, this is not an option.  Here is the background:
+
+This is actually only implementable in one way:
+
+  * Define a clear resolution order in favor of classes or in favor of namespaced elements
+  * Require the others to explicitly define an element as a class or as a namespace:
+
+If we favor classes:
+
+<code php>
+<?php
+// always calls class Blah::blah, method thing()
+Blah::blah::thing();
+?>
+</code>
+
+and
+
+<code php>
+<?php
+use namespace Blah::blah;
+// always calls function Blah::blah::thing()
+blah::thing();
+?>
+</code>
+
+If we favor namespaces:
+
+<code php>
+<?php
+// always calls function Blah::blah::thing()
+Blah::blah::thing();
+?>
+</code>
+
+and
+
+<code php>
+<?php
+use class Blah::blah;
+// always calls class Blah::blah, method thing()
+blah::thing();
+?>
+</code>
+
+==== Advantages ====
+
+  * conflicts can be controlled explicitly via "use namespace" or "use class"
+  * resolution is clear if access to the whole file is available
+
+==== Problems ====
+
+  * unqualified name (Blah::blah::thing or ::Blah::blah::thing) is unavailable for elements accessed via "use namespace/class" syntax, short name must always be used
+  * Code review (checking patches for errors) becomes impossible - one must always have full access to the entire file.  This is necessary at places like Google, where separate managers review commits of underlings and "import/use" is forbidden.
+
+In my opinion, the 2nd problem renders this solution and any like it completely unusable.  We need a solution that allows ::fully::delimited::names.
+
+===== Introduce -> as Classname->Method() syntax =====
+
+At first look, this appears to be an option, but as I explain below, the ambiguity between static class elements and namespaced elements is deeply embedded in the current implementation, and is not possible to resolve, thus disqualifying any solution that preserves :: as separator.  However, disregarding those reasons, here are the ways to consider this option:
+
+This could be done in a couple of ways:
+
+The first way (which was Stas's proposal):
+
+  * allow -> as an alternate syntax
+
+
+The second way (which was Lukas's understanding of Stas's proposal):
+
+  * move all static method calls to -> syntax
+  * introduce E_DEPRECATED for :: calls that resolve to static method, remove in PHP 6
+
+The second way is going to be a terrible headache for all OO authors, past and present, and will prevent migration to PHP 5.3 for those who are only looking for security fixes and performance improvements.  As such, it can be safely vetoed as impractical.  The next section assumes we are talking about Stas's original proposal, which is to allow this syntax:
+
+<code php>
+<?php
+class foo {
+    static function bar(){echo "bar\n";
+}
+foo::bar(); // "bar"
+foo->bar(); // "bar"
+</code>
+
+and this syntax in case of name conflict:
+
+<code php>
+<?php
+namespace foo::foo;
+function bar(){echo "bar function\n";}
+namespace foo;
+class foo {
+    static function bar(){echo "bar\n";
+}
+::foo::foo::bar(); // "bar function"
+::foo::foo->bar(); // "bar"
+</code>
+
+The same is true for constants:
+
+<code php>
+<?php
+namespace foo::foo;
+const BAR = 2;
+namespace foo;
+class foo {
+    const BAR = 1;
+}
+echo ::foo::foo::BAR; // 2
+echo ::foo::foo->BAR; // 1
+</code>
+
+
+==== Advantages ====
+
+  * if classname->method() is used, it solves the ambiguity issue
+
+==== Problems ====
+
+  * if classname::method() is used, the ambiguity problem still exists
+  * all existing code uses classname::method() or classname::CONST.  Thus, to be protected from the ambiguity, all existing OO code would need to
+    be modified.
+  * The syntax $blah::hello() is introduced in PHP 5.3, and is equivalent to blah::hello() if $blah = 'blah'; blah::hello() is equivalent to blah->hello(), but $blah::hello() is not equivalent to $blah->hello(), and the same is true of constants - it introduces another logical failure path for new users
+  * it redefines a long-established definition of ->, which is not necessarily a problem, but could be confusing for both existing and new users
+  * only educated users would ever think to look for -> unless a massive PR campaign is mounted, which would also make PHP look disorganized.  This is simply a political and NOT a technical problem.
+
+===== Use \ as namespace separator =====
+
+Before discussing the advantages and problems, it is prudent to look at some of the intrinsic problems in the implementation of namespaces with ::
+as the separator before continuing.
+
+==== The big, non-obvious problems with :: as separator ====
+
+==== Resolution of T_STRING T_PAAMAYIM_NEKUDOTAYIM T_STRING and why this kills :: as namespace separator ====
+
+With current CVS of PHP_5_3, these two code samples work very differently:
+
+file1.php:
+<code php>
+<?php
+namespace foo;
+function bar(){echo "func\n";}
+</code>
+
+main.php:
+<code php>
+include 'file1.php';
+class foo {
+static function bar(){echo "method\n";}
+}
+foo::bar(); // func
+?>
+</code>
+
+<code php>
+<?php
+namespace foo::foo;
+function bar(){echo "func\n";}
+namespace foo;
+class foo {
+static function bar(){echo "method\n";}
+}
+foo::bar(); // method
+?>
+</code>
+
+The actual line of code "foo::bar()" does not change, but the addition of a namespace to the file changes the name resolution.  In global code, "foo::bar()" always refers to namespaced function "foo::bar."  Inside of a namespace declaration, "foo::bar()" always refers to a class method.  
+
+Although this may appear on the surface to simply be a name resolution bug, the problem is much deeper.  PHP performs resolution at run-time for namespaced functions and for class methods.  Basically, the opcode will check for two different scenarios:
+
+1) in namespaced code:
+   * check for "foo::bar" function [fail]
+   * check for "foo::foo" class [succeed]
+
+2) in global code:
+   * check for "foo::bar" function [succeed]
+
+Note that inside the namespaced code, there is no attempt to check for [nsname]::foo::bar (foo::foo::bar).  In order to implement this, we would need to have potentially 4 hash lookups for every static method call:
+
+   * check for function nsname::[called thing]
+   * check for function [called thing]
+   * check for class nsname::[called thing]
+   * check for class [called thing]
+
+In this list, [called thing] is the way the method/function is called, so in the code sample above, it would be "foo::bar", and we would check for:
+
+   * check for function foo::foo::bar
+   * check for function foo::bar
+   * check for class foo::foo::bar
+   * check for class foo::bar
+
+This would potentially double the autoload lookups for classes, and thus is actually impossible to solve correctly with the current implementation.
+
+The only solution is to re-define how name lookup works, such that it is different for straight "blah()" or "new blah" vs. "that::way()" or "new that::way."  However, because we use :: for the namespace separator, it is literally impossible to decide whether "that::way()" should be treated as our unqualified "way" or as qualified "that::way."  The only way to solve this problem is to use a different namespace separator.
+
+==== inefficiency due to ambiguity ====
+
+The current implementation of namespaced functions and static methods requires code execution to go through the same location.  The same is true of class constants vs. namespaced constants.  For every class static method and class static constant, there is at least 1 extra hash table lookup, regardless of whether any namespaced classes/constants are defined.
+
+As a side note, PHP 5.3 is so much faster than PHP 5.2, this is not a worthwhile comparison, and is not the best base to compare against, so I will be instead comparing PHP 5.3 CVS vs. a patched PHP 5.3 with a different namespace separator.
+
+If another namespace separator is used, every static method call has 1 fewer hash table lookup, and every constant resolution saves potentially 2 hash table lookups (internal details can be explained if you'd like - nothing is more complicated under the hood than the way constants are resolved, so I will leave those out of this RFC).  In addition, it is possible to perform much more efficient parsing of namespaced function calls than it is under the current implementation, because zend_do_begin_function_call() can be used instead of zend_do_begin_class_member_function_call(), which is much more efficient due to checks in class_member_function_call that are unnecessary for namespaced functions, but absolutely necessary if the namespace separator is ::.
+
+==== Code review gotchas ====
+
+Neither human review nor automated tools can look at:
+
+<?php
+Blah::blah::blah();
+?>
+
+and successfully resolve what it is in fact doing.  This will hamper automated security auditing tools, code correctness tools, and human review of patches, creating a situation that makes debugging and designing robust PHP code harder than it is now.  This can only be corrected via a new namespace separator.
+
+===== Description of what it means to use \ as namespace separator =====
+
+The main issues that using \ as namespace separator can address are:
+
+  * name ambiguity between static class methods/constants and namespace functions/constants
+  * name resolution order differences and gotchas of foo::bar() in a namespace vs. in global code
+  * code review problems
+
+==== Advantages ====
+
+  * name ambiguity is impossible
+  * \ is visually quite different from ::, and is easier to scan and detect as namespace instead of static class operator
+  * \ is a single keystroke on U.S. keyboard layout without shift key
+  * \this\is\used for paths on Windows and is intuitively familiar to those developers.  According to a php|arch survey (as relayed by Steph Fox), most of their readers develop on Windows and deploy on Unix, which would imply that \these\paths are familiar
+  * \this\maps\to\filesystem layouts often used by autoload intuitively for the above reason
+  * because \ is a single keystroke, it is possible to require \ prefix for all global functions/classes/constants, and conversion is minimally effortful (from personal experience trying to convert files to several namespace separators to see what it was like)
+  * code review ambiguities disappear permanently
+  * name resolution order problems disappear if we decide that "foo/bar" or "foo::bar" is always prefixed with namespace name, and only short names like "bar()" or "new bar" are checked for both "nsname/bar()" and internal function "bar()" or "class nsname/bar" and internal class "bar".  "/foo/bar" is used for global scoping.
+  * code coverage of namespace-related code is so good, it is possible to be very confident of the correctness of the patch.
+
+==== Problems ====
+
+  * \ looks a lot like / and is easy to accidentally flip, especially for unix users
+  * \ is used for escaping
+  * inside a string a namespace name becomes\\like\\this or we can get weird characters.  This could be confusing to users at first.
+  * all existing namespaced code must be nearly rewritten, a simple search/replace of :: would not be possible.
+  * the patch touches a lot of the engine, and will need rigorous battle-testing.
+  * to many, \this\way will look weird at first.
+
+==== Patch ====
+
+A patch against current CVS of PHP 5.3 is available at http://pear.php.net/~greg/backslash.sep.patch.txt
+
+It is worth noting that 95% of this patch took me 2 hours to write, the constant resolution code took me an entire week, and the unit test modifications took only 1-2 hours, so porting this to HEAD should be pretty simple, but the initial work was non-trivial and I hope that the final solution could be based off of this work.
+
+==== Rejected Features ====
+
+  * ::: as namespace separator
+  * namespace member nsname::is::here->classname::method()
+
+===== Changelog =====
+
+
