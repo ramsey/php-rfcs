@@ -1,19 +1,47 @@
-====== Namespace identifier resolution RFC ======
-  * Version: 0.9
+====== Namespace identifier resolution RFCs ======
+  * Version: 1.0
   * Date: 2008-10-30
   * Author: Lukas Smith <smith@pooteeweet.org>
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/namespaceresolution
 
-This RFC discusses the way identifiers inside a namespace are resolved.
+This RFC discusses the way identifiers inside a namespace are to be resolved.
 
 ===== Introduction =====
 
-Generally in namespaces we support fully qualified names. However what happens if a non fully qualified name is used that is not defined inside the namespace? Should this cause a fatal error or should an attempt be made to resolve this call to the global namespace?
+Generally in namespaces we support fully qualified names as well as importing namespaces via "use". However what happens if a non fully qualified name is used that is not defined or imported inside the namespace? Should this cause a fatal error or should an attempt be made to resolve this call to the global namespace?
+
+<code php>
+<?php
+namespace foo;
+class blah {}
+function blah(){}
+
+$bar = new bar();
+bar();
+?>
+</code>
 
 ==== Why do we need RFCs? ====
 
 Obviously its important that we make a conscious decision for these questions. Depending on how we approach this, users might unintentionally trigger autoload, call functions in the global namespace they did not expect or they could run into trouble when trying to migrate existing code to namespaces.
+
+Obviously one way to avoid this is via an explicit "use" statement or by fully qualifying the name
+
+<code php>
+<?php
+namespace foo;
+use ding\dong as bar;
+
+class blah {}
+function blah(){}
+
+$bar = new bar();
+\bar();
+?>
+</code>
+
+While there is obviously no way to magically import the right things all namespaces, we do have the option of automatically falling back into the  global namespace if the identifier does not resolve in the local namespace. This RFC details some alternative approaches for this as well as how things would be like if such a fallback would not exist.
 
 ===== Possible approaches =====
 
@@ -21,37 +49,52 @@ Obviously its important that we make a conscious decision for these questions. D
 
 In this scenario when an identifier does not resolve inside the current namespace and attempt would be made to find the identifier in the global namespace.
 
+When referencing global identifiers in namespaces, it is probably a reasonable assumption that the bulk of that will be function calls. This is because currently most functionality in PHP is provided via functions. Also once an instance of a class has been made, one does not have to reference the identifier again in common usage (obviously there will still be cases, like with instanceof/type hint checks or static calls).
 
-When referencing global identifiers in namespaces, it is probably a reasonable assumption that the bulk of that will be function calls. This is because currently most functionality in PHP is provided via functions. Also once an instance of a class has been made, one does not have to reference the identifier in common usage (obviously there will still be cases, like with instanceof/type hint checks).
-
-In the past people created classes often for the sole reason of being able to sort of "namespace" their functions. Given that we now have real namespaces, class usage as a namespace replacement is no longer necessary. Still another possible assumption, which is considerably more dangerous to make, would be that most code that uses namespaces will mostly use classes inside the current namespace.
+In the past people often created classes for the sole reason of being able to sort of "namespace" their functions. Given that we now have real namespaces, class usage as a namespace replacement is no longer necessary. Still another possible assumption, which is considerably more dangerous to make, is that most code that uses namespaces will mostly use classes for its implementation and considerably less depend on namespaced functions.
 
 One noteworthy aspect here is that for classes we have autoload. If non fully qualified identifiers can be used to reference global identifiers, "lazy" programmers can skip fully qualifying identifiers even if they have the full intention of referencing a global identifier. With autoload this could trigger expensive operations, which are essentially useless.
 
 For functions however we do not have autoload capabilities. This brings the advantage that falling back to the global namespace does not run the performance risk of autoload. So a fallback would be much less expensive, but obviously there would still be overhead for not making intentional references to the global namespace fully qualified.
 
-At the same time the ability to automatically fallback into the global namespace gives the ability to overload global identifiers inside a namespace without having to modify existing code inside that namespace. This however can also be considered dangerously similar to the ambiguity issues we solved by changing the namespace separator. Static code analysis becomes more difficult, which is always the cost of overloading.
+At the same time the ability to automatically fallback into the global namespace gives the ability to overload global identifiers inside a namespace without having to modify existing code inside that namespace. This however can also be considered dangerously similar to the ambiguity issues we solved by changing the namespace separator (for example static code analysis becomes more difficult).
 
-Further more users need to be aware that if they are overloading internal identifiers that they to make sure that either the relevant code is loaded. For classes there is the autoload approach would would ensure that the class to overload is loaded on demand if necessary. Users that do not use autoload or that are overloading function (and constants) run the risk of their code behaving differently in not so obvious ways if they do not always flat out load all files defining relevant functions (and constants) for this namespace.
+Furthermore users need to be aware that if they are overloading internal identifiers that they need to make sure that the relevant code is loaded in time. For classes there is the autoload approach which would help ensure that the class to overload is loaded on demand if necessary. However users that do not use autoload or that are overloading function (and constants) run the risk of their code behaving differently in not so obvious ways if they do not always load all files defining relevant functions (and constants) for this namespace.
 
-One approach to make it at least noticeable when a fallback into the global namespace occurs would be to for example throw an E_NOTICE. This would obviously discourage users from using the fallback for overloading, but it would ensure that people migrating legacy code or people who have not yet fully understood namespaces, would be able to find out about where they are loosing performance.
+file1.php
+<code php>
+<?php
+namespace foo;
+function strlen(){}
+?>
+</code>
 
-Another approach to reduce some of the issues is by simply removing functions (and constants) from namespaces.
+file2.php
+<code php>
+<?php
+namespace foo;
+// removing the commenting of the following line will change the behavior of file2.php
+// include 'file1.php';
+strlen();
+?>
+</code>
+
+One approach to make it at least noticeable when a fallback into the global namespace occurs would be to throw an E_NOTICE in this case. This would obviously discourage users from using the fallback for overloading, but it would ensure that people migrating legacy code or people who have not yet fully understood namespaces, would be able to find out about where they are loosing performance.
+
+Another approach to reduce (though it does not remove the issues entirely) some of the issues is by simply removing functions (and constants) from namespaces.
 
 As a result of the above notes, we might decide to go with a few different options based on how one weighs these aspects:
 
-  - only for functions/constants
-  - only for classes
-  - only for internal identifiers
-  - for everything
+  - Only for functions/constants
+  - Only for classes
+  - Only for internal identifiers
+  - For everything
 
 === Only for functions/constants ===
 
 Assumption: Most people will use global functions and namespaced classes.
 
-By throwing an E_NOTICE when a fallback occurs, the performance issues become more manageable, but it would reduce the feasibility of overloading.
-
-Also note that if functions (and constants) would be removed from namespaces, then most disadvantages would be removed as functions (and constants) would always directly reference the global namespace.
+Notes: By throwing an E_NOTICE when a fallback occurs, the performance issues become more manageable, but it would reduce the feasibility of overloading. Also note that if functions (and constants) would be removed from namespaces, then most disadvantages would be removed as functions (and constants) would always directly reference the global namespace.
 
 == Advantages ==
   - Does not require fully qualified names for functions (and constants)
@@ -67,7 +110,7 @@ Also note that if functions (and constants) would be removed from namespaces, th
 
 Assumption: People want to overload global classes
 
-By throwing an E_NOTICE when a fallback occurs, the performance issues become more manageable, but it would reduce the feasibility of overloading.
+Notes: By throwing an E_NOTICE when a fallback occurs, the performance issues become more manageable, but it would reduce the feasibility of overloading.
 
 == Advantages ==
   - Does not require fully qualified names for classes
@@ -94,9 +137,7 @@ Assumption: People will leave the global namespace to PHP and namespace their ow
 
 Assumption: People want to easily migrate their existing code and beginners should not have to know (as much about) if they are coding inside a namespace or not.
 
-By throwing an E_NOTICE when a fallback occurs, the performance issues become more manageable, but it would reduce the feasibility of overloading.
-
-Also note that if functions (and constants) would be removed from namespaces, then some of the disadvantages would be removed as functions (and constants) would always directly reference the global namespace.
+Notes: By throwing an E_NOTICE when a fallback occurs, the performance issues become more manageable, but it would reduce the feasibility of overloading. Also note that if functions (and constants) would be removed from namespaces, then some of the disadvantages would be removed as functions (and constants) would always directly reference the global namespace.
 
 == Advantages ==
   - Does not require fully qualified names for all global identifiers
@@ -108,20 +149,22 @@ Also note that if functions (and constants) would be removed from namespaces, th
   - Additionally there is a possible performance bomb with autoload
   - Overloading global identifiers requires ensuring that all relevant files are loaded or unexpected behavior might occur
 
-==== Require fully qualified names everywhere ====
+==== Do not fall back to the global namespace ====
 
-Assumption: People are willing to spend more time on updating their legacy code that they migrate to namespaces and adapt their coding when working within namespaces.
+Assumption: People are willing to spend more time on updating their legacy code that they migrate to namespaces and adapt their coding style to fully qualify global identifiers when working within namespaces.
 
 == Advantages ==
   - No risk for people relying on behavior that does the same but with more overhead
+  - No risk for ambiguity
 
 == Disadvantages ==
-  - Require fully qualified names for all global identifiers
+  - Require fully qualified names (or use statements) for all global identifiers
 
 ==== More about namespaces ====
 
-http://wiki.php.net/rfc/backslashnamespaces
+  - http://wiki.php.net/rfc/namespaceseparator
+  - http://wiki.php.net/rfc/backslashnamespaces
 
 ===== Changelog =====
 
-
+- from 0.9 to 1.0: added some examples, added note about use statement, fixed some language issues
