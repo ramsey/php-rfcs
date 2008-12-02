@@ -2,7 +2,7 @@
   * Version: 1.0
   * Date: 2008-08-23
   * Author: Christian Seiler <chris_se@gmx.net>
-  * Status: Under Discussion
+  * Status: Implemented
   * First Published at: http://wiki.php.net/rfc/rounding
 
 This RFC discusses the situation on floating point rounding in PHP, explains
@@ -273,7 +273,8 @@ This can be avoided, however. The trick is to force the FPU to **always** use
 double precision for calculations. The problem is that this is not possible
 in a platform-independent way. The GNU C library offers the _FPU_SETCW and
 _FPU_GETCW macros in fpu_control.h while on Windows Systems a function named
-_controlfp is available for this job.
+_controlfp is available for this job. FreeBSD provides fpsetprec() and other
+Operating Systems that run on x86 require inline assembly.
 
 Please note that zend_strtod() is also affected by this problem: On systems
 with the GCC and a 32 bit x86 processor, zend_strtod() will yield different
@@ -393,37 +394,19 @@ round function should be used instead.
 
 ==== Building an abstraction layer for FP control register manipulation ====
 
-In a first step, my patch introduces 3 macros:
+See http://www.christian-seiler.de/projekte/fpmath/ for further information
+on how to ensure double precision on different architectures, operating
+systems and with different compilers.
 
-   * _ZEND_FPU_CW_DECLARE
-   * _ZEND_FPU_CW_SET
-   * _ZEND_FPU_CW_RESTORE
+This proposal proposes to wrap the above abstraction into the following
+macros:
 
-The DECLARE macro declares certain necessary variables, the SET macro modifies
-the FPU control word so that double precision is used for calculation and
-RESTORE restores the previous state of the control word. The following example
-illustrates how these macros are to be used:
+  * ZEND_FLOAT_DECLARE
+  * ZEND_FLOAT_ENSURE()
+  * ZEND_FLOAT_RESTORE()
+  * ZEND_FLOAT_RETURN(val)
 
-<code c>
-double somefunction (double val)
-{
-	_ZEND_FPU_CW_DECLARE;
-	double foo;
-
-	_ZEND_FPU_CW_SET;
-
-	/* some calculations... */
-	foo = val / 100.0;
-
-	/* ... */
-
-	_ZEND_FPU_CW_RESTORE;
-	return foo;
-}
-</code>
-
-These macros expand to the correct versions for each platform or to NOPs if
-the method for the corresponding platform could not be determined.
+These will be defined in Zend/zend_float.h.
 
 ==== Fix of zend_strtod ====
 
@@ -439,7 +422,7 @@ printf ("%.20f\n", 0.002877);
 Run that in C and run that in PHP on a Linux x86 32 bit box - you will get
 different results.
 
-For this reason, my patch also fixes zend_strtod() by adding the _ZEND_FPU_CW
+For this reason, my patch also fixes zend_strtod() by adding the proposed
 macros to the function. Then, C and PHP will yield the same results on all
 platforms (that support IEEE 754 arithmetics anyway).
 
@@ -450,7 +433,7 @@ eliminate all the problems:
 
 === Usage of FP control word manipulation ===
 
-The round function uses the new _ZEND_FPU_CW macros in order to ensure double
+The round function uses the new ZEND_FLOAT macros in order to ensure double
 precision arithmetics within the function body. This will make sure the final
 division works properly.
 
@@ -524,22 +507,11 @@ in a table if they are small enough.
 
 ==== Patch =====
 
-The patch is available under
-[[http://www.christian-seiler.de/temp/php/2008-08-23-rounding/rounding-5.3-1.patch]].
-It applies against the current CVS branch of 5.3, porting it to HEAD should
-be extremely trivial (since this only affects math-related stuff).
+The patch was already applied to PHP_5_3 and HEAD.
 
-I tested the patch under Linux 32 bit x86, Linux 64 bit x86_64 and Windows
-32 bit x86. Please note that MinGW does not define _controlfp_s but does
-define _controlfp. Thus I added a conditional ifdef to use _controlfp instead
-if _controlfp_s is not present. This is not relevant now but may be relevant
-when CMake is used as build system for PHP and thus PHP starts to support
-MinGW.
-
-The _ZEND_FPU_CW macros are currently defined in zend_strtod.h, but there may
-be a better place for that. Also, the configure checks for those makros are
-currently in ext/standard/config.{m4,w32} while they are probably better
-located somewhere else.
+I tested the patch under Linux 32 bit x86, Linux 64 bit x86_64, Windows
+32 bit x86 and FreeBSD 32 bit x86. Additionally, the macros themselves were
+tested on various platforms (see the above link for details).
 
 ===== Comparison with the 2004 proposal =====
 
@@ -598,4 +570,5 @@ goes far beyond the scope of this proposal.
 
 ===== Changelog =====
 
+  * 2008-12-02 Christian Seiler: Updated to current situation
   * 2008-08-23 Christian Seiler: Created RFC
