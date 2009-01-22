@@ -1,0 +1,362 @@
+====== Closures: Object extension ======
+
+Recently, efforts were made to go beyond the scope of the original Closures proposal ([[rfc/closures]]) in order to allow the extension of objects dynamically, take the following example code:
+
+<code php>
+$object->newMethod = function () { return 42; };
+var_dump ($object->newMethod ());
+</code>
+
+With the original proposal, this does not work, since the original proposal retains PHP's notion that member variables and methods live in different "namespaces".
+
+But, people have argued on internals@ that this is a very desirable feature. Thus, in order to make this possible, a patch for this was proposed. One particular issue with this, however, has sparked quite a bit of a discussion: The issue of what $this inside a closure actually points to.
+
+Take, for example, the following code:
+
+<code php>
+class A {
+  private $value = 1;
+  public $closure;
+  public function getClosure () {
+    return function () { return $this->value; };
+  }
+}
+class B {
+  public $value;
+  public $closure;
+}
+
+$a = new A;
+$b = new B;
+$b->value = 2;
+$a->closure = $a->getClosure ();
+var_dump ($a->closure ());
+$b->closure = $a->closure;
+var_dump ($b->closure ());
+$closure = $a->closure;
+var_dump ($closure ());
+</code>
+
+The question here is: What will the corresponding code output? In the following I will first present different possibilities of how to implement then, then I will show some sample code that demonstrates the differences between those approaches and finally explain what the drawbacks of those approaches are.
+
+Please: Before reading, keep in mind that the definition of "closure" is simply an object then saves the scope that there is at creation time. Since closures come from functional programming (i.e. lambda calculus), the way closures and OOP interact is up to the programming language that combines both. Different programming languages that implement both have different approaches to this topic that are tailored to the specific language.
+
+===== Approaches to $this binding =====
+
+==== (A) Original proposal: Bind $this to the object scope at creation (if existing) ====
+
+The original RFC proposed to bind $this to the object scope at creation. Thus, if a closure is created outside of an object (in global scope or inside a function), no $this is available. If it is created inside an object method, then it will inherit the object scope of that method. The object scope will stay that way for the lifetime of the closure, i.e. no matter what you do with it. Assigning it to a property of a different object will not change that.
+
+==== (B) Proposal by Marcus: Initially bind $this to creation object scope, re-bind on assignment to object property ====
+
+Marcus's proposal would make the closure initially inherit the object scope of the method in which it was defined but on assignment to a property of an object, the scope would change:
+
+<code php>
+class Other {
+  private $value = 1;
+  public function getClosure () { return function () { return $this->value; }; }
+}
+$object = new stdClass;
+$otherObject = new Other;
+$object->method = $otherObject->getClosure();
+</code>
+
+At this point, ''$object->method'' would not be bound to $otherObject but to $object and thus a call would try to access ''$object->this''.
+
+==== (C) Javascript like behaviour: Don't bind $this at creation but only when called ====
+
+Javascript implements the following behaviour: The this variables is **never** bound at creation but only when calling the closure. If the closure is called from outside of class scope, the this variable points to the global object (in browsers that's ''window'') and thus this.member actually accesses the global variable member in JS.
+
+In PHP this would translate to:
+
+<code php>
+$closure = function () { return $this->foo; };
+$closure (); // Can't access property of non-object, because $closure does not have object context!
+$obj = new stdClass;
+$obj->foo = 1;
+$obj->closure = $closure;
+$obj->closure (); // works
+call_user_func (array ($obj, 'closure')); // works
+call_user_func ($obj->closure); // WON'T WORK!
+$obj->closure->__invoke (); // WON'T WORK!
+</code>
+
+The last two examples will not work because:
+
+  - ''call_user_func($obj->closure)'': the property ''$obj->closure'' is retrieved and passed as a parameter to the call_user_func function. It can then no longer determine whether or not the closure was originally a property of an object or not - let alone which.
+  - ''$obj->closure->_ _invoke'': Here, the engine translates that into the following opcodes: 1) fetch the property "closure" of object $obj and store it in a temporary variable. Then execute _ _invoke of that temporary variable. Also, here, there is no **sane** possibility for the engine to know whether the closure was originally an object member.
+
+(Unlike Javascript, PHP doesn't have a global object to fall back to. And $GLOBALS is an array...)
+
+==== (D) Pseudo-Javascript like behaviour: Rebind $this only when called as a method ====
+
+This would actually be a combination of (A) and (C):
+
+Originally bind the closure to the object where it was created - and thus when called as a simple variable, it would retain the original object context. But when called as a member of another object, $this would be rebound on call time.
+
+Basically, all cases where (C) fails will now "fall back" to the case (A).
+
+===== Comparison of the approaches =====
+
+The following example code will highlight the differences between the two approaches:
+
+<code php>
+class MyClass {
+  private $a = 1;
+
+  public function getClosure () {
+     $closure = function () {
+          return $this->a;
+     };
+     var_dump ($closure ()); // [0]
+     return $closure;
+  }
+}
+
+$obj1 = new MyClass;
+$obj2 = new stdClass;
+$obj2->a = 2;
+$closure = $obj1->getClosure ();
+
+var_dump ($closure ()); // [1]
+$obj2->closure = $closure; // [*]
+var_dump ($obj2->closure ()); // [2]
+var_dump (call_user_func ($obj2->closure)); // [3]
+var_dump (call_user_func (array ($obj2, 'closure'))); // [4]
+var_dump ($obj2->closure->__invoke ()); // [5]
+$closure = $obj2->closure;
+var_dump ($closure ()); // [6]
+
+?>
+</code>
+
+I have highlighted the different output places with square braces (i.e. ''[1]'', ''[2]'', etc.). I have also highlighted the line in which Marcus's proposal (B) will cause a rebind of the closure. The following table shows how the different approaches will react:
+
+<code>
+  | 0 | 1 | 2 | 3 | 4 | 5 | 6
+==+===+===+===+===+===+===+===
+A | 1 | 1 | - | 1 | - | 1 | 1
+--+---+---+---+---+---+---+---
+B | 1 | 1 | 2 | 2 | 2 | 2 | 2
+--+---+---+---+---+---+---+---
+C | # | # | 2 | # | 2 | # | #
+--+---+---+---+---+---+---+---
+D | 1 | 1 | 2 | 1 | 2 | 1 | 1
+</code>
+
+The columns represent the output of the highlighted lines, the rows represent the different approaches (A: original approach, B: Marcus's approach, C: Javascript-like, D: A + C hybrid). The following legend illustrates outcome:
+
+<code>
+1: $obj1 is the $this variable of the closure.
+2: $obj2 is the $this variable of the closure.
+-: (Original approach): "Call to undefined method"; we could make anything happen there if we wanted... (see below)
+#: (JS-like approach): "Unable to access property of a non-object" because $this is not defined.
+</code>
+
+===== Discussion, further proposals =====
+
+==== Proposal D ====
+
+Proposal D (pseudo-JS-like) is clearly not viable, since it would be **extremely** confusing to have ''$object->closure ()'' bind to $obj2 but ''$object->closure->_ _invoke'' to $obj1. And it is even more confusing to put a closure into an object property, then call it (binds to the object of which it is the property) and **much** later store it again into a normal variable and then it binds again to the original object where there is now no more reference in the corresponding code. Clearly, this is not desirable.
+
+==== Proposal C ====
+
+Proposal C (Javascript-like) behaviour would be consistent in itself, but has the major drawback that closures can't directly access the $this object of classes where they were defined in and can not access private members of that object anymore either (even if a reference to the object is passed in as a lexical variable) due to the fact that class scope doesn't match. Take for example the following code:
+
+<code php>
+class MyClass {
+  private $mapping = array (...);
+  public function doSomething ($data) {
+    return array_map (function ($element) {
+      return isset($this->mapping[$element]) ? $this->mapping[$element] : $element;
+    }, $data);
+  }
+}
+</code>
+
+Since the closure is called from array_map outside of any object context (since that is added call-time only in JS), the above code would not be possible, which could be quite inconvenient. You would have to store the closure as an object method and then wrap that in another closure in order to have access to $this (that's what the JS folks do) - or you could pass $object = $this as a lexical variable into the closure.
+
+Also, the lack of support for calling _ _invoke without removing object context may be undesirable.
+
+==== Proposal B ====
+
+Proposal B (Marcus's proposal) has a very big drawback: It does magic on simple assignment. Usually, when you have an assignment operation in PHP, nothing tremendous happens. A value gets copied etc. but no magic happens. Now, take for example the following piece of code:
+
+<code php>
+// somewhere $closure came from another object
+$obj->closure = $closure; // MAGIC happens on this assignment, scope gets re-bound
+$closure = $obj->closure; // Now, $closure is definitely bound to $obj instead of the original.
+</code>
+
+This behaviour is EXTREMELY hard to detect since assignments happen all over the place. Usually, people rely on the fact that 
+
+<code php>
+$b = $a;
+$a = $b; 
+</code>
+
+will *not* change the value of $a. Of course, this may already be broken with _ _get and _ _set **but** that does not necessarily mean it is a good idea that should be done by the engine itself!
+
+Also: It is a common use-case that people store callbacks in object properties, take the following example code:
+
+<code php>
+interface Some_Filter {
+  public function accept ($value);
+}
+
+class Closure_Filter implements Some_Filter {
+  private $closure;
+  public function __construct (Closure $closure) {
+    $this->closure = $closure;
+  }
+  public function accept ($value) {
+    return call_user_func ($this->closure, $value);
+  }
+}
+
+class Foo {
+  private $min, $max;
+
+  public function bar () {
+    $filter = new Closure_Filter (function ($value) {
+      return $value >= $this->min && $value <= $this->max;
+    });
+    $data = $something->doSomethingElse ($filter, $data);
+  }
+}
+</code>
+
+I believe the code to be a realistic (albeit simplified) example of a real-world use case and not something completely contrived. The problem is, however: With this proposal, the closure's $this will be rebound to the Closure_Filter class object and not the original $this which the author intended to.
+
+Also, another question arises here: If you have the following code:
+
+<code php>
+$x = 4;
+$obj1->closure = function () use ($x) { ... };
+$obj2->closure = $obj1->closure; // [*]
+$obj1->closure ();
+</code>
+
+If the closure object itself is changed in the assignment ''[*]'', the last call to ''$obj1->closure()'' will actually be bound to $obj2! The only possible solution would be to silently clone the closure at the point of the assignment in order to leave the original one intact and only change the $this of the new one. However, this implies implicit cloning of the closure at the assignment. PHP does not currently do this! It is **extremely** counter-intuitive if Closures semi-behave like PHP4 objects instead of PHP5 objects.
+
+==== Proposal A ====
+
+This proposal is self-consistent (as is proposal C) but has a major drawback: The proposal does not include the possibility to dynamically extend objects by closure methods. One could of course augment the behaviour to allow ''$object->method()'' without rebinding $this at all (which is btw. Python's behaviour), however, lots of people with Javascript background would find the lack of possibility to reference call the assigned object with $this at all disappointing.
+
+===== Modified proposal A, Roadmap =====
+
+In order to satisfy the need for
+
+  - a consistent approach (leaves only A and C)
+  - direct inheritance of $this if used inside a method and passed to array_map for example
+  - rebinding $this in order to dynamically extend objects
+
+the following is proposed:
+
+==== Basis ====
+
+The original behaviour, i.e. proposal A, is the basis for this proposal. Thus, no automatic rebinding of $this is used.
+
+==== Calling methods ====
+
+Additionally, it is now possible to call closure methods directly, i.e.:
+
+<code php>
+$obj->method = function () { ... };
+$obj->method ();
+</code>
+
+The following resolution order is chosen:
+
+   - Try to find the method in the method table and call it directly.
+   - Try to find a property in the property table with the name and if it is a closure, call the closure.
+   - Use __call
+   - No not use __get
+
+**NOTE** This appears to be the conensus on this issue as far as I can see on-list. If this should be not the case, please correct this section.
+
+==== Rebinding of $this ====
+
+Automatic rebinding of $this is problematic, if approach A is to be augmented (i.e. approaches B and D). Thus, there is no automatic rebinding of $this but rather manual rebinding using methods of closures:
+
+<code php>
+$obj->method1 = Closure::bind ($obj, function () { });
+$obj->method2 = $otherClosure->bindTo ($obj);
+</code>
+
+''Closure::bind ($obj, $closure)'' is basically a convenience wrapper for ''$closure->bindTo ($obj)''.
+
+''$closure->bindTo()'' does the following: It clones the closure and returns a new closure which is bound to the new object. The cloning occurs with the following semantics:
+
+  * $this will be chaned anyway, so ignore it in the clone.
+  * Create a new hash table for the static variables (which internally also contain the lexical variables) and copy the variables over. References remain references (which will *not* be severed) and copies remain copies.
+
+==== Warnings on direct-method calls ====
+
+When calling a closure directly but the bound object is *not* the object for which the closure is called, then a warning should be shown (but the closure should NOT be rebound dynamically):
+
+<code php>
+// $obj is not $this
+$obj->method1 = function () { ... };
+$obj->method1 (); // WARNING: Closure called as method but bound object differs from containing object.
+$obj->method2 = Closure::bind ($obj, function () { ... });
+$obj->method2 (); // No warning, objects match
+
+// inside a class
+$this->method = function () { ... };
+$this->method (); // No warning, objects match
+</code>
+
+However (due to the impossibility to detect that it is a method-like call and due to the fact that it could be deliberate), the following will not cause any warnings:
+
+<code php>
+// $obj != $this
+$obj->method = function () { ... };
+$obj->method->__invoke ();
+call_user_func ($obj->method);
+$m = $obj->method;
+$m ();
+</code>
+
+But the following will again:
+
+<code php>
+// $obj != $this
+$obj->method = function () { ... };
+call_user_func (array ($obj, 'method'));
+</code>
+
+==== Private / protected member access ====
+
+It should be decided whether the closure methods which are assigned to the object should inherit the class scope of that object and thus can access the private and protected members of that object.
+
+Possibilities:
+
+  - Always use the class scope of closure creation time
+  - Always use the class scope of the object that bindTo() is called for
+  - Always use the class scope of the function that calls bindTo()
+
+This is still to be discussed.
+
+==== Closure cloning ====
+
+Since bindTo() allows to clone closures anyway now, it would be silly to leave the clone handler of closures disabled. Thus, clone $closure should do the same as ''$closure->bindTo ($originalObject)''.
+
+==== Object cloning ====
+
+When an object containing closure methods is cloned, the closure methods should **not** be automatically rebound but rather should the object have to do it itself in the __clone method. With this behaviour, the user has the control over whether to rebind the closures on cloning or not.
+
+This may still be subject to discussion.
+
+==== Important: Timeline ====
+
+In order to be able to proceed to PHP 5.3 beta 1 quickly, I suggest the following timeline:
+
+  - For beta1, we make sure that proposal A (no closure-property-calling, no rebinding) is in CVS.
+  - post-beta1, we add those features to PHP after the details that are not entirely clear are discussed. If the discussion takes too long, we don't include that feature in PHP 5.3 but instead we wait for the next version (5.3.1 or 5.4 or 6.0 or whatever)
+
+Important observation: If we have closure-property-calling but we DO NOT have rebinding, then this will certainly cause confusion among users coming from Javascript. Thus we should consider them a unit and only add them both or none at all.
+
+===== Alternative, if no consensus can be reached =====
+
+If no consensus regarding this can be reached, we could revert closures to be non-OOP-aware objects, i.e. that $this is **never** available inside closures. This would be a major step back in my eyes, but it would at least leave it open for discussion how to actually implement $this without breaking BC while being able to release PHP 5.3 without that support.
