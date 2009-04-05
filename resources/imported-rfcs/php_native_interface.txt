@@ -1,0 +1,164 @@
+====== Removal of the Zend API ======
+  * Version: 1.0.x
+  * Date: 2009-03-27
+  * Author: Paul Biggar <paul.biggar@gmail.com>
+  * Status: revising after v1.0
+
+
+Provides a rationale for replacing the Zend API with *phpni*, a PHP Native Interface. Includes the design of *phpni*, and emphasizes a means to improve the Zend Engine as a result of the replacement.
+
+===== Introduction =====
+
+This RFC is in two parts, which will probably be split off in the future:
+
+  * The need to remove external access to the Zend Engine (aka remove the Zend API)
+  * The design of a "PHP native interface", dubbed *phpni*, to deal with this problem.
+
+
+
+===== Why remove the Zend API? =====
+
+=== Zend API ===
+
+The Zend API is a large set of functions, macros and data-structures which are used to interact with the Zend Engine. It serves 3 major purposes, roughly in order of importance:
+
+  * Used to write PHP's standard libraries, 3rd party extensions, and much of PECL.
+    * Allows wrapping of C/C++ libraries in order to allow the to be accessed from user-code.
+    * Allows hot (performance-sensitive) code to be rewritten in C for speed
+  * Used to embed PHP into within C/C++ applications using the embed SAPI
+
+=== Problems ===
+
+The main problem with it is that it constrains the implementation of the Zend Engine. The Zend API creates a tight coupling between the Zend Engine and its clients, restricting greatly our ability to change the Zend Engine. By requiring backwards compatability with the Zend Engine, we are ensuring that the Zend Engine can only be modified in minor ways. This holds the Zend Engine to design decisions made nearly 10 years ago, and prevents PHP from getting much faster in the long term.
+
+The Zend API also makes it difficult to write PHP extensions. Although most of the API is not terribly difficult to work with, concepts like copy-on-write, change-on-write sets, and separation appear to be tricky concepts for many people. The only documentation is Sara Golemon's book, and the actual code is not well commented. Although zend_parse_parameters has simplified the parameter parsing somewhat, it seems that a simpler way of writing extensions would be welcome.
+
+A number of other PHP implementations exist, such as IBM's Project Zero, Phalanger, Roadsend, Quercus and phc. Many of these projects find it very difficult to re-use PHP's standard libraries. They have chosen different strategies:
+
+  * Quercus and Roadsend have reimplemented popular extensions. This means that probably 90% of extensions are unavailable. It also means that future and private extensions cannot be available.
+  * Phalanger and Project Zero attempt to re-use the existing libraries by marshalling their data into the Zend API. This appears to be slow and error-prone. In particular, Project Zero reports speed problems from marshalling Unicode strings into the Zend API (and those are then passed to C libraries, possably requiring extra marshaling).
+  * phc is designed around reusing the Zend API for compatibility with the PHP. This constrains many of the optimizations phc would wish to perform.
+
+
+The second half of this RFC describes a solution to this issue: the PHP Native Interface. However, to actually solve this issue, a decision must be made to not only use the PHP Native Interface to provide an interface between extensions and implementations, but also to disallow any external access to the Zend API.
+
+
+===== phpni: The PHP Native Interface =====
+
+This describes the design of *phpni*, the PHP Native Interface. This design is in early stages. The stages required until completion are described later (link?).
+
+
+=== Design Criteria ===
+
+  * Remove any couping between the Zend Engine, extensions and SAPIs.
+  * Support all major use cases of the Zend API
+    * embedding within SAPIs
+    * proving access to C libraries
+    * providing the ability to rewrite performance sensitive code in C
+
+
+=== Solution ===
+
+Take the use case of wrapping a C library to expose its functionality in user space. The major idea is to "automatically" import C functions into a special namespace. The PHP library functions would then be comprised of PHP user space code which calls those C functions directly. That way it is possible to craft an API that is separate from the C implementation.
+
+Lets take a simple example. Assume we have a C library XXX, with 3 functions, x, y and z. We'd like to expose this in user space as a class called MyXXX, with methods a and b. We create a file with the signatures of x, y and z:
+
+extensions/xxx/sigs.h
+<file>
+int x (int, int);
+void y (char*, int);
+void z (char*, int);
+</file>
+
+We then write our user space code:
+
+extensions/xxx/MyXXX.php
+<file>
+class MyXXX
+{
+   function __construct ($username)
+   {
+       $this->username = $username;
+   }
+
+   function a ($w1, $w2)
+   {
+      $foo = \internals\XXX\x ($w1, $w2);
+      \internals\XXX\y ($this->username, $foo);
+   }
+
+   function b ($m1, $m2)
+   {
+      $foo = \internals\XXX\x ($m1, $m2);
+      \internals\XXX\z ($this->username, $foo);
+      return $foo;
+   }
+}
+</file>
+
+In order to interface between these two, it will be necessary to have a tool to automatically wrap the C functions. SWIG could be used to create this tool.
+
+=== Zend engine ===
+
+Since the libraries would no longer use the Zend API, the tight coupling would be broken. It would now be possible to change major parts of the Zend engine without affecting the operation of any other part of PHP.
+
+=== Extensions/PECL ===
+
+It would no longer be necessary to know the Zend API to write extensions. Instead, only the API of the C library is necessary, and the interface can be created in PHP user code.
+
+=== Embed SAPI ===
+
+The same interface used for libraries can be used to handle many of the use cases of the C API. However, it is likely that a means to call PHP user code from C/C++ code, will be required.
+
+
+=== Other PHP implementations ===
+
+Since PHP extensions are no longer written in the Zend API, other PHP implementations, such as Roadsend, Project Zero, Phalanger and Quercus should be reuse the libraries without difficulty. In addition, if the coupling is between the interpreter and its components is simple enough, it may be possible for other implementations to be slotted in directly. However, though this would be a nice side-effect, it should probably not be considered a priority.
+
+
+===== Similar projects =====
+
+=== Non-PHP ===
+
+phpni differs from many of these in that it is designed not to add new features, but instead to replace an existing facility - the ability to call C libraries. As such, dynamic linking is not part of the spec.
+
+  * ctypes (Python) http://docs.python.org/library/ctypes.html
+  * JNI (Java) http://en.wikipedia.org/wiki/Java_Native_Interface
+  * CNI (Java) http://gcc.gnu.org/onlinedocs/gcj/About-CNI.html#About-CNI
+  * JNA (Java) https://jna.dev.java.net/
+  * Pyrex (Python) http://www.cosc.canterbury.ac.nz/greg.ewing/python/Pyrex/
+  * Cython (Python) http://www.cython.org/
+  * FFI (ruby) http://kenai.com/projects/ruby-ffi/pages/Home http://lifegoo.pluskid.org/?p=370
+  * Haskell 98 Foreign Function Interface http://www.cse.unsw.edu.au/~chak/haskell/ffi/
+  * CFFI (Common Lisp): Common-Lisp FFI: http://common-lisp.net/project/cffi/
+
+=== For PHP ===
+
+There is no reason we shouldn't reuse these, if they fit the bill.
+
+  * FFI http://pecl.php.net/package/ffi
+  * CodeGen_PECL http://pear.php.net/package/CodeGen_PECL/
+  * Inline_C http://pear.php.net/package/Inline_C
+  
+
+===== Project Plan =====
+
+This is a simple design. In reality, it would need to be prototyped to determine whether this makes sense for every use case, and that there would be little sacrificed to make it work. The work on it should probably progress in roughly the following order:
+
+  * Prototype a single library
+    * perhaps readline?
+    * Manually write interface code between the header and the PHP code.
+
+  * Discuss requirements with other PHP implementations
+  
+  * Write a utility to generate the interface code automatically
+    * Using SWIG?
+    * Test 5 or 6 libraries
+    * Test more complicated functionality
+
+  * Convert entire set of PHP extensions
+
+
+Naturally, before the last step it will be necessary to get consensus from other internals developers that this is a good idea. It would be worthwhile to produce a document discussing the experience so far.
+
+
