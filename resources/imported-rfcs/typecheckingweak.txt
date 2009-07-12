@@ -1,17 +1,17 @@
-====== Request for Comments: Weak parameter type checking and type ensurance  ======
+====== Request for Comments: Parameter Type Enforcement ======
   * Version: 0.1
   * Date: 2009-07-12
-  * Author: Zeev Suraski <zeev@zend.com> Lukas Smith <smith@pooteeweet.org>
+  * Author: Zeev Suraski <zeev@zend.com>, Guillaume Rossolini <g.rossolini@gmail.com>, Lukas Smith <smith@pooteeweet.org>
   * Status: In discussion
   * First Published at: http://wiki.php.net/rfc/typechecking
 
 This RFC suggests a system designed to enable functions to denote designated types for arguments, and conversion rules (as well as pass/fail criteria) for when calling code passes arguments from different types.
-The rationale behind using such 'weak' type checking system (in general, and in particular when compared with 'strict' type checking) is also discussed.
+The rationale behind using such type-enforcement system (in general, and in particular when compared with 'strict' type checking) is also discussed.
 
 ===== Background =====
 
 Circa 2002, 'type hints' were added to the then-in-development PHP 5.0.  Type hints (possibly misnamed) were designed to allow functions and methods denote the specific kinds of objects they can handle - primarily to accommodate for PHP's much more complex, advanced OO system.  Adding these type hints meant that the growing number of functions designed to work on specialized objects, would not have to spend the first few lines of their implementation verifying is_a relationships - but could do that easily within the function signature.
-The possibility of supporting type hints for 'native' PHP types was discussed shortly afterwords;  It was decided against it primarily on the premise that scalar types in PHP convert on-the-fly depending on the context, and there's no logic behind forcing their type at the calling stage.  One notable exception was 'array' - for which support was added, with the rationale being that functions which expect array arguments, would probably find any other type quite useless.
+The possibility of supporting type hints for 'native' PHP types was discussed shortly afterwords;  Consensus was not reached and it never made it to the language, primarily on the premise that scalar types in PHP convert on-the-fly depending on the context and there's no logic behind forcing their type at the calling stage.  One notable exception was 'array' - for which support was added, with the rationale being that functions which expect array arguments, would probably find any other type quite useless.
  
 ===== Introduction =====
 
@@ -32,12 +32,23 @@ Conceptually, user functions will be able to denote that they are expecting a sp
 
 <code php>
 function foo(int x) {}
-function bar(x, y, float z) {}
+function bar(x, string y) {}
 function baz(int x, float y, string z) {}
 function foobar(int &x) {}
 </code>
 
 Once a function argument has been designated a scalar type hint - the function author is completely relieved of any further checks and conversions, and is assured that his or hers code will always be supplied with an argument of the designated type.
+
+<code php>
+foo(100);               // will succeed silently
+foo(3.14);              // argument will be trimmed to 3(int) before being passed to foo()
+foo('19');              // argument will be converted to 19(int) before being passed to foo()
+foo('hey!');            // will fail
+bar(123, 'yo');         // success
+bar('whatever', 17.5);  // argument will be converted to a string '17.5' before being passed to bar()
+foobar(17.5);           // will fail (scalar value cannot be passed by reference)
+$x=17.5;  foobar($x);   // $x will be converted to 17(int), and then passed to foobar()
+</code>
 
 During the parameter passing stage, PHP will ensure that values passed as arguments tagged with type requirements - are actually of that designated type.  The following algorithm will be employed:
 
@@ -89,18 +100,29 @@ There are numerous benefits to introducing type-checking for scalar types in PHP
   - **Simplication of parameter sanitizing**.  The need for explicitly casting arguments ($arg = (int) $arg;) or conditional type-check failures (if (!is_numeric($arg)) {...}) will be much reduced, and may be eliminated.
   - **Code readability**.  Reading the implementation code may be easier with the clear knowledge that an argument is of a certain type.
   - **Clearer contract between caller and callee**.  By the function signature alone - it will be possible for the caller to know what kind of value is expected by the called function.
+  - **IDE enablement**.  IDEs will be able to have better insight into the behavior of the code, and potentially translate it into better tooling.
   - **Optimization**.  Using the information about typed arguments, and the fact they are always ensured to be of that type - it may be possible to use this information to perform certain opcode-level optimizations.
   - **Security**.  In certain cases, using typed arguments may help discover and prevent security issues.
 
 
 ===== Comparison with Strict Typing =====
 
-The main 'contender' to this weak typing RFC is the Strict Typing RFC - which is based on a strict comparison of the zval.type value.  As such, it introduces an entirely new semantics to PHP, especially around parameter passing.  Today, the zval.type is used only by a handful of functions (is_int() et al, gettype()), and the identity operator.  The former are much more rarely than their more 'lax' siblings (is_numeric()) which are typically more appropriate;  While the latter is typically used for specialized cases, e.g. when dealing with a function returning an integer, and having to tell boolean false apart.  It is therefore argued that extending a zval.type-based checks into parameter passing - a center-piece of the language - will inadvertently change the theme of the language, and the expected 'lax' type checking behavior expected from it today.
+The main 'contender' to this RFC is the Strict Typing RFC.  Unlike Type Enforcement, Strict Typing is based on a strict comparison of the zval.type value.  As such, it introduces an entirely new semantics to PHP, especially around parameter passing.  Today, the zval.type is used only by a handful of functions (is_int() et al, gettype()), and the identity operator.  The former are much more rarely than their more 'lax' siblings (is_numeric()) which are typically more appropriate;  While the latter is typically used for specialized cases, e.g. when dealing with a function returning an integer, and having to tell boolean false apart.  It is therefore argued that extending a zval.type-based checks into parameter passing - a center-piece of the language - will inadvertently change the theme of the language, and the expected 'lax' type checking behavior expected from it today.
 
 In that context, it's important to mention that the two most common sources for data going into PHP - input data (_GET, _POST, etc.) and data coming from the database - are almost exclusively typed as strings.  While some do type conversion during the input sanitizing phase - that is not always the case, especially with data coming from the database.  Strict Typing is inherently incompatible with this concept, in the sense that it assumes the underlying data type (zval.type) is identical to the semantics of the value.  It does not come to say that the two cannot be used together - but they are a pretty bad fit.
 
 Furthermore - it is important to notice that the sole difference between Strict Typing and this proposed solution has to do with what happens **outside** the scope of the type-argumented function.  In other words - all the benefits for the function code itself (readability, code reduction, optimization, etc.) is 100.0% identical.  The semantics of what happens during the parameter-passing stage is what's different.
 
-Arguably - because Strict Typing is likely to cause a lot of 'false positives', i.e. - failures in pieces of code that actually have nothing wrong in them - it is also likely that these would be solved by explicit casting during the function call;  Since PHP's casting will happily convert just about any type to any other type - this solution would be inferior to the solution proposed here - that is more likely to encourage code without explicit casting and therefore help weed out more issues and bugs.
+Interestingly, the benefits from both Strict Typing and Type Enforcement typing are quite similar - primarily since they are virtually identical as far as the called-function is concerned, and only differ in the semantics of the parameter-passing phase.  The same benefits mentioned above are mostly all relevant to Strict Typing as well.  If any, Type Enforcement holds an edge in code readability and reliability as far as the calling code is concerned.  Because Strict Typing is likely to cause a lot of 'false positives', i.e. - failures in pieces of code that actually have nothing wrong in them - it is also likely that these would be solved by explicit casting during the function call;  Since PHP's casting will happily convert just about any type to any other type - this solution would be inferior to the solution proposed here - that is more likely to encourage code without explicit casting and therefore help weed out more issues and bugs.
+
+<code php>
+function baz(int x, float y, string z) {}
+
+// Strict type checking
+baz((int) $_GET['x'], (float) $_GET['y'], (string) $_GET['z']); //explicit conversion required, even 'illogical' conversions will be applied without warning
+
+// Type enforcement
+baz($_GET['x'], $_GET['y'], $_GET['z']);  // on-the-fly conversion, with 'safety net' against illogical conversion
+</code>
 
 ===== Changelog =====
