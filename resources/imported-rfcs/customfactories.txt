@@ -1,0 +1,175 @@
+====== Request for Comments: Custom Factories ======
+  * Version: 1.0
+  * Date: 2009-11-18
+  * Author: Robert Lemke <robert.at.typo3.org>
+  * Status: First draft, under discussion
+  * First Published at: http://wiki.php.net/rfc/customfactories
+
+===== Introduction =====
+
+Dependencies between classes and ultimately between libraries are usually static due to hardcoded class names. While it is theoretically possible to develop alternative implementations by extending the original class or implementing a common interface, it is seldomly possible to make an existing library use this new implementation if this flexibility has not been foreseen by the original author.
+
+Dependency Injection and other forms of [[http://en.wikipedia.org/wiki/Inversion_of_Control|Inversion of Control]] can be a remedy to hard-wired dependencies and are, in the opinion of the author, the favorized way to tackle the problem.
+
+However, in order to conveniently use Dependency Injection and to utilize legacy libraries which not yet support Dependency Injection, PHP needs to support the notion of Custom Factories.
+
+===== The Problem =====
+
+The following code shows a class using the Singleton pattern to retrieve a logger:
+
+<code php>
+class SystemLogger implements LoggerInterface {
+
+	static protected $instance;
+
+	/**
+	 * Every time getInstance() is called, PHP kills a kitten
+	 */
+	public function getInstance() {
+		if (self::$instance === NULL) {
+			self::$instance = new self;
+		}
+		return self::$instance;
+	}
+
+	public function log($message) {
+		// ...
+	}
+
+}
+
+class SomeService {
+
+	protected $logger;
+
+	public function __construct() {
+		$this->logger = SystemLogger::getInstance();
+	}
+	
+	public function aMethod() {
+		$this->logger->log('aMethod has been called.');
+		// ...
+	}
+}
+</code>
+
+In the above code "SomeService" will always use "SystemLogger", there is no way to tell the service to use an alternative implementation of LoggerInterface. The following code solves this problem through a form of Dependency Injection:
+
+<code php>
+class SystemLogger implements LoggerInterface {
+
+	public function log($message) {
+		// ...
+	}
+
+}
+
+class SomeService {
+
+	protected $logger;
+
+	public function __construct(LoggerInterface $logger) {
+		$this->logger = $logger;
+	}
+	
+	public function aMethod() {
+		$this->logger->log('aMethod has been called.');
+		// ...
+	}
+}
+</code>
+
+The instance of LoggerInterface can either be passed to the constructor manually, or some framework takes care of injecting the dependency. Injection of objects which are in a Singleton scope (i.e. only one instance exists per script run) works very well without any special support by PHP. However, the situation is way different for creation of new objects.
+
+The following example uses no form of Dependency Injection but instead has hardcoded class names:
+
+<code php>
+class Email implements EmailInterface {
+	// ...
+}
+
+class Foo {
+	public function bar() {
+		$email = new Email();
+		// ...
+	}
+}
+</code>
+
+The two classes can be decoupled by using a generic Object Factory:
+
+<code php>
+class Email implements EmailInterface {
+	// ...
+}
+
+class Foo {
+
+	protected $objectFactory;
+
+	public function __construct(ObjectFactoryInterface $objectFactory) {
+		$this->objectFactory = $objectFactory;
+	}
+
+	public function bar() {
+		$email = $this->objectFactory->create('EmailInterface');
+		// ...
+	}
+}
+</code>
+
+Now "Foo" does not depend on any specific implementation, neither on an actual ObjectFactory nor on a specific Email implementation. But this comes with a price: At most places where the "new" operator would usually be used to instantiate classes, the ObjectFactory or some other kind of factory needs to be called. If the mechanism of Dependency Injection is consequently used, this results in a lot of additional typing and many classes will need the ObjectFactory getting injected by the surrounding framework.
+
+===== Proposal =====
+
+Provided that most or even all classes need to be instantiated by some factory provided by the framework, it is worth considering to provide specific support from the side of PHP. A way to realize this would be a registry of custom factories. Here is some mock example:
+
+<code php>
+class ObjectFactory {
+
+	// ...
+
+	public function create($className, array $arguments) {
+		if (!isset($this->registeredClasses[$className])) {
+			return FALSE;
+		}
+		$object = $this->instantiateClassAndInjectDependencies($className, $arguments);
+		return $object;
+	}
+}
+
+class Bootstrap {
+	public function initialize() {
+		$objectFactory = new ObjectFactory;
+		spl_factory_register(array($objectFactory, 'create'))
+	}
+}
+
+
+class Email implements EmailInterface {
+	// ...
+}
+
+class Foo {
+	public function bar() {
+		$email = new EmailInterface();
+	}
+}
+</code>
+
+Each time the "new" operator is used, the SPL Factory mechanism will ask registered object factories to instantiate the class. Such a factory must either return an instance of the specified class, subclass or interface, or return FALSE if it cannot or does not want to instantiate the class in question. As a last resort, some default spl_factory will try to instiate the class.
+
+===== Patch =====
+
+Unfortunately I am no C programmer and therefore lack the ability to provide a reasonable patch. At this point this RFC should act as a basis for further discussion by internals and PHP developers.
+
+==== Background Information ====
+
+In the [[http://flow3.typo3.org|FLOW3 Framework]] we are making heavy use of Dependency Injection and even provide a fully functional framework for Aspect Oriented Programming. While this all works fine for us, it would be way more elegant and probably faster if custom factories as suggested here existed.
+
+==== Bibliography ===
+[1] Martin Fowler, "Inversion of Control"
+http://martinfowler.com/bliki/InversionOfControl.html
+
+[2] Robert Lemke, "FLOW3 Object Framework"
+http://flow3.typo3.org/documentation/manuals/flow3/flow3.objectframework/
