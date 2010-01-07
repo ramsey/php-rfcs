@@ -7,9 +7,9 @@
 
 ===== Introduction =====
 
-php_error(), zend_throw_extension(), the @-operator... PHP and/or the Zend Engine respectively offer a variety of error issuance and handling mechanisms. There is, however, no encompassing concepts: Core functions only issue php_errors (suppressable), intl 1.0.3 by default suppresses all errors but can activate php_errors, pdo however has a proprietary flag to define error behaviour that allows exceptions - but limits php_error to E_WARNING.
+php_error(), zend_throw_extension(), the @-operator... PHP and/or the Zend Engine respectively offer a variety of error issuance and handling mechanisms. There is, however, no encompassing concepts: Core functions only issue php_errors (suppressable), intl 1.0.3 by default suppresses all errors but can activate php_errors, pdo however has a flag to define error behaviour that allows exceptions - but limits php_error to E_WARNING. Furthermore, each extension has a different way of changing its error behaviour.
 
-I state that error behaviour has to be in the hands of the user (php coder). He has to handle the situation and live with the consequences of failed calls. Some may prefer php_error()s, others prefer exceptions; some are ok with E_WARNINGs that indicate severe situations, others prefer E_ERROR for those cases; and some might want to either suppress all messages or default to a big exception block for a whole script in production systems (redirecting to a "sorry, something went wrong" page).
+I think that error behaviour has to be in the hands of the user (php coder). Different users have different preferences - and prefer different behaviour in different situations.
 
 ===== Scope =====
 
@@ -24,52 +24,42 @@ All other situations - like compilation problems, core errors in engine startup/
 If an error condition is met, different types of reactions are possible:
 ^ Name               ^ Description                              ^
 | Suppress           | Note down error and return an //error value//, e.g. false/NULL |
+| Monitor            | same as Suppress, but let a php monitor know - independent of error handling taken by user code|
 | Error              | same as Suppress, but issue a php_error as well |
 | Throw              | same as Suppress, but throw an exception as well |
 
-The error behaviour should be configurable by the user; preferably system-wide and
-overridable. An extension should not, however, decide to differ from the user's wishes.
+The error behaviour should be configurable by the user. An extension should not differ from the user's wishes, except in absolutely extraordinary circumstances.
 
-In any case, there should be a method to get at the noted-down error information, e.g.
-error code and message.
+Noted-down error information, e.g. error code and message etc., should be available by a standardized API.
 
 ==== Error Parameters ====
 
-php_error needs an E_* value to distinguish warnings and errors and the Throw behaviour
+Different behaviours, ask for different additional parameters: 
+zend_error needs an E_* value to distinguish warnings and errors and throwing an exception
 needs an exception class.
 
-Defaults for those parameters should be configurable like the error behaviour. The extension
-should however be able, while issuing an error, to set appropriate parameters if necessary.
+Default values for those parameters should be configurable like the error behaviour. However, more specific
+values - like an BadFunctionCallException while testing parameters - have to be definable with the
+error call itself.
 
 For extreme cases - like "one big exception block per script" - the default parameters
-should be enforcable by the user's wishes.
+should be enforcable by the user.
 
 ==== Error Container Hierarchy ====
 
-PHP lives of its extensibility. An extension can offer a whole bunch of different classes
-that are related; take ''intl'' as an example. It could be interesting for the user
-to differentiate his error reactions by object and/or extension. 
-He could wish to let the whole of ''intl'' throw a PersonalIntlExceptionClass upon errors or
-decide to switch to exceptions for a long block of translation calls (not testing each
-and every result on its own) while he usually prefers E_ERRORS being issued.
+PHP lives of its extensibility. Different extensions currently show different
+default error behaviours. It goes without saying, that error behaviour must
+keep being configurable by extension.
 
-The proposal therefore stands for a three-level hierarchy:
-
-^ Level           ^ Description ^
-| Global          | Define behaviour and default parameters |
-|                 | Could be used to force behaviour as well as parameters, eg. in production |
-| Field/Extension | Inherits from Global level |
-|                 | Overrides behaviour and parameters for a "field", e.g. all i18n in intl.so|
-| Object          | Inherits from Field level |
-|                 | Overrides behaviour and parameters for a single object |
-
-If any level enforces behaviour and/or parameters, the lower levels will not deviate.
+As some extensions currently do, I propose to add a further layer of error
+configurability on object level (see e.g. PDO -> by PDO connection). They should
+default to the extension's behaviour, but be configurable differently.
 
 ===== Special Cases =====
 
 ==== Enforced Exception class ====
 
-Each level could enforce the use of a specific exception class, e.g. PersonalIntlExceptionClass() for all of intl.so. While forcing such a common class does ease catching, some information a more specific class could provide is lost.
+A lower hierarchy level could enforce the use of a specific exception class, e.g. PersonalIntlExceptionClass() for all of intl.so. While forcing such a common class does ease catching, some information a more specific class could provide is lost.
 
 As of PHP 5.3, the concept of exception chaining has been introduced, whereas a "previous" extension can be attached. In order to keep the previously lost information, the concrete exception class given upon issuing an error should be chained to the enforced class.
 
@@ -85,91 +75,96 @@ The @ operator does suppress error issuance for the evaluation of the expression
 
 If possible, the operator should be limited to errors in the execution of scripts but "silence" thrown exceptions as well (like a "per object" Suppress above). It's functionality should be prohibited, if a certain behaviour is enforced.
 
-===== Implementation =====
+===== C API =====
+
+The following does not represent compilable code.
 
 ==== Error Container ====
 
-Each level mentioned above would need storage for error parameters as well as error results:
+The levels mentioned above would need a common container structure to hold error
+configuration as well as "last error" information. The same construct can be hold
+by extensions as well as objects.
+
 <code c>
-  struct _error_container {
-    // identification
-    char *name;
+  struct error_container {
+    char *name;                         // identification, e.g. extension name
+    error_container *parent;            // hierarchy: inherit parent's configuration
+    error_container *delegate;          // hierarchy: "last" error is in a child from this one
 
-    // used to propagate errors up/down
-    error_container *parent;
-    error_container *delegate;
+    error_behaviour  behaviour;         // error behaviour for this container
+    long             level;             // default E_*
+    zend_class_entry *exception;        // default exception class
 
-    // parameters as set by ini or api
-    enum error_behaviour behaviour;
-    zend_bool            force_behaviour;
-    long                 level;
-    char *               exception;
-    zend_bool            force_parameters;
-
-    // last error's data
-    char *container;
-    long  code;
-    char *msg;
+    error_incident incident;            // last error's information on this container's level
   }
 </code>
-
-  * **name**\\ There would be a global container (probably NULL), per extension (extension name) and per object ("object container")
-  * **parent**\\ Used to create the hierarchy of containers, e.g. to force a behaviour to lower containers
-  * **delegate**\\ Rather than copying error data two or even three times, set a pointer to the real data (container's destructors will have to correct pointers)
-  * **behaviour**\\ Some enum for the behaviours mentioned above
-  * **force-* **\\ Do force either behaviour or parameters for this container and children
-  * **level**\\ Either default or forced error level (E_*) for zend_error()
-  * **exception**\\ Either default or forced exception name (name instead of ce ptr allows to autoload)
-  * **container**\\ In which container the error did occur (for user presentation)
-  * **code** / **msg**\\ The usual error parameters
 
 ==== Error Function ====
 
 <code c>
-  void error_throw( error_container *container, long level, char *exception, long code TSRMLS_DC, char *format, ...);
+  error_behaviour error_yell( error_container *container, long level, char *exception, long code, char *msg );
+  error_behaviour error_yellf( error_container *container, long level, char *exception, long code, char *format, ... );
 </code>
 
-Each use of the error function should nevertheless be followed by a defined return value.
+Instead of writing explicit calls to zend_error or zend_exception_throw, this call abstracts away the
+error behaviour. It does, however return the ''actual'' behaviour initiated.
 
-==== User API ====
+As errors might be suppressed, after the use of error_yell a defined return value should be returned to PHP.
+One //cannot// be sure that the engine will branch away into an error or exception handler.
 
-<code>
-  // set or reset behaviour for an error container (global container if NULL)
-  void   error_set_behaviour( [string|object], $behaviour [, $errorlevel [, $exception]] );
-  void   error_reset_behaviour( [string|object] );
+==== Utility functions ===
 
-  // issue errors in plain PHP, too!
-  void   error_throw( [string|object], $code, $msg [, $level [, $exception]] );
-  void   error_clear( [string|object] );
+Apart from the error issuing function, several utility functions are needed, e.g.:
+  * Creation/Destruction of error containers
+  * Setting/Resetting error behaviour of containers
+  * Reading error incidents
+  * Clearing error incidents
 
-  // get error information by container
-  array  error_get_last( [string|object] ); // backwards compatible enhancement!
-  int    error_get_code( [string|object] );
-  string error_get_message( [string|object] );
-  string error_get_container( [string|object] );
+The corresponding API depends too much on implementation detais to discuss those here.
+
+===== PHP API =====
+
+Apart from extensions in C, php code itself could use such unified error configuration as well.
+Above mentioned error_yell function as well as utility functions to configure error behaviour and
+read error information should be available.
+
+A standard ErrorClass - implementing an object
+level error container plus standardized methods to access it - should be available:
+
+<code php>
+  class ErrorClass {
+    function __construct( $parent_container )
+    function setErrorBehaviour(...);
+    function resetErrorBehaviour();
+    function yellError(...);
+    function getLastError();
+  }
 </code>
 
-A container should be identifiable as NULL (global), a string (field/extension containers) or by giving an object that supports this scheme. As written above, any error should "trickle up" the chain, such that an error_get_code() gets the (globally) last error's code, even if it happened in a child container.
+Of course, the internal ErrorClass could be used as base class for
+extension classes as well.
 
-The same functions could be used as methods in objects supporting this scheme.
+Error containers would be identified by:
+  * NULL: global/highest hierarchy
+  * string: extension-level container (e.g. in a hash)
+  * ErrorClass: object-level container
 
-==== Integration ====
-
-Short of extending core structures of the Zend Engine and for better backwards compatibility, the error containers would have to be held in a hash. Extensions and objects would be able to "register" their container - as well as unregister them upon destruction. Extension names and object handles could be used as keys. As errors should be a relatively rare occurence, not much overhead is to be expected.
+In order to allow PHP frameworks to depend on an "extension level" container,
+such a string-identified container should be creatable on user level.
 
 ===== Backwards Compatibility =====
 
 ==== Extensions ====
 
-Extensions can keep backwards compatibility, if their current default behaviour is mapped to the above-mentioned Field level. Even special cases should be representable with the mentioned behaviours, parameters and enforcement.
+Extensions can keep backwards compatibility, if their current default behaviour is mapped to the above-mentioned extension level. Even special cases should be representable with the mentioned behaviours, parameters and enforcement.
 
 ==== Core ====
 
-I would personally not touch the core, but it's error behaviour should be representable as well.
+The core should probably only be touched if this proposal (or something analogous) is included in it...
 
 ===== Course of Action and Patch =====
 
-  - An intl extension-level implementation is being created by kampfcaspar at https://saintcyr.oeri.ch/trac/php-intl/
+  - Development: https://saintcyr.oeri.ch/trac/php-error/
   - Given enough feedback and operating experience, the enhanced error handling could be bundled in an "error extension"
   - Other extensions could use the "error extension"
 
@@ -178,3 +173,4 @@ I would personally not touch the core, but it's error behaviour should be repres
 ^ Date        ^ Author      ^ Message                 ^
 | 2009-12-27  | kampfcaspar | Created Initial Version |
 | 2009-12-28  | kampfcaspar | Added draft API         |
+| 2010-01-07  | kampfcaspar | Overhaul                |
