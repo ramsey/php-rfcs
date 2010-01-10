@@ -7,19 +7,51 @@
 
 ===== Introduction =====
 
-php_error(), zend_throw_extension(), the @-operator... PHP and/or the Zend Engine respectively offer a variety of error issuance and handling mechanisms. There is, however, no encompassing concepts: Core functions only issue php_errors (suppressable), intl 1.0.3 by default suppresses all errors but can activate php_errors, pdo however has a flag to define error behaviour that allows exceptions - but limits php_error to E_WARNING. Furthermore, each extension has a different way of changing its error behaviour.
+php_error(), zend_throw_extension(), the @-operator... PHP and/or the Zend Engine respectively offer a variety of error issuance and handling mechanisms. There is, however, no encompassing concepts: Core functions only issue php_errors (suppressable), intl 1.0.3 by default suppresses all errors but can activate php_errors, pdo however has a flag to define error behaviour that allows exceptions - but limits php_error to E_WARNING. Furthermore, each extension has a different way of changing its error behaviour etc. etc.
 
 I think that error behaviour has to be in the hands of the user (php coder). Different users have different preferences - and prefer different behaviour in different situations.
 
-===== Scope =====
+==== Scope ====
 
 Error conditions are encountered in a variety of places and cases. This RFC only covers error conditions in a running script, e.g. a file was not found.
 
 All other situations - like compilation problems, core errors in engine startup/shutdown - are out of scope.
 
+==== Differences Observed ====
+
+ * Almost all error behaviours include a human readable //error message// and a machine readable //error code//;
+   the 'original' zend_error however, does not define error codes, but far less granular //error types// (which
+   are nevertheless named errno in parts of the docs, e.g. set_error_handler).
+ * Error codes - if used - do not follow any common semantic rules and are therefore not interpretable without knowing
+   their source; even more, they might be defined externally (SQLSTATE or linked library).
+ * While traditionally error numbers have mostly been numeric, also //alphanumeric// variants exist (SQLSTATE).
+ * Error codes and - to a lesser extent - error messages are traditionally held in a special variable or place
+   for later inspection. Information held there may be reset //upon request/new error// (errno in C, error_get_last
+   in PHP) or with any subsequent //successful action/call// (PDO, intl).
+ * There may be just a single holding space for later inspection of error information (error_get_last), a
+   a compartementalized holding space for independent error information (PDO vs. PDOStatement) 
+   or even a hierarchical one, which combines the earlier two (intl).
+ * Functions not bailing out on error situations should return a //defined error value//. There is, however, a 
+   variety of defined error values - also dependent on the required valid return value range, which might include
+   values that other functions use as error indicating value.
+ * Definition of error actions - as described in the introduction - is handled by php.ini or object calls or not
+   available at all. None of it offers all options.
+
+===== Goals =====
+
+The goal would be to create a framework in which
+  * the //PHP user// decides, what kind of error reaction he wishes; that includes
+  * having an "error call" that abstracts away from zend_errors/exceptions and
+  * a minimal inheritance of error behaviours, such that different extensions and/or resource objects might be configured to react differently.
+  * offers a C-level API for compiled extensions as well as a PHP-level API for frameworks in that language.
+  * can be used in OOP as well as non-OOP situations.
+
+Such goals can only be achieved under the side condition of complete backwards compatibility. Default behaviour of
+existing php and extensions must not be changed - all existing error behaviour must be mappable.
+
 ===== Definitions =====
 
-==== Error Behaviours ====
+==== Error Actions ====
 
 If an error condition is met, different types of reactions are possible:
 ^ Name               ^ Description                              ^
@@ -28,9 +60,16 @@ If an error condition is met, different types of reactions are possible:
 | Error              | same as Suppress, but issue a php_error as well |
 | Throw              | same as Suppress, but throw an exception as well |
 
-The error behaviour should be configurable by the user. An extension should not differ from the user's wishes, except in absolutely extraordinary circumstances.
+The error action should be configurable by the user. An extension should usually not differ from the user's wishes.
 
-Noted-down error information, e.g. error code and message etc., should be available by a standardized API.
+Noted-down error information, e.g. error code and message etc., would be available by a standardized API.
+
+==== Error Levels ====
+
+Existing extensions use their error mechanisms not only to issue grave errors, but also to
+transport mere "warnings" to the user - much like a message transport. As this is pre-existing,
+both an //error and a //warning call should be supplied. The latter - ignoring all configuration -
+choosing Suppress or Monitor as appropraiate action.
 
 ==== Error Parameters ====
 
@@ -38,22 +77,22 @@ Different behaviours, ask for different additional parameters:
 zend_error needs an E_* value to distinguish warnings and errors and throwing an exception
 needs an exception class.
 
-Default values for those parameters should be configurable like the error behaviour. However, more specific
+Default values for those parameters should be configurable like the error action. However, more specific
 values - like an BadFunctionCallException while testing parameters - have to be definable with the
 error call itself.
-
-For extreme cases - like "one big exception block per script" - the default parameters
-should be enforcable by the user.
 
 ==== Error Container Hierarchy ====
 
 PHP lives of its extensibility. Different extensions currently show different
 default error behaviours. It goes without saying, that error behaviour must
-keep being configurable by extension.
+keep being configurable //by extension//.
 
-As some extensions currently do, I propose to add a further layer of error
-configurability on object level (see e.g. PDO -> by PDO connection). They should
+As some extensions currently do, I propose to add a layer of error
+configurability on //object level// (see e.g. PDO -> by PDO connection). They should
 default to the extension's behaviour, but be configurable differently.
+
+Without any hassle, //inheritance// could be implemented. The error configuration on
+a PDO connection could be inherited its PDOStatements.
 
 ===== Special Cases =====
 
@@ -91,7 +130,7 @@ by extensions as well as objects.
     error_container *parent;            // hierarchy: inherit parent's configuration
     error_container *delegate;          // hierarchy: "last" error is in a child from this one
 
-    error_behaviour  behaviour;         // error behaviour for this container
+    error_action     action;            // error behaviour for this container
     long             level;             // default E_*
     zend_class_entry *exception;        // default exception class
 
@@ -107,7 +146,7 @@ by extensions as well as objects.
 </code>
 
 Instead of writing explicit calls to zend_error or zend_exception_throw, this call abstracts away the
-error behaviour. It does, however return the ''actual'' behaviour initiated.
+error behaviour. It does, however return the //actual// action initiated.
 
 As errors might be suppressed, after the use of error_yell a defined return value should be returned to PHP.
 One //cannot// be sure that the engine will branch away into an error or exception handler.
@@ -125,7 +164,7 @@ The corresponding API depends too much on implementation detais to discuss those
 ===== PHP API =====
 
 Apart from extensions in C, php code itself could use such unified error configuration as well.
-Above mentioned error_yell function as well as utility functions to configure error behaviour and
+Above mentioned error_yell function as well as utility functions to configure error actions and
 read error information should be available.
 
 A standard ErrorClass - implementing an object
@@ -134,8 +173,8 @@ level error container plus standardized methods to access it - should be availab
 <code php>
   class ErrorClass {
     function __construct( $parent_container )
-    function setErrorBehaviour(...);
-    function resetErrorBehaviour();
+    function setErrorAction(...);
+    function resetErrorAction();
     function yellError(...);
     function getLastError();
   }
@@ -156,7 +195,7 @@ such a string-identified container should be creatable on user level.
 
 ==== Extensions ====
 
-Extensions can keep backwards compatibility, if their current default behaviour is mapped to the above-mentioned extension level. Even special cases should be representable with the mentioned behaviours, parameters and enforcement.
+Extensions can keep backwards compatibility, if their current default behaviour is mapped to the above-mentioned extension level. Even special cases should be representable with the mentioned actions, parameters and enforcement.
 
 ==== Core ====
 
@@ -174,3 +213,4 @@ The core should probably only be touched if this proposal (or something analogou
 | 2009-12-27  | kampfcaspar | Created Initial Version |
 | 2009-12-28  | kampfcaspar | Added draft API         |
 | 2010-01-07  | kampfcaspar | Overhaul                |
+| 2010-01-10  | kampfcaspar | +Differences Observed   |
