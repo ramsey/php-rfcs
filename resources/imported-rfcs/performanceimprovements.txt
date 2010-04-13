@@ -1,0 +1,96 @@
+====== Zend Engine Performance Improvements ======
+  * Version: 1.0
+  * Date: 2010-04-13
+  * Author: Dmitry Stogov <dmitry@zend.com>, Stanislav Malyshev <stas@zend.com>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/performanceimprovements
+
+This RFC offers several Zend Engine changes which together make up to 20% performance improvement on synthetic benchmarks and some real-life applications. 
+
+===== Empty HashTable Optimization =====
+
+During execution PHP uses a lot of HashTables, and our research showed that a significant part of these tables still empty throughout their entire lifetime. For example each PHP class has fully-allocated & initialized method/constant/properties tables even if it doesn't have method/constants/properties. Note that during HashTable initialization it allocates space for pointers to Buckets (HashTable->arBuckets[]). Of course, this allocation takes space and time.
+
+The idea for improvement is to delay the actual allocation of HashTable->arBuckets[] in the various tables until the insertion of first element. As a result PHP will use a bit less memory and save one [e]malloc()/[e]free() for each empty HashTable. On the other hand it'll have to check if the HashTable was initialized on each new element insertion.
+
+The patch improves speed of bench.php from **4.31** sec to **4.06** sec and micro_bench.php from **19.78** sec to **19.36** sec.
+ 
+===== Literal Tables =====
+
+Currently ZE uses a virtual machine with fixed 3-operand opcode representation. Each operand is represented as a union which may hold a zval (literal - a constant value known at compile time). So for each opcode we have to allocate space for 3 zvals even if the opcode doesn't use them. Each opcode requires 76 bytes on a 32-bit system.
+
+The proposed patch moves zvals from the opcodes themselves into a separate literal_table. Each op_array will have its own literal_table and its opcodes will contain pointers into this table. In addition the opcode structure was changed a bit to remove znode.u.EA.type and align data in a better way. As result each opcode will take only 28 bytes on 32-bit system. 
+
+For string constants the literal_table also contains a pre-calculated hash_value, which can be used during run-time. Some ZE internal functions were extended to receive and use additional zend_literal argument in case of constant operands. Several opcodes which use case-insensitive string operands (e.g. function and class references) allocate two following entries in the literal_table. The opcode itself points to the first entry which contains the original string value and the next entry contains the same lower-cased string. This allows performing most ZE primitive operations (e.g. function call, class fetch, method call, property access, etc) with constant operands without hash_value recalculation and lower-casing.
+
+The patch improves speed of bench.php to **4.01** sec and micro_bench.php to **17.95** sec.
+It also significantly reduces the memory usage of real-life applications with big code base. For example it reduce resident memory usage of PHP process which loads all Zend Framework classes from 27M to 22M (saves 5M or 18% per process).
+
+//Note: In the future this patch may be extended with moving zend_op.lineno into a separate debug_info data structure.//
+
+===== Interned Strings =====
+
+Interned strings is a well known technique originally implemented in functional languages. Its main idea is that each string (or atom) is allocated once and never changed (immutable). (See http://en.wikipedia.org/wiki/String_interning for more details). Our implementation makes the strings which are known at compile-time interned. The attempt to make all the strings interned made a significant slowdown on some applications that perform a lot of dynamic string operations. The patch introduces IS_INTERNED() macro to check if a given char* is interned or regular string. PHP doesn't have to duplicate or destroy interned strings in zval_copy_ctor() and zval_dtor(), but it must also not modify them in place. Interned strings contain pre-calculated hash_values so some opcodes with variable arguments won't require hash_value recalculation any more. For example:
+
+<code php>
+$a = "hello";
+$arr[$a] = "world"; // hash_value is pre-calculated at compile-time
+</code>
+
+In addition interned strings may be compared just using == C operator instead of strcmp(). It makes additional benefit at PHP string comparison and HashTable manipulation.
+
+The patch uses a fixed preallocated memory region to hold all the interned strings. IS_INTERNED() is represented simple as a region boundary checks. In case the region is exceeded all the strings which would going to be interned are still regular char*. To create interned strings the CG(new_interned_string)() callback should be used. Interned strings allocated during request processing are held in memory until the end of request processing. It's done through CG(interned_strings_snapshot)() and CG(interned_strings_restore)(). //Opcode caches have to dynamically override these callbacks to hold interned strings in shared memory.// 
+
+The patch improves speed of bench.php to **3.60** sec and micro_bench.php to **14.97** sec.
+
+//Note: The usage of special data structure (e.g. zend_string) instead of char* throughout PHP  would probably be a more consistent solution, but it would be a huge break. We are going to look into this solution in the future.//
+
+===== Zend Engine VM Tuning =====
+
+Mainly involves manual tuning based on profile feedback and CPU performance counters. The patch eliminates redundant instructions, performs additional source-level specialization, allows C compiler to make better register allocation and registers spilling. In general it doesn't change behavior or binary-compatibility except for 3 things:
+
+  - ZEND_RECV result value is always IS_CV (previously it could be IS_VAR for arguments named $this or $_GET)
+  - ZEND_CATCH has to be used with constant class name (previously it could be used with "self", "parent", "static")
+  - ZEND_FETCH_DIM_? opcode handlers may perform array and index fetching in different way. As result if both of them are undefined the warning messages may be emitted in a different order.
+
+The patch improves speed of bench.php to **3.49** sec and micro_bench.php to **14.63** sec
+
+===== Performance Evaluation =====
+
+The previous numbers were got without any opcode caches and optimizers. 
+
+^                       ^ php-trunk ^ patched ^ inprovement ^
+| bench.php (sec)       |      4.31 |    3.49 |         19% |
+| micro_bench.php (sec) |     19.78 |   14.63 |         26% | 
+
+The following results show the improvement of real-life applications with patched PHP and modified version of Zend Optimizer+.
+
+^                     ^ php-trunk ^ pathced ^ improvement ^
+| blog (req/sec)      |      59.3 |    66.2 |         12% |
+| drupal (req/sec)    |    1073.9 |  1084.8 |          1% |
+| fw (req/sec)        |     105.3 |   111.8 |          6% |
+| hello (req/sec)     |    5362.5 |  5351.4 |          0% |
+| qdig (req/sec)      |     243.4 |   253.7 |          4% |
+| typo3 (req/sec)     |     355.3 |   382.6 |          8% |
+| wordpress (req/sec) |     101.8 |   108.5 |          7% |
+| xoops (req/sec)     |      70.3 |    78.5 |         12% |
+| scrum (req/sec)     |      86.5 |   104.2 |         20% |
+
+===== APC support =====
+
+I'm going to develop a patch for APC in a few days after these patches are committed.
+
+===== Patches =====
+
+The patches must be applied to php trunk all together
+
+  * {{rfc:performanceimprovement:cumulative.diff.txt}}
+
+or in a proper order.
+
+  * {{rfc:performanceimprovement:1-bench.diff.txt}}
+  * {{rfc:performanceimprovement:2-empty_hash.diff.txt}}
+  * {{rfc:performanceimprovement:3-literals.diff.txt}}
+  * {{rfc:performanceimprovement:4-interned.diff.txt}}
+  * {{rfc:performanceimprovement:5-tuning.diff.txt}}
+  * {{rfc:performanceimprovement:6-version.diff.txt}}
