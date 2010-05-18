@@ -1,0 +1,49 @@
+====== Run Time Cache ======
+  * Version: 1.0
+  * Date: 2010-05-17
+  * Author: Dmitry Stogov <dmitry@zend.com>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/runtimecache
+
+This RFC offers an implementation of run-time caching technique which may improve performance of repeatable code
+
+===== Introduction =====
+
+During execution PHP often access different HashTables to get functions, constants, methods and properties by name. In case we save the result of lookup associated with current opcode we can quickly reuse the same value without HashTable access. This technique is called "inline caching" (See http://en.wikipedia.org/wiki/Inline_caching for more details).
+
+===== Implementation =====
+
+For each opcode that performs run-time binding of a constant name PHP compiler allocates a cache slot and stores its number in the zend_literal.cache_slot. The cache itself (zend_op_array.run_time_cache) is allocated on the first execution of op_array. During execution PHP checks if cache with this slot was initialized before and omits unnecessary lookups. PHP uses CACHED_PTR(slot) macro to check if it already performed a lookup before for constants, functions and classes and CACHED_POLYMORPHIC_PTR(slot, class_entry) for methods and properties which may be different for different classes. In the second case the cache keeps not only a pointer to method or property info but also the class entry which were used on previous lookup and checks if it's the same.
+
+To utilize this technique for properties access the structure of zend_class_entry and zend_object were changed a bit. Instead of keeping properties in HashTables now we store them in plain arrays and access them by offset (zend_property_info.offset) calculated at compile time (or during inheritance). In case object uses dynamic properties (non declared properties) or requires access through HashTable the plain array is converted to HashTable.
+This optimization is important itself because management of plain array significantly cheaper.
+
+A lot of changes in the patch caused by modification of zend_class_entry/zend_object structures.
+
+===== Performance Evaluation =====
+
+The patch makes more than 20% speed up on synthetic benchmark.
+
+^                       ^ php-trunk ^ patched ^ improvement ^
+| bench.php (sec)       |      3.47 |    3.45 |          1% |
+| micro_bench.php (sec) |     15.35 |   11.90 |         22% | 
+
+
+It also makes visible speedup on real-life object oriented applications.
+
+(the measurement was done with modified version of Zend Optimizer+)
+
+^                       ^ php-trunk ^ patched ^ improvement ^
+| blog (req/sec)        |        66 |    68.2 |          3% |
+| drupal (req/sec)      |    1073.7 |  1074.3 |          0% |
+| fw (req/sec)          |     109.8 |   113.4 |          3% |
+| hello (req/sec)       |   5791.79 | 5823.98 |          1% |
+| qdig (req/sec)        |       251 |   252.3 |          1% |
+| typo3 (req/sec)       |     378.7 |   382.2 |          1% |
+| wordpress (req/sec)   |     107.8 |   108.9 |          1% |
+| xoops (req/sec)       |      79.2 |    84.1 |          6% |
+| scrum (req/sec)       |     105.9 |   114.7 |          8% |
+
+===== Patch =====
+
+  * {{rfc:runtimecache:cache.diff.txt}}
