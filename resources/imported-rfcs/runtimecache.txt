@@ -47,3 +47,76 @@ It also makes visible speedup on real-life object oriented applications.
 ===== Patch =====
 
   * {{rfc:runtimecache:cache.diff.txt}}
+
+===== Notes for Extension Maintainers =====
+
+As was said before the patch modifies zend_class_entry and zend_object structure, so in case the extension works with properties directly it should be modified a bit. The key changes which may affect the extensions are in zend.h
+
+<code diff>
+Index: Zend/zend.h
+===================================================================
+--- Zend/zend.h	(revision 299688)
++++ Zend/zend.h	(working copy)
+@@ -298,6 +298,7 @@
+ typedef struct _zend_object {
+ 	zend_class_entry *ce;
+ 	HashTable *properties;
++	zval **properties_table;
+ 	HashTable *guards; /* protects from __get/__set ... recursion */
+ } zend_object;
+ 
+@@ -468,11 +469,13 @@
+ 	zend_uint ce_flags;
+ 
+ 	HashTable function_table;
+-	HashTable default_properties;
+ 	HashTable properties_info;
+-	HashTable default_static_members;
+-	HashTable *static_members;
++	zval **default_properties_table;
++	zval **default_static_members_table;
++	zval **static_members_table;
+ 	HashTable constants_table;
++	int default_properties_count;
++	int default_static_members_count;
+ 	const struct _zend_function_entry *builtin_functions;
+ 
+ 	union _zend_function *constructor;
+</code>
+
+For example property initialization in class constructors should be done using a special function instead of direct HashTable copying. Such copying isn't possible any more because default_properties HashTable is replaced with plain array - default_properties_table. 
+
+<code diff>
+Index: ext/xsl/php_xsl.c
+===================================================================
+--- ext/xsl/php_xsl.c	(revision 299688)
++++ ext/xsl/php_xsl.c	(working copy)
+@@ -129,7 +128,7 @@
+ 	intern->profiling = NULL;
+ 
+ 	zend_object_std_init(&intern->std, class_type TSRMLS_CC);
+-	zend_hash_copy(intern->std.properties, &class_type->default_properties, (copy_ctor_func_t) zval_add_ref, (void *) &tmp, sizeof(zval *));
++	object_properties_init(&intern->std, class_type);
+ 	ALLOC_HASHTABLE(intern->parameter);
+ 	zend_hash_init(intern->parameter, 0, NULL, ZVAL_PTR_DTOR, 0);
+ 	ALLOC_HASHTABLE(intern->registered_phpfunctions);
+</code>
+
+In case extension accesses object properties in HashTable it has to check if such HashTable initialized and rebuld it if necessary.
+
+<code diff>
+Index: ext/spl/spl_dllist.c
+===================================================================
+--- ext/spl/spl_dllist.c	(revision 299688)
++++ ext/spl/spl_dllist.c	(working copy)
+@@ -523,6 +522,9 @@
+ 		INIT_PZVAL(&zrv);
+ 		Z_ARRVAL(zrv) = intern->debug_info;
+ 
++		if (!intern->std.properties) {
++			rebuild_object_properties(&intern->std);
++		}
+ 		zend_hash_copy(intern->debug_info, intern->std.properties, (copy_ctor_func_t) zval_add_ref, (void *) &tmp, sizeof(zval *));
+ 
+ 		pnstr = spl_gen_private_prop_name(spl_ce_SplDoublyLinkedList, "flags", sizeof("flags")-1, &pnlen TSRMLS_CC);
+</code>
