@@ -395,3 +395,99 @@ $obj->method1 (); //PHP Fatal error:  Non-static closure called as method but no
 //only if the closure is actually bound to some other object (as opposed to not be bound at all), will we get_
 // WARNING: Closure called as method but bound object differs from containing object.
 </code>
+
+==== Private/protected members (scope) ====
+
+The currently implemented handling of scope for class closures is
+
+- They initially inherit the (calling) scope of the class they were created in.
+- After that, always use the class scope of the object that bindTo() is called for ([[#private_protected_member_access|option 2]])
+- If there's any bound instance, the called scope is set to the class of it, otherwise it's the same as the calling scope.
+
+The implementation of option #2 has serious drawbacks. Consider the following code:
+
+<code php>
+class foo {
+	private $field = "foo";
+	function getClosure() {
+		return function () {
+			echo $this->field, "\n";
+		};
+	}
+}
+class subFoo extends foo {}
+ 
+$f = new subFoo();
+$g = new subFoo();
+$c = $f->getClosure();
+$c(); //foo
+$c = $c->bindTo($g); //or even $c->bindTo($f)
+$c(); //fails
+</code>
+
+Since it's always taking the class of the bound object as scope, this means we have no way to keep the original scope of the closure without binding an instance of exactly the same class. It's against the basic principles of OOP to have something that works when passed A, but not when passed a subclass of A.
+
+There's always another problem. The current implementation allows changing the scope of a static closure, but only by attempting to bind it with am object of the desired class. This has two problems: it requires an instance for a solely static operation and it may even not be possible to generate objects of the desired class (e.g. it's abstract).
+
+Therefore, I propose an implementation ([[http://nebm.ist.utl.pt/~glopes/misc/closures_scope.patch|patch here]]) of option 4: "Add a parameter to bindTo() to specify this." This option is the most versatile and the implementation in the patch has very little magic – it only changes the scope of the closure if it's requested, otherwise it keeps the previous scope. The order of the current arguments of ''Closure::bind'' was also changed so that its implementation could be unified to that of ''Closure::bindTo'' using ''zend_parse_method_parameters''. The prototype is this:
+
+<code>
+Closure Closure::bind(Closure $old, object $to [, mixed $scope = "static" ] )
+</code>
+
+If the last argument is not given, or if "static" is specified, the current scope (or lack thereof) is preserved, with one exception noted below.
+
+The patch preserves these invariants:
+- A static closure, being scoped or not, cannot have any bound instance.
+- A non static closure has a bound instance iif it is scoped.
+
+To preserve these invariants, there are these additional rules:
+- If a non static closure is given a scope (or it already has a scope, but the scope parameter is not specified) and a NULL instance, it's made static.
+- If a static closure is given an instance, the instance is ignored and an ''E_WARNING'' notice is emitted.
+- If a non static non scoped (and therefore non bound) instance is given no scope and a non NULL instance, it's given a dummy scope (currently the "Closure" scope). **This is the only case where the previous scope, or lack thereof, is changed by the rebinding process**. This is necessary because it's not legal to have ''$this'' with a NULL scope.
+
+Example:
+
+<code php>
+class A {
+	private $x;
+	
+	public function __construct($v) {
+		$this->x = $v;
+	}
+	
+	public function getIncrementor() {
+		return function() { return ++$this->x; };
+	}
+}
+class B extends A {
+	private $x;
+	public function __construct($v) {
+		parent::__construct($v);
+		$this->x = $v*2;
+	}
+}
+
+$a = new A(0);
+$b = new B(10);
+
+$ca = $a->getIncrementor();
+var_dump($ca()); //int(1)
+
+echo "Testing with scope given as object", "\n";
+
+$cb = $ca->bindTo($b, $b);
+$cb2 = Closure::bind($ca, $b, $b);
+var_dump($cb()); //int(21)
+var_dump($cb2()); //int(22)
+
+echo "Testing with scope as string", "\n";
+
+$cb = $ca->bindTo($b, 'B');
+$cb2 = Closure::bind($ca, $b, 'B');
+var_dump($cb()); //int(23)
+var_dump($cb2()); //int(24)
+
+$cb = $ca->bindTo($b, NULL);
+var_dump($cb()); //Fatal error: Cannot access private property B::$x
+</code>
