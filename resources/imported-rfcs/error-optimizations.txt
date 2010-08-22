@@ -10,20 +10,75 @@ This RFC proposes a way to optimize our errors, by performing a type of just-in-
 
 ===== Introduction =====
 
-...
+Every error in PHP is formatting in a sprintf()-alike syntax using one of our many error handling functions, every time an error, warning or notice occurs, we hit the error handlers, format them even if we never wish to display the errors. This RFC proposes a way that could be used to reduce that.
 
 ===== Implementation =====
 
-...
+This RFC's implementation, proposes that we extends the EG() globals (executor) inside the Engine, to contain two new fields:
+<code c>
+        ...
+        zend_bool error_stack_enabled: 1;
+        zend_bool error_stack_logging: 0;
+        zend_error_arguments error_stack[];
+        int error_stack_size: 0;
+</code>
 
-==== log_errors ====
+The new structure, "zend_error_arguments", it looks like the following:
 
-...
+<code c>
+struct {
+	/* Message format */
+	const char *format;
+
+	/* File, and line number, if any */
+	const char *filename;
+	const int lineno;
+
+	/* Arguments */
+	va_args arguments;
+} _zend_error_arguments;
+
+typedef struct _zend_error_arguments zend_error_arguments;
+</code>
+
+The error_stack_logging executor global needs to match that of INI_BOOL("log_errors") and is only enabled if error_stack_enabled (INI_BOOL("display_errors") is off) is 1, which should be handled in main/ at PHP, outside the Engine which just sets a default. When we hit an error, it will stack the error using the error arguments structure and stash it into the global. If display_errors is off and log_errors is on, then dispatch it directly to the logging buffer, but only stack the last occured one, meaning that if two errors occurs in a row, with log_errors set to on and display errors set to off, the second call will override the last argument, using the error_stack_size global:
+
+<code c>
+zend_error_arguments arguments;
+
+... 
+
+if (EG(error_stack_enabled) && EG(error_stack_logging)) {
+        EG(error_stack)[EG(error_stack_size)] = arguments;
+
+        if (EG(error_stack_logging)) {
+                  /* dispatch to error logging hook */
+        }
+} else {
+        ...
+}
+</code>
 
 ==== error_get_last() ====
 
-....
+error_get_last() should internally check if EG(error_stack_enabled) is on, like:
+
+<code c>
+if (EG(error_stack_enabled) && EG(error_stack_size)) {
+        char *error;
+
+        /* Dispatch to formatting function, and copy it into, the "error" variable */
+
+        RETURN_STRING(error, 0, 1);
+} else {
+        ...
+}
+</code>
 
 ==== Memory usage ====
 
-...
+Obvious the memory usage here can grow quite rapidly, but people who would use this feature already takes great care of their code to not assume the opposite.
+
+===== Notes =====
+
+  * This is a very early WIP, the idea may change, or render obsolete in the future
