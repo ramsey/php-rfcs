@@ -1,6 +1,6 @@
 ====== Request for Comments: Class Metadata ======
   * Version: 1.0
-  * Date: 2010-05-26
+  * Date: 2010-08-24
   * Author: Guilherme Blanco <guilhermeblanco@hotmail.com>
   * Status: Ready for discussion
   * First Published at: http://wiki.php.net/rfc/annotations
@@ -36,12 +36,11 @@ First thing to be decided would be the tokens to be used for categorize an Annot
 
 When using meta mapping, less characters is preferred to speed up its construction.
 
-Doctrine defines a generic package that can be used: [[http://github.com/doctrine/common/tree/master/lib/Doctrine/Common/Annotations]]
-There it is possible to extract this EBNF:
+PHP Annotation could be simplified into this EBNF:
 
 <code>
 Annotations     ::= Annotation {Annotation}*
-Annotation      ::= "@" AnnotationName ["(" [Values] ")"]
+Annotation      ::= "[" AnnotationName ["(" [Values] ")"] "]"
 AnnotationName  ::= QualifiedName | SimpleName | AliasedName
 QualifiedName   ::= NameSpacePart "\" {NameSpacePart "\"}* SimpleName
 AliasedName     ::= Alias ":" SimpleName
@@ -59,19 +58,8 @@ KeyValuePair    ::= Key "=" PlainValue
 Key             ::= string | integer
 </code>
 
-With identifier being the terminal: [a-zA-Z_][a-zA-Z0-9\-_]*
-
-We have the limitation of characters that can have double meaning (one good example could be @, which would conflict with error suppressing when meta mapping a class definition).
-So we need to bring a list of tokens that could be used. I imported the suggestions from [[rfc:namespaceseparator|Namespace separator]] discussion:
-
-<code>**</code> 
-<code>^^</code>
-<code>%%</code>
-<code>:> </code>
-<code>:)</code>
-<code>:::</code>
-
-We can even consider a composition of tokens, example using [...] as attribute delimiter:
+With identifier being the terminal: [a-zA-Z_][a-zA-Z0-9_]*
+The annotation can be a composite of a start/end tokens. Here is an example of PHP Annotations:
 
 <code>
 [Entity(tableName="users")]
@@ -98,54 +86,156 @@ class User
 }
 </code>
 
+The support is all done through the inclusion of a new class: ReflectionAnnotation.
 
-The support would exist via the inclusion of a ReflectionAttribute object.
-This would populate the item for each correspondent Reflection* instance. Affected classes would be ReflectionClass, ReflectionProperty and ReflectionMethod.
-This is the interface prototype each of these classes should implement in order to support it:
+===== How to define Annotations =====
+
+Annotations can be defined in classes, methods, properties or functions.
+ReflectionAnnotation is an abstract class the must be implemented in order to accept an Annotation definition.
+Once this class is extended, the subclass is ready to be used an an Annotation:
 
 <code php>
-interface \ReflectionAttributeSupport
-{
-    /**
-     * Retrieve a ReflectionAttribute instance attached to the Reflection*.
-     *
-     * @param string $attribute Attribute to be checked for.
-     * @return \ReflectionAttribute Related ReflectionAttribute if found; null if not found.
-     */
-    public function getAttribute($attribute);
+class Foo extends \ReflectionAnnotation {}
+
+[Foo(true)]
+class Bar { /* ... */ }
+</code>
+
+Just extending the base class already allows you to define a unique value, accessible through a public property named "value".
+
+<code php>
+$reflClass = new \ReflectionClass('Bar');
+$reflAnnot = $reflClass->getAnnotation('Foo');
+
+echo $foo->value; // true
+</code>
+
+To expand Annotations support, it is allowed to define other properties, which are required to be public.
+BY doing it, you can define Annotations and automatically defining values to them.
+
+<code php>
+namespace App\Annnotation;
+
+class Link extends \ReflectionClass {
+    public $url;
+    public $target;
+}
+
+[App\Annotation\Link(url="http://www.php.net", target="_blank")]
+class PHPWebsite {
+    /* ... */
 }
 </code>
 
-Finally, this is he interface prototype of a ReflectionAttribute:
+===== How to retrieve Annotation information =====
+
+Annotations are only useful if defined information can be retrieved somehow.
+There are different ways to retrieve annotation information, mostly differing from how it was defined.
+
+** The following explanation is only valid for classes **
+
+To define an Annotation that may be exported to subclasses, it is required to define an Annotation on ReflectionAnnotation subclass, called Inherited.
+This is the general rule for Inherited annotations:
+
+** [Inherited] annotations are not inherited when used to annotate anything other than a class. A class that implements one or more interfaces never inherits any annotations from the interfaces it implements. **
+
+Example:
 
 <code php>
-interface \ReflectionAttribute implements \ArrayAccess
-{
-    /**
-     * Returns the first index of values (equivalent to $reflAttr[$field]).
-     * This is intentional to support this EBNF grammar rules:
-     *
-     *     Values ::= Array | Value {"," Value}*
-     * 
-     * Calling it should return the Array (which is converted to PHP array) 
-     * or the found Value (which is a ReflectionAttribute, any other object 
-     * instance, array or a scalar value).
-     *
-     * In the case of a Value that is a FieldAssignment and the key is not
-     * found, it should throw a \RuntimeException.
-     *
-     * @param mixed $field Value key to be fetched. Optional with default to
-     *                     the first index of an array.
-     * @return mixed
-     * @throws \RuntimeException
-     */
-    public function getValue($field = 0);
-}
+[Inherited]
+class Foo extends \ReflectionAnnotation {}
+
+class Bar extends \ReflectionAnnotation {}
+
+[Foo]
+[Bar]
+class A {}
+
+class B extends A {}
 </code>
 
-Of course this is not highly engineered and can be easily managed to a better implementation. This is just a draft that can be discussed and changed as needed to meet new requirements.
+When you attempt to retrieve the defined information for classes A and B, you get:
 
+<code php>
+$reflClassA = new \ReflectionClass('A');
+var_dump($reflClassA->getAnnotations());
+/*
+array(2) {
+  ["Foo"]=>
+  object(Foo)#%d (1) {
+    ["value"]=>NULL
+  },
+  ["Bar"]=>
+  object(Bar)#%d (1) {
+    ["value"]=>NULL
+  }
+}
+*/
+
+$reflClassB = new \ReflectionClass('B');
+var_dump($reflClassB->getAnnotations());
+/*
+array(2) {
+  ["Foo"]=>
+  object(Foo)#%d (1) {
+    ["value"]=>NULL
+  }
+}
+*/
+</code>
+
+The method `getAnnotations()` supports one of the three arguments:
+
+  * \ReflectionAnnotation::ALL - Fetched both defined annotations + inherited ones
+  * \ReflectionAnnotation::INHERITED - Retrieves only inherited annotations
+  * \ReflectionAnnotation::DEFINED - Retrieves only defined annotations (which may be defined as [Inherited], but declared in current class)
+
+Another available method is to retrieve an specific Annotation: `getAnnotation($name)`, which may return the matched Annotation or null if not found.
+
+Basically, these are the extended methods in Reflection API, written in raw PHP:
+
+<code php>
+
+abstract class ReflectionAnnotation {
+    const INHERITED = 1;
+    const DECLARED  = 2;
+    const ALL       = 3;
+}
+
+class ReflectionFunction {
+    // ...
+
+    public function getAnnotations();
+
+    public function getAnnotation($name);
+}
+
+class ReflectionClass {
+    // ...
+
+    public function getAnnotations($type = ReflectionAnnotation::ALL);
+
+    public function getAnnotation($name, $type = ReflectionAnnotation::ALL);
+}
+
+class ReflectionProperty {
+    // ...
+
+    public function getAnnotations();
+
+    public function getAnnotation($name);
+}
+
+class ReflectionMethod {
+    // ...
+
+    public function getAnnotations();
+
+    public function getAnnotation($name);
+}
+</code>
 
 ===== Changelog =====
 
-2010-05-26 guilhermeblanco Initial RFC creation.
+  * 2010-05-26 guilhermeblanco Initial RFC creation.
+  * 2010-08-24 guilhermeblanco Updated for a real doable support
