@@ -15,31 +15,198 @@ The purpose of this RFC is to propose adding functionality to Reflection which w
 Metadata is data which provides additional description about a structure. In PHP, this can be used for many purposes:
   * **Type Information** - Since PHP is a loosely typed language, there is currently no venue for encoding expected type information for use in, e.g. validation or sanitization routines.
   * **Relationships** - In an application with many model-type classes, there almost always exist many relationships between the models that go beyond the parent-child one modeled by class inheritance. For example, the "foreign key" concept from relational databases is one such set of relationships (e.g. one-to-one, one-to-many, etc) and is important in ORM-type programs.
-  * **Other** - Unfortunately, most of the use cases fall into the "other" category, and in truth the use cases for metadata often fall into a grey area: all information contained in metadata //could be contained within the structure itself//. The question is whether or not it could be more elegantly and appropriately contained elsewhere.
+  * **Other** - Most of the use cases fall into the "other" category, and in truth the use cases for metadata often fall into a grey area: all information contained in metadata could be contained within the structure itself. The question is whether or not it could be more elegantly and appropriately contained elsewhere.
 
 For other use cases, see also [[http://wiki.php.net/rfc/annotations|the Annotations RFC]].
 
-==== Why should the PHP engine do this? ====
+==== Why should this functionality be in php core? ====
 
-1. There is already a widely used syntax for structured DocBlocks (short description, long description, tags using the @ symbol).
-2. For metadata to be the most
+  - There is already a widely used syntax for structured DocBlocks (short description, long description, tags using the @ symbol). This means that there is a de facto standard which PHP can tap into to add functionality painlessly.
+  - As many of the use cases involve frameworks or other software intended to be used by a wide audience, this functionality could not be effectively captured in a PHP extension since frameworks et al. cannot generally rely on a non-core extension.
+  - The Reflection extension already in core is a natural place to put this as a complement to getDocComment().
 
 ===== Common Misconceptions =====
 
-RFCs do not in any way replace discussions on the mailing list.
+**Comments should not effect PHP's runtime behavior**
+
+There is no doubt that in general, commenting code means that it should be ignored by the parser. Despite this, I think there is reason to support parsing docBlocks.
+
+First of all, not all comments become docBlocks. They must precede a structure (class, function, property, method), and they must have the <code php>/** ... */</code> comment structure.
+
+<code php>
+//
+#
+/* ... */
+</code>
+are NOT docBlocks.
+
+Therefore, the comments that could potentially effect runtime behavior are isolated to a very specific set. Also, popular convention for docBlocks that already exists will support understanding of this difference.
+
+Furthermore, although not a reason in itself for either accepting or rejecting this proposal, Python's docstrings are parsed along with the object. This establishes that there is at least precedent for comments being integrated into runtime.
 
 ===== Proposal =====
 
-Nothing needs to be patched here. Just use this template at your discretion.
+This proposal is for a function which parses docBlocks and returns an associative array with text key=>value mappings to be added to the Reflection extension via three new methods:
+  * ReflectionClass::getParsedDocComment()
+  * ReflectionFunctionAbstract::getParsedDocComment()
+  * ReflectionProperty::getParsedDocComment()
+
+This proposal suggests that whitespace be treated similarly to in HTML (all whitespace gets reduced to a single space character) except that empty lines are significant (see example 1 below for explanation of this rule).
+
+=== Draft EBNF for docBlock parsing: ===
+
+<code>
+docblock := "\/**" , [whitespace] , [short_description] , [long_description] , [tag , { tag | ignored }*] , { emptyline }* , linebreak , "*/" ;
+short_description := line , { emptyline }+ ;
+long_description := line , { line | emptyline }* ;
+line := [space] , "* " , [space] , character-"@" , string , [space] , linebreak ;
+emptyline := [space] , "*" , [space] , linebreak ;
+tag := [space] , "* " , "@" , tagname , space , { string | string , linebreak }* , linebreak ;
+ignored := emptyline , { line | emptyline }+ ;
+string := { character } ;
+tagname := { character - " " } ;
+space := " " | "\t" ;
+linebreak := "\n" | "\r" | "\r\n" ;
+character := ? any ASCII character with code >= 32 and <= 126 ? ;
+</code>
+
+=== Examples ===
+
+== 1. The following shows a docBlock being parsed via this function: ==
+
+<code php>
+
+/**
+ * (Short Description)
+ *
+ * (Long Description ...
+ * 
+ * long description continues...
+ *
+ *
+ *
+ * still long description ...)
+ * 
+ * @tag1 this is some text for tag1
+ * @tag2
+ *
+ * @tag3 this is some
+ *       pretty-indented
+ *       multiline text
+ *       for tag 3
+ *
+ * (After tags begin, any text which has an empty line
+ * between it and the preceding tag will be completely
+ * ignored)
+ *
+ * @tag4 this is some
+ * non-pretty-indented
+ * multiline text
+ * for tag 4
+ *
+ * (as above, this is ignored)
+ */
+class foo {
+    // ...
+}
+
+$r = new ReflectionClass('foo');
+var_dump($r->getParsedDocComment());
+
+/*
+array(3) {
+  ["short_description"]=>
+  string(19) "(Short Description)"
+  ["long_description"]=>
+  string(85) "(Long Description ...
+ 
+ long description continues...
+ 
+ 
+ 
+still long description ...)"
+  ["tags"]=>
+  array(4) {
+    ["tag1"]=>
+    string(26) "this is some text for tag1"
+    ["tag2"]=>
+    string(0) ""
+    ["tag3"]=>
+    array(4) {
+      [0]=>
+      string(12) "this is some"
+      [1]=>
+      string(15) "pretty-indented"
+      [2]=>
+      string(14) "multiline text"
+      [3]=>
+      string(8) "for tag3"
+    }
+    ["tag4"]=>
+    array(4) {
+      [0]=>
+      string(12) "this is some"
+      [1]=>
+      string(19) "non-pretty-indented"
+      [2]=>
+      string(14) "multiline text"
+      [3]=>
+      string(9) "for tag 4"
+    }
+  }
+}
+*/
+
+</code>
+
+== 2. The following shows examples of docblocks that could not be parsed: ==
+
+<code php>
+
+/**
+ * This looks like a docblock, but since it doesn't
+ * precede a structure, it's not.
+ */
+
+// This is a comment ... but not a docblock
+class foo() {
+}
+
+# This is a comment ... but not a docblock
+class bar() {
+}
+
+/*
+ * This looks a lot like a docblock, but it's not one
+ * because it's opening line does not have two *.
+ *
+ * @tag this tag couldn't be parsed
+ */
+class baz() {
+}
+
+function foobar() {
+    /**
+     * This looks like a docblock, but since it doesn't
+     * precede a structure, it's not.
+     */
+}
+
+
+=== What is a docblock: ===
+A comment block using /** ... */ syntax, preceding a class, function, property, or method. This is the same as is currently used for the getDocComment() function in Reflection.
+
+=== What will not happen: ===
+  * Nothing will be done automatically - the getParsedDocComment() function must be called first.
+  * No comment block except for the docblocks described above will be available for parsing.
+  * At no point will anything in docBlocks be executed by the PHP engine.
 
 ==== Rejected Features ====
 
-Automated voting system.
+TBD?
 
-==== More about RFCs ====
+==== BC Breaks ====
 
-http://en.wikipedia.org/wiki/Request_for_Comments
+None.
 
 ===== Changelog =====
-
-
