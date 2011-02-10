@@ -1,0 +1,301 @@
+====== Request for Comments: Proposed Modifications To Traits ======
+  * Version: 1.0
+  * Date: 2011-02-11
+  * Author: Ben Schmidt <mail_ben_schmidt.at.yahoo.com.au>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/traitsmodifications
+  * Other formats: None
+
+======Introduction======
+
+Traits in PHP enable improved code reuse. They can be simplistically viewed as compiler-assisted copy-and-paste. Methods designed to be reused can be defined in traits and then these traits can be used in classes. The traits are 'flattened', so it is as if the trait methods were defined directly in the class in which they are used. Traits can access other methods and properties of the class, including those of other traits. They also currently fit in with the method overriding system: methods defined directly in a class override those in used traits, which in turn override those in ancestor classes.
+
+However, I believe traits have some deficiencies and limitations that would be worth addressing.
+
+======Proposals======
+
+=====Make inheritance and trait composition more separate and consistent=====
+
+====Problem====
+
+There are two aspects of traits that this modification addresses:
+
+  - In the present trait design, care is taken to ensure that conflicts between methods with matching names in different traits are explicitly resolved by the programmer. The rationale behind this is that any change to a trait which introduces a conflict will not go unnoticed or cause things to break. Traits are not supposed to have overriding and other 'vertical' behaviours. However, a method in a class body can shadow a method in a trait without even any warning being emitted. This is inconsistent, and because of it, as traits change, breakages can happen.
+  - Furthermore, this shadowing mechanism is not a full inheritance mechanism, like when methods in a subclass override and shadow those of a superclass: there is no way for a class method to reliably call the next method up the inheritance chain (which may be a trait method, or a method in a superclass). In short, there is no substitute for ''parent::''.
+
+====Proposal====
+
+Traits are designed to facilitate 'horizontal' code reuse. They are not intended to be part of an inheritance-like structure ('vertical' code reuse). So, I propose we remove concepts of inheritance and shadowing from traits, at least unless intent for this is made explicit when composing a class.
+
+So, when composing a class, the class body should be treated essentially like another trait, and any conflict between a method in the class body and a trait must be explicitly resolved by the programmer, just as conflicts between traits must be.
+
+Furthermore, the 'class body' should be viewed as containing methods from superclasses, too; a conflict between a superclass method and a trait method requires resolution. However, note that in this case, if a trait method is used ''insteadof'' a parent method, the parent method is not omitted from the class--the ''insteadof'' merely indicates that overriding is intentional, and superclass methods can still be accessed using ''parent::''. (If the parent method is used ''insteadof'' a trait method, the trait method is omitted as normal.)
+
+====Example====
+
+At present, this is legal:
+
+<code php>
+<?php
+trait T {
+   public function foo() {
+      echo "T";
+   }
+}
+class C {
+   use T;
+   public function foo() {
+      echo "C";
+   }
+}
+$o = new C();
+$o->foo(); // outputs C
+?>
+</code>
+
+With the proposed modification, it would cause an error at compile-time, requiring the programmer to do something like this:
+
+<code php>
+<?php
+trait T {
+   public function foo() {
+      echo "T";
+   }
+}
+class C {
+   use T {
+      self::foo insteadof T::foo;
+      // or C::foo insteadof T::foo;
+   };
+   public function foo() {
+      echo "C";
+   }
+}
+$o = new C();
+$o->foo(); // outputs C
+?>
+</code>
+
+This one would also cause an error needing resolution:
+
+<code php>
+<?php
+class P {
+   public function foo() { }
+}
+trait T {
+   public function foo() { }
+}
+class C extends P {
+   use T;
+}
+?>
+</code>
+
+Either ''self::'' or ''parent::'' could be used to refer to a superclass method. Using ''parent::'' would be an error, though, if the method were overridden by a method in the class body: it is not involved in any conflict, but only ''self::'' is. So this is OK:
+
+<code php>
+<?php
+class P {
+   public function foo() { }
+}
+trait T {
+   public function foo() { }
+}
+class C extends P {
+   use T {
+      T::foo insteadof self::foo;
+      // or T::foo insteadof parent::foo;
+      // or T::foo insteadof C::foo;
+      // or T::foo insteadof P::foo;
+   };
+}
+?>
+</code>
+
+But this is an error:
+
+<code php>
+<?php
+class P {
+   public function foo() { }
+}
+trait T {
+   public function foo() { }
+}
+class C extends P {
+   use T {
+      T::foo insteadof parent::foo;
+      // or: T::foo insteadof P::foo;
+   };
+   public function foo() { }
+}
+?>
+</code>
+
+====Implementation====
+
+I have no special comments to make regarding this implementation. It should be straightforward conceptually (though not necessarily quick or easy!) and mostly a modification of existing code.
+
+=====Add trait-local scope=====
+
+====Problem====
+
+Traits are designed to be able to easily interact if desired, particularly by sharing state, but also by calling methods provided by other traits or the composing class. However, sometimes this flexibility is not desired. In fact, it would make most sense for traits to have fairly carefully defined interfaces of interaction, so they can share state and use 'external' methods (necessarily or optionally) provided by other traits or the composing class, only when intended. When this sharing is not intended, though, it is good for traits to be able to reliably access their own state and method implementations. However, this is not currently possible, and hindered by two things:
+
+  * The complete lack of private state for traits mean all state must be shared. (And there is little allowance for generating errors on unintentional sharing.)
+  * The trait method omission (''insteadof'') and aliasing (''as'') mechanisms can result in trait methods no longer being available by the name the trait expects (and possibly being replaced by 'incompatible' methods).
+
+====Proposal====
+
+I suggest this problem can be simply solved by introducing two additional uses of the ''trait'' keyword: as a scoping keyword and an access specifier.
+
+As a scoping keyword, it would be used analogously to self. Method calls such as ''$this->print()'' could be replaced with ''trait::print()'' when the programmer desires to ensure that their trait method, and only their trait method, is called--when there is no intention that method replacement should be possible. It would only be able to be used in a trait, and could only be used to reference methods or properties defined in the same trait, using their original name. It could be used to access the trait methods for objects other than ''$this'', too, by means of the syntax ''$that->trait::method()''.
+
+As an access specifier, it would be used instead of public, private, etc. in trait definitions, to mean that the member (data or method) can and can only be accessed using the mechanism above (''trait::''). Methods and properties with ''trait'' access, of course, do not clash with methods in other traits or the class body; by using ''use'' appropriately, though, they can be made public (or protected or private).
+
+A side effect of traits being able to be more private is that it may become desirable to include some traits multiple times in the one class. To facilitate this, I suggest allowing ''as'' to be used outside the braces of of the ''use'' clause of a class to give a trait a name by which to refer to it in that clause (and with which to mangle property and method names when executing trait methods and encountering ''trait::'').
+
+====Example====
+
+Though not a particularly appropriate example, as this is quite probably better achieved by the delegate pattern, a contrived 'stack trait' can provide an example of how basically all aspects of this could work in practice:
+
+<code php>
+<?php
+trait Stack {
+   trait $st;
+   public function push($item) {
+      array_push(trait::$st,$item);
+   }
+   public function pop() {
+      return array_pop(trait::$st);
+   }
+   public function popAll() {
+      $all=array();
+      while ( ( $all[] = trait::pop() ) !== null ) ;
+      return $all;
+   }
+   public function equalTo($otherstack) {
+      return ($this->trait::st == $otherstack->trait::st);
+   }
+}
+class SomeClass {
+   use Stack as SomeStack {
+      SomeStack::push as pushSomething;
+      SomeStack::pop as popSomething;
+      SomeStack::popAll as emptySomething;
+      SomeStack::equalTo as sameSomethingAs;
+   };
+}
+?>
+</code>
+
+The class could compose multiple stacks without trouble.
+
+====Implementation====
+
+Implementation could be very simple. When flattening a trait into a class, every trait method, and every trait property with trait level access, could be included with a mangled name (e.g. making use of the reserved ''_ _'' prefix and/or characters which are illegal in code, e.g. ''_ _trait-TraitName-methodName''), and any occurrences of ''trait::'' scoping in any trait method body could be replaced with a call to the same kind of mangled name (e.g. ''trait::print()'' becomes ''$this->_ _trait-ErrorReporting-print()''). Data members could be treated in exactly the same way (e.g. ''trait::$output'' becomes ''$this->_ _trait-ErrorReporting-output''). Static members pose no additional problems. When flattening a trait into another trait, the mangling/transformation is slightly different, but not much harder. Perhaps a little demangling code for backtraces and/or error messages would be nice. This would be sufficient, though. The trait access specifier is nothing more than an indication that a method should be omitted with its unmangled name (essentially the same as an insteadof directive, but without any method taking its place), or that a property should be included with a mangled name, rather than going through the existing property conflict checking mechanism.
+
+Iterating over the object properties (or methods via reflection!), like with inherited private properties, could potentially include multiple properties (or methods) with the same name.
+
+=====Extend ''use'' syntax=====
+
+====Problem====
+
+Sometimes you want to use traits in a way where a number of traits provide various aspects (indeed traits!) of a particular behaviour. These aspects may be designed to be composed in different combinations and orders by a class author. But currently there is no nice way to call the 'next' method in a 'chain of traits'. In inheritance, parent:: fills this role, but for traits we need something else. At the moment, it can be done by using fairly artificial names for methods to avoid name clashes, and writing forwarding methods (just as much work as the delegate pattern, which traits are partly designed to 'replace'). A nicer syntax is desirable.
+
+====Proposal====
+
+I propose that the ''use'' directive be made more extensive and powerful. At the moment, at least one trait name must be listed in the directive (I believe). (These trait names may be listed with aliases using ''as'', with the earlier part of my proposal.) In addition, a number of exclusion (''insteadof'') and aliasing (''as'') directives can be included within braces. I propose that ''use'' be made more flexible, with it being optional to name traits (i.e. ''use'' may be used without composing any traits at all), and allowing additional types of aliasing directives in the braces:
+
+  * With the left-hand-side naming methods from self:: (or unqualified) and parent::, allowing them to be given different (additional) names in the class.
+  * With the right-hand-side including a trait qualification (TraitName::), with the meaning that the method is to supply the definition of an abstract trait-access method.
+  * With the left-hand-side referencing a method of a class property (e.g. ''$stack->push''), allowing a forwarding method to be automatically generated. (This also helps ensure traits are not abused by providing an easy way to implement the delegate pattern.)
+
+====Example====
+
+Again, a somewhat small and contrived example, but a little taste of how this works.
+
+Say we had a number of traits designed to provide different aspects of saving a database record: one ensures no other user changed the record since it was read, one logs the new change, one generates a hash for new records rather than relying on the database's automatic increment. And an ActiveRecord base class provides the core functionality of actually writing the record to the database. At present, to link these traits together, we would need something like this in the class:
+
+<code php>
+<?php
+trait GeneratingHashes {
+   trait function save() {
+      if ($this->newRecord) $this->fields['id'] = trait::hash();
+      return $this->saveForGeneratingHashes();
+   }
+   trait function hash() {
+      ...
+   }
+   abstract private function saveForGeneratingHashes();
+}
+...
+class CertainTypeOfRecord extends ActiveRecord {
+   private $fields=array();
+   private $newRecord=false;
+   private $log;
+   use EnsuringNoChanges, LoggingOperations, GeneratingHashes {
+      EnsuringNoChanges::save as public;
+      GeneratingHashes::save as private saveForEnsuringNoChanges;
+      LoggingOperations::save as private saveForGeneratingHashes;
+   }
+   private function saveForLoggingOperations() {
+      return parent::save();
+   }
+   public function echoLog($outputFile) {
+      $this->log->echo($outputFile);
+   }
+}
+?>
+</code>
+
+With these changes, this can be done with less code, and more elegantly:
+
+<code php>
+<?php
+trait GeneratingHashes {
+   trait function save() {
+      if ($this->newRecord) $this->fields['id'] = trait::hash();
+      return $this->next_save();
+   }
+   trait function hash() {
+      ...
+   }
+   abstract trait function next_save();
+}
+...
+class CertainTypeOfRecord extends ActiveRecord {
+   private $fields=array();
+   private $newRecord=false;
+   private $log;
+   use EnsuringNoChanges, LoggingOperations, GeneratingHashes {
+      EnsuringNoChanges::save as public;
+      GeneratingHashes::save as EnsuringNoChanges::next_save;
+      LoggingOperations::save as GeneratingHashes::next_save;
+      parent::save as LoggingOperations::next_save;
+      $log->echo as echoLog;
+   }
+}
+?>
+</code>
+
+====Implementation====
+
+I don't foresee too many implementation subtleties, though a little generating of forwarding code may be necessary. Particularly, since properties' objects wouldn't be available at compile time, the ability to reference them in ''use'' would probably have to be implemented by generating a forwarding method, and it wouldn't work with arguments passed by reference. It would basically be a shorthand for
+
+<code php>
+<?php
+public function publicMethodName() {
+   return call_user_func(array($this->delegate,'delegatedMethod'),
+         func_get_args());
+} 
+?>
+</code>
+
+In other cases, though, method bodies would probably be at hand and able to be linked to the appropriate names without trouble.
+
+====== Changelog ======
+
+1.0 (2011-02-11): Initial draft (based on mailing list discussion following an earlier proposal not recorded as an RFC).
+
