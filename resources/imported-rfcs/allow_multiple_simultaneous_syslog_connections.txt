@@ -1,0 +1,98 @@
+====== Allow multiple simultaneous syslog connections  ======
+  * Version: 1.0
+  * Date: 2011-07-05
+  * Author: Jérôme Loyet <fat@php.net>
+  * Status: Under Discussion
+  * First Published at: https://wiki.php.net/rfc/syslog_enhancement
+  * Original discussion: http://marc.info/?l=php-internals&m=129639452805700&w=2
+  * Original Feature Request: https://bugs.php.net/bug.php?id=51118
+
+===== Introduction =====
+
+This patch allows users to use multiple simultaneous syslog connections.
+
+Currently, the openlog function does not return a resource like would do the fopen or any database connection function. That implementation limits to 1 the simultaneous number of connections possible to syslog and this is problematic when the goal is to use syslog with different log locals.
+
+The patch changes openlog, syslog and closelog to handle a ressource which contain ident, option and facility.
+
+===== Proposal =====
+The proposed implementation should not break any current usage of syslog functions. Here is the changes :
+
+Global:
+  * add error_log_facility and error_log_ident variables to php.ini in order to defined default syslog parameters.
+  * add main/php_syslog.c file with :
+    * Add 3 variable in the struct _php_core_globals to keep trace of syslog options over the syslog() calls.
+    * php_openlog: save ident, facility and option in its global context before calling openlog.
+    * php_closelog: clear global context before calling closelog
+    * php_syslog_get_ident: returns the ident global context
+    * php_syslog_get_facility: returns the facility global context
+    * php_syslog_get_option: returns the option global context
+    * php_syslog2() is quite the same as php_syslog with ident/facility/option arguments added. Thoses are compared to the syslog global context, and openlog is called if they don't match.
+    * php_syslog remains #defined to syslog
+  * in main/main.c:
+    * if error_log is set to "syslog", call php_syslog2() with error_log_ident/facility instead of php_syslog()
+  * in ext/standard/syslog.c
+    * now openlog() returns a ressource which contains ident/option/facility
+    * now syslog() and closelog() takes an optional ressource parameter (returned from openlog) at the last position
+    * use php_syslog2,php_openlog and php_closelog
+  * in sapi/milter/php_milter.c
+    * use php_syslog2 in place of previous openlog/syslog
+
+===== Example =====
+<code php>
+<?php
+  syslog(LOG_ERR, "test 1 wihout calling openlog");
+  /*
+    ident is default (the process name) aka "php"
+    Jul 23 05:20:22 hostname php: test 1 wihout calling openlog
+  */
+
+  $r1 = openlog("ident#1", LOG_PID, LOG_SYSLOG);
+  $r2 = openlog("ident#2", LOG_PID, LOG_SYSLOG);
+
+  syslog(LOG_ERR, "test on #1", $r1);
+  /*
+    use $r1, so ident is now "ident#1"
+    Jul 23 05:20:22 hostname ident#1[24144]: test on #1
+  */
+
+  syslog(LOG_ERR, "test on ressource #2", $r2);
+  /*
+    use $r2, so ident is now "ident#2"
+    Jul 23 05:20:22 hostname ident#2[24144]: test on #2
+  */
+
+  closelog($r1);
+  closelog($r2);
+
+  syslog(LOG_ERR, "test 2 without openlog");
+  /*
+    as $r1 and $r2 have been closed, ident has been reset to default (the process name) aka "php"
+    Jul 23 05:20:22 hostname php: test 2 wihout calling openlog
+  */
+
+  openlog("ident#0", LOG_PID, LOG_SYSLOG);
+  syslog(LOG_ERR, "test 3 with openlog() but without ressource");
+  /*
+    openlog has been called, so ident not the default until closelog() call
+    Jul 23 05:20:22 hostname php: test 3 with openlog() but without ressource
+  */
+  closelog();
+  syslog(LOG_ERR, "test 4 without calling openlog");
+  /*
+    closelog() has been called, ident has been reset to default (the process name) aka "php"
+    Jul 23 05:20:22 hostname php: test 4 wihout calling openlog
+  */
+?>
+</code>
+
+===== Patch =====
+  * The source patch can be found with the ticket: https://bugs.php.net/bug.php?id=51118
+  * The documentation has not been patched yet.
+
+===== References =====
+  * http://en.wikipedia.org/wiki/Syslog
+  * http://linux.die.net/man/3/syslog
+
+===== Changelog =====
+  * 2011/07/05 Draft
