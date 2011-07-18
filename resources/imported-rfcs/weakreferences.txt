@@ -1,22 +1,66 @@
-====== Request for Comments: Weak References ======
-  * Version: 1.0
+===== Request for Comments: Weak References =====
+  * Version: 1.1
   * Date: 2011-07-15
-  * Author: Etienne Kneuss <colder@php.net>
-  * Status: Under Discussion
-
+  * Author: Etienne Kneuss <colder@php.net>, Hannes Landeholm <landeholm@gmail.com>
+  * Status: In discussion
 
 ===== Introduction =====
 
-This RFC discuss the introduction of weak references in PHP.
+Weak references is an established concept in many existing object oriented languages such as [[http://download.oracle.com/javase/1.4.2/docs/api/java/lang/ref/WeakReference.html|Java]], [[http://msdn.microsoft.com/en-us/library/system.weakreference.aspx|C#]], [[http://docs.python.org/library/weakref.html|Python]] and Lisp, and has been so for many years. [1] A weak reference provides a reference to an object that does not prevent it from being collected by [[http://php.net/manual/en/features.gc.php|the garbage collector (GC)]] as opposed from a strong reference (a normal variable containing an object instance). This type of referencing is critical for some types of object oriented design that needs to index a reference or use a reference as an index without preventing garbage collection of the referenced object. It is especially useful when working with references in a generic fashion, for example in framework design.
 
-==== Weak Reference ====
+[[https://bugs.php.net/bug.php?id=52318|Weak references has been requested for more than a year.]] At the time of writing it has over 10 votes and is also rated as highly important.
 
-A weak reference is a reference to an object that does not prevent its collection from the garbage collector (GC). Weak references are trying to solve the problem of caches and secondary references in complex data-structures. In such scenarios, the cache prevents the garbage collector from collecting an object, even though it's explicit usage has stopped.
+__Notes:__
 
-==== Use Cases ====
+  * Weak references does not change the behavior of normal ("strong") references or the syntax of the language.
+  * There is currently no mechanism in PHP that you can use to implement weak references. You need to reference an object to access it. The garbage collector needs the object to not be referenced to collect it. Ergo you cannot both reference an object and have the garbage collector collect it.
+  * Weak references is not used to enable or implement caching. Rather the opposite: weak references is used to prevent caching of objects.
 
-Weak references are useful to allow associating data to existing objects, without having to manually clean this information before the actual object gets collected.
+===== Use Cases =====
 
+Because weak references is such a generic concept it would be hard to find a use case that's both generic enough to cover most use cases and specific enough too allow you to relate to them. This section contains three use cases that the RFC author thinks would be among the most relevant for userland developers, but there could also be other useful usages. This section attempts to describe three major ones in an abstract way and provide concrete examples for them.
+
+==== Remote-identifier-indexed index ====
+
+When designing applications that fetch and model objects from external data sources an identifier is used to recognize this object. In a database it could be an ID while a file system would use the file name. One example could be an external server that takes a serial number of a product and return the related product data. The application might want to fetch the same serial number multiple times. Fetching the same product again and making a new object could have several problems. It might be slow and expensive. It might also break the assumption that an "Product" in never represented with more than one object instance at once.
+
+In a MVC (Model, View, Controller) framework one design is to have an internal dictionary of ID's that maps to their respective fetched model instances so an already fetched and initialized model instance can be returned when the application requests the same ID multiple times. However this design will prevent the garbage collector from actually freeing the objects when they are no longer used. Imagine that a web application quickly loops through all instances in a large table - examining them one at a time. Suddenly the application crashes due to an OOM (out of memory). This is because the internal ID index acts as a cache rather than a weak index collection. The hard references prevents the objects from being freed after they have been fetched from the database. If the index was a weak reference collection instead this would not be a problem.
+
+==== The observer pattern ====
+
+One useful design pattern is having object listening to events of other objects. This is known as the "observer pattern" and enables decoupling of objects.[2] Basically an object tells another object that it wants to "register" with a certain "event". When that event is "triggered" in that class it wants to "notify" the "observing" objects that the event was triggered. In order to implement this pattern one must keep a collection of registered instances in the observed object that are currently waiting for the event. This has an unintended side-effect. Since we are now storing references to the observing objects in the observed object, the observing objects can no longer be garbage collected as long as the observed object is not collected. Conceptually a weak reference should be used here instead.
+
+An airplane company Flight Inc. has a PHP application with a Flight class and a SeatBooking class. Whenever a Flight is set to "canceled" in the application, it has to notify all SeatBookings of the event so that the SeatBookings can notify their related passengers that the flight was canceled. A programmer implements this with a normal array.
+
+The programmer is now given another task - to loop trough all potential SeetBooking's and calculate the potential revenue (min, max, avg) that could gained from a certain selection of Flights. The programmer decides to brute force trough all potential bookings in all potential scenarios (Simulation) and use the existing price calculation logic in SeatBooking. In a pretty nested loop he creates a SeatBooking (new SeatBooking) sets the parameters (including what Flight it should be associated with), gathers the price information and moves on to the next SeatBooking in the next iteration. The reference to the last SeatBooking is overwritten for each iteration of the nested loop so the programmer does not expect any OOM condition but the program crashes anyway due to OOM after just a couple of thousand iterations. His array of SeatBookings in the Flight class was accidentally turned into a cache that cached the SeatBooking instances. He was lucky that the application crashed and he caught this problem. Otherwise the application might have hogged all the memory on the booking server - causing the booking server to grind to a swapping halt. Once again, a weak reference collection should have been used instead.
+
+Also see the current interfaces that SPL already provides for the observer pattern: [[http://php.net/manual/en/class.splobserver.php|SplObserver]] and [[http://php.net/manual/en/class.splsubject.php|SplSubject]].
+
+==== Non-obtrusively associating data with objects ====
+
+Arbitrarily associating data with objects is easier in PHP than other more strict languages since PHP allows dynamically adding public properties to object at run time. However doing this can still be undesirable in third party classes for several reasons:
+
+  * It can easily result in unintended side effects (bugs). The property might be subtly used (dynamically) and the property might be reserved in future updates.
+  * Awkward underscore prefixing to avoid the above.
+  * The class (or another class) might reflect on its properties - resulting in unintended side effects.
+  * The class might not allow dynamically adding properties. (overloaded get/set)
+  * Adding properties could have special meaning in the class. (overloaded get/set)
+  * Dynamically re-designing third party classes is not generally regarded as good object oriented design ("Inappropriate Intimacy").
+  * Not fully understanding the data structure or object graph in third party library being modified could result in memory leaks.
+
+To solve this one can use a dictionary and map the object to the related data. In PHP this can be achieved by using [[http://php.net/manual/en/class.splobjectstorage.php|SplObjectStorage]]. However the object will now be prevented from being garbage collected for as long as this data association exists. This was an unintended side effect since we are not interested in the data if the object is not used anywhere - therefore the data should not prevent the object from being collected. A weak reference to the object instead would solve this.
+
+===== Proposal and Patch =====
+
+This RFC suggests adding a class called "SplWeakRef" to the standard PHP library which implements weak references. This class would have a signature similar to the class "java.lang.ref.WeakReference" in Java[3], but would even more simple initially. It would implements some magic to allow GC collection. SplWeakRef would have the following prototype:
+
+  void   SplWeakRef::__construct(object ref)
+  object SplWeakRef::get()
+  bool   SplWeakRef::valid()
+  
+Patch is available here: [[http://patches.colder.ch/php-src/weakref-trunk.patch?markup]]
+
+==== Example ==== 
 
   <?php
   
@@ -39,13 +83,27 @@ Weak references are useful to allow associating data to existing objects, withou
   $a = $plop->getByID(42);
   
   unset($a); // destroys object
-===== Proposal and Patch =====
 
-Proposal is a SplWeakRef class, which implements some magic to allow GC collection. SplWeakRef would have the following prototype:
+===== Additional cleanup and __destruct() =====
 
-  void   SplWeakRef::__construct(object ref)
-  object SplWeakRef::get()
-  bool   SplWeakRef::valid()
-  
-  
-Patch is available here: [[http://patches.colder.ch/php-src/weakref-trunk.patch?markup]]
+Another common requirement will be to have the ability to clean up additional resources whenever the weakly reference object is collected - when SplWeakRef turns invalid. For example when implementing some sort of weak reference collection. In such a collection you would want to remove any weak reference that turns invalid to prevent references that take up resources. This RFC does not propose any mechanism in SplWeakRef to catch such an event for two reasons: First of all the initial version of SplWeakRef should be as simple as possible. Secondly there is a workaround. By utilizing the destruct() method on the object that is weakly referenced, one can catch this event and run any remaining cleanup. It might also be possible to make the collection more automated - for example, by using a third class as a proxy that is referenced both by the weak reference class and the target class - with a generic destruct() method.
+
+A future improvement would be to change the constructor (and implementation) to:
+
+  void SplWeakRef::__construct(object ref, SplQueue ref_queue = null)
+
+If the SplWeakRef is then given a ref_queue, it will call ref_queue->push($this) whenever it becomes invalid. If additional cleanup is required (if you want to catch the event and do cleanup immediately) one could simply extend SplQueue and overload SplQueue::push().
+
+Note that resurrection must be avoided so the SplWeakRef does not flip between valid -> invalid and then turns valid again (this would be a confusing behavior which can lead to unintentional behavior = bugs). The implementation should therefore make sure the SplWeakRef does not turn invalid before destruct() has been run for the object since destruct() can resurrect an object.
+
+===== Further reading =====
+
+  * http://weblogs.java.net/blog/2006/05/04/understanding-weak-references
+  * http://stackoverflow.com/questions/1640889/when-should-weak-references-be-used
+  * http://msdn.microsoft.com/en-us/library/ms404247.aspx 
+
+===== References =====
+
+  * [1] https://secure.wikimedia.org/wikipedia/en/wiki/Weak_reference
+  * [2] https://secure.wikimedia.org/wikipedia/en/wiki/Observer_pattern
+  * [3] http://download.oracle.com/javase/1.4.2/docs/api/java/lang/ref/WeakReference.html
