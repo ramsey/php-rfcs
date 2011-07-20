@@ -1,0 +1,141 @@
+====== Request for Comments: DateTime and Daylight Saving Time Transitions ======
+  * Version: 0.1
+  * Date: 2011-07-20
+  * Author: Daniel Convissor <danielc@php.net>
+  * Status: Draft
+  * First Published at: https://wiki.php.net/rfc/datetime_and_daylight_saving_time
+
+===== Introduction =====
+PHP's DateTime class has unexpected outcomes when dealing with the
+transitions between Daylight Saving Time and Standard Time.
+
+Properly defining, documenting and unit testing DateTime's behaviors is
+important for PHP's future.  This document seeks agreement on what
+the expected behaviors should be.
+
+Getting these issues straightened out before 5.4 goes into Release Candidate
+status seems wise.
+
+===== Time Zone for Sake of Discussion =====
+The ''America/New_York'' time zone will be used as the basis for this
+discussion.  The Standard/Daylight transition in this zone happens at
+2:00 am.  Other zones use different transition times.
+
+==== Spring ====
+<code>
+01:59:59 Standard Time
++ 1 second
+= 03:00:00 Daylight Saving Time (United States)
+</code>
+
+  * The hour of 2am gets skipped.
+  * There are 23 hours on that Sunday.
+  * 2010-03-14
+
+==== Fall ====
+<code>
+1:59:59 Daylight Saving Time (United States)
++ 1 second
+= 1:00:00 Standard Time
+</code>
+
+  * The hour of 1am gets replayed.
+  * There are 25 hours on that Sunday.
+  * 2010-11-07
+
+===== Construction During Transitions =====
+==== Spring ====
+Times between ''2:00:00 am'' and ''2:59:59 am'' do not exist during the
+Spring transition.  Attempts to create such times should be rounded forward,
+like PHP currently does when trying to create February 29th on a non-leap
+year.
+
+<code php>
+date_default_timezone_set('America/New_York');
+$date = new DateTime('2010-03-14 02:30:00');
+echo $date->format('Y-m-d H:i:s T') . "\n";
+// Expected: 2010-03-14 03:30:00 EDT
+// Actual:   2010-03-14 02:30:00 EDT
+</code>
+
+==== Fall ====
+PHP needs a means to create objects representing times during the hour
+repeated on the Daylight/Standard transition day
+(between ''1:00:00 am'' and ''1:59:59 am'' Standard Time).
+
+This RFC proposes adding a third parameter to ''DateTime::__construct()'',
+''bool $is_daylight_saving_time''.  The default value would be NULL.
+When NULL, PHP will use the current behavior, which uses the DST/ST
+in place at the specified time and uses DST during the repeated hour in the
+fall.
+
+Force Daylight Saving Time:
+<code php>
+date_default_timezone_set('America/New_York');
+$date = new DateTime('2010-11-07 01:30:00', null, true);
+echo $date->format('Y-m-d H:i:s T') . "\n";
+// Expected: 2010-11-07 01:30:00 EDT
+</code>
+
+Force Standard Time:
+<code php>
+date_default_timezone_set('America/New_York');
+$date = new DateTime('2010-11-07 01:30:00', null, false);
+echo $date->format('Y-m-d H:i:s T') . "\n";
+// Expected: 2010-11-07 01:30:00 EST
+</code>
+
+Default to Daylight Time during repeated hour, PHP's current behavior:
+<code php>
+date_default_timezone_set('America/New_York');
+$date = new DateTime('2010-11-07 01:30:00');
+echo $date->format('Y-m-d H:i:s T') . "\n";
+// Expected & Actual: 2010-11-07 01:30:00 EDT
+</code>
+
+
+===== Construction During Other Times =====
+Attempts to create a Standard Time during Daylight Saving Time should be
+rolled forward to DST.  Attempts to create a Daylight Saving Time during
+Standard Time should be rolled back to ST.
+
+
+===== Math =====
+==== Spring ====
+^ Saturday ^ Sunday  ^ Diff ^
+| 04:30 S  | 04:30 D | 1D   |
+| 04:30 S  | 03:30 D | 22H  |
+| 04:30 S  | 01:30 S | 21H  |
+| 01:30 S  | 01:30 S | 1D   |
+| The Transition Second |||
+| 01:59:59 S | 03:00:00 D | 1S |
+
+<code php>
+date_default_timezone_set('America/New_York');
+// Saturday, 23.5 hrs before DST transition
+$date = new DateTime('2010-03-13 02:30:00');
+$date->add(new DateInterval('P1D'));
+// Sunday, 2:30 doesn't exist, roll forward 1 hr
+echo $date->format('Y-m-d H:i:s T') . "\n";
+// Expected & Actual: 2010-03-14 03:30:00 EDT  
+</code>
+
+==== Fall ====
+^ Saturday ^ Sunday  ^ Diff  ^
+| 04:30 D  | 04:30 S | 1D    |
+| 04:30 D  | 03:30 S | 24H   |
+| 04:30 D  | 02:30 S | 23H   |
+| 04:30 D  | 01:30 S | 22H   |
+| 04:30 D  | 01:30 D | 21H   |
+| 01:30 D  | 01:30 D | 1D    |
+| 01:30 D  | 01:30 S | 1D 1H |
+| The Transition Second |||
+| 01:59:59 D | 01:00:00 S | 1S |
+
+
+===== Other Issues? =====
+If you know of other problems, please add them here or bring them to the
+attention of the authors.
+
+
+===== Changelog =====
