@@ -1,6 +1,6 @@
 ====== Request for Comments: DateTime and Daylight Saving Time Transitions ======
-  * Version: 0.1
-  * Date: 2011-07-20
+  * Version: 0.2
+  * Date: 2011-08-24
   * Author: Daniel Convissor <danielc@php.net>
   * Status: Draft
   * First Published at: https://wiki.php.net/rfc/datetime_and_daylight_saving_time
@@ -19,36 +19,19 @@ status seems wise.
 ===== Time Zone for Sake of Discussion =====
 The ''America/New_York'' time zone will be used as the basis for this
 discussion.  The Standard/Daylight transition in this zone happens at
-2:00 am.  Other zones use different transition times.
+2:00 am.  The forward transition (in spring) jumps to 3:00 am, skipping
+over the hour of 2 am.  The backward transition (in fall) jumps back to
+1:00 am, repeating the hour of 1am.
 
-==== Spring ====
-<code>
-01:59:59 Standard Time
-+ 1 second
-= 03:00:00 Daylight Saving Time (United States)
-</code>
+Other zones use different transition quantities and times.
 
-  * The hour of 2am gets skipped.
-  * There are 23 hours on that Sunday.
-  * 2010-03-14
-
-==== Fall ====
-<code>
-1:59:59 Daylight Saving Time (United States)
-+ 1 second
-= 1:00:00 Standard Time
-</code>
-
-  * The hour of 1am gets replayed.
-  * There are 25 hours on that Sunday.
-  * 2010-11-07
 
 ===== Construction During Transitions =====
-==== Spring ====
+==== Forward Transitions ====
 Times between ''2:00:00 am'' and ''2:59:59 am'' do not exist during the
-Spring transition.  Attempts to create such times should be rounded forward,
-like PHP currently does when trying to create February 29th on a non-leap
-year.
+Forward Transitions transition.  Attempts to create such times should be
+rounded forward, like PHP currently does when trying to create February 29th
+on a non-leap year.
 
 <code php>
 date_default_timezone_set('America/New_York');
@@ -58,21 +41,21 @@ echo $date->format('Y-m-d H:i:s T') . "\n";
 // Actual:   2010-03-14 02:30:00 EDT
 </code>
 
-==== Fall ====
+==== Backward Transitions ====
 PHP needs a means to create objects representing times during the hour
 repeated on the Daylight/Standard transition day
 (between ''1:00:00 am'' and ''1:59:59 am'' Standard Time).
 
-This RFC proposes adding a third parameter to ''DateTime::__construct()'',
-''bool $is_daylight_saving_time''.  The default value would be NULL.
-When NULL, PHP will use the current behavior, which uses the DST/ST
-in place at the specified time and uses DST during the repeated hour in the
-fall.
+This RFC proposes adjusting the time string parser to handle strings ending
+in ''DST'' and ''ST''.  When ''DST'' or ''ST'' are not present, PHP will use
+the current behavior, which uses the time zone offset in place at the
+specified time and uses DST offset during the repeated hour during backward
+transitions.
 
 Force Daylight Saving Time:
 <code php>
 date_default_timezone_set('America/New_York');
-$date = new DateTime('2010-11-07 01:30:00', null, true);
+$date = new DateTime('2010-11-07 01:30:00 DST');
 echo $date->format('Y-m-d H:i:s T') . "\n";
 // Expected: 2010-11-07 01:30:00 EDT
 </code>
@@ -80,7 +63,7 @@ echo $date->format('Y-m-d H:i:s T') . "\n";
 Force Standard Time:
 <code php>
 date_default_timezone_set('America/New_York');
-$date = new DateTime('2010-11-07 01:30:00', null, false);
+$date = new DateTime('2010-11-07 01:30:00 ST');
 echo $date->format('Y-m-d H:i:s T') . "\n";
 // Expected: 2010-11-07 01:30:00 EST
 </code>
@@ -93,44 +76,72 @@ echo $date->format('Y-m-d H:i:s T') . "\n";
 // Expected & Actual: 2010-11-07 01:30:00 EDT
 </code>
 
-
-===== Construction During Other Times =====
-Attempts to create a Standard Time during Daylight Saving Time should be
-rolled forward to DST.  Attempts to create a Daylight Saving Time during
-Standard Time should be rolled back to ST.
+Attempts to create a time that is during Daylight Saving Time but using
+''ST'' should roll the time forward to Daylight Saving Time.
+Attempts to create a time that is during Standard Time but using
+''DST'' should roll the time back to Standard Time.
 
 
 ===== Math =====
-==== Spring ====
-^ Saturday ^ Sunday  ^ Diff ^
-| 04:30 S  | 04:30 D | 1D   |
-| 04:30 S  | 03:30 D | 22H  |
-| 04:30 S  | 01:30 S | 21H  |
-| 01:30 S  | 01:30 S | 1D   |
-| The Transition Second |||
-| 01:59:59 S | 03:00:00 D | 1S |
+==== Forward Transitions ====
+=== diff() ===
+^ End ^ Start ^ Expected Result ^ Currently Works ^
+| ''2010-03-14 03:00:00 EDT'' | ''2010-03-14 01:59:59 EST'' | PT0H0M1S | N |
+| ''2010-03-14 04:30:00 EDT'' | ''2010-03-13 04:30:00 EST'' | P1DT0H | Y |
+| ''2010-03-14 03:30:00 EDT'' | ''2010-03-13 04:30:00 EST'' | P0DT22H | N |
+| ''2010-03-14 01:30:00 EST'' | ''2010-03-13 04:30:00 EST'' | P0DT21H | Y |
+| ''2010-03-14 01:30:00 EST'' | ''2010-03-13 01:30:00 EST'' | P1DT0H | Y |
 
-<code php>
-date_default_timezone_set('America/New_York');
-// Saturday, 23.5 hrs before DST transition
-$date = new DateTime('2010-03-13 02:30:00');
-$date->add(new DateInterval('P1D'));
-// Sunday, 2:30 doesn't exist, roll forward 1 hr
-echo $date->format('Y-m-d H:i:s T') . "\n";
-// Expected & Actual: 2010-03-14 03:30:00 EDT  
-</code>
+=== add() ===
+^ Start ^ Interval ^ Expected Result ^ Currently Works ^
+| ''2010-03-14 01:59:59 EST'' | PT1S | ''2010-03-14 03:00:00 EDT'' | Y |
+| ''2010-03-13 04:30:00 EST'' | P1D | ''2010-03-14 04:30:00 EDT'' | Y |
+| ''2010-03-13 04:30:00 EST'' | PT22H | ''2010-03-14 03:30:00 EDT'' | Y |
+| ''2010-03-13 04:30:00 EST'' | PT21H | ''2010-03-14 01:30:00 EST'' | Y |
+| ''2010-03-13 01:30:00 EST'' | P1D | ''2010-03-14 01:30:00 EST'' | Y |
+| ''2010-03-13 02:30:00 EST'' | P1D | ''2010-03-14 02:30:00 EDT'' | Y |
 
-==== Fall ====
-^ Saturday ^ Sunday  ^ Diff  ^
-| 04:30 D  | 04:30 S | 1D    |
-| 04:30 D  | 03:30 S | 24H   |
-| 04:30 D  | 02:30 S | 23H   |
-| 04:30 D  | 01:30 S | 22H   |
-| 04:30 D  | 01:30 D | 21H   |
-| 01:30 D  | 01:30 D | 1D    |
-| 01:30 D  | 01:30 S | 1D 1H |
-| The Transition Second |||
-| 01:59:59 D | 01:00:00 S | 1S |
+=== sub() ===
+^ End ^ Interval ^ Expected Result ^ Currently Works ^
+| ''2010-03-14 03:00:00 EDT'' | PT1S | ''2010-03-14 01:59:59 EST'' | N |
+| ''2010-03-14 04:30:00 EDT'' | P1D | ''2010-03-13 04:30:00 EST'' | Y |
+| ''2010-03-14 03:30:00 EDT'' | PT22H | ''2010-03-13 04:30:00 EST'' | N |
+| ''2010-03-14 01:30:00 EST'' | PT21H | ''2010-03-13 04:30:00 EST'' | Y |
+| ''2010-03-14 01:30:00 EST'' | P1D | ''2010-03-13 01:30:00 EST'' | Y |
+
+==== Backward Transitions ====
+=== diff() ===
+^ End ^ Start ^ Expected Result ^ Currently Works ^
+| ''2010-11-07 01:00:00 EST'' | ''2010-11-07 01:59:59 EDT'' | PT0H0M1S | N |
+| ''2010-11-07 04:30:00 EST'' | ''2010-11-06 04:30:00 EDT'' | P1DT0H | Y |
+| ''2010-11-07 03:30:00 EST'' | ''2010-11-06 04:30:00 EDT'' | P0DT24H | N |
+| ''2010-11-07 02:30:00 EST'' | ''2010-11-06 04:30:00 EDT'' | P0DT23H | N |
+| ''2010-11-07 01:30:00 EST'' | ''2010-11-06 04:30:00 EDT'' | P0DT22H | N |
+| ''2010-11-07 01:30:00 EDT'' | ''2010-11-06 04:30:00 EDT'' | P0DT21H | Y |
+| ''2010-11-07 01:30:00 EDT'' | ''2010-11-06 01:30:00 EDT'' | P1DT0H | Y |
+| ''2010-11-07 01:30:00 EST'' | ''2010-11-06 01:30:00 EDT'' | P1DT1H | N |
+
+=== add() ===
+^ Start ^ Interval ^ Expected Result ^ Currently Works ^
+| ''2010-11-07 01:59:59 EDT'' | PT1S | ''2010-11-07 01:00:00 EST'' | N |
+| ''2010-11-06 04:30:00 EDT'' | P1D | ''2010-11-07 04:30:00 EST'' | Y |
+| ''2010-11-06 04:30:00 EDT'' | PT24H | ''2010-11-07 03:30:00 EST'' | N |
+| ''2010-11-06 04:30:00 EDT'' | PT23H | ''2010-11-07 02:30:00 EST'' | N |
+| ''2010-11-06 04:30:00 EDT'' | PT22H | ''2010-11-07 01:30:00 EST'' | N |
+| ''2010-11-06 04:30:00 EDT'' | PT21H | ''2010-11-07 01:30:00 EDT'' | Y |
+| ''2010-11-06 01:30:00 EDT'' | P1D | ''2010-11-07 01:30:00 EDT'' | Y |
+| ''2010-11-06 01:30:00 EDT'' | P1DT1H | ''2010-11-07 01:30:00 EST'' | N |
+
+=== sub() ===
+^ End ^ Interval ^ Expected Result ^ Currently Works ^
+| ''2010-11-07 01:00:00 EST'' | PT1S | ''2010-11-07 01:59:59 EDT'' | N |
+| ''2010-11-07 04:30:00 EST'' | P1D | ''2010-11-06 04:30:00 EDT'' | Y |
+| ''2010-11-07 03:30:00 EST'' | PT24H | ''2010-11-06 04:30:00 EDT'' | N |
+| ''2010-11-07 02:30:00 EST'' | PT23H | ''2010-11-06 04:30:00 EDT'' | N |
+| ''2010-11-07 01:30:00 EST'' | PT22H | ''2010-11-06 04:30:00 EDT'' | N |
+| ''2010-11-07 01:30:00 EDT'' | PT21H | ''2010-11-06 04:30:00 EDT'' | Y |
+| ''2010-11-07 01:30:00 EDT'' | P1D | ''2010-11-06 01:30:00 EDT'' | Y |
+| ''2010-11-07 01:30:00 EST'' | P1DT1H | ''2010-11-06 01:30:00 EDT'' | N |
 
 
 ===== Other Issues? =====
