@@ -1,7 +1,7 @@
 ====== Request for Comments: DateTime and Daylight Saving Time Transitions ======
-  * Version: 0.2
-  * Date: 2011-08-24
-  * Author: Daniel Convissor <danielc@php.net>
+  * Version: 0.3
+  * Date: 2011-09-15
+  * Author: Daniel Convissor <danielc@php.net> with feedback from Derick Rethans <derick@php.net>
   * Status: Draft
   * First Published at: https://wiki.php.net/rfc/datetime_and_daylight_saving_time
 
@@ -16,14 +16,49 @@ the expected behaviors should be.
 Getting these issues straightened out before 5.4 goes into Release Candidate
 status seems wise.
 
+
+===== Zone Types =====
+PHP uses three different time zone data structures internally.
+
+Zone Type 3 objects contain the transition data required for proper
+calculations around the Daylight/Standard time changes.
+
+Zone Type 1 and 2 objects just know their offset from UTC, so addition and
+subtraction on them ignore crossing over Daylight/Standard thresholds.
+
+This RFC focuses on the changes needed to make Zone Type 3 work in a
+comprehensive manner.  Zone Type 1 and 2 behaviors are covered to clarify
+their expected behavior.
+
+==== Examples ====
+Examples of how to create DateTime objects containing each zone type:
+
+=== Zone Type 1: Offset ===
+<code php>
+$d = new DateTime('2011-09-13 14:15:16 -0400');
+</code>
+
+=== Zone Type 2: Abbreviation ===
+<code php>
+$d = new DateTime('2011-09-13 14:15:16 EDT');
+</code>
+
+=== Zone Type 3: ID ===
+<code php>
+$d = new DateTime('2011-09-13 14:15:16');
+// or
+$d = new DateTime('2011-09-13 14:15:16', new DateTimeZone('America/New_York'));
+</code>
+
+
 ===== Time Zone for Sake of Discussion =====
-The ''America/New_York'' time zone will be used as the basis for this
-discussion.  The Standard/Daylight transition in this zone happens at
+The ''America/New_York'' time zone will be used for demonstration purposes.
+The Standard/Daylight transition in this zone happens at
 2:00 am.  The forward transition (in spring) jumps to 3:00 am, skipping
 over the hour of 2 am.  The backward transition (in fall) jumps back to
 1:00 am, repeating the hour of 1am.
 
-Other zones use different transition quantities and times.
+Other time zones use different transition quantities and times.
 
 
 ===== Construction During Transitions =====
@@ -76,72 +111,149 @@ echo $date->format('Y-m-d H:i:s T') . "\n";
 // Expected & Actual: 2010-11-07 01:30:00 EDT
 </code>
 
-Attempts to create a time that is during Daylight Saving Time but using
-''ST'' should roll the time forward to Daylight Saving Time.
-Attempts to create a time that is during Standard Time but using
-''DST'' should roll the time back to Standard Time.
+The ''ST'' or ''DST'' modifiers can only be used when specifying times
+during the backward transition period.  Using the modifiers at other times
+will throw an exception in object-oriented style code while procedural
+style code will return false without triggering errors.
 
 
 ===== Math =====
+The date format used in this section is for display purposes only, does
+not correspond to a PHP format, nor is intended to be parsed by PHP.
+
+The behaviors indicated here are covered by unit tests in ''ext/date/tests'':
+  * xxxx.phpt
+  * yyyy.phpt
+  * zzzz.phpt
+
+Each output line in the test files is prefixed with an identifier
+that corresponds to the ''phpt'' columns in the tables below.
+
+Actual results for Zone Types 1 and 2 are shown as ''N/A'' for the moment
+because results are tainted by
+[[https://bugs.php.net/bug.php?id=55253|Bug 55253]].
+
 ==== Forward Transitions ====
-=== diff() ===
-^ End ^ Start ^ Expected Result ^ Currently Works ^
-| ''2010-03-14 03:00:00 EDT'' | ''2010-03-14 01:59:59 EST'' | PT0H0M1S | N |
-| ''2010-03-14 04:30:00 EDT'' | ''2010-03-13 04:30:00 EST'' | P1DT0H | Y |
-| ''2010-03-14 03:30:00 EDT'' | ''2010-03-13 04:30:00 EST'' | P0DT22H | N |
-| ''2010-03-14 01:30:00 EST'' | ''2010-03-13 04:30:00 EST'' | P0DT21H | Y |
-| ''2010-03-14 01:30:00 EST'' | ''2010-03-13 01:30:00 EST'' | P1DT0H | Y |
+=== Zone Type 3 ===
+== diff() ==
+^ End ^ Start ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-03-14T03:00:00''//(DT)// | ''2010-03-14T01:59:59''//(ST)// | PT0H0M1S | fd1 | PT1H0M1S |
+| ''2010-03-14T04:30:00''//(DT)// | ''2010-03-13T04:30:00''//(ST)// | P1DT0H   | fd2 | |
+| ''2010-03-14T03:30:00''//(DT)// | ''2010-03-13T04:30:00''//(ST)// | P0DT22H  | fd3 | P0DT23H |
+| ''2010-03-14T01:30:00''//(ST)// | ''2010-03-13T04:30:00''//(ST)// | P0DT21H  | fd4 | |
+| ''2010-03-14T01:30:00''//(ST)// | ''2010-03-13T01:30:00''//(ST)// | P1DT0H   | fd5 | |
 
-=== add() ===
-^ Start ^ Interval ^ Expected Result ^ Currently Works ^
-| ''2010-03-14 01:59:59 EST'' | PT1S | ''2010-03-14 03:00:00 EDT'' | Y |
-| ''2010-03-13 04:30:00 EST'' | P1D | ''2010-03-14 04:30:00 EDT'' | Y |
-| ''2010-03-13 04:30:00 EST'' | PT22H | ''2010-03-14 03:30:00 EDT'' | Y |
-| ''2010-03-13 04:30:00 EST'' | PT21H | ''2010-03-14 01:30:00 EST'' | Y |
-| ''2010-03-13 01:30:00 EST'' | P1D | ''2010-03-14 01:30:00 EST'' | Y |
-| ''2010-03-13 02:30:00 EST'' | P1D | ''2010-03-14 02:30:00 EDT'' | Y |
+== add() ==
+^ Start ^ Interval ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-03-14T01:59:59''//(ST)// | PT1S  | ''2010-03-14T03:00:00''//(DT)// | fa1 | |
+| ''2010-03-13T04:30:00''//(ST)// | P1D   | ''2010-03-14T04:30:00''//(DT)// | fa2 | |
+| ''2010-03-13T04:30:00''//(ST)// | PT22H | ''2010-03-14T03:30:00''//(DT)// | fa3 | |
+| ''2010-03-13T04:30:00''//(ST)// | PT21H | ''2010-03-14T01:30:00''//(ST)// | fa4 | |
+| ''2010-03-13T01:30:00''//(ST)// | P1D   | ''2010-03-14T01:30:00''//(ST)// | fa5 | |
+| ''2010-03-13T02:30:00''//(ST)// | P1D   | ''2010-03-14T02:30:00''//(DT)// | fa6 | |
 
-=== sub() ===
-^ End ^ Interval ^ Expected Result ^ Currently Works ^
-| ''2010-03-14 03:00:00 EDT'' | PT1S | ''2010-03-14 01:59:59 EST'' | N |
-| ''2010-03-14 04:30:00 EDT'' | P1D | ''2010-03-13 04:30:00 EST'' | Y |
-| ''2010-03-14 03:30:00 EDT'' | PT22H | ''2010-03-13 04:30:00 EST'' | N |
-| ''2010-03-14 01:30:00 EST'' | PT21H | ''2010-03-13 04:30:00 EST'' | Y |
-| ''2010-03-14 01:30:00 EST'' | P1D | ''2010-03-13 01:30:00 EST'' | Y |
+== sub() ==
+^ End ^ Interval ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-03-14T03:00:00''//(DT)// | PT1S  | ''2010-03-14T01:59:59''//(ST)// | fs1 | ''2010-03-14T03:59:59''//(DT)// |
+| ''2010-03-14T04:30:00''//(DT)// | P1D   | ''2010-03-13T04:30:00''//(ST)// | fs2 | |
+| ''2010-03-14T03:30:00''//(DT)// | PT22H | ''2010-03-13T04:30:00''//(ST)// | fs3 | ''2010-03-13T05:30:00''//(ST)// |
+| ''2010-03-14T01:30:00''//(ST)// | PT21H | ''2010-03-13T04:30:00''//(ST)// | fs4 | |
+| ''2010-03-14T01:30:00''//(ST)// | P1D   | ''2010-03-13T01:30:00''//(ST)// | fs5 | |
+
+=== Zone Types 1 & 2 ===
+== diff() ==
+^ End ^ Start ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-03-14T03:00:00''//(DT)// | ''2010-03-14T01:59:59''//(ST)// | PT0H0M1S | fd1 | |
+| ''2010-03-14T04:30:00''//(DT)// | ''2010-03-13T04:30:00''//(ST)// | P0DT23H  | fd2 | |
+| ''2010-03-14T03:30:00''//(DT)// | ''2010-03-13T04:30:00''//(ST)// | P0DT22H  | fd3 | |
+| ''2010-03-14T01:30:00''//(ST)// | ''2010-03-13T04:30:00''//(ST)// | P0DT21H  | fd4 | |
+| ''2010-03-14T01:30:00''//(ST)// | ''2010-03-13T01:30:00''//(ST)// | P1DT0H   | fd5 | |
+
+== add() ==
+^ Start ^ Interval ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-03-14T01:59:59''//(ST)// | PT1S  | ''2010-03-14T02:00:00''//(ST)// | fa1 | N/A |
+| ''2010-03-13T04:30:00''//(ST)// | P1D   | ''2010-03-14T04:30:00''//(ST)// | fa2 | N/A |
+| ''2010-03-13T04:30:00''//(ST)// | PT22H | ''2010-03-14T02:30:00''//(ST)// | fa3 | N/A |
+| ''2010-03-13T04:30:00''//(ST)// | PT21H | ''2010-03-14T01:30:00''//(ST)// | fa4 | N/A |
+| ''2010-03-13T01:30:00''//(ST)// | P1D   | ''2010-03-14T01:30:00''//(ST)// | fa5 | N/A |
+| ''2010-03-13T02:30:00''//(ST)// | P1D   | ''2010-03-14T02:30:00''//(ST)// | fa6 | N/A |
+
+== sub() ==
+^ End ^ Interval ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-03-14T03:00:00''//(DT)// | PT1S  | ''2010-03-14T02:59:59''//(DT)// | fs1 | N/A |
+| ''2010-03-14T04:30:00''//(DT)// | P1D   | ''2010-03-13T04:30:00''//(DT)// | fs2 | N/A |
+| ''2010-03-14T03:30:00''//(DT)// | PT22H | ''2010-03-13T05:30:00''//(DT)// | fs3 | N/A |
+| ''2010-03-14T01:30:00''//(ST)// | PT21H | ''2010-03-13T04:30:00''//(ST)// | fs4 | N/A |
+| ''2010-03-14T01:30:00''//(ST)// | P1D   | ''2010-03-13T01:30:00''//(ST)// | fs5 | N/A |
 
 ==== Backward Transitions ====
-=== diff() ===
-^ End ^ Start ^ Expected Result ^ Currently Works ^
-| ''2010-11-07 01:00:00 EST'' | ''2010-11-07 01:59:59 EDT'' | PT0H0M1S | N |
-| ''2010-11-07 04:30:00 EST'' | ''2010-11-06 04:30:00 EDT'' | P1DT0H | Y |
-| ''2010-11-07 03:30:00 EST'' | ''2010-11-06 04:30:00 EDT'' | P0DT24H | N |
-| ''2010-11-07 02:30:00 EST'' | ''2010-11-06 04:30:00 EDT'' | P0DT23H | N |
-| ''2010-11-07 01:30:00 EST'' | ''2010-11-06 04:30:00 EDT'' | P0DT22H | N |
-| ''2010-11-07 01:30:00 EDT'' | ''2010-11-06 04:30:00 EDT'' | P0DT21H | Y |
-| ''2010-11-07 01:30:00 EDT'' | ''2010-11-06 01:30:00 EDT'' | P1DT0H | Y |
-| ''2010-11-07 01:30:00 EST'' | ''2010-11-06 01:30:00 EDT'' | P1DT1H | N |
+=== Zone Type 3 ===
+== diff() ==
+^ End ^ Start ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-11-07T01:00:00''//(ST)// | ''2010-11-07T01:59:59''//(DT)// | PT0H0M1S | bd1 | PT0H59M59S |
+| ''2010-11-07T04:30:00''//(ST)// | ''2010-11-06T04:30:00''//(DT)// | P1DT0H   | bd2 | |
+| ''2010-11-07T03:30:00''//(ST)// | ''2010-11-06T04:30:00''//(DT)// | P0DT24H  | bd3 | P0DT23H |
+| ''2010-11-07T02:30:00''//(ST)// | ''2010-11-06T04:30:00''//(DT)// | P0DT23H  | bd4 | P0DT22H |
+| ''2010-11-07T01:30:00''//(ST)// | ''2010-11-06T04:30:00''//(DT)// | P0DT22H  | bd5 | P0DT21H |
+| ''2010-11-07T01:30:00''//(DT)// | ''2010-11-06T04:30:00''//(DT)// | P0DT21H  | bd6 | |
+| ''2010-11-07T01:30:00''//(DT)// | ''2010-11-06T01:30:00''//(DT)// | P1DT0H   | bd7 | |
+| ''2010-11-07T01:30:00''//(ST)// | ''2010-11-06T01:30:00''//(DT)// | P1DT1H   | bd8 | P1DT1H |
 
-=== add() ===
-^ Start ^ Interval ^ Expected Result ^ Currently Works ^
-| ''2010-11-07 01:59:59 EDT'' | PT1S | ''2010-11-07 01:00:00 EST'' | N |
-| ''2010-11-06 04:30:00 EDT'' | P1D | ''2010-11-07 04:30:00 EST'' | Y |
-| ''2010-11-06 04:30:00 EDT'' | PT24H | ''2010-11-07 03:30:00 EST'' | N |
-| ''2010-11-06 04:30:00 EDT'' | PT23H | ''2010-11-07 02:30:00 EST'' | N |
-| ''2010-11-06 04:30:00 EDT'' | PT22H | ''2010-11-07 01:30:00 EST'' | N |
-| ''2010-11-06 04:30:00 EDT'' | PT21H | ''2010-11-07 01:30:00 EDT'' | Y |
-| ''2010-11-06 01:30:00 EDT'' | P1D | ''2010-11-07 01:30:00 EDT'' | Y |
-| ''2010-11-06 01:30:00 EDT'' | P1DT1H | ''2010-11-07 01:30:00 EST'' | N |
+== add() ==
+^ Start ^ Interval ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-11-07T01:59:59''//(DT)// | PT1S   | ''2010-11-07T01:00:00''//(ST)// | ba1 | ''2010-11-07T01:00:00''//(ST)// |
+| ''2010-11-06T04:30:00''//(DT)// | P1D    | ''2010-11-07T04:30:00''//(ST)// | ba2 | |
+| ''2010-11-06T04:30:00''//(DT)// | PT24H  | ''2010-11-07T03:30:00''//(ST)// | ba3 | ''2010-11-07T04:30:00''//(ST)// |
+| ''2010-11-06T04:30:00''//(DT)// | PT23H  | ''2010-11-07T02:30:00''//(ST)// | ba4 | ''2010-11-07T03:30:00''//(ST)// |
+| ''2010-11-06T04:30:00''//(DT)// | PT22H  | ''2010-11-07T01:30:00''//(ST)// | ba5 | ''2010-11-07T02:30:00''//(ST)// |
+| ''2010-11-06T04:30:00''//(DT)// | PT21H  | ''2010-11-07T01:30:00''//(DT)// | ba6 | |
+| ''2010-11-06T01:30:00''//(DT)// | P1D    | ''2010-11-07T01:30:00''//(DT)// | ba7 | |
+| ''2010-11-06T01:30:00''//(DT)// | P1DT1H | ''2010-11-07T01:30:00''//(ST)// | ba8 | ''2010-11-07T02:30:00''//(ST)// |
 
-=== sub() ===
-^ End ^ Interval ^ Expected Result ^ Currently Works ^
-| ''2010-11-07 01:00:00 EST'' | PT1S | ''2010-11-07 01:59:59 EDT'' | N |
-| ''2010-11-07 04:30:00 EST'' | P1D | ''2010-11-06 04:30:00 EDT'' | Y |
-| ''2010-11-07 03:30:00 EST'' | PT24H | ''2010-11-06 04:30:00 EDT'' | N |
-| ''2010-11-07 02:30:00 EST'' | PT23H | ''2010-11-06 04:30:00 EDT'' | N |
-| ''2010-11-07 01:30:00 EST'' | PT22H | ''2010-11-06 04:30:00 EDT'' | N |
-| ''2010-11-07 01:30:00 EDT'' | PT21H | ''2010-11-06 04:30:00 EDT'' | Y |
-| ''2010-11-07 01:30:00 EDT'' | P1D | ''2010-11-06 01:30:00 EDT'' | Y |
-| ''2010-11-07 01:30:00 EST'' | P1DT1H | ''2010-11-06 01:30:00 EDT'' | N |
+== sub() ==
+^ End ^ Interval ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-11-07T01:00:00''//(ST)// | PT1S   | ''2010-11-07T01:59:59''//(DT)// | bs1 | ''2010-11-07T00:59:59''//(DT)// |
+| ''2010-11-07T04:30:00''//(ST)// | P1D    | ''2010-11-06T04:30:00''//(DT)// | bs2 | |
+| ''2010-11-07T03:30:00''//(ST)// | PT24H  | ''2010-11-06T04:30:00''//(DT)// | bs3 | ''2010-11-06T03:30:00''//(DT)// |
+| ''2010-11-07T02:30:00''//(ST)// | PT23H  | ''2010-11-06T04:30:00''//(DT)// | bs4 | ''2010-11-06T03:30:00''//(DT)// |
+| ''2010-11-07T01:30:00''//(ST)// | PT22H  | ''2010-11-06T04:30:00''//(DT)// | bs5 | ''2010-11-06T03:30:00''//(DT)// |
+| ''2010-11-07T01:30:00''//(DT)// | PT21H  | ''2010-11-06T04:30:00''//(DT)// | bs6 | |
+| ''2010-11-07T01:30:00''//(DT)// | P1D    | ''2010-11-06T01:30:00''//(DT)// | bs7 | |
+| ''2010-11-07T01:30:00''//(ST)// | P1DT1H | ''2010-11-06T01:30:00''//(DT)// | bs8 | ''2010-11-06T00:30:00''//(DT)// |
+
+=== Zone Types 1 & 2 ===
+== diff() ==
+^ End ^ Start ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-11-07T01:00:00''//(ST)// | ''2010-11-07T01:59:59''//(DT)// | PT0H0M1S | bd1 | |
+| ''2010-11-07T04:30:00''//(ST)// | ''2010-11-06T04:30:00''//(DT)// | P1DT1H   | bd2 | |
+| ''2010-11-07T03:30:00''//(ST)// | ''2010-11-06T04:30:00''//(DT)// | P1DT0H   | bd3 | |
+| ''2010-11-07T02:30:00''//(ST)// | ''2010-11-06T04:30:00''//(DT)// | P0DT23H  | bd4 | |
+| ''2010-11-07T01:30:00''//(ST)// | ''2010-11-06T04:30:00''//(DT)// | P0DT22H  | bd5 | |
+| ''2010-11-07T01:30:00''//(DT)// | ''2010-11-06T04:30:00''//(DT)// | P0DT21H  | bd6 | |
+| ''2010-11-07T01:30:00''//(DT)// | ''2010-11-06T01:30:00''//(DT)// | P1DT0H   | bd7 | |
+| ''2010-11-07T01:30:00''//(ST)// | ''2010-11-06T01:30:00''//(DT)// | P1DT1H   | bd8 | |
+
+== add() ==
+^ Start ^ Interval ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-11-07T01:59:59''//(DT)// | PT1S   | ''2010-11-07T02:00:00''//(DT)// | ba1 | N/A |
+| ''2010-11-06T04:30:00''//(DT)// | P1D    | ''2010-11-07T04:30:00''//(DT)// | ba2 | N/A |
+| ''2010-11-06T04:30:00''//(DT)// | PT24H  | ''2010-11-07T04:30:00''//(DT)// | ba3 | N/A |
+| ''2010-11-06T04:30:00''//(DT)// | PT23H  | ''2010-11-07T03:30:00''//(DT)// | ba4 | N/A |
+| ''2010-11-06T04:30:00''//(DT)// | PT22H  | ''2010-11-07T02:30:00''//(DT)// | ba5 | N/A |
+| ''2010-11-06T04:30:00''//(DT)// | PT21H  | ''2010-11-07T01:30:00''//(DT)// | ba6 | N/A |
+| ''2010-11-06T01:30:00''//(DT)// | P1D    | ''2010-11-07T01:30:00''//(DT)// | ba7 | N/A |
+| ''2010-11-06T01:30:00''//(DT)// | P1DT1H | ''2010-11-07T02:30:00''//(DT)// | ba8 | N/A |
+
+== sub() ==
+^ End ^ Interval ^ Expected ^ phpt ^ Actual (if wrong) ^
+| ''2010-11-07T01:00:00''//(ST)// | PT1S   | ''2010-11-07T00:59:59''//(ST)// | bs1 | N/A |
+| ''2010-11-07T04:30:00''//(ST)// | P1D    | ''2010-11-06T04:30:00''//(ST)// | bs2 | N/A |
+| ''2010-11-07T03:30:00''//(ST)// | PT24H  | ''2010-11-06T03:30:00''//(ST)// | bs3 | N/A |
+| ''2010-11-07T02:30:00''//(ST)// | PT23H  | ''2010-11-06T04:30:00''//(ST)// | bs4 | N/A |
+| ''2010-11-07T01:30:00''//(ST)// | PT22H  | ''2010-11-06T04:30:00''//(ST)// | bs5 | N/A |
+| ''2010-11-07T01:30:00''//(DT)// | PT21H  | ''2010-11-06T04:30:00''//(DT)// | bs6 | N/A |
+| ''2010-11-07T01:30:00''//(DT)// | P1D    | ''2010-11-06T01:30:00''//(DT)// | bs7 | N/A |
+| ''2010-11-07T01:30:00''//(ST)// | P1DT1H | ''2010-11-06T01:30:00''//(ST)// | bs8 | N/A |
 
 
 ===== Other Issues? =====
