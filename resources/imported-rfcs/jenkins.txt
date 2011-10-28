@@ -9,47 +9,116 @@
 
 The purpose of this RFC is to introduce the idea of using [[http://jenkins-ci.org/|Jenkins]] for Continuous Integration in the PHP project supported with a Proof of concept implementation.
 
-===== Why do we need CI? =====
+===== What is CI =====
 
+Continuous Integration is a software development practice where members of a team integrate their work frequently, usually each person integrates at least daily - leading to multiple integrations per day. Each integration is verified by an automated build (including test) to detect integration errors as quickly as possible. Many teams find that this approach leads to significantly reduced integration problems and allows a team to develop cohesive software more rapidly.
+http://martinfowler.com/articles/continuousIntegration.html
+http://en.wikipedia.org/wiki/Continuous_integration
+
+===== Why do we need CI? =====
   * Runs the build and the tests automatically, doesn't require human interaction to spot build and test failures.
   * Provides a solid baseline for others to check that they are seeing a problem or it is just some configuration problem on their end.
   * Provides an easy way to check the build status and the test results for different platform/environments (different cpu architectures, OS, etc.).
-  * Allows us to follow the build trends and history.
+  * Allows us to follow the build trends and history, we can see the common defects, etc.
 
 ===== gcov.php.net =====
-  * gcov.php.net is an in-house php application written in php: http://svn.php.net/viewvc/web/php-gcov/trunk/
+  * gcov.php.net is an in-house php application : http://svn.php.net/viewvc/web/php-gcov/trunk/
   * gcov.php.net does a throughout analysis (building the supported php versions and executing the testsuite with [[http://gcc.gnu.org/onlinedocs/gcc/Gcov.html|gcov]], [[http://ltp.sourceforge.net/coverage/lcov.php|lcov]] and [[http://valgrind.org/|Valgrind]] for test coverage and memory leaks, and does some [[https://wiki.php.net/ideas/automaticcodechecker|code checking]].
-  * gcov.php.net does a throughout analysis, but having to wait more than 2 days for a build result isn't really useful for checking build or test failures early.
-  * the development of gcov.php.net and the related work seems halted in the absence of Nuno Lopes.
+  * gcov.php.net does a throughout analysis, but having to wait more than 2 days for a build result defeats the purpose of CI.
+  * gcov.php.net only tests the code against one specific environment.
+  * the development of gcov.php.net and the related work seems slowed/halted in the absence of Nuno Lopes.
 
-===== Why Jenkins? =====
-  * It is community based and open source.
-  * It is java based, so it is easy to install on most platforms.
-  * It has a nice market share, good documentation and a pluggable architechture which allows it to be really [[https://wiki.jenkins-ci.org/display/JENKINS/Plugins|extendable]].
-  * Provides a web interface for the configuration, the most challanging configuration step could be writing your ant build.xml (so it is easy). 
-  * Supports both SVN, git and mercurial (and almost every other SCM), so the DVCS migration shouldn't be a problem.
-  * Supports distributed builds out of the box.
+===== Jenkins =====
+  * Jenkins, previously known as Hudson, is an open source continuous integration tool written in Java.
+  * http://jenkins-ci.org/
+  * http://en.wikipedia.org/wiki/Jenkins_(software)
+
+===== Why Jenkins =====
+  * It is a truly open source, no catch(MIT License https://github.com/jenkinsci/jenkins/blob/master/LICENSE.txt).
+  * It has a active, open and committed community behind it.
+  * It has an easy to extend architecture and there is a whole bunch of plugins (https://wiki.jenkins-ci.org/display/JENKINS/Plugins).
+  * Supports distributed builds out of the box(https://wiki.jenkins-ci.org/display/JENKINS/Distributed+builds).
+  * Supports both SVN, git and mercurial (and almost every other SCM), so the DVCS migration shouldn't cause any problem.
+  * It is java based, so it is available on most platform without a major PITA.
+  * Provides a web interface for both the administration/configuration and checking the build results. 
   * Sebastian Bergmann prefers it over everything else. :)
+  * Which means that currently it is one (if not the) most used CI tools in the php community.
 
 ===== ci.qa.php.net =====
 
 We have a demo/Proof of concept interface at http://ci.qa.php.net/
-  * It consist 2 vm: a 64 and 32 bit debian squeeze
-  * It has 6 [[https://wiki.jenkins-ci.org/display/JENKINS/Distributed+builds|matrix job]]:
-    * two for each branch(5.3, 5.4, trunk):
-      * one for ./configure && make
-      * one for running the testsuite against that branch
-  * I also patched the run-tests.php to be able to generate ant junit compatible xml report which is supported by jenkins.
-  * Each matrix job will be executed on both node, and the results will be aggregated:
-    * if the job fails of any of the nodes, the job will be failed
-    * for the testsuite jobs, the test results will be aggregated:
-      * see http://ci.qa.php.net/job/php-src-5.3-matrix-tests/3/testReport/? fox example
-  * I'm planning a documentation about the current setup (which plugins, packages was used, configuration, general jenkins terminologies, introducting the terms like job, downstream job, matrix job, configuration job, distributed jobs, etc.).
-  * Some config files and my run-tests.php patches are available at https://github.com/Tyrael/ci.qa.php.net
+  * We have 4 virtual machines: 2 Linux(Debian Squeeze i386 and amd64) and 2 bsd(FreeBSD 8.2 i386 and amd64), the debian amd64 runs the jenkins master instance, and every vm(including the debian amd64) runs a jenkins slave. 
+  * We have 6 "matrix" job:
+    * Two for each branch(5.3, 5.4, trunk):
+      * the "build" job for building the binaries (./buildconf && ./configure && make)
+      * the "test" job for running the testsuite against that branch
+  * Each "build" job polls the svn repository periodically, and triggers the build if any SCM changes occur for that branch.
+  * If the "build" job is successful, it will trigger the "test" job for that branch.
+  * The "test" job will use the binary from the "build" job and execute the testsuite, this job will fail if run-tests.php returns with a non-zero exit code(REPORT_EXIT_STATUS=1) 
+  * Both the "build" and the "test" job is a "matrix" job, also known as multi-configuration job:
+    * The jenkins nodes can have labels, and the jobs can be attached  to label(s), so they will only build on nodes having that label(s).
+    * The multi configuration job means that the job will be executed multiple times, with slight variations in the build configuration.
+    * Those variation could be many thing, but in our case, the axes of our matrix jobs are the labels: our builds will be executed on all four nodes.
+    * By default, a matrix job is only considered successful, if all of the configuration jobs for that job succeeds.
+    * Jenkins supports aggregating the test results from the configuration jobs, more on that later.
+  * We patched the run-tests.php to be able to generate ant junit compatible xml report which is supported by Jenkins(https://github.com/Tyrael/ci.qa.php.net/blob/master/run-tests.php).
+    * This means that Jenkins can do advanced stuff with our test results, like 
+        * aggregating the results
+        * showing the execution time for each test
+        * groupping the test by status (passed, failed, error, skipped)
+        * it can spot if a new test failure is introduced, etc.
+  * We also created an ant build.xml for our jobs (https://github.com/Tyrael/ci.qa.php.net/blob/master/build.xml), so we can execute our build steps in more platform independent way.
+  * We set up an irc channel on freenode: #php.qa and we also set up an irc integration with jenkins (https://wiki.jenkins-ci.org/display/JENKINS/IRC+Plugin), so the build status can be followed/checked through irc.
+  * Of course reporting via email is also supported and will be set up when needed.
+
+===== Tutorial =====
+  * http://ci.qa.php.net/ is the dashboard
+    * it lists the projects and a quick summary about the status
+      * S: status, the blue bubble means that the last execution for that particular job was a success, the red ball means failure(the yellow means unstable).
+      * W: weather, the weather icons show a quick summary of the health of that job, sunny/cloudy/rain/thunder shows the frequency of build failures.
+      * Job: job name
+      * Last Success: Date of the last successful execution (and a link for that build)
+      * Date of the last failed execution (and a link for that build)
+      * Length of the last executon
+      * Schedule a build (only accessible for authenticated users having the php-dev group membership, it doesn't use the svn user db or the karma system yet. :()
+      * Cron Trigger: showing the scheduling for that particular job.
+  * http://ci.qa.php.net/job/php-src-5.3-matrix-build/ is a job view
+    * on the left there is the navigation:
+      * Status: the status of the job, with the project matrix and some trends.
+      * Changes: show which job execution was built from which scm revision.
+      * Workspace: the current workspace (on the master node).
+      * Schedule a build: same as on the dashboard.
+      * Subversion polling log: output of the last scm poll.
+    * and the Build history:
+      * trend, see below
+      * Status
+      * Build number
+      * Build date, and a link to that particular job execution.
+      * Size of the build artifacts(the files created via the build)
+  * http://ci.qa.php.net/job/php-src-5.3-matrix-build/buildTimeTrend build trend
+    * you can see some nice trend graphs about the build history
+  * http://ci.qa.php.net/job/php-src-5.3-matrix-build/28/ build page for the matrix job
+    * on the left you can see:
+      * Status: status of that particular build
+        * who triggered it
+        * from which SCM revision
+        * Compiler warnings
+        * Configuration matrix
+          * you can see the eligible matrix combinations and the status of each configuration job (blue: success, yellow: unstable, red: failure, blinking: in progress)
+      * Changes: the changes SCM changes since the previous build
+      * Console output: the output of the build process
+      * Previous build: guess what
+  * http://ci.qa.php.net/job/php-src-5.3-matrix-build/28/architecture=amd64,osfamily=linux,osflavor=debian,osversion=6.0/ build page for the matrix job on a specific node
+    * This is the actual build page, as the matrix job only triggers the configuration jobs on the slaves
+    * On the left you can see basically the same links as for the matrix job, except that the Consol output now show a whole bunch of info: the output of our actual build execution.
+  * http://ci.qa.php.net/job/php-src-5.3-matrix-tests/12/testReport/? aggregated test results for a specific build number
+    * you can see the failed tests grouped by configuration and a summary of the executed tests.
+    * you can see all tests, or all tests for a specific configuration, or all tests.
+    * you can see the history for each invidual tests.
+    * you can see the diff for the failed tests. 
 
 ===== Current problems =====
-  * Not sure what to do with XFAILs, JUnit doesn't provide anything similar in concept(http://zoomsplatter.blogspot.com/2008/06/why-xfail.html), so for now failing XFAIL is a passing test, passing XFAIL is a test failure, but we can swap that if needed. 
-  * <del>A few tests fail on jenkins which could pass elsewhere cause we don't have enough ram, so some tests timeout, when the machine starts swapping(Zend/tests/bug55509.phpt for example allocates 2.1G memory).</del>
+  * JUnit doesn't provide anything similar in concept to XFAIL(http://zoomsplatter.blogspot.com/2008/06/why-xfail.html), so for now failing XFAIL is a passing test, passing XFAIL is a test failure, but we can swap that if needed, or handle both case as test failure. 
 
 ===== Other alternatives =====
   * [[http://svn.php.net/viewvc/web/php-rmtools/trunk/|rmtools]]: Pierre and Dan is [[http://www.mail-archive.com/internals@lists.php.net/msg53358.html|working on]] a distributed build environment.
@@ -58,17 +127,17 @@ We have a demo/Proof of concept interface at http://ci.qa.php.net/
   * other CI tools (there is a whole bunch)
 
 ===== Future plans =====
-  * Enable every extension and feature for the builds(--enable-* and --with-* for configure)
-  * The installation of other slaves are also in progress (FreeBSD, NetBSD, OpenBSD, others could be added as needed).
-  * Adding other machines could be necessary (the current and the above mentioned in-progress nodes are only virtual machines on the same sole physical server).
+  * Enable every extension and feature for the builds(--enable-* and --with-* for configure).
+  * Adding more nodes (Windows, other linux distros, Mac OS X, other BSD variants, etc. ).
+  * Adding other machines would be necessary to add more nodes (we maxed out our capacity on the server with this 4 vm).
   * Implement custom authentication through master.php.net.
   * The phpdoc building could also be added to jenkins.
   * The pecl extensions could be also built in Jenkins regulary.
-  * We could run other php applications test suites against our php binaries.
-  * Jenkins could be also used for our php based projects (web/*, phpunit tests, etc.)
+  * We could run other php applications test suites against our binaries.
+  * Jenkins could be also used for our php based projects (web/* for example).
   * It is also possible to replace the current functionality of gcov.php.net with jenkins if needed.
 
 ===== Changelog =====
 
-1.0 2011-10-20 Initial version
-
+0.1 2011-10-20 Initial version
+1.0 2011-10-28 Complete in content
