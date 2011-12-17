@@ -9,7 +9,7 @@
 
 The purpose behind this RFC is to introduce return type hinting to PHP class methods.  This RFC differs from the [[rfc:returntypehint|existing entry]] with a completely different concept and patch.  The language changes taken by this approach is, in my opinion, more advantageous because it provides a more familiar interface to method type hinting and uses the existing standard created by parameter type hinting.
 
-==== Syntactical Changes ====
+==== Syntactical Implementation ====
 
 === Approach ===
 
@@ -26,15 +26,139 @@ When writing this patch, I saw no reason diverge from this direction.  However, 
 With the introduction to the new object model in PHP 5 came parameter type hinting.  Developers could define objects and arrays (as of version 5.1), forcing the caller to provide a precise type or face raising a catchable fatal error.  This eliminated the need for functions and methods to constantly contain blocks of code verifying a provided value is a specific type.  Moving this check to the Zend Engine not only made execution faster, but it also saved precious development time.  This approach inherently provides valuable documentation and establishes a higher level of confidence in code.
 
 This implementation of return type hinting follows the same approach.  This provides consistency that developers appreciate.  When and if type hinting allows for additional types, the change can be applied to both methods and parameters.
-==== Why do we need type hinting for methods? ====
+
+=== Example Implementations ===
+
+<code php>
+<?php
+
+class MyClass
+{
+    public ArrayIterator getIterator()
+    {
+        return new ArrayIterator();
+    }
+    
+    public array getArray()
+    {
+        $array = array('some','array','values');
+        return $array;
+    }
+    
+    public function getMixedValue()
+    {
+        return 'Anything can be returned here';
+    }
+    
+    public \ArrayIterator getNamespacedVersion()
+    {
+        return new ArrayIterator();
+    }
+    
+    public array getNullValue()
+    {
+        return null;
+    }
+}
+</code>
+
+The above examples show how some of the functionality works.  
+
+=== Interfaces ===
+
+The interface changes introduced in this patch provide compile-time validation on inheritance and implementation.  Abstract methods implemented in classes will be required to adhere to the type hint defined by the interface definition.  If they aren't compatible, an E_COMPILE_ERROR is raised.  There is a strict guideline: if an object, array or mixed (function keyword) are defined, the implementing method will not be able to change this.
+
+Interface names may also be declared as the type hint for return values.  The following example illustrates an implementation of this:
+
+<code php>
+<?php
+
+interface IteratorInterface
+{
+    public ArrayIterator getIterator();
+}
+
+class Users implements IteratorInterface
+{
+    public ArrayIterator getIterator() 
+    {
+        /* do some work */
+        return new ArrayIterator();
+    }
+}
+
+class Vehicles implements IteratorInterface
+{
+    public ArrayIterator getIterator()
+    {
+        /* do some work */
+        return new ArrayIterator();
+    }
+}
+
+class MyClass
+{
+    public IteratorInterface getTheIterator()
+    {
+        return new Vehicles(); // This is valid
+    }
+    
+    public IteratorInterface getTheOtherIterator()
+    {
+        return new Users(); // This is valid, too
+    }
+}
+</code>
+
+The above example shows two classes (Vehicles and Users) that implement an interface (IteratorInterface) and a class that provides methods defining the interface as the return type hint.  Any class that implements an interface may be returned from a method that defines such.  
+
+=== Reflection ===
+
+Reflection has a minor change in this patch.  A new method called "getReturnType" has been added to ReflectionMethod which returns one of the following values: "mixed", "array" or "{ClassName}" (the actual class' name).  
+
+==== Functional Implementation ====
+
+I will briefly describe the functional changes made, and let the patch do the rest.
+
+=== Parser ===
+
+The language parser "Zend/zend_language_parser.y" has been modified to add an additional term called "method_return_type".  The definition for this contains one token, T_ARRAY, and one term - fully_qualified_class_name.  The method_return_type was added to class_statement, just above "function".  
+
+I separated the "function" and "method_return_type" definitions within class_statement for two reasons.  First, I didn't want to introduce any additional changes to the compiler function zend_do_begin_function_declaration.  Since all function and method declarations go through this today, I didn't want to add logic within this just to verify if a method has defined a type hint.  This would've ended up in multiple places throughout the function, so I thought it would be best to let the parser deal with this once. 
+
+Second, and not a technical decision, I didn't want to introduce these changes on the first iteration.  Can this functionality be combined into the zend_do_begin_function_declaration?  Yes.  Would doing so affect the performance of the compilation?  It absolutely would.  Every function and method call would require a logical check to verify if a type hint is defined.  
+
+=== Compiler ===
+
+As I previously stated, a new function "zend_do_begin_returntype_method_declaration" was added.  This function takes care of verifying whether an array or object is defined, allocating and resolving the class name and finishing the additional tasks which are required for all methods and functions.  This does contain some redundant code from zend_do_begin_function_declaration, but in time, this can be resolved.
+
+I also modified zend_do_begin_function_declaration to declare the type hint as IS_UNUSED and nullify the class name.  
+
+I decided to add the type hint data elements to the zend_op_array structure rather than the zend_function union.  My main goal with this is to introduce a standard location for storing this data.  Today, only parameters contain type hinting.  In the future, methods (this RFC) and other language elements (e.g. accessors) could contain type hinting functionality, and my hope is they will be able to take advantage of using an already defined location.  I prefixed the names with "method_", but that can easily be changed within this patch or in the future.
+
+=== Executor ===
+
+Three functions were added to zend_execute.c: 
+
+  - zend_verify_method_return_type - this verifies if a method adheres to the defined return type
+  - zend_verify_method_return_error - like its parameter counterpart, this determines the correct type of error to raise
+  - zend_verify_method_return_class_kind - if it is determined an object is being returned, this function is called to resolve whether a class or interface name should be provided along with the correct error matching that.
+
+The zend_vm_execute.h was modified in multiple places to reference zend_verify_method_return_type.  If it is determined the function or method doesn't have a definition defined, it quickly continues the code execution.  If a definition is provided, it verifies the type provided by method, and either allows the continuation of the execution, or raises the catchable fatal error.
+
+=== Tests ===
+
+A total of 20 tests were added to tests/classes/.  All tests file names are prefixed with "method_returntype_" for easy identification.  The tests do the following:
+
+  * Determine that non-namespaced and namespaced class name don't produce a syntax error
+  * Determines if a catchable fatal error is raised when an array or object is defined and the following are returned: resource, object, string, integer or double.  There are referenced return counterparts for these as well.
+  * Determine if an E_COMPILE_ERROR is raised when a class implements an interface that defines a method which returns both an array and object, but fails to correctly redefine. 
 
 
+===== Patch =====
 
-===== Common Misconceptions =====
+Patch
 
-
-
-===== Proposal and Patch =====
 
 
 ===== Changelog =====
