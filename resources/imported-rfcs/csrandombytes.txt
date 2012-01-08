@@ -1,0 +1,77 @@
+====== Request for Comments: Platform and extension-independent API to the system CSPRNG ======
+  * Version: 1.0
+  * Date: 2012 Jan 8
+  * Author: Tom Worster <fsb@thefsb.org>
+  * Status: Draft
+
+Platform and extension-independent API to the system CSPRNG
+
+===== Introduction =====
+
+Some applications require cryptographically secure random data to perform security functions. This RFC proposes a solution to the PHP programmer's difficulties obtaining such data.
+
+==== Requirement ====
+
+Applications may require Cryptographically Secure (CS) random data ([[http://en.wikipedia.org/wiki/Cryptographically_secure_pseudorandom_number_generator|Wikipedia CSPRNG]]) to be used in forming, for example, encryption keys, random passwords, session keys, stream initialization vectors, nonces, secure unique IDs, and some kinds of salts. Most operating systems on which PHP typically runs provide a CSPRNG as a service to applications. On Windows it is called CryptGenRandom. On Linux, OS X, FreeBSD etc. applications may read the /dev/random pseudo-device. Each of these OSs also offers a way for the user to query the status of the CSPRNG.
+
+PHP programmers sometimes need access to the system CSPRNG.
+
+[Note: CSPRNG abbreviates Cryptographically Secure Pseudo-Random Number Generator but that term can mislead. The applications in scope here need random strings more often than numbers. What I call “the system CSPRNG”, i.e.  CryptGenRandom and the various versions of /dev/random, in fact deliver strings of random bytes.]
+
+==== Current PHP APIs to the syetem CSPRNG ====
+
+PHP does not yet provide satisfactory access to the system CSPRNG.
+
+A PHP programmer writing platform independent software that cannot make assumptions regarding the deployment environment (e.g. a contractor) will have to proceed roughly as follows:
+
+1. Try openssl_random_pseudo_bytes(). It is part of the openssl extension so it cannot be assumed to be available.
+
+2. Try mcrypt_create_iv(). It is part of the mcrypt extension so it cannot be assumed to be available.
+
+Those are the two best options because they are platform independent and properly abstracted in the PHP API. However, if both are unavailable the programmer may precede with other options:
+
+3. Try to read from /dev/random, and possibly on Linux /dev/urandom. This option is not available on Windows, of course, and can fail due to permissions. A cautious programmer would not assume permission to read the device even if it is known to exist.
+
+4. Another platform independent option is session abuse: Try reading session_id() and setting ini_set(‘session.entropy_length’, length), which can fail either due to permissions or if --disable-session was used at build time. If they work, calling session_regenerate_id() and then reading session_id() should return a random string from the system CSPRNG.
+
+5. Finally if the script is running on Windows it may attempt to use a direct Windows API call such as COM('CAPICOM.Utilities.1')->GetRandom
+or DOTNET('mscorlib',
+'System.Security.Cryptography.RNGCryptoServiceProvider'). The former is obsolescent and both depend on system components that are not part of many standard Windows configurations.
+
+If all the above fail then the script will not be able to read a string from the system’s CSPRNG. As a consequence it may fail to operate properly, either by performing its task insecurely or by refusing to preform the task. Whenever this happens, neither the script nor the operating system is to blame—at fault is either the PHP API or the system configuration, depending on ones point of view.
+
+[An example of a PHP package that works roughly along the lines set out above is https://github.com/ircmaxell/PHP-CryptLib/tree/master/lib/CryptLib/Random/Source. This package does not attempt to use mcrypt or sessions and it falls back to using PHP’s built in PRNGs bit-mixed with microtime() when it can’t access the system CSPRNG.]
+
+
+==== Why PHP's API's today are inadequate ====
+
+There are two reasons why this situation is unsatisfactory. First, PHP programmers should be able to write scripts that use CS random data without risking failure in the field due to unfortunate configuration of the production environment. The programmer, after all, may have no influence over the production environment and might not be in a position to dictate requirements. Nevertheless, the programmer may want to protect her reputation by delivering quality software that can reasonably be expected work securely many years into the future on PHP systems of configuration she cannot predict.
+
+Second, even if the probability that all 5 of the methods described above fail were vanishingly small, such a process is unacceptably complex. It demands a degree of sophistication and volume of code that is out of keeping with the task—it should be as simple as calling a function similar to openssl_random_pseudo_bytes(). More importantly, it is difficult to test such software because it requires many different runtime systems to exercise all braches. 
+
+==== Does anything need to be done? ====
+
+The second argument in the previous section is, at heart, that PHP’s lack of a platform- and extension-independent API to the system CSPRNG increases development complexity and quality concerns. The first is that is that no matter what you do, the script will fail on some platforms.
+
+So the question arises: how likely is it that any given PHP installation has no access to the system CSPRNG? This is an important question and I cannot offer any properly surveyed statistics. But I have some anecdotal experience. I wrote a script that implements the procedure described above and shared it with some other developers and tested it myself. They immediately reported it failing in certain specific Windows and Linux production servers. I found that the default configuration of WAMP, XAMP and AMPPS all lack both openssl and mcrypt. Naturally each /AMP/ system allows installation or activation of the respective extensions. But defaults are important because they are so often left alone (and in any case some developers can’t control or make assumptions about the configuration). Further, I found that CAPICOM was not present on either an XP or Win7 VM set up from their respective install CD. Naturally DOTNET was not present either.
+
+This was enough to convince me that the status quo as described above is not satisfactory. 
+
+===== Proposal =====
+
+A function offered by PHP core for reading CS random bytes from the system CSPRNG.
+
+This function shuld have a parameter specifying the number of random bytes the caller requests. The return value is a string of the requested byte length, the value being provided by the system CSPRNG.
+
+The function should neither block nor return a failure status in the case that the systems entropy pool is depleted. However, it should allow the caller to discover if this is the case. Thus it should behave as openssl_random_pseudo_bytes() does, continuing to return bytes from the system CSPRNG even when its entropy sources are low and offering a flag it sets if the caller reads beyond what the CSPRNG considers secure. In other words, it should neither behave like /dev/random on Linux, which blocks when entropy is low, nor like mcrypt_create_iv(), which can return insecure results without the caller’s knowledge. 
+owledge.
+
+
+==== Rejected Features ====
+
+Automated voting system.
+
+===== Changelog =====
+
+1.0 2011-01-08 First version
+
