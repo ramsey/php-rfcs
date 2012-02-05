@@ -1,0 +1,104 @@
+====== RFC: Remove preg_replace /e modifier ======
+  * Version: 1.0
+  * Date: 2012-02-04
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: In Draft
+
+===== Summary =====
+
+This RFC aims at **deprecating** and subsequently **removing** the ''/e'' modifier (PREG_REPLACE_EVAL) that
+[[http://php.net/preg_replace||''preg_replace'']] provides.
+
+===== What does the /e modifier do? =====
+
+Quoting the [[http://php.net/manual/en/reference.pcre.pattern.modifiers.php||PHP manual]]:
+
+> If this modifier is set, preg_replace() does normal substitution of backreferences in the replacement string,
+evaluates it as PHP code, and uses the result for replacing the search string. Single quotes, double quotes,
+backslashes (\) and NULL chars will be escaped by backslashes in substituted backreferences.
+
+Example:
+
+<code php>
+$code = preg_replace('(<h([1-6])>(.*?)</h\1>)e', '"<h$1>" . strtoupper("$2") . "</h$1>"', $code); // uppercases headings
+</code>
+
+===== Problems =====
+
+There are several serious issues with the ''/e'' modifier:
+
+==== Security issues ====
+
+As ''/e'' evaluates arbitrary PHP code it can easily be exploited if user input is not carefully validated
+or sanitized.
+
+For example the above example can be used to execute arbitrary PHP code by passing the string
+''<h1>{${eval($_GET[php_code])}}</h1>''. The evaluted code in this case would be
+''"<h1>" . strtoupper("{${eval($_GET[php_code])}}") . "</h1>"'' and as such execute any PHP code passed in the
+''php_code'' GET variable.
+
+An example of a larger project which suffered from such a code injection vulnerability is RoundCube
+(see [[this changeset||http://trac.roundcube.net/changeset/2148]]).
+
+=== Alternative ===
+
+A both more secure and cleaner approach is the use of
+[[http://php.net/preg_replace_callback||''preg_replace_callback'']]:
+
+<code php>
+preg_replace_callback(
+    '(<h([1-6])>(.*?)</h\1>)',
+    function ($m) {
+        return "<h$m[1]>" . strtoupper($m[2]) . "</h$m[1]>";
+    },
+    $code
+);
+</code>
+
+When passing the above exploit code (''<h1>{${eval($_GET[php_code])}}</h1>'') into this function the result will
+just be ''<h1>{${EVAL($_GET[PHP_CODE])}}</h1>'' and no code will be executed.
+
+=== But we don't remove eval() either, do we? ===
+
+The use of the ''/e'' modifier is not comparable to the use of ''eval()''. *Any* use of ''/e'' can be replaced
+with a safer and cleaner use of ''preg_replace_callback''. ''eval()'' on the other hand has *some* valid use cases
+which can not be implemented in any other (sane) way.
+
+Additionally it is much easier to create a vunerability with ''/e'' than it is with ''eval''. Firstly many people
+don't understand PCRE well enough to distinguish whether a use of ''/e'' is safe or not. But more importantly the
+fact that addslashes() is applied to all substituted backreferences creates a false feeling of security (as seen
+above it can be easily circumvented.)
+
+==== Overescaping of quotes ====
+
+The application of ''addslashes'' on all substituted backreferences not only isn't helping security, but additionally
+also results in unexpected behavior when the input contains quotes.
+
+As always both quote types are escaped, but only one of them needs escaping, one of the quote types will always be
+overescaped. E.g. if ''<h1>Hallo 'World'</h1>'' is passed into the above function the result would be
+''<h1>HALLO \'WORLD\'</h1>'' (note the additional backslash).
+
+This behavior makes ''/e'' unusable for many applications (or people just use it anyways, without knowing that it
+is broken).
+
+==== Use as obfuscation in exploit scripts ====
+
+Various exploit scripts use the ''/e'' modifier to obfuscate their intention. Some examples from a quick SO search:
+
+ * [[http://stackoverflow.com/questions/3328235/how-does-this-giant-regex-work]]
+ * [[http://serverfault.com/questions/249190/how-do-i-decode-this-wordpress-hack]]
+ * [[http://stackoverflow.com/questions/8813126/decoding-a-weird-and-possibly-malicious-php-code]]
+ 
+This obfuscation hides scripts from ''grep'' like searches (as ''preg_replace'' is usually considered a "good"
+function). Additionally - as you can see in the second link - it is possible to obfuscate the use of the ''/e''
+modifier itself, making it even harder to find it's usage.
+ 
+Obviously the use by exploit scripts is not bad per se (most exploit scripts also use ''echo'' and we better keep
+that), so don't put too much weight on this argument ;)
+
+===== Conclusion =====
+
+The ''/e'' modifier has little to no valid uses but imposes a rather big security risk. As it can in any case be
+replaced by a callback there would be no loss in functionality.
+
+The time line for deprecation and removal is subject to discussion.
