@@ -9,7 +9,7 @@
 
 ===== Abstract =====
 
-This RFC proposes the creation of a new .phpp file type.  This file type will be parsed by the webserver as 100% PHP code; that is, all code will be executed //without// <?php and ?> tags.  No raw HTML output would be allowed in these scripts using ?>, though echo/print and other output statements will continue to work in those scripts without any restriction.
+This RFC proposes the creation of a new .phpp file type and a new .phpf file type.  These file types will both be parsed by the webserver as 100% PHP code; that is, all code will be executed //without// <?php and ?> tags.  No raw HTML output would be allowed in these scripts using ?>, though echo/print and other output statements will continue to work in those scripts without any restriction.  In addition, the .phpp file will also recursively disallow any ?> content from scripts that it includes, resulting in a stack that contains only PHP code.  The .phpf file will not have this same restriction.
 
 ===== Background =====
 
@@ -22,6 +22,8 @@ PHP was originally created to operate as server-side code embedded within a bloc
 The web has evolved considerably since the late 1990s when most people's idea of a "website" consisted of an "About Me" page with a photo, lots of text, some links; and, of course, a guestbook.  Today, websites are largely more functional and practical in nature, replacing much of what used to be done by client-side software executed by the operating system.
 
 As the web has evolved, so too have the various methods for developing in it.  PHP now largely takes the form of classes and code-only libraries that are hooked from the UI layer of the modern website.  The widely-accepted MVC (Model-View-Controller) standard mandates that the UI layer ("view") should hook to a bridge layer ("controller"), which then calls on complex pure-code classes/functions ("model") and funnels the sanitized results back to the view layer.  As such, the model layer is inherently forbidden to have raw HTML (i.e. "view") code included anywhere in its stack, since the very purpose of MVC is to segregate these roles so that designers and programmers can simultaneously work on a project without having to be skilled in both or worry about frequent collisions and merge conflicts between the two.  In a way, this could be thought of as an evolved form of templating.
+
+However, many frameworks utilize more "tangled" inclusion stacks where the model and view are not necessarily seperated throughout.  For these instances, it would be beneficial to have code-only scripts that are allowed to include scripts that may contain raw HTML as well.
 
 ==== The Tags ====
 
@@ -55,13 +57,55 @@ A .phpp file would behave exactly like a .php file, //except// for the following
   * Any .phpp scripts included by a .phpp file must also adhere to these rules and contain only pure HTML code.
   * A regular .php script cannot be included from a .phpp script.  An E_WARNING will be thrown for include and an E_RECOVERABLE_ERROR will be thrown for require; in both instances, the included file will be ignored.
 
+However, there are frameworks and libraries that don't follow a segregated framework but would nonetheless benefit from being able to use PHP-only files.  We thus have a situation where there are viable use-cases for both having a pure PHP stack and having a pure PHP file with an impure stack.  The logical solution, then, is to create another file type to accommodate this.  Pure PHP files that contain impure PHP code would have the extension, ".phpf", which stands for "PHP Framework" because existing frameworks will be the primary use-case for this type.
+
+A .phpf file would behave exactly like a .phpp file, //except// that regular .php scripts //can// be included and are allowed to contain raw ?> content.  If a .phpp file is included, then the standard .phpp rules would still apply for that script's inclusion stack.
+
 ==== Inclusion of Mixed Code ====
 
-It has been suggested that regular .php files that contain raw HTML should be able to be included by a .phpp file because someone might want to include a regular .php library from a .phpp file.  Unfortunately, this is a completely unworkable idea because it would render the entire purpose of a pure-code PHP file meaningless.  After all, the key benefit of a .phpp file is being able to reliably segregate your model layer from your template/view layer without having to worry about HTML code being "sneaked-in" from someplace deep within an include stack.
+The .phpp file type is generally intended for use with applications that have been designed from the ground-up with MVC code segregation.  If you're working within a less certain framework, it is recommended that you use .phpf instead.
 
-Besides, such an allowance is completely unnecessary anyway, since using non-horrible architecture can achieve the exact same result without having to pollute your .phpp stack.  Here's a screenshot from a recent Internals thread where I illustrated this point a little more clearly:
+The following flow chart shows an example of both the right way and the wrong way to use a .phpp stack:
 
 {{:rfc:gmail_-_php-dev_updated_rfc_version_1.png?nolink|}}
+
+==== Naming Conventions ====
+
+Obviously, PHP does not rely on file extensions themselves to determine how to parse a script.  This RFC will **NOT** change that!  The .phpp and .phpf extensions mentioned in this RFC are merely the recommended naming convention.
+
+==== Script Inclusion ====
+
+If you're including a .phpf or .phpp script from within a PHP script, we'll need a way to tell PHP what type of file we're including.  Instead of creating new keywords, the most sensible approach will be to add a bit constant to include and require.  The following syntax is proposed:
+
+require[(] $script_filename, $script_type = PHP_SCRIPT_TYPE_NORMAL [)];
+
+Possible values for $script_type:
+
+PHP_SCRIPT_TYPE_NORMAL (0x01)
+  * If the included file contains PHP code, parse it.
+
+PHP_SCRIPT_TYPE_TAGLESS (0x02)
+  * Code is assumed to be PHP throughout the script.  The <?php tag throws E_NOTICE and the ?> tag throws E_RECOVERABLE_ERROR.
+
+PHP_SCRIPT_TYPE_STACK (0x04)
+  * The $script_type is applied to all child scripts of the one being included.
+  * Question : Would anyone see value in adding an override constant that, while not recommended, allows the developer to apply a different $script_type somewhere deeper in the stack?  Personally this doesn't sound useful to me, but I'd be willing to put it in if enough of you wanted it.
+
+PHP_SCRIPT_TYPE_CODE_FILE (PHP_SCRIPT_TYPE_NORMAL & PHP_SCRIPT_TYPE_TAGLESS)
+  * The entire script is assumed to be PHP code and is parsed accordingly.
+
+PHP_SCRIPT_TYPE_CODE_STACK (PHP_SCRIPT_TYPE_NORMAL & PHP_SCRIPT_TYPE_TAGLESS & PHP_SCRIPT_TYPE_STACK)
+  * The entire script and all its child scripts (i.e. its "stack") are assumed to be PHP code and parsed accordingly.
+
+==== Using "as" Instead of Comma? ====
+
+It has been suggested that, instead of "require $filename, $constant" we should use "require $filename as $constant".  Further discussion on this topic is needed.
+
+==== Webserver Execution ====
+
+Ideally, we want .phpf and .phpp files to be able to be directly executed from the browser in addition to include/require.  This will probably require the creation of two new handlers.
+
+However, script inclusion is the more important priority.  Direct webserver execution can be implemented at a later time if need be.
 
 ===== Final Thoughts =====
 
@@ -74,6 +118,8 @@ With this new feature, developers will be able to adopt best-practices architect
 Voting has not yet been initiated.  Please check back later.
 
 ===== Changelog =====
+
+Version 1.20 : Language clarifications.  Added .phpf script type.
 
 Version 1.10 : Status => Under Discussion.
 
