@@ -1,0 +1,182 @@
+====== Request for Comments: Loop+Else control structure ======
+  * Version: 1.0
+  * Date: 2012-05-10
+  * Author: Dmitri Ravazin <ravazin@gmail.com>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/loop_else
+  * Original discussion: https://bugs.php.net/bug.php?id=26411
+
+
+===== Introduction =====
+
+Performing a set of actions upon *not* entering a loop is a very common programming necessity. This RFC proposes an optional "else" clause that can be used after while, for, and foreach loops to simplify handling of this particular scenario.
+
+A secondary objective of this RFC is to bring closure to a number of requests in bug tracker (hopefully they can be closed after this, whatever the resolution).
+
+==== Syntax ====
+Proposed syntax will look as follows:
+<code php>
+// "foreach" example (display a list of names)
+foreach ($array as $x) {
+	echo "Name: {$x->name}\n";
+} else {
+	echo "No records found!\n";
+}
+
+// "for" example (unset a range of keys from array, then return it, or return null on error)
+for ($i = some_very_expensive_and_ugly_looking_calculation($array); $i >= 0; $i--) {
+	unset($array[$i]);
+} else {
+	return null; // horrific error!
+}
+return $array;
+
+// "while" example (return true if any $search matches have been removed from $array)
+while ($temp = array_search($search, $array)) {
+	unset($array[$temp]);
+} else {
+	unset($array[$search]); // just because we can
+	return false;
+}
+return true;
+</code>
+And for comparison purposes, the following block (it's obviously longer and less elegant) contains the same code written //without// loop+else:
+<code php>
+foreach ($array as $x) {
+	echo "Name: {$x->name}\n";
+}
+if (count($array) < 1) {
+	echo "No records found!\n";
+}
+
+
+
+if (some_very_expensive_and_ugly_looking_calculation($array) < 0) { // either that or clutter our scope with temporary variable
+	return null;
+}
+for ($i = some_very_expensive_and_ugly_looking_calculation($array); $i >= 0; $i--) {
+	unset($array[$i]);
+}
+return $array;
+
+
+
+$removed = false; // no choice... have to remember this in a variable
+while ($temp = array_search($search, $array)) {
+	unset($array[$temp]);
+	$removed = true;
+}
+if (!$removed) {
+	unset($array[$search]);
+}
+return $removed;
+</code>
+
+===== How does this work? =====
+
+==== When is loop's "else" clause executed? ====
+Proposed "else" clause will be executed only if main loop body has *not* been entered at least once (i.e. loop condition was never satisfied).
+For this reason do-while loop cannot have this syntax (as it is guaranteed that its body will be entered at least once).
+
+So in general, a loop+else construct is the equivalent of the following user code:
+<code php>
+$loop_entered = false;
+loop ($condition) {
+	// "loop" can be for, foreach, or while
+	$loop_entered = true;
+}
+if (!$loop_entered) {
+	// this is our "else" clause
+}
+</code>
+
+==== What about loops without a body? ====
+I suggest loops without a body should not be allowed to have an alternate "else" clause:
+<code php>
+while($condition); // Can't add an else { } after this statement
+for ($i = 0; $i < 10; $i++);
+foreach ($array as $x);
+</code>
+
+==== What is the precedence? ====
+In order to avoid BC breaks when single-statement blocks are not enclosed in {}'s, any ambiguity should always be resolved in favor of if's.
+This means that in the following sample "else" block belongs to the "if", and not the "while":
+<code php>
+if ($hungry)
+	while (more_food()) {
+		eat();
+else
+	watch_tv();
+</code>
+However, when there is no conflict between a loop and an "if", this should be resolved in favor of the "closest" loop, just like it is now with if's.
+This means that in the following sample "else" belongs to the "foreach" loop, and not the "while":
+<code php>
+while ($condition)
+	foreach ($array as $x)
+		$x->doWork();
+	else
+		echo "No work was done!\n";
+</code>
+
+==== Alternative syntax for control structures ====
+This should work as expected (while respecting the precedence order described above), e.g.:
+<code php>
+<?php while ($x = $cursor->fetchObject()): ?>
+	<p>Hi! My name is <?php echo $x->name; ?>!</p>
+<?php else: ?>
+	<p>Nothing was fetched</p>
+<?php endwhile; ?>
+</code>
+
+==== How about elseif? ====
+Under this proposal, the following PHP code would be valid:
+<code php>
+while ($condition) {
+...
+} else if ($another_condition) {
+...
+} else {
+...
+}
+</code>
+Because of that, I believe it would make sense to allow loop+elseif syntax as well.
+
+===== Pros =====
+  * This makes code shorter, more flat, and more readable. (this is the primary objective)
+     * Eliminates the annoyance of having to use flag variables in a lot of common use-cases
+     * Code is more structured and predictable (e.g. no more if's that can come before OR after the loop)
+  * No new keywords
+  * No BC breaks
+  * PHP would not be the first language to implement such a structure. Python has it (although it behaves differently there).
+  * This feature has almost universal support in userland (related feature requests in bug tracker are among the highest rated of all time)
+
+===== Cons =====
+  * "This new syntax is excessive and can be confusing to new developers" (c)
+  * "This violates the KISS principle" (c)
+  * Overhead?
+  * Complicated changes to the parser? Too much work for a relatively minor syntax sugar?
+  * This syntax is not supported by any of the "big mountains" like C, C++, Java, or C#. (the former being most notable since PHP is written in it)
+
+===== Common Misconceptions =====
+
+  * Proposed syntax can be achieved by a simple "if" statement before or after the loop.
+     * While true in some cases (for example in most "foreach" cases this is indeed true), in others (e.g. when checked data is modified inside the loop) a temporary variable will be required to keep track of whether the loop has been entered. This is illustrated in "while" example in the Syntax section.
+     * Even when temporary variable can be avoided, an extra "if" statement will require the repetition of loop's condition inside the "if", which can contain a very expensive and/or long calculation (see "for" example is Syntax section).
+
+===== Alternative Proposals =====
+We could also do it the Python way, which means executing "else" upon the natural completion of the loop, and only skipping it on break, continue, or throw.
+I personally see this a lot less useful than this proposal.
+
+
+===== References =====
+
+Original discussions in bug tracker:
+
+[[https://bugs.php.net/bug.php?id=26411|while {} else {}]] (by php at bellytime dot com)
+
+[[https://bugs.php.net/bug.php?id=46240|Build in foreach else support]] (by kjarli at gmail dot com)
+
+[[https://bugs.php.net/bug.php?id=61222|For... else construct]] (by jeroenvandenenden at gmail dot com)
+
+===== Changelog =====
+May 10, 2012 - RFC draft created
