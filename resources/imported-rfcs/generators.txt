@@ -1,0 +1,475 @@
+====== Request for Comments: Generators ======
+  * Date: 2012-05-28
+  * Author: Niktia Popov <nikic@php.net>
+  * Status: In Draft
+
+===== Introduction =====
+
+Generators provide an easy, boilerplate-free way of implementing iterators.
+
+As an example, consider how you would implement the ''file()'' function in userland code:
+
+<code php>
+function getLinesFromFile($fileName) {
+    if (!$fileHandle = fopen($fileName, 'r')) {
+        return;
+    }
+    
+    $lines = [];
+    while (false !== $line = fgets($fileHandle)) {
+        $lines[] = $line;
+    }
+    
+    fclose($fileHandle);
+    
+    return $lines;
+}
+
+$lines = getLinesFromFile($fileName);
+foreach ($lines as $line) {
+    // do something with $line
+}
+</code>
+
+The main disadvantage of this kind of code is evident: It will read the whole file into a large array. Depending
+on how big the file is, this can easily hit the memory limit. This is not what you usually want. Instead you
+want to get the lines one by one. This is what iterators are perfect for.
+
+Sadly implementing iterators requires an insane amount of boilerplate code. E.g. consider this iterator variant
+of the above function:
+
+<code php>
+class LineIterator implements Iterator {
+    protected $fileHandle;
+    
+    protected $line;
+    protected $i;
+    
+    public function __construct($fileName) {
+        if (!$this->fileHandle = fopen($fileName, 'r')) {
+            throw new RuntimeException('Couldn't open file "' . $fileName . '"');
+        }
+    }
+    
+    public function rewind() {
+        fseek($this->fileHandle, 0);
+        $this->line = fgets($this->fileHandle);
+        $this->i = 0;
+    }
+    
+    public function valid() {
+        return false !== $this->line;
+    }
+    
+    public function current() {
+        return $this->line;
+    }
+    
+    public function key() {
+        return $this->i;
+    }
+    
+    public function next() {
+        if (false !== $this->line) {
+            $this->line = fgets($this->fileHandle);
+            $this->i++;
+        }
+    }
+    
+    public function __destruct() {
+        fclose($this->fileHandle);
+    }
+}
+
+$lines = new LineIterator($fileName);
+foreach ($lines as $line) {
+    // do something with $line
+}
+</code>
+
+As you can see a very simple piece of code can easily become very complicated when turned into an
+iterator. Generators solve this problem and allow you to implement iterators in a very straightforward
+manner:
+
+<code php>
+function *getLinesFromFile($fileName) {
+    if (!$fileHandle = fopen($fileName, 'r')) {
+        return;
+    }
+    
+    while (false !== $line = fgets($fileHandle)) {
+        yield $line;
+    }
+    
+    fclose($fileHandle);
+}
+
+$lines = getLinesFromFile($fileName);
+foreach ($lines as $line) {
+    // do something with $line
+}
+</code>
+
+The code looks very similar to the array-based implementation. The main difference is that instead of pushing
+values into an array the values are ''yield''ed.
+
+Generators work by passing control back and forth between the generator and the calling code:
+
+When you first call the generator function (''$lines = getLinesFromFile($fileName)'') the passed argument is bound,
+but nothing of the code is actually executed. Instead the function directly returns a ''Generator'' object. That
+''Generator'' object implements the ''Iterator'' interface and is what is eventually traversed by the ''foreach''
+loop:
+
+Whenever the ''Iterator::next()'' method is called PHP resumes the execution of the generator function until it
+hits a ''yield'' expression. The value of that ''yield'' expression is what ''Iterator::current()'' then returns.
+
+Generator methods, together with the ''IteratorAggregate'' interface, can be used to easily implement traversable
+classes too:
+
+<code php>
+class Test implements IteratorAggregate {
+    protected $data;
+    
+    public function __construct(array $data) {
+        $this->data = $data;
+    }
+    
+    public function *getIterator() {
+        foreach ($this->data as $key => $value) {
+            yield $key => $value;
+        }
+        // or whatever other traversation logic the class has
+    }
+}
+
+$test = new Test(['foo' => 'bar', 'bar' => 'foo']);
+foreach ($test as $k => $v) {
+    echo $k, ' => ', $v, "\n";
+}
+</code>
+
+Generators can also be used the other way around, i.e. instead of producing values they can also consume them. When
+used in this way they are often referred to as enhanced generators, reverse generators or coroutines.
+
+As coroutines are a rather advanced concept it is very hard to come up with not too contrived and short examples
+for them. Common applications are state machines and concurrent programming (in particular cooperative multitasking).
+Examples for those are rather large and as such not listed here. See http://www.dabeaz.com/coroutines/Coroutines.pdf
+for a very nice presentation on the subject.
+
+But to show some code at least, here is how coroutines work in principle:
+
+<code php>
+function *someCoroutine() {
+    while (true) {
+        // receive some data, typically in a loop
+        $data = yield;
+        
+        doSomethingCoolWithData($data);
+        
+        // one can obviously also add another receive loop
+        // within the outer loop (this would be one form of
+        // "state" in the state machine use case)
+        while (true) {
+            $moreData = yield;
+            
+            doSomethingCoolWithMoreData($moreData);
+        }
+        
+        // It's also possible to send data back
+        yield $xyz;
+        // or send an receive in one go
+        $data = yield $xyz;
+        
+        // or pass the result on to another coroutine
+        // (thus building a coroutine pipeline)
+        $coroutine2->send($result);
+    }
+}
+
+$coroutine = someCoroutine();
+$echo->send('foo');
+$echo->send('bar');
+</code>
+
+Values are sent into the generator using the ''send($value)'' method. The sent value will then be the return value of
+the ''yield'' expression.
+
+===== Specification =====
+
+==== Recognition of generator functions ====
+
+In Python any function which contains a ''yield'' statement is automatically a generator function and does not have
+to be marked in some special way. In JavaScript (Harmony) generator functions use the ''function*'' keyword (''function''
+with an asterix).
+
+It's unclear which of the approaches is better. It seems strange that a function can completely change its behavior
+based on what kind of statements it contains. Explicitely marking generator functions seems more obvious. On the other
+hand, as the use of ''yield'' is enough to clearly identify a generator, the use of some special modiefer like ''*'' seems
+redundant.
+
+Furthermore using a special modifier would allow ''yield''-less generators. This by itself doesn't sound particularly useful,
+but has use cases in the context of coroutines (in particular when seen in conjunction with ''yield*'' delegation). Quoting from
+PEP 3152: "Finally, sometimes there is a need for a function to be a coroutine even though it does not yield anything, and in
+these cases it is necessary to resort to kludges such as if 0: yield to force it to be a generator."
+
+Thus I think that it makes sense to have some kind of marker. One option is the aforementioned asterix modifer, another one
+would be a ''generator'' keyword (e.g. ''generator function range()'' or just ''generator range()''). This would have the problem
+of introducing a new keyword, which I think could be already in use by people. (''yield'' on the other hand seems rather exotic).
+Also the keyword would prevent the use of the class name ''Generator'' for the iterators returned by generator functions.
+
+The use of the asterix seems somewhat consistent with the use of the ampersand ''&'' reference modifier. Similarly to how
+''function &foo()'' means that the function returns by-reference, ''function *foo()'' would mean that the function "returns"
+multiple values.
+
+The only oddity that could arise is if it were allowed to specify both modifiers: ''function *&foo()'' (or ''function* &foo()''?).
+It is unclear though whether that should actually be possible (see "Yield by reference" section).
+
+==== Basic behavior ====
+
+When a generator function is called the execution is suspended immidiately after parameter binding and a ''Generator'' object
+is returned.
+
+The ''Generator'' object implements the following interface:
+
+<code php>
+final class Generator implements Iterator {
+    void  rewind();
+    bool  valid();
+    mixed current();
+    mixed key();
+    void  next();
+    
+    mixed send(mixed $value);
+    void close();
+}
+</code>
+
+If the generator is not yet at a ''yield'' statement (i.e. was just created and not yet used as an interator), then any call to
+''rewind'', ''valid'', ''current'', ''key'', ''next'' or ''send'' will resume the generator until the next ''yield'' statement is
+hit.
+
+Consider this example:
+
+<code php>
+function *gen() {
+    echo 'start';
+    yield 'middle';
+    echo 'end';
+}
+
+// Intial call does not output anything
+$gen = gen();
+
+// Call to current() resumes the generator, thus "start" is echo'd.
+// Then the yield expression is hit and the string "middle" is returned
+// as the result of current() and then echo'd.
+echo $gen->current();
+
+// Execution of the generator is resumed again, thus echoing "end"
+$gen->next();
+</code>
+
+A nice side-effect of this behavior is that coroutines do not have to be primed with a ''next()'' call before they can be used (as
+it is required in Python, where for which reason any use of a coroutine requires the use of a decorator which automatically performs
+this ''next'' call.)
+
+Apart from the behavior described above the behavior of the ''Generator'' methods is as follows:
+
+  * ''rewind'': Generators are not rewindable, so this is just a no-op. (More in the "Rewinding a generator" section.)
+  * ''valid'': Returns ''false'' if the generator has been closed, ''true'' otherwise. (More in the "Closing a generator" section.)
+  * ''current'': Returns whatever was passed to ''yield'' or ''null'' if nothing was passed or the generator is already closed.
+  * ''key'': Returns the yielded key or, if none was specified, an auto-incrementing key or ''null'' if the generator is already closed.
+    (More in the "Yielding keys" section.)
+  * ''next'': Resumes the generator (unless the generator is already closed).
+  * ''send'': Sets the return value of the ''yield'' expression and resumes the generator (unless the generator is already closed).
+    (More in the "Sending values" section.)
+  * ''close'': Closes the generator. (More in the "Closing a generator" section.)
+
+==== Yielding keys ====
+
+The languages that currently implement generators don't have support for yielding keys (only values). This though is just a sideeffect
+as these languages don't support keys in iterators in general. 
+
+In PHP on the other hand keys are explicitely part of the iteration process and it thus does not make sense to not add
+key-yielding support. The syntax could be anonolgeaus to that of ''foreach'' loops and ''array'' declarations:
+
+<code php>
+yield $key => $value;
+</code>
+    
+The problem with this syntax that it would be ambiguous in array declarations and nested ''yield'' expressions:
+
+<code php>
+array(
+    yield $key => $value
+)
+// could be
+array(
+    (yield $key) => $value
+)
+// or
+array(
+    (yield $key => $value)
+)
+
+yield yield $a => $b;
+// could be
+yield (yield $a) => $b
+// or
+yield (yield $a => $b)
+</code>
+
+Even though this is an absolute edge-case, the grammar still shouldn't be ambiguous in this case. It's not clear how this can
+be solved. In the current implementation the ''yield $key => $value'' syntax is simply implemented as a statement instead of
+an expression. This obviously is a rather bad solution to the problem and it would be preferable to find some other way to deal
+with it.
+
+Furthermore generators need to generate keys even if no key was explicitely yielded. In this case it seems reasonable to behave
+the same as arrays do: Start with the key ''0'' and always increment by one. If in between an integer key which is larger than the
+current auto-key is explicitely yielded, then that will be used as the starting point for new auto-keys. All other yielded keys
+do not affect the auto-key mechanism.
+
+<code php>
+function *gen() {
+    yield 'a';
+    yield 'b';
+    yield 'key' => 'c';
+    yield 'd';
+    yield 10 => 'e';
+    yield 'f';
+}
+
+foreach (gen() as $key => $value) {
+    echo $key, ' => ', $value, "\n";
+}
+
+// outputs:
+0 => a
+1 => b
+key => c
+2 => d
+10 => e
+11 => f
+</code>
+    
+This is the same behavior that arrays have (i.e. if ''gen()'' instead simply returned an array with the yielded values the keys would
+be same). The only difference occurs when the generator yield non-integer, but numeric keys. For arrays they are cast, for generators
+the are not.
+
+==== Rewinding a generator ====
+
+Rewinding to some degree goes against the concept of generators, as they are mainly intended as one-time data sources that are not
+supposed to be iterated another time. On the other hand, most generators probably *are* rewindable and it might make sense to allow
+it. One could argue though that rewinding a generator is really bad practice (especially if the generator is doing some expensive
+calculation). Allowing it to rewind would look like it is a cheap operation, just like with arrays. Also rewinding (as in jumping
+back to the execution context state at the initial call to the generator) can lead to unexpected behavior, e.g. in the following case:
+
+<code php>
+function *getSomeStuff(PDOStatement $stmt) {
+    foreach ($stmt as $row) {
+        yield doSomethingWith($row);
+    }
+}
+</code>
+    
+Here rewinding would simply result in an empty iterator as the result set is already depleted.
+
+One solution thus could be to allow explicitely marking generators to be rewindable. E.g. one could add a ''rewindable'' function,
+which makes a generator rewindable:
+
+<code php>
+$gen = rewindable(gen());
+</code>
+    
+This function is actually already implementable in userland code (see "Cloning a generator" section.)
+
+==== Cloning a generator ====
+
+Generators can be cloned, thus leaving two independent ''Generator'' objects with the same state. This behavior can for example be
+used to create the aforementioned ''rewindable'' function:
+
+<code php>
+class RewindableGenerator implements Iterator {
+    protected $original;
+    protected $current;
+    
+    public function __construct(Generator $generator) {
+        $this->original = $generator;
+        $this->current = null;
+    }
+    
+    public function rewind() {
+        if ($this->current) { $this->current->close(); }
+        $this->current = clone $this->original;
+        $this->current->rewind();
+    }
+    
+    public function valid() {
+        if (!$this->current) { $this->current = clone $this->original; }
+        return $this->current->valid();
+    }
+    
+    public function current() {
+        if (!$this->current) { $this->current = clone $this->original; }
+        return $this->current->current();
+    }
+    
+    public function key() {
+        if (!$this->current) { $this->current = clone $this->original; }
+        return $this->current->key();
+    }
+    
+    public function next() {
+        if (!$this->current) { $this->current = clone $this->original; }
+        $this->current->next();
+    }
+    
+    public function send($value) {
+        if (!$this->current) { $this->current = clone $this->original; }
+        return $this->current->send($value);
+    }
+    
+    public function close() {
+        $this->original->close();
+        if ($this->current) {
+            $this->current->close();
+        }
+    }
+}
+
+function rewindable(Generator $generator) {
+    return new RewindableGenerator($generator);
+}
+</code>
+
+It can be then used as follows:
+
+<code php>
+function *xrange($start, $end, $step = 1) {
+    for ($i = $start; $i <= $end; $i += $step) {
+        yield $i;
+    }
+}
+
+$range = rewindable(xrange(0, 5));
+foreach ($range as $i) {
+    echo $i, "\n";
+}
+foreach ($range as $i) {
+    echo $i, "\n";
+}
+</code>
+
+This will correctly output the 0..5 range twice.
+
+==== Patch ====
+
+A working, but not yet complete implementation can be found at https://github.com/nikic/php-src/tree/addGeneratorsSupport.
+
+==== TODO ====
+
+  * ''Generator::throw'' method
+  * Decide whether closing a generator show be done by throwing an exception into the generator (like ''GeneratorExit''
+    in Python)
+  * Implement ''yield*'' expression and generator return values
+  * Some more stuff
