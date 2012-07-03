@@ -1,0 +1,213 @@
+====== Request for Comments: Scalar Type Hinting With Casts ======
+  * Version: 0.1
+  * Date: 2012-07-03
+  * Author: Anthony Ferrara <ircmaxell@php.net>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/scalar_type_hinting_with_casts
+
+===== Introduction =====
+
+Currently, PHP has no way to provide type hinting for function parameters which are not classes or arrays. This is on often requested feature that has been discussed on the internals list many many times. This RFC discusses a new implementation of this feature that attempts to stay close to php's type shifting roots, and attempts to mirror //zend_parse_parameters// as much as possible.
+
+==== Philosophy ====
+
+This RFC discusses a method of adding scalar type hints to PHP while attempting to embrace the dynamic nature of PHP variables.  This means that passing a type that does not exactly match the hinted type will cause a cast to happen. This cast will only succeed if the argument can be cleanly converted to the requested type. If it cannot be converted without significant data-loss, an //E_RECOVERABLE_ERROR// will be raised.
+
+For consistency, this patch attempts to follow //zend_parse_parameters()// for the validation rules, except for disallowing lossy conversion from float to int (1.5 -> int generates an error).
+
+===== Proposal =====
+
+==== Engine Changes ====
+
+This implementation does not change the parser at all. The parser still detects the type hints as object type hints. The compiler (zend_compile.c) will then detect the exact value for the type hint, and change the stored hint from IS_OBJECT to the proper type (freeing the string).
+
+Therefore this patch does not introduce new reserved words. 
+
+One potential side-effect, is that with the current patch, //function a(int $a)// hints for an integer primitive, but //function a(Int $a)// hints for a class named //Int//. This can be resolved by forcing a strtolower on the hint prior to string comparison.
+
+==== Syntax ====
+
+Five new type hints are introduced with this patch:
+
+  * //int// - Matching integers only
+  * //float// - Matching floating point numbers
+  * //boolean// - Matching boolean parameters only
+  * //string// - Matching strings only
+  * //resource// - Matching resources only
+
+==== Conversion Rules ====
+
+Conversion is allowed only if data-loss does not happen. There are a few exceptions (objects using <nowiki>__toString</nowiki>, strings containing leading numerics, etc). Here's a table of examples. 
+
+  * //fail// indicates an E_RECOVERABLE_ERROR
+  * //pass// indicates no error and a conversion
+  * //notice// indicates an E_NOTICE and a conversion
+
+^ value                   ^ string ^ float  ^ int    ^ boolean ^ resource ^ array ^
+^ true (boolean)          | pass   | pass   | pass   | pass    | fail     | fail  |
+^ false (boolean)         | pass   | pass   | pass   | pass    | fail     | fail  |
+^ 0 (integer)             | pass   | pass   | pass   | pass    | fail     | fail  |
+^ 1 (integer)             | pass   | pass   | pass   | pass    | fail     | fail  |
+^ 12 (integer)            | pass   | pass   | pass   | pass    | fail     | fail  |
+^ 12 (double)             | pass   | pass   | pass   | pass    | fail     | fail  |
+^ 12.34 (double)          | pass   | pass   | fail   | pass    | fail     | fail  |
+^ 'true' (string)         | pass   | fail   | fail   | pass    | fail     | fail  |
+^ 'false' (string)        | pass   | fail   | fail   | pass    | fail     | fail  |
+^ '0' (string)            | pass   | pass   | pass   | pass    | fail     | fail  |
+^ '1' (string)            | pass   | pass   | pass   | pass    | fail     | fail  |
+^ '12' (string)           | pass   | pass   | pass   | pass    | fail     | fail  |
+^ '12abc' (string)        | pass   | notice | notice | pass    | fail     | fail  |
+^ '12.0' (string)         | pass   | pass   | pass   | pass    | fail     | fail  |
+^ '12.34' (string)        | pass   | pass   | fail   | pass    | fail     | fail  |
+^ 'foo' (string)          | pass   | fail   | fail   | pass    | fail     | fail  |
+^ array () (array)        | fail   | fail   | fail   | fail    | fail     | pass  |
+^ array (0 => 12) (array) | fail   | fail   | fail   | fail    | fail     | pass  |
+^ NULL (NULL)             | pass   | pass   | pass   | pass    | fail     | fail  |
+^ %%''%% (string)         | pass   | fail   | fail   | pass    | fail     | fail  |
+^ 1 (resource)            | fail   | fail   | fail   | fail    | pass     | fail  |
+^ implementing __toString | pass   | fail   | fail   | fail    | fail     | fail  |
+
+It's important to note that passing `12.5` as a float or string to a //int// type hint will presently fail, since data-loss would occur (this diverges from //zend_parse_parameters// which would truncate the value).
+
+==== Errors ====
+
+If a provided hint does not match at all ("foo" passed to an //int// hint), an //E_RECOVERABLE_ERROR// is raised.
+
+If a non-well-formed string is passed to an //int// hint ("12.5foo"), an //E_NOTICE// is raised on a non-well-formed numeric (the same as zend_parse_parameters).
+
+==== Defaults ====
+
+Any value can be entered as a default. Presently even array() is allowable for an int type hint. The default is converted at run-time when it is accessed.
+
+This can lead to odd bugs, so in the future it would be good to validate the default in zend_compile.c (casting it where appropriate, checking for a valid cast).
+
+==== References ====
+
+The current implementation treats references like any other value. If it casts, the referenced value is casted. 
+
+==== New APIs ====
+
+This current proposal adds a series of conversion functions to the core:
+
+  * //int convert_to_{type}_safe(zval <nowiki>**</nowiki>ptr)// - Convert the zval to {type}. Return value indicates if conversion was "clean". (FAILURE indicates unclean conversion)
+  * //int convert_to_{type}_safe_ex(zval <nowiki>**</nowiki>ptr)// - Separate zval if not a reference, and convert to {type}. Return indicates clean conversion (FAILURE indicates unclean conversion).
+
+These functions pairs exist for //long//, //double//, //string//, //boolean//. Resource doesn't need one, as no type other than resource can presently be converted safely to a resource.
+
+==== New Methods ====
+
+For consistency, the following new methods have been added to //ReflectionParameter//
+
+  * //isInt()// - boolean to determine if parameter is type-hinted as an integer.
+  * //isFloat()// - boolean to determine if parameter is type-hinted as a float.
+  * //isBoolean()// - boolean to determine if parameter is type-hinted as a boolean.
+  * //isString()// - boolean to determine if parameter is type-hinted as a string.
+  * //isResource()// - boolean to determine if parameter is type-hinted as a resource.
+
+==== Patch ====
+
+The modifications necessary to implement this feature exist on the [[https://github.com/ircmaxell/php-src/tree/scalar_type_hints|scalar_type_hints branch of ircmaxell's github fork]]. It is still a work-in-progress, and should be considered unstable at this time.
+
+===== Possible Changes =====
+
+==== Float to Int Casting Rules ====
+
+At present, the cast from float to int results in an error if the int doesn't exactly represent the float (satisfying a double cast: //val = (double) (long) val//). And a cast from an int to a float follows the same semantics (as on 64 bit platforms PHP_INT_MAX is not exactly representable by a float).
+
+This could be relaxed for semi-representable values. So 1.5 could be allowed for an int parameter (casted to 1). But //float(99999999999999999999)// would not, because it would lose a lot of information in the transfer (would be casted to PHP_INT_MAX).
+
+I believe the current behavior (error on non-exactly-representable) is the correct one. However, this could be changed to an E_NOTICE instead indicating that partial data was lost.
+
+==== Warning On Data Loss ====
+
+We could also change the E_RECOVERABLE_ERROR on data-loss to an E_WARNING. That would allow data-loss to continue. The value passed in would still be cast according to the normal casting rules. So passing //"foo"// to an int parameter would result in //int(1)// and an E_WARNING.
+
+===== Examples =====
+
+==== Integer Hints ====
+
+<file php int_hint.php>
+<?php
+function foo(int $a) {
+    var_dump($a); 
+}
+foo(1); // int(1)
+foo("1"); // int(1)
+foo(1.0); // int(1)
+foo("1a"); // Notice: A non well formed numeric value encountered int(1)
+foo("a"); // E_RECOVERABLE_ERROR
+foo(999999999999999999999999999999999999); // E_RECOVERABLE_ERROR (since it's not exactly representable by an int)
+foo(1.5); // E_RECOVERABLE_ERROR
+foo(array()); // E_RECOVERABLE_ERROR
+foo(new StdClass); // E_RECOVERABLE_ERROR
+?>
+</file>
+
+==== Float Hints ====
+
+<file php float_hint.php>
+<?php
+function foo(float $a) {
+    var_dump($a); 
+}
+foo(1); // float(1)
+foo("1"); // float(1)
+foo(1.0); // float(1)
+foo("1a"); // Notice: A non well formed numeric value encountered float(1)
+foo("a"); // E_RECOVERABLE_ERROR
+foo(1.5); // float(1.5)
+foo(array()); // E_RECOVERABLE_ERROR
+foo(new StdClass); // E_RECOVERABLE_ERROR
+?>
+</file>
+
+==== String Hints ====
+
+<file php string_hint.php>
+<?php
+function foo(string $a) {
+    var_dump($a); 
+}
+foo(1); // string "1"
+foo("1"); // string "1"
+foo(1.0); // string "1"
+foo("1a"); // string "1a"
+foo("a"); // string "a"
+foo(1.5); // string "1.5"
+foo(array()); // E_RECOVERABLE_ERROR
+foo(new StdClass); // E_RECOVERABLE_ERROR
+?>
+</file>
+
+==== Boolean Hints ====
+
+<file php boolean_hint.php>
+<?php
+function foo(boolean $a) {
+    var_dump($a); 
+}
+foo(1); // bool(true)
+foo("1"); // bool(true)
+foo(1.0); // bool(true)
+foo(0); // bool(false)
+foo("0"); // bool(false)
+foo("1a"); // bool(true)
+foo("a"); // bool(true)
+foo(1.5); // bool(true)
+foo(array()); // E_RECOVERABLE_ERROR
+foo(new StdClass); // E_RECOVERABLE_ERROR
+?>
+</file>
+
+===== More Information =====
+
+==== Prior RFCs ====
+
+  * [[rfc:typehint|Return value and parameter type hint]] by Felipe
+  * [[rfc:typecheckingstrictandweak|Strict and weak parameter type checking]] by Lukas and Zeev
+  * [[rfc:typecheckingstrictonly|Optional Strict Type Checking for Scalars]] by Paul (Ilia's proposal)
+  * [[rfc:typecheckingparseronly|Parser and Reflection-API only Type Hints]] by Derick (Implemented)
+  * [[rfc:parameter_type_casting_hints|Parameter Type Casting Hints]] by Anthony
+
+===== Changelog =====
+  * 0.1 - Initial Draft
