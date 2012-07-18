@@ -7,26 +7,44 @@
 
 ===== Introduction =====
 
-T_LIST cannot be used with foreach before.
+This feature introduces list() support in foreach constructs:
+
 <code php>
 <?php
-foreach (array(array(1, 2), array(3, 4)) as list($a, $b)) {
-  /* won't work */
+$users = array(
+    array('Foo', 'Bar'),
+    array('Baz', 'Qux');
+);
+
+// Before
+foreach ($users as $user) {
+    list($firstName, $lastName) = $row;
+    echo "First name: $firstName, last name: $lastName. ";
+}
+
+// After
+foreach ($users as list($firstName, $lastName)) {
+    echo "First name: $firstName, last name: $lastName. ";
 }
 </code>
 
-It is also a feature request:  #10203 [[https://bugs.php.net/bug.php?id=10203|allow foreach($array as list($a,$b)]]
+This feature eliminates the use of a redundant variable ($user in the example above), reduces code verbosity in typical cases of iterating structured data, such as SQL result sets, and it doesn't introduce new keywords, but simply reuses a familiar PHP construct in a new context.
 
-I think this feature could make PHP code more flexible, so I am working on a solution to provide that.
+It's a commonly requested feature, and there is evidence that people already expect list() should work in this scenario:  #10203 [[https://bugs.php.net/bug.php?id=10203|allow foreach($array as list($a,$b)]]
+
+This RFC provides a behavior specification and implementation for this feature.
 
 ===== Proposal =====
 1. ZEND_FE_FETCH
 <code php>
 <?php
-foreach (array(array(24,2333), array(31,4666)) as list($a,$b)) {
+$rows = array(array(24,2333), array(31,4666));
+
+foreach ($rows as list($a, $b)) {
     printf("a=>%s, b=>%s\n", $a, $b);
 }
-/** output:
+
+/** Output:
 a=>24, b=>2333
 a=>31, b=>4666
 */
@@ -35,16 +53,19 @@ a=>31, b=>4666
 2. ZEND_FE_FETCH_WITH_KEY
 <code php>
 <?php
-foreach (array(array(24,2333), array(31,4666)) as $k => list($a, $b)) {
+$rows = array(array(24,2333), array(31,4666));
+
+foreach ($rows as $k => list($a, $b)) {
     printf("key:%s, a=>%s, b=>%s\n", $k, $a, $b);
 }
-/** output:
+
+/** Output:
 key:0, a=>24, b=>2333
 key:1, a=>31, b=>4666
 */
 </code>
 
-Opcodes generated:
+Samples with generated opcodes:
 
 list.php
 <code php>
@@ -111,10 +132,9 @@ foreach ($array as $k => list($a, $b)) {
   10    20    > RETURN                                                   1
 </code>
 
-===== More about RFC =====
-In order to avoid the reduce/reduce conflict, I have to add the new bison rules to the existing "foreach_variable", which would otherwise bring a side-effect, that is :
+===== Implementation details of the RFC =====
+In order to avoid the reduce/reduce conflict, new bison rules will be added to the existing "foreach_variable", to avoid this side effect:
 
-considering this script:
 <code php>
 <?php
 foreach (array(1,3,4) as &$key => $foo) {
@@ -122,25 +142,26 @@ foreach (array(1,3,4) as &$key => $foo) {
 }
 </code>
 
-before patched:
+Without the rules:
 <code>
 PHP Parse error:  syntax error, unexpected '&', expecting T_STRING or T_VARIABLE or '$' in /home/huixc/test.php on line 2
 </code>
 
-after patched:
+With the rules:
 <code>
 PHP Fatal error:  Key element cannot be a reference in /home/huixc/test.php on line 2
 
 Fatal error: Key element cannot be a reference in /home/huixc/test.php on line 2
 </code>
 
-===== Silent Token ======
-about silent token '@',  is it neccessary to be supported :
+===== Possible additional features (vote separately): silent Token ======
+It is possible to add support of the silent token in the new context:
 <code php>
 foreach (array(array(1,3,4), array(1, 2)) as @list($a, $b, $c)) {
 }
 </code>
-if yes, the second patch in the following patchs list can be used.
+
+In case we want this, an additional patch will be provided.
 
 Opcodes generated:
 
@@ -148,7 +169,7 @@ list_with_silent.php
 <code php>
 <?php
 foreach (array(array(1, 2), array(3, 4), array(5)) as @list($a, $b)) {
-    echo $a, $b; /* without the silent token, there will be a notice since the third item of array has no index 1*/
+    echo $a, $b; // Without the silent token, there will be a notice since the third nested array has no second item.
 }
 </code>
 
@@ -178,7 +199,8 @@ foreach (array(array(1, 2), array(3, 4), array(5)) as @list($a, $b)) {
         22  >   SWITCH_FREE                                              $4
    5    23    > RETURN                                                   1
 </code>
-===== Patchs =====
+
+===== Patches =====
    * http://www.laruence.com/php-dev/php-5.4.0svn-add-foreach-list-support.patch
    * http://www.laruence.com/php-dev/php-5.4.0svn-add-foreach-list-with-slient-support.patch
 ===== Tests =====
