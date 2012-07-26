@@ -1,0 +1,235 @@
+====== Request for Comments: How to write RFCs ======
+  * Version: 1.0
+  * Date: 2012-07-26
+  * Author: Levi Morrison <levim@php.net>
+  * Status: In Draft
+  * First Published at: http://wiki.php.net/rfc/php6-rethink
+
+===== Introduction =====
+
+Any time we do a backwards compatibility break we should stop to think about what other improvements we could make to the language while we are at it.  Sometimes, drastic changes are needed.  The jump from PHP 4 to PHP 5 was huge.  It included a more modern object model and many other similar improvements. This RFC is an idea for when we jump from PHP 5 to PHP 6 and how we might improve upon the object model that we have. Since classes define new types, I will also discuss types in general.
+
+===== What is good about types and objects in PHP? =====
+
+This is not a comprehensive list.
+
+  * **The object model includes inheritance, polymorphism and abstractions.** In concept it works pretty much like any modern OOP language. You have interfaces which you can implement, and classes which you can extend. Nothing particularly special, but that's not a bad thing.
+  * **Dynamic typing and type juggling.** During development it really helps to not have to specify types everywhere. Type juggling between numbers and strings is also useful.
+  * **Type-hints.**  Though ill-named, type-hints bring some of the usefulness of static types to PHP.  It really cuts down on validation.
+
+===== What is bad about types and objects in PHP? =====
+
+  * **Functions and methods don't give return values.**  PHP doesn't support declaring return types so people started using docblocks to declare the return values.  IDE's help mitigate the cost of writing and maintaining them, but it doesn't fix the problem.
+  * **Variables cannot typed.** Dynamic typing helps alleviate development headache because you don't have to worry about types.  Once the project matures, though, not having declared types becomes a grievance.  Class properties get the same treatment as function return methods: people use docblocks to alleviate the problem.
+  * **Type hints do not work for primitive (scalar) values.** If some property of class needs to be an integer, you can't simply type-hint it with `int`.  To do it properly you should use `filter_var` and `FILTER_VALIDATE_INT` and if it isn't an integer you throw an Exception.  This is much clunkier and takes significantly more work than a type-hint.
+  * **Implementing best-practice visibility is verbose.** Generally class members should not be publicly visible and should be accessed through methods. Besides preventing foreign code from messing with the class's behavior, it also future-proofs your code because later on you can add logic when you set and retrieve class members. This adds a lot of boilerplate code.  IDE's can generate the code, but it's there.
+
+===== How we can improve: An Example =====
+
+Consider the following class that follows fairly conventional practices.   It's variables are not public and provides read access through getters:
+<code php>
+class Person {
+    /**
+     * @var int
+     */
+    protected $id;
+
+    /**
+     * @var string
+     */
+    protected $name;
+
+    /**
+     * @param int $id
+     * @param string $name
+     */
+    public function __construct($id, $name) {
+        $this->id = $id;
+        $this->name = $name;
+    }
+
+    /**
+     * @return int
+     */
+    public function getId() {
+        return $this->id;
+    }
+
+    /**
+     * @return string
+     */
+    public function getName() {
+        return $this->name;
+    }
+
+}
+
+</code>
+
+There is nothing in this code that prevents people from specifying incorrect types.  If catching these errors is important enough, you have to write something like this:
+
+<code php>
+class Person {
+    /**
+     * @var int
+     */
+    protected $id;
+
+    /**
+     * @var string
+     */
+    protected $name;
+
+    /**
+     * @param int $id
+     * @param string $name
+     * @throws InvalidArgumentException
+     */
+    public function __construct($id, $name) {
+        $this->setId($id);
+        $this->setName($name);
+    }
+
+    /**
+     * @return int
+     */
+    public function getId() {
+        return $this->id;
+    }
+
+    /**
+     * @return string
+     */
+    public function getName() {
+        return $this->name;
+    }
+
+    /**
+     * @param int $id
+     * @throws InvalidArgumentException
+     */
+    protected function setId($id) {
+        if (filter_var($id, FILTER_VALIDATE_INT) === FALSE) {
+            throw new InvalidArgumentException();
+        }
+        $this->id = $id;
+    }
+
+    /**
+     * @param string $name
+     * @throws InvalidArgumentException
+     */
+    protected function setName($name) {
+
+        if (is_bool($name) || !is_scalar($name)) {
+            throw new InvalidArgumentException();
+        }
+        $this->id = $name;
+    }
+
+}
+</code>
+
+That is a lot of typing for properly storing two variables inside of a class.  That's not even the end of it, though.  What if our class really needs to be an interface? We then end up with something like this:
+
+<code php>
+interface Person {
+
+    /**
+     * @return int
+     */
+    public function getId();
+
+    /**
+     * @return string
+     */
+    public function getName();
+    
+}
+
+class PersonImpl implements Person {
+    protected $id;
+
+    /**
+     * @var string
+     */
+    protected $name;
+
+    /**
+     * @param int $id
+     * @param string $name
+     */
+    public function __construct($id, $name) {
+        $this->id = $id;
+        $this->name = $name;
+    }
+
+    /**
+     * @return int
+     */
+    public function getId() {
+        return $this->id;
+    }
+
+    /**
+     * @return string
+     */
+    public function getName() {
+        return $this->name;
+    }
+
+    /**
+     * @param int $id
+     * @throws InvalidArgumentException
+     */
+    protected function setId($id) {
+        if (filter_var($id, FILTER_VALIDATE_INT) === FALSE) {
+            throw new InvalidArgumentException();
+        }
+        $this->id = $id;
+    }
+
+    /**
+     * @param string $name
+     * @throws InvalidArgumentException
+     */
+    protected function setName($name) {
+
+        if (is_bool($name) || !is_scalar($name)) {
+            throw new InvalidArgumentException();
+        }
+        $this->id = $name;
+    }
+
+}
+</code>
+
+So what can we do?
+
+I feel like we can improve this by changing how objects work in PHP.  By adding static types as an option (and supporting them with type-hints) and creating automatic getters and setters we can cut out most of that code. A picture is worth a thousand words (but I'll write some after the example anyway):
+
+<code php>
+
+interface Person {
+
+    int get id();
+
+    string get name();
+
+}
+
+class PersonImpl implements Person {
+
+    int $id;
+
+    string $name;
+
+    public function __construct(int $id, string $name) {
+        $this->id = $id;
+        $this->name = $name;
+    }
+
+}
+</code>
+
+===== Changelog =====
