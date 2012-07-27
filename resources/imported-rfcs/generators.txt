@@ -515,6 +515,78 @@ than the native implementation, but still faster than the iterator variant.
 
 The tests were run on a Ubuntu VM, so I'm not exactly sure how representative they are.
 
+===== Why not just use callback functions? =====
+
+A question that has come up a few times during discussion: Why not use callback functions, instead of generators? For example the above ''getLinesFromFile'' function could
+be rewritten using a callback:
+
+<code php>
+function processLinesFromFile($fileName, callable $callback) {
+    if (!$fileHandle = fopen($fileName, 'r')) {
+        return;
+    }
+    
+    while (false !== $line = fgets($fileHandle)) {
+        $callback($line);
+    }
+    
+    fclose($fileHandle);
+}
+
+processLinesFromFile($fileName, function($line) {
+    // do something
+});
+</code>
+
+This approach has two main disadvantages:
+
+Firstly, callbacks integrate badly into the existing PHP coding paradigms. Having quadruply-nested closures is something very normal in languages like JavaScript, but
+rather rare in PHP. Many things in PHP are based on iteration and generators can nicely integrate with this.
+
+A concrete example, which was actually my initial motivations to write the generators patch:
+
+<code php>
+protected function getTests($directory, $fileExtension) {
+    $it = new RecursiveDirectoryIterator($directory);
+    $it = new RecursiveIteratorIterator($it, RecursiveIteratorIterator::LEAVES_ONLY);
+    $it = new RegexIterator($it, '(\.' . preg_quote($fileExtension) . '$)');
+
+    $tests = array();
+    foreach ($it as $file) {
+        // read file
+        $fileContents = file_get_contents($file);
+
+        // parse sections
+        $parts = array_map('trim', explode('-----', $fileContents));
+
+        // first part is the name
+        $name = array_shift($parts);
+
+        // multiple sections possible with always two forming a pair
+        foreach (array_chunk($parts, 2) as $chunk) {
+            $tests[] = array($name, $chunk[0], $chunk[1]);
+        }
+    }
+
+    return $tests;
+}
+</code>
+
+This is a function which I use to provide test vectors to PHPUnit. I point it to a directory containing test files and then split up those test files into individual tests
++ expected output. I can then use the result of the function to feed some test function via ''@dataProvider''.
+
+The problem with the above implementation obviously is that I have to read all tests into memory at once (instead of one-by-one).
+
+How can I solve this problem? By turning it into an iterator obviously! But if you look closer, this isn't actually that easy, because I'm adding new tests in a nested loop.
+So I would have to implement some kind of complex push-back mechanism to solve the problem. And - getting back on topic - I can't use callbacks here either, because I need
+a traversable for use with ''@dataProvider''. Generators on the other hand solve this problem very elegantly. Actually, all you have to do to turn it into a lazy generator
+is replace ''$tests[] ='' with ''yield''.
+
+The second, more general problem with callbacks is that it's very hard to manage state across calls. The classic example is a lexer + parser system. If you implement the
+lexer using a callback (i.e. ''lex(string $sourceCode, callable $tokenConsumer)'') you would have to figure out some way to keep state between subsequent calls. You'd have
+to build some kind of state machine, which can quickly get really ugly, even for simple problems (just look at the hundreds of states that a typical LALR parser has). Again,
+generators solve this problem elegantly, because they maintain state implicitly, in the execution state.
+
 ===== TODO =====
 
   * Decide on whether to implement the ''Generator::throw'' method
