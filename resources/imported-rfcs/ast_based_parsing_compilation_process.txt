@@ -1,0 +1,60 @@
+====== Request for Comments: Moving to an AST-based parsing/compilation process ======
+  * Date: 2012-09-04
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Under Discussion
+
+===== Introduction =====
+
+Currently PHP uses a single-pass compilation process, i.e. the parser directly invokes opcode compilation routines. Most other languages on the other hand use an intermediary structure to separate those two phases: The parser only emits an abstract syntax tree (AST), which is then used by a separate compiler to emit instructions. The use of an AST decouples the two phases and as such allows for greater flexibility and deeper analysis.
+  
+This RFC outlines why PHP should consider moving to an AST-based compilation process.
+
+===== Advantages =====
+
+==== Potential for more advanced optimizations ====
+
+An abstract syntax tree gives us the ability to apply more advanced optimizations. It is usually not possible to apply compile-time optimizations with a single-pass compiler because not enough information is available at the time the instructions are emitted. With an abstract syntax tree on the other hand a lot more information is easily available, which can be used to compile faster opcodes.
+
+The main issue here is that PHP does not cache the compiled opcodes, so they are regenerated on every request. As an optimizing compiler increases compile times it may be that the additional compilation overhead is actually larger than the resources saved in execution. Adding advanced optimizations in the compilation process would probably require the inclusion of some kind of opcode-cache directly into PHP. Or alternatively the optimizations would be done by a separate extension (which could be employed together with APC etc).
+
+Furthermore one should point out that the concept of "advanced optimizations" is rather fuzzy. If you look at projects like HipHop, you'll find that the performance numbers don't actually show a vast improvement over the native Zend implementation. There just isn't *that* much potential for optimization in a dynamic language (unless you go down the JIT road).
+
+Generally I'd say that the potential for optimizations is the least important reason to move to an AST (even though it is probably the first thing that comes to mind). It's just not clear enough how much it will actually bring (or cost).
+
+==== Elimination of various quirks ====
+
+Currently there is various quirks in the emitted opcodes which can be attributed to the use of a single-pass compiler. The simplest (and least important) example are the NOP opcodes that the compiler inserts at several places.
+
+A more interesting example is the fact that whenever you access a static member like ''Foo::$bar'' an unused compiled-variable for ''$bar'' is emitted. The compiler thinks that ''$bar'' is a normal variable and as such creates an
+unnecessary and unused CV for it.
+
+Other quirks (which actually influences the behavior) is caused by the separation of ''variable'' and ''expr_without_variable'' in the grammar. For example parentheses may cause subtle changes in behavior (''func($foo)''
+and ''func(($foo))'' have different behavior).
+
+All these can be eliminated when an AST is used.
+
+==== Removal of ugly hacks / reducing complexity of the compiler ====
+
+In order to support single-pass compilation ugly hacks have to be used both in the parser and in the compiler. One example is that already emitted opcodes sometimes have to be overridden or adjusted at a later time (and I'm not talking about ''pass_two'' here). Generally all code related to variable access (where "variable" means, variables, properties, functions, methods etc) is very complex and hard to understand. The immense complexity in this area is also part of the reason why the dereferencing syntaxes in PHP are so inconsistent.
+
+Using an AST the compiler can be written in a much cleaner way. This would make the code in this area easier to understand, easier to maintain and also more friendly to new contributors.
+
+==== Decoupling syntax decisions from technical issues ====
+
+With the current single-pass compiler some things are very hard / near impossible to implement. This actively influences syntax descisions.
+
+One example of syntax that is currently impossible is array destructuring without a special ''list()'' construct. The syntax ''[$a, $b] = [$b, $a]'' that is common in other languages is not possible to implement in PHP due to parser limitations.
+
+Another example are list comprehensions / generator expressions where the result expression comes first (e.g. ''[x * x for x in list]'' in Python). In PHP only the reversed syntax is possible (''foreach ($list as $x) yield $x * $x'').
+
+Those are two examples of larger limitations, but smaller syntax decisions are often driven by parser limitations too. An AST allows implementing many syntax elements that would otherwise be impossible. (One of the main reasons for this is that an AST based parser does not require mid-rule semantic action reduction.)
+
+===== Disadvantages =====
+
+The main disadvantage of generating an AST is (quite obviously) that it slows down compilation and requires more memory. At this point it is hard to estimate how much impact it will have in this respect.
+
+===== Summary =====
+
+Splitting up parsing and compilation in two phases comes with numerous advantages, the most important ones being reducing the complexity of the compiler (and grammar) as well as reducing the influence of technical issues on language design (syntax in particular).
+
+But: Moving to an AST-based compilation process would basically require a (nearly) complete rewrite of the parser and the compiler. It would be a hell lot of work. It would be nice to get some help there ;)
