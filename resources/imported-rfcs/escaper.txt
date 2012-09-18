@@ -1,0 +1,120 @@
+====== Escaping RFC for PHP Core ======
+  
+  * Version: 1.0
+  * Date: 2012-09-18
+  * Author: Pádraic <padraic.brady.at.gmail.com>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/escaper
+
+===== Introduction =====
+
+This RFC proposes the addition of a set of standard functions and/or an SPL class dedicated to the secure escaping of untrusted values against Cross-Site Scripting (XSS) and related vulnerabilities. It recognises that this involves the partial duplication of certain existing functions but raises the argument that the current division of functionality, the disparate behaviour of that functionality and varied misunderstandings among programmers have served to enable insecure practices in the absence of a unified approach in this area.
+
+The proposed functionality is intended to largely reflect the recommendations of the OWASP's various [XSS Cheat Sheets](https://www.owasp.org/index.php/XSS_%28Cross_Site_Scripting%29_Prevention_Cheat_Sheet) by offering a comprehensive set of simple escaping functions or class methods specific to the most common HTML contexts: HTML Body, HTML Attribute, Javascript, CSS and URL/URI.
+
+A similar approach has already been taken in PHP code by Zend Framework 2.0 (Zend\Escaper) and, just recently, Symfony 2 (via Twig) adopted this functionality. While this can be done in PHP by individual frameworks, it would be far more useful to have such escaping mechanisms available to everyone in core PHP, both from a performance perspective and to help standardise the current hodgepodge of practices that have arisen.
+
+===== The Problem With Inconsistent Functionality =====
+
+At present, programmers orient towards the following PHP functions for each common HTML context:
+
+  * HTML Body: htmlspecialchars() or htmlentities()
+  * HTML Attribute: htmlspecialchars() or htmlentities()
+  * Javascript: addslashes() or json_encode()
+  * CSS: n/a
+  * URL/URI: rawurlencode() or urlencode()
+
+In practice, these decisions appear to depend more on what PHP offers, and if it can be interpreted as offering sufficient escaping safety, than it does on what is recommended in reality to defend against XSS. While these functions can prevent XSS, they do not cover all use cases or risks.
+
+Using htmlspecialchars() in a perfectly valid HTML5 unquoted attribute value, for example, is completely useless since the value can be terminated by a space (among other things) which is never escaped. Thus, in this instance, we have a conflict between a widely used HTML escaper and a modern HTML specification, with no specific function available to cover this use case. While it's tempting to blame users, or the HTML specification authors, escaping just needs to deal with whatever HTML and browsers allow.
+
+Inconsistencies with valid HTML, insecure default parameters, lack of character encoding awareness, and misrepresentations of what functions are capable of by some programmers - these all make escaping in PHP an unnecessarily convoluted quest for those who just want an escaping function that works across all HTML contexts.
+
+Including more narrowly defined and specifically targeted functions or SPL class methods into PHP will simplify the whole situation for users, offer a cohesive approach to escaping, and, by its presence in Core, discourage function misuse and homegrown escaping functions.
+
+===== SPL Class or Functions? =====
+
+While it may well be feasible to do both, I have a strong preference for classes and would suggest a class structure that implements the following interface:
+
+''    interface Escaper
+    {
+        public function __construct($encoding = 'UTF-8');
+
+        public function escapeHtml($value);
+
+        public function escapeHtmlAttr($value);
+
+        public function escapeJs($value);
+
+        public function escapeCss($value);
+
+        public function escapeUrl($value);
+
+        public function validateUrl($value);
+
+    }''
+
+Functions may be added along the following lines:
+
+  * escape_html($value, $encoding);
+
+  * escape_html_attribute($value, $encoding);
+
+  * escape_javascipt($value, $encoding);
+
+  * escape_css($value, $encoding);
+
+  * escape_url($value, $encoding);
+
+I am strongly opposed to allowing these functions accept unpredictable character encoding directives via php.ini. That would require additional work to validate which is precisely what this RFC should seek to avoid.
+
+I have assumed that the character encodings supported are limited to those presently allowed by htmlspecialchars() and that the internals of each method or function validate this fact or throw an Exception (or an error for function calls) to prevent continued (potentially vulnerable) execution as is currently allowed by htmlspecialchars().
+
+The functions/methods don't drastically depart from htmlspecialchars(). The class API is the real advantage. The second parameter is not optional.
+
+The following is a sample implementation in PHP from Zend Framework 2.0:
+https://github.com/zendframework/zf2/raw/master/library/Zend/Escaper/Escaper.php
+
+Symfony's Twig also recently added similar escaping options:
+https://github.com/fabpot/Twig/raw/master/lib/Twig/Extension/Core.php
+
+===== Class Method Dissection =====
+
+The matching functions would, of course, be along the same lines.
+
+==== escapeHtml ====
+
+The escapeHtml() function is basically identical to htmlspecialchars() but provides a few additional tweaks (validating encoding option, ceasing execution where invalid encoding detected, etc.). It assumes a default encoding of UTF-8 and behaves as if the ENT_QUOTES and ENT_SUBTITUTE flags were both set. As it would not accept a Doctype flag, escaping is done to the lowest common denominator.
+
+==== escapeHtmlAttr ====
+
+Typical HTML escaping can replace this method, but only if the attribute value can be guaranteed as being properly quoted. Where quoting is not guaranteed, this method performs additional escaping that escapes all space characters and their equivalents. In effect, this means escaping everything except basic alphanumeric characters and the comma, period, hyhen and underscore characters. Anything else will be escaped as a hexadecimal entity unless a valid name entity can be substituted.
+
+==== escapeJs ====
+
+Javascript string literals in HTML are subject to significant restrictions particularly due to the potential for unquoted attributes and any uncertainty as to whether Javascript will be viewed as being CDATA or PCDATA by the browser. To eliminate any possible XSS vulnerabilities, Javascript escaping for HTML extends the escaping rules of both ECMAScript and JSON to include any potentially dangerous character. Very similar to HTML attribute value escaping, this means escaping everything except basic alphanumeric characters and the comma, period and underscore characters as hexadecimal or unicode escapes.
+
+==== escapeCss ====
+
+CSS is almost identical to Javascript for the same reasons. CSS escaping excludes only basic alphanumeric characters and escapes all other characters into valid CSS hexadecimal escapes.
+
+==== escapeUrl ====
+
+This method is basically an alias for rawurlencode() which has applied RFC 3986 since PHP 5.3. It is included primarily for consistency.
+
+===== Finding Holes For XSS In Existing Functions =====
+
+In support of the inconsistency argument, I wrote a blog article a while ago about htmlspecialchars() and the circumstances of those use cases where its escaping functionality could be defeated:
+
+[A Hitchhiker's Guide To XSS: How Not To Use Htmlspecialchars() For Output Escaping](http://blog.astrumfutura.com/2012/03/a-hitchhikers-guide-to-cross-site-scripting-xss-in-php-part-1-how-not-to-use-htmlspecialchars-for-output-escaping/)
+
+Similar in nature, there are frequent lapses of awareness surrounding Javascript escaping. Backslash escaping and JSON encoding usually leave behind literal characters that can be misinterpreted by a HTML parser so the restrictive escaping strategy for Javascript values described earlier becomes necessary.
+
+===== Implementation for PHP Core? =====
+
+As my C skills are beyond rusty (they are barnacle encrusted at the bottom of the Atlantic), implementation of a patch for this RFC would require another volunteer to write it. Countless virtual cookies await this individual.
+
+===== Conclusion =====
+
+The essence of this RFC is to propose including basic safe escaping functionality within PHP which addresses the need to apply context-specific escaping in web applications. By offering a simple consistent approach, it affords the opportunity to implement these specifically to target XSS and to omit other functionality that some native functions include, and which can be problematic to programmers or doesn't go far enough. Centralising escaping functionality into one consistent package would, I believe, be one more small step to improving the application of escaping in PHP.
+
