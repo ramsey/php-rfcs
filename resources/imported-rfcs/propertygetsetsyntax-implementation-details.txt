@@ -1,44 +1,53 @@
 ====== Internal Implementation Details for Property Accessors ======
-  * Version: 1.1 (to be updated prior to vote)
-  * Created: 2012-12-29
+  * Version: 1.2
+  * Updated: 2013-01-16
   * Author: Clint Priest <phpdev at zerocue dot com>
   * Contributors: Nikita Popov
+  * RFC Document: [[https://wiki.php.net/rfc/propertygetsetsyntax-v1.2|v1.2 Document]]
+  * The code for this RFC are available here: https://github.com/cpriest/php-src/tree/accessors
 
-  * RFC Document: [[https://wiki.php.net/rfc/propertygetsetsyntax-as-implemented|https://wiki.php.net/rfc/propertygetsetsyntax-as-implemented]]
-  * The changes for this RFC are available here: https://github.com/cpriest/php-src/tree/accessors
+==== Overview ====
 
-===== Internal Implementation =====
+The current implementation of property accessors can be thought of as properties which have their read/write/isset/unset access 
+guarded by accessor functions, the primary changes that permit this functionality to work are all within standard zend object handling
+function calls.
 
-**Note: These implementation details have not been kept up with the semi-rapidly changing internal implementation and will be updated near the beginning of the voting period when all code has been completed**
+The rest of the code changes are involved in compilation of the property accessor syntax, allowing for automatic implementation, etc.
 
-Accessor information is stored in a new zend_accessor_info struct.  These structures are stored in a new HashTable property in a zend_class_entry structure named accessors.  They are indexed by the hash_value of the property name and are thus quickly accessed during property resolution.
+Finally a few functions were added to reflection to reflect on the new features.
+
+==== Memory Structure Changes ====
+
+Accessor information is stored as an array of zend_function pointers added to the zend_property_info structure.
 
 <code c>
-typedef struct _zend_accessor_info {
-	zend_uint	flags;
-	const char 	*doc_comment;
-	int 		doc_comment_len;
-	zend_function 	*getter;
-	zend_function 	*setter;
-	zend_function 	*isset;
-	zend_function 	*unset;
-} zend_accessor_info;
+typedef struct _zend_property_info {
+	/* ... */
+	union _zend_function **accs;
+} zend_property_info;
 </code>
 
-Internally the accessors are implemented as ordinary functions (with appropriate access levels) with specialized names.  get/set/isset/unset for a property named $Hours would be %%__getHours()%%, %%__setHours($value)%%, %%__issetHours()%% and %%__unsetHours()%% respectively.
+The memory space is only allocated for the array of pointers if a property has accessors.
 
-Two new function flags have been defined:
+The correct accessor is referenced by using an enum value from the following new enum:
+
 <code c>
-#define ZEND_ACC_READONLY     0x20000000
-#define ZEND_ACC_WRITEONLY    0x40000000
+/* Offsets into zend_property_info->accs */
+typedef enum {
+	ZEND_ACCESSOR_GET,
+	ZEND_ACCESSOR_SET,
+	ZEND_ACCESSOR_ISSET,
+	ZEND_ACCESSOR_UNSET,
+} zend_acc_index;
+#define ZEND_NUM_ACCESSORS 4
 </code>
 
-An additional byte was added to zend_internal_function:
+An additional byte was added to zend_function to specify the purpose of the function:
 <code c>
 zend_uchar purpose;
 </code>
 
-This was in lieu of using 4 additional flag values for which there was not room.  There are presently five states purpose can be in, they are:
+This was in lieu of using 4 additional fn_flag values for which there was not room.  There are presently five states purpose can be in, they are:
 <code c>
 #define ZEND_FNP_UNDEFINED			0		/* No special purpose function */
 #define ZEND_FNP_PROP_GETTER			1		/* Special purpose accessor: getter */
@@ -47,11 +56,36 @@ This was in lieu of using 4 additional flag values for which there was not room.
 #define ZEND_FNP_PROP_UNSETTER			4		/* Special purpose accessor: unsetter */
 </code>
 
- * %%__get()%%, %%__set()%%, %%__isset()%% and %%__unset()%% guards were used and the functionality is the same with the new accessors.
+All non-accessor functions have their purpose initialized to 0.
 
- * Error producing lines have been modified to check the function for ZEND_ACC_IS_ACCESSOR mask with more appropriate error report occurring.  For example: Cannot override final property getter TimePeriod::$Hours
+==== Compilation Changes ====
+
+During compilation if a guarded property is parsed it will create the given property, allocate the function pointer array 
+and begin parsing the accessor code within the context of a function.  
+
+Note that these functions are not methods of the class entry and are only referenced through the zend_function pointers of the 
+property_info structure, this also means that they may not be called directly by userland code, only through accessing the
+property using ordinary property access syntax.
+
+==== zend_object_handler.c Changes ====
+
+Each of the functions that handled read/write/isset/unset functionality checks to see if the property has accessors for 
+the property and if so checks that there is an accessor for the specific action (read/write, etc) being performed and
+handles the situation accordingly.
+
+Much of the pre/post magic call code that %%__get/__set/__isset/__unset%% used was refactored and centralized into their respective zend_std_call_*() functions.
+The new accessors also utilize these functions so that all pre/post condition handling is the same for accessors as they are for the magics.
+
+At this time, accessors also use the same recursive guarding mechanism to protect from recursion, however in the case of recursion with accessors
+a warning will be emitted if recursion is detected and that recursion is not called from the context of the accessor.
+
+For example a get accessor is allowed to get it's own value and does not produce a warning, but instead the ordinary property access routines occur while attempts to read that property from a context other than the get accessor will emit a warning and the value will be returned as NULL.
+
+ * Error producing lines have been modified to produce a useful error report.  For example: Cannot override final property getter TimePeriod::$Hours
 
 ==== Static Accessors ====
-There was no built-in mechanism to handle custom get/set/isset/unset for static properties, these were handled by catching references to static properties, checking for the existence of a static accessor and converting the compilation into a function call.  When a static setter is being used, the compiled code first becomes a static getter call and the zend_do_assign backpatches the op_array to become a call to the setter, as appropriate.
+Static accessors were abandoned due to the unique way in which static properties are presently handled, it would require significant engine changes to facilitate at this time and is
+left for another RFC to refactor the static property handling to bring it more in line with existing zend_object_handlers.c code.
 
-This yielded the possibility that a getter call was being made while it should not be allowed (if there was no getter defined) and so pass_two() was changed to look for these non-backpatched illegal static getter calls and a compile time error is produced.
+==== Tests ====
+Roughly 80 additional tests were added to test the new accessors functionality, they are stored in ~/Zend/tests/accessors
