@@ -1,0 +1,97 @@
+====== Request for Comments: How to write RFCs ======
+  * Version: 1.0
+  * Date: 2013-01-22
+  * Author: Gustavo Lopes <cataphract@php.net>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/sendrecvmsg
+
+
+Adds wrappers for ''recvmsg()'' and ''sendmsg()'' to ext/sockets.
+
+===== Introduction =====
+
+The module ext/sockets, a wrapper around the sockets API, does not include support to ''recvmsg()'' and ''sendmsg()''. This RFC addresses this shortcoming.
+
+==== Native sendmsg() and recvmsg() functions ====
+
+The ''sendmsg()'' and ''recvmsg()'' functions are the most general I/O functions. Their signatures:
+
+<code lang="c">
+ssize_t recvmsg(int socket, struct msghdr *message, int flags);
+ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
+
+
+struct msghdr {
+    void         *msg_name;       /* optional address */
+    socklen_t     msg_namelen;    /* size of address */ 
+    struct iovec *msg_iov;        /* scatter/gather array */
+    size_t        msg_iovlen;     /* # elements in msg_iov */ 
+    void         *msg_control;    /* ancillary data, see below */
+    size_t        msg_controllen; /* ancillary data buffer len */ 
+    int           msg_flags;      /* flags on received message */
+};
+
+struct iovec {                    /* Scatter/gather array items */
+    void  *iov_base;              /* Starting address */
+    size_t iov_len;               /* Number of bytes to transfer */
+};
+
+struct cmsghdr {
+    socklen_t cmsg_len;    /* data byte count, including header */
+    int       cmsg_level;  /* originating protocol */
+    int       cmsg_type;   /* protocol-specific type */
+    /* followed by unsigned char cmsg_data[]; */
+};
+</code>
+
+A thorough discussion is not appropriate here. For PHP purposes, what matters is that these functions allow attaching and retrieving some sort of metadata when sending or receiving data, respectively. The type of the metadata units is specified by the pair cmsg_level/cmsg_type.
+
+===== Rationale =====
+
+Some functionality is only available by using these functions. It can also save us from polluting ''socket_sendto()'' and ''socket_recvfrom()'' with even more address family specific options. It was already an error to add the ''$port'' parameter to what should be a socket/address type agnostic interface. See [[https://github.com/php/php-src/pull/220|pull request #220]].
+
+===== Changes to ext/socket =====
+
+Three new functions are added:
+<code lang="php">
+int socket_recvmsg(resource $socket, /* in/out */ array &$msghdr, int $flags);
+int socket_sendmsg(resource $socket, array $msghdr, int $flags);
+int socket_cmsg_space(int $level, int $type);
+</code>
+
+The last function is analogous to the ''CMSG_SPACE'' macro. It's used to calculate the size of the buffer that should be allocated for receiving the ancillary data. See below.
+
+The arrays match the native structures closely, except prefixes are dropped (for instance, if the native field is named ''msg_flags'', the PHP array will include an entry with key 'flags'). Fields that indicate array or string length are dropped, as they are unnecessary in PHP. The version of msghdr passed to ''socket_recvmsg'' also differs in that 1) it has no ''control'' element, only a ''controllen'' (hopefully calculated with ''socket_cmsg_space''), as the ''control'' buffer is allocated by PHP and 2) it has a ''buffer_size'' element instead of a ''iov'' array. PHP allocates a single ''struct iovec'' to receive the data.
+
+The following message types are supported:
+
+  * IPv6
+    * IPV6_PKTINFO
+    * IPV6_HOPLIMIT
+    * IPV6_TCLASS
+  * Unix
+    * SCM_RIGHTS
+    * SCM_CREDENTIALS/SO_PASSCRED (passing file descriptors between processes)
+ 
+The functions ''socket_set_option()'' and ''socket_get_option()'' were also changed to allow sticking the IPv6 options. For more information on this see [[http://tools.ietf.org/html/rfc3542|RFC 3542]].
+
+===== Usage examples =====
+
+See the tests. The branch includes these:
+
+This includes these tests:
+  - [[https://github.com/cataphract/php-src/blob/sendrecvmsg/ext/sockets/tests/socket_cmsg_credentials.phpt|socket_cmsg_credentials.phpt]]
+  - [[https://github.com/cataphract/php-src/blob/sendrecvmsg/ext/sockets/tests/socket_cmsg_rights.phpt|socket_cmsg_rights.phpt]]
+  - [[https://github.com/cataphract/php-src/blob/sendrecvmsg/ext/sockets/tests/socket_recvmsg.phpt|socket_recvmsg.phpt]]
+  - [[https://github.com/cataphract/php-src/blob/sendrecvmsg/ext/sockets/tests/socket_sendrecvmsg_multi_msg.phpt|socket_sendrecvmsg_multi_msg.phpt]]
+  - [[https://github.com/cataphract/php-src/blob/sendrecvmsg/ext/sockets/tests/socket_set_option_in6_pktinfo.phpt|socket_set_option_in6_pktinfo.phpt]]
+
+===== Patch =====
+
+The [[https://github.com/cataphract/php-src/tree/sendrecvmsg|branch]] is available on Github. It should not work on Windows yet.
+
+===== Changelog =====
+
+  * 2013-01-22 First draft
+
+
