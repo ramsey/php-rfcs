@@ -1,5 +1,5 @@
 ====== Integrating Zend Optimizer+ into the PHP distribution ======
-  * Version: 0.7
+  * Version: 0.75
   * Date: 2013-01-28
   * Author: Zeev Suraski <zeev@php.net>
   * Status: Under Discussion
@@ -14,6 +14,27 @@ This RFC proposes integrating the Zend Optimizer+ component into the Open Source
 Presently, Optimizer+ is a closed-source, yet free-for-use component.  As a part of implementing this RFC - Zend will make the source code of Optimizer+ available under the PHP License, so that it can become an integrated part of PHP with no strings attached.  Once that happens, community contribution would be welcome exactly like it is with any other PHP component, and the component will be governed by the exact same processes (RFC et. al) that are employed by the PHP community.
 
 
+===== What is an Opcode Cache? =====
+
+An opcode cache is a component that is designed to speed the performance of PHP without altering the behavior of applications in any way.
+
+Without an opcode cache, every time PHP executes a .php file, it invokes the runtime compiler, generates an in-memory representation of the file (called intermediate code), and then invokes the executor on it.
+
+Since on a given version of PHP, compiling the same .php file will always result in the exact same intermediate code - this creates an excellent use case for caching.
+
+An opcode cache performs this exact task - it overrides PHP's default compiler callback;  When invoked - it will check if a compiled intermediate-code version of the code is already available in-memory.  If one exists - it will use it without invoking PHP's actual compiler, saving the overhead of compilation.  If not - it will invoke PHP's internal compiler, generate the code, persist it in memory for future use (saving the need for subsequent compilations of the same file) - and then execute it.
+
+Modern opcode caches (Optimizer+, APC 2.0+, others) use shared memory for storage, and can execute files directly off of it - without having to 'unserialize' the code before execution.  This results in dramatic performance speedups, typically reduces the overall server memory consumption, and usually with very few downsides.
+
+
+===== Interaction with other extensions and plugins =====
+
+For the most part, the existence of an opcode cache should have no influence on extensions, except for ones that do 'brain surgey' on the Zend engine.
+
+One such class of plugins are debugger extensions like Xdebug or Zend Debugger.  Since debugger plugins instruct the engine to generate slightly different code - they actually can influence the behavior of an opcode cache in a negative manner.  However, it should be easy to implement some minimal level of 'awareness' so that when Xdebug or Zend Debugger detect the presence of an opcode cache - they'll take measures to ensure that they don't clash with each other.  Zend Debugger today implements it by simply overriding the compiler callback on its own, prior to Optimizer+ - and invokes the Optimizer+ compiler callback only for requests that don't have debugging enabled.  It should be possible to implement the very same mechanism in Xdebug.
+
+To simplify interaction between such modules, and in order to avoid the need for a strict loading order of modules - we may want to create a new mechanism in the engine that allows zend_extensions to specify the priority of overriding the compiler/executor callbacks.  This is something we can look more deeply into if & when we integrate Optimizer+ into core.
+
 
 ===== Alternatives =====
 
@@ -25,7 +46,7 @@ There’s one key alternative available for Optimizer+ - namely, APC.  While arc
 
   - Performance.  Zend Optimizer+ has a consistent performance edge over APC, which, depending on the code, can range between 5 and 20% in terms of requests/second.  See Benchmarks section below.
   - Availability for new PHP versions.  Optimizer+ is typically fully compatible with PHP releases even before they come out;  While this advantage was rarely realized because of the closed-source nature of the component, once open-source, both Zend and the community will help ensure that it’s always fully compatible with every element of the PHP language, avoiding any lags.
-  - Reliability.  Optimizer+ has optional corruption detection capabilities that can prevent a server-wide crash in case of data corruption (e.g. from a faulty implementation of a PHP function in C).
+  - Reliability.  Optimizer+ has optional corruption detection capabilities that can prevent a server-wide crash in case of data corruption (e.g. from a faulty implementation of a PHP function in C).  This handles one of the very few downsides of using a shared-memory-based-opcode-cache - introducing a shared resource that - if corrupted - could bring down an entire server.
   - Better compatibility.  We strived to make Optimizer+ work with any and all constructs supported by PHP, in exactly the same way they’d behave without it.
 
 
@@ -46,7 +67,7 @@ http://bit.ly/116BnnB
 
 ===== Recommendation =====
 
-We can relatively easily work out the disadvantages of Optimizer+ and go with it.  Pierre Joye already volunteered to help with implementing ZTS mode when the source becomes available;  We could cooperate with the community to implement a different memory-reclaiming strategy if we ever choose to.  In terms of a data caching API, there appears to be consensus that a userland data-caching API should be a separate component independently of any other decision.
+We can relatively easily work out the disadvantages of Optimizer+ and go with it.  We could cooperate with the community to implement a different memory-reclaiming strategy if we ever choose to.  In terms of a data caching API, there appears to be consensus that a userland data-caching API should be a separate component independently of any other decision.
 
 
 ===== Suggested Roadmap =====
@@ -72,3 +93,4 @@ If the RFC gets approved, one open question is whether or not we should aim for 
   * 0.61  - Added clarification regarding ZTS
   * 0.62  - Fixed alignment of this ChangeLog list :-)
   * 0.7   - Removed ZTS difference, now that ZTS is supported in the codebase
+  * 0.75  - Added 'What is an Opcode Cache?' and 'Interaction with other extensions and plugins' sections
