@@ -1,0 +1,64 @@
+====== Request for Comments: PHP CLI changing process title support ======
+
+  * Version: 1.0
+  * Date: 2013-02-06
+  * Author: Keyur Govande <kgovande@gmail.com>
+  * Status: Voting
+  * First Published at: http://wiki.php.net/rfc/cli_process_title
+
+===== Introduction =====
+
+This RFC proposes a new way of setting a PHP CLI process's title that's visible in top or ps. The implementation is based based off the one in [[http://www.postgresql.org/docs/9.2/static/monitoring-ps.html|PostgreSQL]]. 
+
+===== Implementation =====
+
+There already exists a PECL extension [[http://pecl.php.net/package/proctitle|proctitle]] that does something similar, but it is incomplete and might lead to memory corruption on Linux (or any OS which does not support [[http://www.unix.com/man-page/FreeBSD/3/setproctitle/|setproctitle]]. 
+
+The reason is the extension only has access to original argv[0] (that comes from main()). argv and environ(7) are in contiguous memory space on Linux. The extension presumes that argv[0] can accomodate 128 characters, but usually that is not possible because argv[0] is "php". When this happens, the extension will scribble on argv[1], argv[2], etc., and maybe even environ and this can have destructive side effects on the running program.
+
+The proposed patch does not suffer from the same issue. It works by hooking into PHP CLI's main(). An init method is the first function call made in main(). 
+   * On Linux: The init method deep-copies argv and environ and these copies are returned to main() for use during the program. The original argv and environ are saved by init. This contiguous block is then used to store the the new title. The OS reads from argv[0] onwards when ps(1) or top(1) or /proc/<pid>/cmdline is called. An explanation is [[http://stupefydeveloper.blogspot.com/2008/10/linux-change-process-name.html| here]]
+   * On BSD without [[http://www.unix.com/man-page/FreeBSD/3/setproctitle/|setproctitle]] support: Similar to Linux. A deep copy of argv is made and returned to main() for further use. The original argv[0] is pointed to a 256 character array block into which the title is copied over. argv[1] is set to NULL to indicate the 'end' of the argv array.
+   * On systems with support for [[http://www.unix.com/man-page/FreeBSD/3/setproctitle/|setproctitle]] OR pstat PSTAT_SETCMD OR PS_STRINGS, we use these instead.
+   * On Windows: the title is set as an Windows [[http://msdn.microsoft.com/en-us/library/windows/desktop/ms682396(v=vs.85).aspx|Event]]
+
+Support for setting the title is also built into the cli-server SAPI.
+
+Note that it is not possible to use similar logic for other web-servers like Apache because we'd need to deep-copy and replace argv and environ before any real code has executed and such low-level access isn't possible there.
+
+==== Example ====
+
+<code php>
+<?php
+
+$title = "This is a test title";
+if (!is_cli_ps_title_available()) {
+    echo "Not supported on this OS\n";
+    exit(1);
+}
+
+if (!set_cli_ps_title($title)) {
+    echo "Unable to set title\n";
+    exit(2);
+}
+
+sleep(15);
+</code>
+
+The above example will output:
+
+  * Linux: {{:rfc:linux_ps_title.png?200|}}
+  * FreeBSD 9.0: {{:rfc:fbsd_ps_title.png?200|}}
+  * Windows 7: {{:rfc:windows_ps_title.png?200|}}
+
+===== Proposal and Patch =====
+
+The patch (including tests) is [[https://gist.github.com/keyurdg/4728770#file-php_ps-patch|here]].
+
+===== Voting =====
+
+The PHP language is not changed, so a 50% + 1 majority is required.
+
+===== Changelog =====
+
+  * 1.0 (2012-02-06): Initial draft
