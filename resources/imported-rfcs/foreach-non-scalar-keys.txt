@@ -1,97 +1,76 @@
 ====== Allow Non-Scalar Keys ======
   * version 1.0
   * Date: 2013-01-28
-  * Author: Levi Morrison <levim@php.net>
+  * Authors: Levi Morrison <levim@php.net>, Nikita Popov <nikic@php.net>
   * Status: Under Discussion
 
-===== Introduction =====
+===== Current situation =====
 
-Implementing the [[http://php.net/manual/en/class.iterator.php|Iterator]] interface allows a class to define the necessary things to use that class as an iterator.  The biggest use-case for implementing the Iterator interface is that it interacts with a foreach loop in a custom way. There are currently limitations on what you can use as the ''key'' part of the iterator:
+The ''Iterator::key'' function can currently return a value of any type, but the handling code in ''foreach'' and several other places only allows integer and string keys to be used. This limitation makes some use-cases unnecessarily complicated. From the SPL two examples are ''MultipleIterator'' and ''SplObjectStorage''.
+
+The ''MutlipleIterator'' allows you to traverse several ''Iterator''s at the same time. It's ''::current'' method returns an array of values and the ''::key'' method returns an array of keys. But due to the ''foreach'' key type limitation the keys can not be directly fetched:
 
 <code php>
-<?php
+$it = new MultipleIterator;
+$it->attachIterator($it1);
+$it->attachIterator($it2);
 
-// $key cannot be an object or array
-foreach($object as $key => $value) {
+// This is NOT possible
+foreach ($it as $keys => $values) {
+    // ...
+}
 
+// Instead you have to use this
+foreach ($it as $values) {
+    $keys = $it->keys();
+    
+    // ...
 }
 </code>
 
-If you implement the iterator interface and return an object or array for the key, you get this error: ''Warning: Illegal type returned from MapIterator::key() in ...''
+''SplObjectStorage'' is a map/set implementation for object keys. Here the issue is circumvented by returning the keys as values and requiring a manual lookup on the values:
 
-===== Example Iterator =====
 <code php>
-<?php
-
-class MapIterator implements Iterator {
-    protected $vals = [];
-    protected $keys = [];
-    protected $index = 0;
-
-    function __construct(array $keys, array $values) {
-        $this->keys = $keys;
-        $this->vals = $values;
-    }
-
-    function rewind() {
-        $this->index = 0;
-    }
-
-    function valid() {
-        return $this->index < count($this->keys) && $this->index >=0;
-    }
-
-    function key() {
-        return $this->keys[$this->index];
-    }
-
-    function current() {
-        return $this->vals[$this->index];
-    }
-
-    function next() {
-        $this->index++;
-    }
-
+// NOT possible
+foreach ($objectStore as $key => $value) {
+    // ...
 }
 
-$requestA = new StdClass;
-$requestA->startLine = 'GET / HTTP/1.1';
-$requestA->headers = ['Host' => 'www.php.net'];
-
-$responseA = new StdClass;
-$responseA->startLine = 'HTTP/1.1 200 OK';
-$responseA->headers = [];
-
-$requestB = new StdClass;
-$requestB->startLine = 'GET /login HTTP/1.1';
-$requestB->headers = ['Host' => 'www.php.net'];
-
-$responseB = new StdClass;
-$responseB->startLine = 'HTTP/1.1 302 Found';
-$responseB->headers = ['Location' => 'http://www.php.net/account/login'];
-
-$requests = [$requestA, $requestB];
-$responses = [$responseA, $responseB];
-
-$mapIterator = new MapIterator(
-    $requests,
-    $responses
-);
-
-foreach ($mapIterator as $request => $response) {
-    var_dump($request);
-    var_dump($response);
+// Instead you have to use
+foreach ($objectStore as $key) {
+    $value = $objectStore[$key];
+    
+    // ...
 }
 </code>
 
-===== Proposal and Patch =====
+These are just two examples from core classes, but it obviously also applies in many other cases (and now that we have generators, it will probably become an even larger issue).
 
-I propose that we lift the restriction that forces a scalar value. Instead we simply assign the key variable to whatever was returned from the iterator. The warning will also be removed. This also opens the possibility to use arrays as keys returned from an iterator, and as such I feel we should also add support for `list` in the keys.
+Another key issue is that you can't really work around this generically. If you want to write code that is also compatible with ''Iterator''s that return array/object keys, you can no longer use the ''foreach ($it as $k => $v)'' syntax. You are forced to use ''foreach ($it as $v) { $k = $it->key(); ... }'', but this will obviously only with with ''Iterator''s and not with aggregates, ''Traversable''s or normal arrays. In order to properly support all use cases you'd have to wrap everything in iterators (i.e. make extensive use of ''IteratorIterator'' and ''ArrayIterator''), which obviously is an option, but cumbersome to a degree that nobody does it. What this means is that iterators like ''MultipleIterator'' are to a large part excluded from use in iterator chaining/pipelines (which is probably the most important thing about using iterators).
 
-There is no patch at this time. I know Ekneuss was working on something but hasn't had time to finish. I also don't know how closely his patch matches up with this proposal, either.
+===== Suggested fix =====
 
-===== Changelog =====
+This RFC proposes to lift the restriction and allow values of arbitrary types to be used as keys (in particularly allowing also arrays and objects) in iterators. (Note: This proposal does not suggest allowing those key types in arrays. This is only about ''Iterator''s.)
 
-version 1.0:
-  * proposed
+In order to remove this restriction the internal [[''zend_object_iterator_funcs''|http://lxr.php.net/xref/PHP_TRUNK/Zend/zend_iterators.h#31]] API has to be changed:
+
+<code c>
+// This entry:
+int (*get_current_key)(zend_object_iterator *iter, char **str_key, uint *str_key_len, ulong *int_key TSRMLS_DC);
+// Is replaced with this entry:
+zval *(*get_current_key)(zend_object_iterator *iter TSRMLS_DC);
+</code>
+
+The handler will return a ''zval*'' with already increased refcount. The ''zval*'' may not be ''NULL'', unless an exception was thrown.
+
+The signature can use ''zval*'' instead of ''zval**'' because by-ref modification of keys is not possible. The refcount is increased in the handler (instead of the VM) as that turned out to be the more convenient method for this use case.
+
+===== Patch =====
+
+A preliminary patch implementing the above proposal can be found here: https://github.com/php/php-src/pull/278
+
+The change itself is rather small, but there are quite a few extensions that require minor adjustments to use the new API.
+
+===== Open questions =====
+
+The main open question are iterator/array interactions, e.g. when an iterator is converted to an array with ''iterator_to_array''. What should be done with the keys that are valid in the iterator, but not in the array? I think the best approach would be to just set the array keys with the exact same semantics as PHP would do (i.e. with all casts and warnings). I couldn't yet find a function in the API that does this though. Maybe have to expose the inline functions from ''zend_execute.c'' for that :)
