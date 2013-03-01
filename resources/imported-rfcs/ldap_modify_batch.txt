@@ -1,0 +1,155 @@
+
+====== PHP RFC: ldap_modify_batch ======
+  * Version: 1.0
+  * Date: 2013-03-01
+  * Author: Ondřej Hošek, ondra.hosek@gmail.com
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/ldap_modify_batch
+
+===== Introduction =====
+
+PHP's LDAP API already allows all the common directory modification operations while abstracting away some of the protocol details. However, some directory services (such as Active Directory) require a slightly more specific approach when performing special modifications, e.g. changing (not resetting) a user's password.
+
+This RFC introduces a new ''ldap_modify_batch'' function which allows precise specification of the modifications to perform, akin to the ''ldap_modify'' function available in the C API. ''ldap_modify_batch'' should be able to coexist peacefully with the other modification functions.
+
+===== Specification =====
+
+==== Description ====
+
+  bool ldap_modify_batch(resource $link_identifier, string $dn, array $modifications)
+
+Modify an existing entry in the LDAP directory. Allows detailed specification of the modifications to perform.
+
+==== Parameters ====
+
+**link_identifier**
+
+> An LDAP link identifier, returned by **//ldap_connect()//**.
+
+**dn**
+
+> The distinguished name of the LDAP entity to modify.
+
+**entry**
+
+> An array that specifies the modifications to make. Each entry in this array is an associative array with two or three keys: ''"attrib"'' maps to the name of the attribute to modify, ''"modtype"'' maps to the type of modification to perform, and (depending on the type of modification) ''"values"'' maps to an array of attribute values relevant to the modification.
+>
+> If the ''"modtype"'' of a modification maps to ''LDAP_MODIFY_BATCH_ADD'', each value specified through ''"values"'' is added (as an additional value) to the attribute named by ''"attrib"''.
+> If the ''"modtype"'' maps to ''LDAP_MODIFY_BATCH_REMOVE'', each value specified through ''"values"'' is removed from the attribute named by ''"attrib"''. Any value of the attribute //not// contained in the ''"values"'' array will remain untouched.
+> If the ''"modtype"'' is ''LDAP_MODIFY_BATCH_REMOVE_ALL'', all values are removed from the attribute named by ''"attrib"''. In this case, the array describing the modification must **not** contain a ''"values"'' entry.
+> If the ''"modtype"'' is ''LDAP_MODIFY_BATCH_REPLACE'', all current values of the attribute named by ''"attrib"'' are replaced with the values specified through ''"values"''.
+>
+> Note that any value for ''"attrib"'' must be a string, any value for ''"values"'' must be an array of strings, and any value for ''"modtype"'' must be one of the ''LDAP_MODIFY_BATCH_*'' constants listed above.
+
+==== Return Values ====
+
+Returns ''TRUE'' if the modification was successful and ''FALSE'' if not.
+
+==== Examples ====
+
+=== Example #1: Add a telephone number to a contact ===
+
+  $modifs = array(
+      array(
+          "attrib"  => "telephoneNumber",
+          "modtype" => LDAP_MODIFY_BATCH_ADD,
+          "values"  => array("+1 555 555 1717")
+      )
+  );
+  ldap_modify_batch($connection, "cn=John Smith,ou=Wizards,dc=example,dc=com", $modifs);
+
+=== Example #2: Rename a user ===
+
+  $modifs = array(
+      array(
+          "attrib"  => "sn",
+          "modtype" => LDAP_MODIFY_BATCH_REPLACE,
+          "values"  => array("Smith-Jones")
+      ),
+      array(
+          "attrib"  => "givenName",
+          "modtype" => LDAP_MODIFY_BATCH_REPLACE,
+          "values"  => array("Jack")
+      )
+  );
+  ldap_modify_batch($connection, "cn=John Smith,ou=Wizards,dc=example,dc=com", $modifs);
+  ldap_rename($connection, "cn=John Smith,ou=Wizards,dc=example,dc=com", "cn=Jack Smith-Jones", NULL, TRUE);
+
+=== Example #3: Add two e-mail addresses to a user ===
+
+  $modifs = array(
+      array(
+          "attrib"  => "mail",
+          "modtype" => LDAP_MODIFY_BATCH_ADD,
+          "values"  => array(
+          	"jack.smith@example.com",
+          	"jack.smith-jones@example.com"
+          )
+      )
+  );
+  ldap_modify_batch($connection, "cn=Jack Smith-Jones,ou=Wizards,dc=example,dc=com", $modifs);
+
+=== Example #4: Change a user's password ===
+
+  $modifs = array(
+      array(
+          "attrib"  => "userPassword",
+          "modtype" => LDAP_MODIFY_BATCH_REMOVE,
+          "values"  => array("Tr0ub4dor&3")
+      ),
+      array(
+          "attrib"  => "userPassword",
+          "modtype" => LDAP_MODIFY_BATCH_ADD,
+          "values"  => array("correct horse battery staple")
+      )
+  );
+  ldap_modify_batch($connection, "cn=Jack Smith-Jones,ou=Wizards,dc=example,dc=com", $modifs);
+
+=== Example #5: Change a user's password (Active Directory) ===
+
+   function adifyPw($pw)
+   {
+       return iconv("UTF-8", "UTF-16LE", '"' . $pw . '"');
+   }
+   
+   $modifs = array(
+       array(
+           "attrib"  => "unicodePwd",
+           "modtype" => LDAP_MODIFY_BATCH_REMOVE,
+           "values"  => array(adifyPw("Tr0ub4dor&3"))
+       ),
+       array(
+           "attrib"  => "unicodePwd",
+           "modtype" => LDAP_MODIFY_BATCH_ADD,
+           "values"  => array(adifyPw("correct horse battery staple"))
+       )
+  );
+  ldap_modify_batch($connection, "cn=Jack Smith-Jones,ou=Wizards,dc=ad,dc=example,dc=com", $modifs);
+
+===== Possible Issues =====
+
+(The author would like further feedback on the following facets of the proposal and implementation -- if you deem any of them problematic, please move them into the //Open Issues// section and start a lively discussion.)
+
+* The structure of ''$modifications'' (specifically the array-of-arrays-of-arrays structure and the usage of the special key strings ''"attrib"'', ''"modtype"'' and ''"values"'') might not be the optimal representation of a list of modifications.
+
+* The types are currently rather inflexible. The value that ''"attrib"'' maps to must be a string, and the value that ''"values"'' maps to must be an array of strings. Adding automatic type conversion will make the API more programmer-friendly; keeping things strict, on the other hand, forces programmers to think twice about the format they will (must?) use to transmit the values.
+
+* The function is implemented in a way that first validates all argument values and only then re-formats them into what is expected by the underlying C API. This approach was chosen to make cleanup easier (nothing is allocated until everything has been validated, so there is only one deallocation code path), but it does come with a slight performance penalty (each array must be iterated through twice).
+
+* The included utility functions might be duplicates of existing ones. These functions are ''_ldap_str_equal_to_const'', ''_ldap_strlen_max'' and ''_ldap_hash_fetch''.
+
+===== Open Issues =====
+
+None yet.
+
+===== Proposal and Patch =====
+
+The current revision of the patch (including tests) is available as [[https://gist.github.com/RavuAlHemio/5049362|GitHub GIST 5049362]]. Development happens in [[https://github.com/RavuAlHemio/php-src/tree/ldap_modify_batch|RavuAlHemio's fork of php-src on GitHub]] on the ''ldap_modify_batch'' branch.
+
+===== Mailing list discussion =====
+
+The mailing list discussion is available [[http://marc.info/?t=136205984800001|on MARC]].
+
+===== Changelog =====
+
+* 1.0 (2013-03-01): Initial draft, following [[http://marc.info/?l=php-internals&m=136205976813706|mailing list post]].
