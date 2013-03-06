@@ -1,0 +1,99 @@
+====== PHP RFC: unset(): return bool if the variable has existed ======
+  * Version: 0.5
+  * Date: 2013-03-06 
+  * Author: Bob Weinand, bobwei9@hotmail.com
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/unset_bool
+  * Implementation: https://github.com/bwoebi/php-src/commit/787d71eed0c5e0140048b8fbacf799029b322661 (tests may follow later)
+
+===== Introduction =====
+
+The purpose of this RFC is to make unset return something meaningful. People also shouldn't have to wonder why they can't use unset if it isn't as a standalone expression.
+
+This removes also an inconsistency: the function's return value is //void//, states the docs. It is until now the only function which has no return value.
+
+===== Proposal =====
+
+Change unset()'s behaviour to:
+  * return true if deletion was successful
+  * return false if deletion failed
+
+The feature could be useful in if's like:
+<code php>
+public function deleteKey ($key) {
+	if (unset($this->array[$key])) {
+		// do some cleanup
+	}
+}
+</code>
+
+This is the way we do it today:
+<code php>
+public function deleteKey ($key) {
+	if (isset($this->array[$key])) {
+		unset($this->array[$key]);
+		// do some cleanup
+	}
+}
+</code>
+But even now we can't be sure if the variable was unset, because the _////_unset() magic method may not have deleted it. With the patch _////_unset() can return a value (which is internally casted to bool) and inform the caller of unset() if the deletion was successful.
+
+The main advantage is that you can do constructs like this: https://git.php.net/?p=php-src.git;a=blob;f=Zend/zend_object_handlers.c#l818 I am just asking myself: when you use it in the Engine, why don't you offer the possibility to PHP?
+
+===== Execution example =====
+
+<code php>
+$var = 1;
+var_dump(unset($var)); // bool(true)
+var_dump(unset($var)); // bool(false)
+
+$dim[1] = "set";
+var_dump(unset($dim[2])); // bool(false)
+var_dump(unset($dim[1])); // bool(true)
+
+class object {
+	private $property;
+
+	public function __unset($var) {
+		if ($var == "prima")
+			return false;
+		if ($var == "secunda")
+			return unset($this->property);
+		if ($var == "tertia")
+			return "some garbage";
+	}
+}
+$class = new object;
+$class->prop = 0;
+var_dump(unset($class->prop)); // bool(true)
+var_dump(unset($class->prima)); // bool(false)
+var_dump(unset($class->secunda)); // bool(true)
+var_dump(unset($class->tertia)); // bool(true)
+var_dump(unset($class->quarta)); // bool(false) (a function execution without return returns NULL, which is, casted to boolean, false)
+</code>
+
+===== Implementation Details ===
+
+Every deleting function called by the VM_HANDLERs ZEND_UNSET_* now return //int//: SUCCESS or FAILURE.
+All the functions which didn't were previously //void// functions, so only adding a return value shouldn't affect any existing code (only exception: see one section below).
+
+The zend_do_unset function was adapted to zend_do_isset_or_is_empty in behaviour. As it's mostly reusing existing code, it shouldn't be error-prone.
+
+The rest was adding loads of "result = SUCCESS/FAILURE;" into the various void functions.
+
+===== Backward Incompatible Changes =====
+
+There may break some extensions which have their own unset_property and/or unset_dimension class-handler.
+This can easily be fixed by changing the return value from //void// to //int// and returning SUCCESS (or FAILURE).
+
+===== Proposed PHP Version(s) =====
+
+Should be implemented in the next 5.x (e.g. 5.5 if it's delayed due to ZO+ or 5.6).
+
+===== References =====
+
+  - https://github.com/php/php-src/pull/282
+
+===== Changelog =====
+
+  * Version 0.5: Initial RFC
