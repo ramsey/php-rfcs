@@ -9,11 +9,80 @@
 
 ===== Introduction =====
 
-PHP offers facilities for large number and decimal arithmetic (GMP and BCMath), but currently using those is a PITA. This RFC proposes to improve the situation by adding support for **operator overloading in internal classes**. Furthermore this RFC exemplarily implements the new API for GMP (and improves GMP in various ways along the way).
-
-TODO: More motivation!
+PHP offers facilities for large number and decimal arithmetic (GMP and BCMath), but currently using those is a PITA. This RFC proposes to improve the situation by adding support for **operator overloading in internal classes**. The operator overloading is exemplarily implemented for the GMP extension, while also improving GMP in various other ways along the way.
 
 ===== Proposal A: Operator overloading =====
+
+==== Why operator overloading? ====
+
+There are several reasons why overloaded operators are preferable over ''gmp_add($a, $b)'' style functions.
+
+The first is that code using overloaded operators is simply **more readable**. As an example, consider the following two code snippets, one using ''gmp_*'' functions, the other using overloading:
+
+<code php>
+$result = gmp_mod(
+    gmp_add(
+        gmp_mul($c0, gmp_mul($ms0, gmp_invert($ms0, $n0))),
+        gmp_add(
+            gmp_mul($c1, gmp_mul($ms1, gmp_invert($ms1, $n1))),
+            gmp_mul($c2, gmp_mul($ms2, gmp_invert($ms2, $n2)))
+        )
+    ),
+    gmp_mul($n0, gmp_mul($n1, $n2))
+);
+
+$result = (
+    $c0 * $ms0 * gmp_invert($ms0, $n0)
+  + $c1 * $ms1 * gmp_invert($ms1, $n1)
+  + $c2 * $ms2 * gmp_invert($ms2, $n2)
+) % ($n0 * $n1 * $n2);
+</code>
+
+Even without understanding what the above code does (it's an excerpt from a Coppersmith attack on RSA), it should be obvious that the second code is a lot clearer. It makes the structure of the code immediately clear (three multiplications are summed up and the modulus is taken), whereas the function-based code actively hides any structure in the code. For mathematical operations infix notation just comes a lot more naturally.
+
+Another advantage of overloaded operators is that it allows **polymorphism** for functions doing arithmetic operations. As an example, consider manually implementing a function like ''gmp_powm'', which calculates a power of a number modulus some other number. Here is a sample implementation (direct translation of pseudo-code on Wikipedia):
+
+<code php>
+function powm($base, $exponent, $modulus) {
+    $result = 1;
+    while ($exponent > 0) {
+        if ($exponent % 2 == 1) {
+            $result = $result * $base % $modulus;
+            $exponent--;
+        }
+        $exponent /= 2;
+        $base = ($base * $base) % $modulus;
+    }
+    return $result;
+}
+</code>
+
+With operator overloading this function will work with **any** type of "number" that implements the basic arithmetic operators. It can work with normal PHP integers, it can work with GMP numbers, it can work with BCMath instances (assuming the overloading API is implemented for them of course):
+
+<code php>
+var_dump(powm(123, 456, 789)); // int(699)
+var_dump(powm(gmp_init(123), gmp_init(456), gmp_init(789))); // GMP(699)
+var_dump(powm(
+    gmp_init("123456789123456789"),
+    gmp_init("987654321987654321"),
+    gmp_init("56789567895678956789")
+)); // GMP(36912902142130032810)
+</code>
+
+Without operator overloading this would not be possible. Instead one would have to implement the same function once using the normal ''+'' style operators and once using ''gmp_*'' functions (and any other set of functions you want to support). Operator overloading brings the advantages of polymorphism (a main reason we use object oriented programming) to the basic operations of the language.
+
+==== Applications of operator overloading ====
+
+Some examples what the operator overloading capability can be used for, apart from the bignum arithmetic outlined in this RFC:
+
+  * Decimal arithmetic. This is particularly important in PHP as PHP commonly deals with monetary values which **can not** be represented as floating point numbers.
+  * Date calculations. Also very common in PHP (''DateTime::add'' etc)
+  * Ratio and complex arithmetic
+  * Unsigned arithmetic and arithmetic on other integral types PHP does not support (e.g. cross platform 64bit integers)
+  * Vector and matrix calculations
+  * (Misuse for DSLs)
+
+==== Technical proposal ====
 
 The operator overloading is implemented by adding a new object handler ''do_operation'' with the following signature:
 
@@ -62,17 +131,6 @@ The prefix operators ''++'' and ''%%--%%'' are supported by the runtime transfor
 The operators ''==='' and ''!=='' are explicitly **not** supported. For objects they have clearly defined semantics (the same object handle) and I see no reason why one should be allowed to break this behavior.
 
 The ability to overload operators is **not** exposed to userland classes.
-
-=== Applications of operator overloading ===
-
-Some examples what the operator overloading capability can be used for, apart from the bignum arithmetic outlines in this RFC:
-
-  * Decimal arithmetic. This is particularly important in PHP as PHP commonly deals with monetary values which **can not** be represented as floating point numbers.
-  * Ratio and complex arithmetic
-  * Unsigned arithmetic and arithmetic on other integral types PHP does not support (e.g. cross platform 64bit integers)
-  * Vector and matrix arithmetic
-  * Date arithmetic
-  * (Misuse for DSLs)
 
 ===== Proposal B: GMP Improvements =====
 
