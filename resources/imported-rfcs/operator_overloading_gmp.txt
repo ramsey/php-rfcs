@@ -136,7 +136,7 @@ typedef int (*zend_object_compare_zvals_t)(zval *result, zval *op1, zval *op2 TS
 
 Here ''result'' is the target zval, ''op1'' the first operand and ''op2'' the second operand. The ''result'' zval has to be set to one of the longs ''-1'' (indicating "greater than"), ''0'' (indicating "equal") or ''-1'' (indicating "less than"). The return value can either be ''SUCCESS'' or ''FAILURE'', which indicate whether the comparison was successful. This return value will be the return value of ''compare_function''.
 
-The ''compare'' handler is called for the ''<'', ''%%<=%%'', ''=='', ''%%=>%%'' and ''>'' operators and any other code using ''compare_function'' (e.g. sorting). The operators ''==='' and ''!=='' are explicitly **not** supported, as they have clearly defined semantics (same object handle) and I see now reason to break this.
+The ''compare'' handler is called for the ''<'', ''%%<=%%'', ''=='', ''!='', ''>='' and ''>'' operators and any other code using ''compare_function'' (e.g. sorting). The operators ''==='' and ''!=='' are explicitly **not** supported, as they have clearly defined semantics (same object handle) and I see now reason to break this.
 
 The difference between the ''compare'' handler and the already existing ''compare_objects'' handler is that ''compare'' is called for **all** comparisons involving an object with a ''compare'' handler, whereas ''compare_objects'' is only called if both operands are objects and have the same ''compare_objects'' handler. Thus ''compare_objects'' can not be used to implement comparisons like ''$gmp == 0''. A ''compare'' handler always takes precedence over a ''compare_objects'' handler.
 
@@ -151,9 +151,7 @@ Currently GMP is based on resources. This has several disadvantages:
   * Cannot make use of the new operator overloading APIs
   * Bad reporting on leaks. During the port I found that many functions leak resources, especially in error conditions.
 
-This RFC proposes to make GMP use objects (of type ''GMP'') as the underlying structure. Using this new structure, the RFC implements support for serialization, casting, dumping and overloaded operators.
-
-In the following there are examples for some of the new behaviors:
+This RFC proposes to make GMP use objects (of type ''GMP'') as the underlying structure. Using this new structure, the RFC implements support for casting, dumping, serialization, cloning and overloaded operators. In the following there are examples for the new behaviors:
 
 === Casting ===
 
@@ -171,7 +169,9 @@ var_dump((float) $n);  // float(42)
 var_dump($n = gmp_init(42));
 var_dump($s = serialize($n));
 var_dump(unserialize($s));
+
 // outputs
+
 object(GMP)#%d (1) {
   ["num"]=>
   string(2) "42"
@@ -180,6 +180,26 @@ string(33) "O:3:"GMP":1:{s:3:"num";s:2:"42";}"
 object(GMP)#%d (1) {
   ["num"]=>
   string(2) "42"
+}
+</code>
+
+=== Cloning ===
+
+<code php>
+$a = gmp_init(3);
+$b = clone $a;
+gmp_clrbit($a, 0);
+var_dump($a, $b);
+
+// Output: (Note that $b is still 3)
+
+object(GMP)#1 (1) {
+["num"]=>
+string(1) "2"
+}
+object(GMP)#2 (1) {
+["num"]=>
+string(1) "3"
 }
 </code>
 
@@ -192,14 +212,60 @@ $b = gmp_init(17);
 var_dump($a + $b);
 var_dump($a + 17);
 var_dump(42 + $b);
+
 // Outputs the following 3 times:
+
 object(GMP)#%d (1) {
   ["num"]=>
   string(2) "59"
 }
 </code>
 
-The following operators are supported: ''+'', ''-'', ''*'', ''/'', ''%'', ''|'', ''&'', ''^'', ''~'', ''=='', ''!='', ''<'', ''%%<=%%'', ''>'', ''>=''. The operators ''%%<<%%'', ''%%>>%%'' are not yet supported, but support is planned. All operators work with two GMP values or one GMP value and one GMP-coercible value (e.g. strings and integers).
+The following operators are supported: ''+'', ''-'', ''*'', ''/'', ''%'', ''|'', ''&'', ''^'' and ''~''. The operators ''%%<<%%'', ''%%>>%%'' are not yet supported, but support is planned. All operators work with two GMP values or one GMP value and one GMP-coercible value (e.g. strings and integers).
+
+=== Overloaded operators: Comparison ===
+
+<code php>
+$a = gmp_init(42);
+var_dump($a == 42,   $a == 17,    $a < 40,     $a < 100);
+//       bool(true), bool(false), bool(false), bool(true)
+</code>
+
+Comparison is supported via the ''=='', ''!='', ''<'', ''>'', ''%%<=%%'' and ''>='' operators. Sorting and other comparison-based operations work as well:
+
+<code php>
+$arr = [gmp_init(0), -3, gmp_init(2), 1];
+sort($arr);
+var_dump($arr);
+
+// Outputs
+
+array(4) {
+  [0]=>
+  int(-3)
+  [1]=>
+  object(GMP)#1 (1) {
+    ["num"]=>
+    string(1) "0"
+  }
+  [2]=>
+  int(1)
+  [3]=>
+  object(GMP)#2 (1) {
+    ["num"]=>
+    string(1) "2"
+  }
+}
+</code>
+
+=== Other minor changes ===
+
+During the refactoring of the implementation a few additional, small changes were done:
+
+  * If you pass a GMP instance to ''gmp_fact'' you will get the factorial of the GMP number (and not the factorial of the resource ID).
+  * Previously some functions like ''gmp_mod'' returned a long result if the second argument was long. This inconsistent and partially buggy behavior is no longer present and a GMP instance is always returned. As the GMP instance is castable to a long this does not break compatibility with scripts relying on the old behavior.
+  * Due to the previous change ''gmp_div_r'' no longer returns an incorrect result in some rounding modes.
+  * If you pass an invalid rounding mode to a function, you will now get a warning.
 
 ===== Backward Incompatible Changes =====
 
