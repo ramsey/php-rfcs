@@ -1,0 +1,184 @@
+====== PHP RFC: Protocol Type Hinting ======
+  * Version: 0.1
+  * Date: 2013-06-25 
+  * Author: Anthony Ferrara <ircmaxell@php.net>
+  * Status: Draft 
+  * First Published at: http://wiki.php.net/rfc/protocol_type_hinting
+
+===== Introduction =====
+
+Currently PHP uses an enforced interface style, where the argument object to a function or method must implement the respective interface. This RFC discusses inverting the dependency to allow for run-time resolving of interfaces. This is very similar to how GO implements interfaces.
+
+==== What Are Go-Style Interfaces? ====
+
+Go-Style interfaces (called //Protocols// by this RFC) are basically run-time resolved interface declarations. The class never //implements// the interface, but instead provides a compatible API. The receiver (the method receiving the argument) can choose to enforce the requirement or not.
+
+==== Why Go-Style Interfaces? ====
+
+The basic premise is that it makes two areas significantly easier to manage:
+
+=== Cross-Project Dependencies ===
+
+When you have cross-project dependencies. Currently, both packages must declare a dependency to a third package for the interface. A good example of this is the PSR-3 logger interface. Currently, the PSR-3 interface must be included by every project that declares a logger which you want to conform to the interface. This results in pulling in project-level dependencies even in cases where you don't need them.
+
+=== Duck Typing ===
+
+Presently, to implement duck-typing, you would need to do something like this:
+
+<file php duck_typing.php>
+<?php
+public function foo($logger) {
+    if (!method_exists($logger, 'log')) {
+        throw new Exception('Expecting a log method!');
+    }
+    $logger->log('foo');
+}
+?>
+</file>
+
+However with protocols (go-style interfaces), it allows the implementing object to still be fully decoupled, but checked at run-time by the engine as if it implemented the interface itself.
+
+===== Proposal =====
+
+I propose adding a special syntax to the current type-hinting paradigm to allow for indicating a non-strict *instanceof* which would resolve the dependency as a protocol.
+
+==== Proposed Syntax ====
+
+The current proposed syntax is basically wrapping a traditional type hint (//foo(Logger $logger)//) with `<>` to indicate the argument should be treated as a protocol.
+
+<file php duck_typing.php>
+<?php
+interface Logger {
+    public function log($argument);
+}
+class Bar {
+    public static function foo(<Logger> $logger) {
+        $logger->log('foo');
+    }
+}
+class FileLogger {
+    public function log($message) {
+        file_put_contents('somelogfile', $message);
+    }
+}
+Bar::foo(new FileLogger);
+?>
+</file>
+
+==== Proposed Behavior ====
+
+Any valid class-style identifier can be used as the "protocol name". That means that both classes and interfaces are supported as identifiers. Then the passed in object is checked to ensure that every method on the "protocol" matches in signature and flags to the passed object. If any do not match, the object is rejected and an //E_RECOVERABLE_ERROR// is raised.
+
+<file php duck_typing.php>
+<?php
+interface Logger {
+    public function log($argument);
+}
+class Bar {
+    public static function foo(<Logger> $logger) {
+        $logger->log('foo');
+    }
+}
+class FileLogger {
+    public function log($message) {
+        file_put_contents('somelogfile', $message);
+    }
+}
+class StringLogger implements Logger {
+    public function log($message) {}
+}
+class StaticLogger {
+    public static function log($message);
+}
+class OtherLogger {
+    public static function log($message, $bar);
+}
+Bar::foo(new FileLogger); // Good!
+Bar::foo(new StringLogger); // Good!
+Bar::foo(new StaticLogger); // Bad! STATIC does not match!
+Bar::foo(new OtherLogger); // Bad! Arg count does not match!
+?>
+</file>
+
+===== Backward Incompatible Changes =====
+
+Considering there is no addition to the reserved word table, and this only adds new branches to the compiler, there are no BC breaks.
+
+===== Effects On Opcode Caches =====
+
+The current implementation would have no effect on Op-Code caching.
+
+===== Proposed PHP Version(s) =====
+
+Proposed for PHP 5.NEXT
+
+===== SAPIs Impacted =====
+
+No SAPI impact.
+
+===== Impact to Existing Extensions =====
+
+There shouldn't be any Extension impact, as no APIs are changed. The only potential impact would be for extensions which are pre-processing the op-array prior to compiling, where the new operand type //IS_PROTOCOL// is used to signify the type-hint at the compiler level.
+
+===== New Constants =====
+
+None
+
+===== php.ini Defaults =====
+
+None
+
+===== Open Issues =====
+
+==== Raising Errors ====
+
+Currently, only a //E_RECOVERABLE_ERROR// is raised saying that the passed object //does not look like// the protocol. We may want to raise an //E_NOTICE// or //E_WARNING// as well to say WHAT did not match (was a method missing? Was the signature different? etc).
+
+==== Syntax ====
+
+I considered implementing a new "type" of interface for this (declaring a new reserved word "protocol"). However after thinking about it, I felt that it was necessary to extend this concept to classes as well as traditional interfaces.
+
+If the //<Foo> $foo// syntax is not acceptable, there are a few alternatives that would likely work:
+
+ * //@Foo $foo//
+ * //%Foo $foo//
+ * //*Foo $foo//
+ * //~Foo $foo//
+
+Personally, I think the //<Foo> $foo// syntax is the clearest, but it may be too close to Generics for comfort...
+
+==== Performance ====
+
+It's worth noting that since this is a separate branch, the current performance of normal type-hints remains uneffected.
+
+The current Proof-Of-Concept will re-run the verification functions (iterating over the function table) for every call. There are two ways that we can improve this:
+
+=== Short-Circuit on Instanceof ===
+
+We can short-circuit if //$obj instanceof hint// returns true. This is likely going to be generally false, but checking is reasonably cheap, and will push the cost of the match to the compiler.
+
+=== Cache Protocol Checks ===
+
+Once we get a valid result (either true or false), we can cache that. The outstanding question would be where to cache. On the protocol side? Or on the implementing side (if in the CE)? Or should there be an Executor Global setup for the cache (as a hash table).
+
+===== Unaffected PHP Functionality =====
+
+Any not using the new syntax.
+
+===== Future Scope =====
+
+===== Patches and Tests =====
+
+I have created a proof-of-concept patch (needs a little bit of refactoring for the official change), but is functional with some basic tests:
+
+Proof-Of-Concept Branch: [[https://github.com/ircmaxell/php-src/tree/protocol_proof_of_concept]]
+
+Diff From Current Master: [[https://github.com/ircmaxell/php-src/compare/protocol_proof_of_concept]]
+
+===== References =====
+
+ * [[http://en.wikipedia.org/wiki/Go_(programming_language)#Type_system|Go's Type System]]
+
+===== ChangeLog =====
+
+ * 0.1 - Initial Draft
