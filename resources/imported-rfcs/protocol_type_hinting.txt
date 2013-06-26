@@ -100,6 +100,140 @@ Bar::foo(new OtherLogger); // Bad! Arg count does not match!
 ?>
 </file>
 
+===== Use-Cases =====
+
+==== Flexible Middleware ====
+
+Right now there's a project called [[http://stackphp.com/|Stack]]. The premise is to provide middlewares for Symfony's //HttpKernel//. In practice these middlewares are nothing more than decorators for the //HttpKernel//. Let's show the //HttpKernel// Interface:
+
+<file php HttpKernelInterface.php>
+<?php
+namespace Symfony\Component\HttpKernel;
+
+use Symfony\Component\HttpFoundation\Request;
+
+interface HttpKernelInterface
+{
+    const MASTER_REQUEST = 1;
+    const SUB_REQUEST = 2;
+
+    public function handle(Request $request, $type = self::MASTER_REQUEST, $catch = true);
+}
+?>
+</file>
+
+Really, there isn't anything Symfony specific there. The only specific part is the //Request// class, which is quite big.
+
+So right now, middleware has to be coupled on the //HttpKernel// and as such, on the //Request// class and a whole lot of other parts of Symfony...
+
+=== Reducing Coupling ===
+
+Let's imagine you're creating a firewall middleware to limit requests to a specific IP (or allow for all except a certain IP). As it stands today, you need a large chunk of Symfony to do so.
+
+But with Structure Typing, you can create two new interfaces:
+
+<file php RequestGetClientIp.php>
+<?php
+interface RequestGetClientIp {
+    public function getClientIp()
+?>
+</file>
+<file php HttpKernelClientIp.php>
+<?php
+interface HttpKernelInterfaceForClientIp
+{
+    const MASTER_REQUEST = 1;
+    const SUB_REQUEST = 2;
+
+    public function handle(<RequestGetClientIp> $request, $type = self::MASTER_REQUEST, $catch = true);
+}
+?>
+</file>
+
+Now, my middleware becomes:
+
+<file php firewall.php>
+<?php
+class Firewall implements HttpKernelInterfaceForClientIp {
+    protected $parent = null;
+    public function __construct(<HttpKernelInterfaceForClientIp> $parent) {
+        $this->parent = $parent;
+    }
+    public function handle(<RequestGetClientIp> $request, $type = self::MASTER_REQUEST, $catch = true) {
+        if ($request->getClientIp() === '127.0.0.1') {
+            return $this->parent->handle($request);
+        }
+        throw new Exception('Not Authorized');
+    }
+}
+?>
+</file>
+
+The cool thing is that I'm effectively decoupled from Symfony here. If ZendFramework changed their [[https://github.com/zendframework/zf2/blob/master/library/Zend/Http/Client.php#L792|Http\Client]] to use the same basic API, you could re-use the middleware on both, without needing a cross-project dependency between Symfony and Zend (and thereby loading the interfaces on every request.
+
+==== Standards Based Interface Declarations ====
+
+Currently, the [[https://github.com/php-fig|PSR-FIG Group]] group is starting to publish interfaces for standardized components. At present, this requires that each project that either provides a "standard implementation" or uses a "standard implementation" must declare a dependency on this third project. 
+
+This raises a significant issue, because it causes a triangular dependency which requires some external effort to resolve. This means that you need some sort of tool to resolve that dependency for you, or you both sides copy/paste the implementation into their tree, and must "register an autoloader" for that dependency, and the first one to do so will win. Either way, it's not a straight forward solution.
+
+For example, take the [[https://github.com/php-fig/log/blob/master/Psr/Log/LoggerInterface.php|PSR-3 LoggerInterface]]
+
+<file php LoggerInterface.php>
+<?php
+namespace psr\log;
+interface LoggerInterface
+{
+    public function emergency($message, array $context = array());
+    public function alert($message, array $context = array());
+    public function critical($message, array $context = array());
+    public function error($message, array $context = array());
+    public function warning($message, array $context = array());
+    public function notice($message, array $context = array());
+    public function info($message, array $context = array());
+    public function debug($message, array $context = array());
+    public function log($level, $message, array $context = array());
+}
+?>
+</file>
+
+
+=== Reducing Coupling ===
+
+Using Structural Typing, we can solve this triangular dependency by only requiring the interface when we need it (at the receiver) as opposed to at the producer:
+
+We can also narrow the requirement for an acceptable logger based on our application's needs. So we can redefine:
+
+<file php Psr3LogWarningAndError.php>
+<?php
+interface Psr3LogWarningAndError {
+    public function error($message, array $context = array());
+    public function warning($message, array $context = array());
+}
+?>
+</file>
+<file php MyCode.php>
+<?php
+class MyClass {
+    protected $logger;
+    public function __construct(<Psr3LogWarningAndError> $logger) {
+        $this->logger = $logger;
+    }
+    public function doSomething($foo) {
+        if (!$foo) {
+            $this->logger->warning("Foo!!!", [$foo]);
+        }
+    }
+}
+?>
+</file>
+
+So now, our code can depend on the narrower interface that we actually need, while allowing all PSR-3 compatible implementations to pass. But it also will allow us to replace polymorphically the logger with a non-PSR-3 logger (because it doesn't implement other parts of the interface, for example), but fulfills our entire need.
+
+The key here is that it inverts the dependency on who gets to define what the needed units of functionality are. It allows the receiving code to define the scope of required functionality instead of the sending code.
+
+It also solves the triangular dependency problem since the sender never needs to explicitly require the dependency. That can be left for an off-line check (or a test), reducing the amount of and need for dependency resolving tools for the purpose of common interfaces...
+
 ===== Backward Incompatible Changes =====
 
 Considering there is no addition to the reserved word table, and this only adds new branches to the compiler, there are no BC breaks.
