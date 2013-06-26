@@ -1,4 +1,4 @@
-====== PHP RFC: Protocol Type Hinting ======
+====== PHP RFC: Structural Type Hinting ======
   * Version: 0.1
   * Date: 2013-06-25 
   * Author: Anthony Ferrara <ircmaxell@php.net>
@@ -12,7 +12,7 @@ Currently PHP uses an enforced interface style, where the argument object to a f
 In short, rather than checking the type-tree as traditional type-hinting works, this only checks to see that the **public** APIs match (that if you added "implements $interface" to the class definition, if it would pass)...
 ==== What Are Go-Style Interfaces? ====
 
-Go-Style interfaces (called //Protocols// by this RFC) are basically run-time resolved interface declarations. The class never //implements// the interface, but instead provides a compatible API. The receiver (the method receiving the argument) can choose to enforce the requirement or not.
+Go-Style interfaces (called //Structural Typing// by this RFC) are basically interface type hinting which are resolved by looking at the structure of the object being passed rather than the type information. The class never //implements// the interface, but instead provides a compatible API. The receiver (the method receiving the argument) can choose to enforce the requirement or not.
 
 ==== Why Go-Style Interfaces? ====
 
@@ -22,28 +22,11 @@ The basic premise is that it makes two areas significantly easier to manage:
 
 When you have cross-project dependencies. Currently, both packages must declare a dependency to a third package for the interface. A good example of this is the PSR-3 logger interface. Currently, the PSR-3 interface must be included by every project that declares a logger which you want to conform to the interface. This results in pulling in project-level dependencies even in cases where you don't need them.
 
-Implementing Protocols would allow the Class maintainers to just build their classes without additional dependencies, but the receivers (consumers) of those objects to still have some form of type-safety.
-
-=== Duck Typing ===
-
-Presently, to implement duck-typing, you would need to do something like this:
-
-<file php duck_typing.php>
-<?php
-public function foo($logger) {
-    if (!method_exists($logger, 'log')) {
-        throw new Exception('Expecting a log method!');
-    }
-    $logger->log('foo');
-}
-?>
-</file>
-
-However with protocols (go-style interfaces), it allows the implementing object to still be fully decoupled, but checked at run-time by the engine as if it implemented the interface itself.
+Implementing Structural Typing would allow the Class maintainers to just build their classes without additional dependencies, but the receivers (consumers) of those objects to still have some form of type-safety.
 
 === Decoupling Of Classes ===
 
-Right now, there's now way to type-hint on the //PDO// class while still allowing for decorators or other objects that also satisfy the same interface. Using protocols that's completely possible. This should greatly simplify the building of Mock objects as well as generators.
+Right now, there's now way to type-hint on the //PDO// class while still allowing for decorators or other objects that also satisfy the same interface. Using Structural Typing that's completely possible. This should greatly simplify the building of Mock objects as well as generators.
 
 <file php class_decoupling.php>
 <?php
@@ -54,13 +37,14 @@ public function foo(<PDO> $db) {
 </file>
 
 This further strengthens the safety offered by type-hints, while decoupling the class further from the interface and classes of the hint.
+
 ===== Proposal =====
 
-I propose adding a special syntax to the current type-hinting paradigm to allow for indicating a non-strict *instanceof* which would resolve the dependency as a protocol.
+I propose adding a special syntax to the current type-hinting paradigm to allow for indicating a non-strict *instanceof* which would resolve the dependency as a Structural Type.
 
 ==== Proposed Syntax ====
 
-The current proposed syntax is basically wrapping a traditional type hint (//foo(Logger $logger)//) with `<>` to indicate the argument should be treated as a protocol.
+The current proposed syntax is basically wrapping a traditional type hint (//foo(Logger $logger)//) with `<>` to indicate the argument should be treated as a Structural Type Hint.
 
 <file php duck_typing.php>
 <?php
@@ -83,7 +67,7 @@ Bar::foo(new FileLogger);
 
 ==== Proposed Behavior ====
 
-Any valid class-style identifier can be used as the "protocol name". That means that both classes and interfaces are supported as identifiers. Then the passed in object is checked to ensure that every method on the "protocol" matches in signature and flags to the passed object. If any do not match, the object is rejected and an //E_RECOVERABLE_ERROR// is raised.
+Any valid class-style identifier can be used as the "structure name". That means that both classes and interfaces are supported as identifiers. Then the passed in object is checked to ensure that every method on the "structure type" matches in signature and flags to the passed object. If any do not match, the object is rejected and an //E_RECOVERABLE_ERROR// is raised.
 
 <file php duck_typing.php>
 <?php
@@ -148,11 +132,11 @@ None
 
 ==== Raising Errors ====
 
-Currently, only a //E_RECOVERABLE_ERROR// is raised saying that the passed object //does not look like// the protocol. We may want to raise an //E_NOTICE// or //E_WARNING// as well to say WHAT did not match (was a method missing? Was the signature different? etc).
+Currently, only a //E_RECOVERABLE_ERROR// is raised saying that the passed object //does not look like// the structure type. We may want to raise an //E_NOTICE// or //E_WARNING// as well to say WHAT did not match (was a method missing? Was the signature different? etc).
 
 ==== Syntax ====
 
-I considered implementing a new "type" of interface for this (declaring a new reserved word "protocol"). However after thinking about it, I felt that it was necessary to extend this concept to classes as well as traditional interfaces.
+I considered implementing a new "type" of interface for this (declaring a new reserved word "structure"). However after thinking about it, I felt that it was necessary to extend this concept to classes as well as traditional interfaces.
 
 If the //<Foo> $foo// syntax is not acceptable, there are a few alternatives that would likely work:
 
@@ -167,15 +151,63 @@ Personally, I think the //<Foo> $foo// syntax is the clearest, but it may be too
 
 It's worth noting that since this is a separate branch, the current performance of normal type-hints remains uneffected.
 
-The current Proof-Of-Concept will re-run the verification functions (iterating over the function table) for every call. There are two ways that we can improve this:
+Currently, //instanceof// short-circuiting and caching of structure checks has been implemented. 
 
-=== Short-Circuit on Instanceof ===
+While performance is an apparent concern, the benchmarks indicate performance at works on-par with existing type hints (and when called multiple times can be faster)...
 
-We can short-circuit if //$obj instanceof hint// returns true. This is likely going to be generally false, but checking is reasonably cheap, and will push the cost of the match to the compiler.
+Here are the results of the benchmarks:
 
-=== Cache Protocol Checks ===
+<file php benchmark.php>
+<?php
+interface Foo {
+        public function foo();
+}
 
-Once we get a valid result (either true or false), we can cache that. The outstanding question would be where to cache. On the protocol side? Or on the implementing side (if in the CE)? Or should there be an Executor Global setup for the cache (as a hash table).
+class Bar {
+        public function foo() {}
+}
+
+class Baz implements Foo {
+        public function foo() {}
+}
+
+function benchmark($func, $times, $arg) {
+        $s = microtime(true);
+        for ($i = 0; $i < $times; $i++) {
+                $func($arg);
+        }
+        $e = microtime(true);
+        return $e - $s;
+}
+$times = 1000000;
+$interface = benchmark(function(Foo $foo) {}, $times, new Baz);
+echo "Interface in $interface seconds, " . ($interface / $times) . " seconds per run\n";
+$structural = benchmark(function(<Foo> $foo) {}, $times, new Bar);
+echo "Structural in $structural seconds, " . ($structural / $times) . " seconds per run\n";
+$native = benchmark(function($foo) {}, $times, new Bar);
+echo "Native in $native seconds, " . ($native / $times) . " seconds per run\n";
+?>
+</file>
+
+=== When Run Once ===
+
+When run once (with $times = 1):
+
+''Interface in 1.5974044799805E-5 seconds, 1.5974044799805E-5 seconds per run
+Structural in 1.4066696166992E-5 seconds, 1.4066696166992E-5 seconds per run
+Native in 6.9141387939453E-6 seconds, 6.9141387939453E-6 seconds per run''
+
+The margin of error for the test is approximately the same difference as between Interface and Structural. This means that the performance for a single run is about constant.
+
+=== When Run Many Times ===
+
+When run with $times = 1000000;
+
+''Interface in 0.50202393531799 seconds, 5.0202393531799E-7 seconds per run
+Structural in 0.48089909553528 seconds, 4.8089909553528E-7 seconds per run
+Native in 0.3850359916687 seconds, 3.850359916687E-7 seconds per run''
+
+In this case, the margin of error was less than the difference, meaning that the Structural approach is slightly more performant at runtime than the interface based approach.
 
 ===== Unaffected PHP Functionality =====
 
@@ -194,6 +226,8 @@ Diff From Current Master: [[https://github.com/ircmaxell/php-src/compare/protoco
 ===== References =====
 
  * [[http://en.wikipedia.org/wiki/Go_(programming_language)#Type_system|Go's Type System]]
+ * [[http://golang.org/doc/faq#implements_interface|FAQ About Why Go Doesn't "Implement" Interfaces]]
+ * [[http://en.wikipedia.org/wiki/Structural_type_system|Structural Typing]]
 
 ===== ChangeLog =====
 
