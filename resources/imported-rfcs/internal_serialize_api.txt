@@ -1,0 +1,111 @@
+
+====== PHP RFC: Internal Serialize API ======
+  * Version: 0.1
+  * Date: 2013-07-27
+  * Author: Jakub Zelenka, bukka@php.net
+  * Status: Under Discussion
+
+===== Introduction =====
+
+This RFC propose API for internal generating of serialization.
+
+===== Proposal =====
+
+The idea is that extension writers will be able to use class serialize callback for object serialization
+
+=== Serialize hook changes ===
+
+Currently ''zend_class_entry'' serializer callback ''serialize'' is used if callback exists and its return value is SUCCESS. The RFC proposes changing the possible return values to:
+
+<code>
+#define PHP_SERIALIZE_FAILURE (FAILURE)
+#define PHP_SERIALIZE_CUSTOM  (SUCCESS)
+#define PHP_SERIALIZE_OBJECT  (SUCCESS + 1)
+</code>
+
+If the return value is ''PHP_SERIALIZE_FAILURE'' or ''PHP_SERIALIZE_CUSTOM'', the behavior will be the same as it is now for FAILURE or SUCCESS. It's BC though. 
+
+If the return value is ''PHP_SERIALIZE_OBJECT'', the custom class prefix generation in ''php_var_serialize_intern'' (C:class_name...) will be omitted and only the string returned from the callback will be used.
+
+
+=== Serialization state structure ===
+
+The new structure ''php_serialize_state'' for internal state of the generated serialization will be defined. The structure is important for pointing to the allocated data and checking correct order of API function calling.
+
+=== Functions ===
+
+<code>
+/* initialize serialize state */
+int php_serialize_init(php_serialize_state *state, unsigned char **buffer, zend_uint *buf_len);
+
+/* the final operations for internal data serialization */
+int php_serialize_finish(php_serialize_state *state);
+
+/* initialize serialize state and pre-allocate size of memory */
+int php_serialize_init_ex(php_serialize_state *state, unsigned char **buffer, zend_uint *buf_len, size_t size);
+
+/* add object serialization string prefix */
+int php_serialize_object_start(php_serialize_state *state, zval *object, zend_uint nprops);
+
+/* add object serialization string prefix */
+int php_serialize_object_start_ex(php_serialize_state *state, const char *class_name, zend_uint properties_num);
+
+/* append string that ends the object definition */
+int php_serialize_object_end(php_serialize_state *state);
+
+/* append null property */
+int php_serialize_property_null(php_serialize_state *state, const char *key);
+
+/* append boolean property */
+int php_serialize_property_bool(php_serialize_state *state, const char *key, long value);
+
+/* append long property */
+int php_serialize_property_long(php_serialize_state *state, const char *key, long value);
+
+/* append double property */
+int php_serialize_property_double(php_serialize_state *state, const char *key, double value);
+
+/* append string property */
+int php_serialize_property_string(php_serialize_state *state, const char *key, const char *value);
+
+/* append string property */
+int php_serialize_property_stringl(php_serialize_state *state, const char *key, const char *value, size_t value_length);
+
+/* allocate data to value buffer that needs to filled afterwards */
+int php_serialize_property_stringl_ptr(php_serialize_state *state, const char *key, char **value, size_t value_length);
+
+/* append string property zval */
+int php_serialize_property_zval(php_serialize_state *state, const char *key, zval *value);
+</code>
+
+All defined function return SUCCESS on success, otherwise FAILURE (it can happen if they are called in order that is not allowed). Some functions might be internally defined as macros.
+
+The functionality for all functions should be clear from the comments. The exception is function ''php_serialize_property_stringl_ptr'' that needs further explanation. Its purpose is to prevent double allocations. It allocates ''value_length'' characters and the position of the first character is returned to ''value''. It is a user responsibility to copy exactly ''value_length'' characters to the ''value'' immediately after calling the function (it means before other function from the API is called).
+
+===== Examples =====
+
+This example shows how the new API could be used in DateTime serialization. There would be some extra checks if it was used. This is just an example of the API.
+
+<code>
+int date_object_serialize(zval *object, unsigned char **buffer, zend_uint *buf_len, zend_serialize_data *data TSRMLS_DC)
+{
+    char *value;
+    php_serialize_state state;
+    php_date_obj *dateobj = (php_date_obj *) zend_object_store_get_object(object TSRMLS_CC);
+
+    php_serialize_init(&state, buffer, buf_len);
+    php_serialize_object_start(&state, object, 3);
+    php_serialize_property_string(&state, "date", date_format("Y-m-d H:i:s", 12, dateobj->time, 1));
+    php_serialize_property_long(&state, "timezone_type", dateobj->time->zone_type);
+    php_serialize_property_stringl_ptr(&state, "time_zone", &value, sizeof("UTC+05:00"));
+    snprintf(tmpstr, sizeof("+05:00"), "%c%02d:%02d", dateobj->time->z > 0 ? '-' : '+', abs(dateobj->time->z / 60), abs(dateobj->time->z % 60));
+    php_serialize_object_end(&state);
+    php_serialize_finish(&state);
+
+    return PHP_SERIALIZE_OBJECT;
+}
+</code>
+
+===== Patches and Tests =====
+
+Will be after agreeing on API spec...
