@@ -1,0 +1,148 @@
+====== Constructor Argument Promotion ======
+
+  * Version: 0.1
+  * Date: 2013-08-07
+  * Author: Sean Cannella, seanc@fb.com
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/constructor-promotion
+
+===== Introduction =====
+
+Shorthand syntax for declaring and assigning constructor arguments as properties in the function signature. A similar feature can be found in other programming languages such as Scala and TypeScript.
+
+===== Proposal =====
+
+A common pattern used in classes with constructors is to declare class properties, accept some (or all) of those properties as arguments to a constructor, and assign them within the body of the constructor as so:
+
+  <?php
+  class MyClass {
+    /**
+     * foo is used for blah
+     */
+    public $foo;
+  
+    /**
+     * bar is used for blah
+     */
+    protected $bar;
+  
+    /**
+     * baz is used for blah
+     */
+    private $baz;
+  
+    /**
+     * Make a new MyClass
+     * @param string $foo - Something
+     * @param int $bar - Something else
+     * @param string $baz - Other things (optional)
+     */
+    public function __construct($foo, $bar, $baz = 'some default') {
+      $this->foo = $foo;
+      $this->bar = $bar;
+      $this->baz = $baz;
+    }
+  }
+
+This is verbose boilerplate and can lead to coderot between the constructor's explanation of the parameters and the property declaration's doc comments. This proposal seeks to simplify writing of such classes through implicit constructor argument promotion. The above class could be rewritten as:
+
+
+  <?php
+  class Car {
+    /**
+     * Make a new Car
+     * @prop string $make - Make of the car
+     * @prop int $doors - Number of doors the car has
+     * @prop string $model - Model of the car (optional)
+     */
+    public function __construct(public $make,
+                                protected $doors,
+                                private $model = 'unknown') {
+    }
+  }
+
+Where the repurposing of the visibility keywords tells the compiler to create properties on the class and assign them values from the arguments to the constructor. This would be implemented entirely in the parser to produce equivalent zend_class_entry/zend_property_info structures and assignment bytecodes at the start of the constructor.
+
+===== Considerations/Notes =====
+
+1) No class level analysis when promoting arguments. Specifically, if a field with the name of one of the "to be promoted" parameters is present we would give the expected "Cannot redeclare ..." error. So the following code would lead to an error:
+
+  <?php
+  class A {
+    private $f;
+  
+    function __construct(private $f) {}
+  }
+
+2) Don't perform analysis over class hierarchies. So the following code would lead to two fields being declared, one in class A and one in class B:
+
+  <?php
+  class A {
+    function __construct(private $f) {}
+  }
+  
+  class B extends A {
+    function __construct(private $f) { parent::__construct($f); }
+  }
+
+3) Parameter promotion over an abstract constructor or in an interface is not allowed. The following code would result in an error:
+
+  <?php
+  class A {
+    abstract function __construct(private $f);
+  }
+
+The reason is that promoted parameters need to add statements to the body of the constructor, which for an abstract method or interface is not present.
+
+4) Unclear whether or not to allow var as a promotion attribute (PHP4 syntax). For now, visibility attributes (public, private, protected) must be explicit.
+
+5) The field assignments will be pushed at the beginning of the method body. In that respect, if the field is later assigned in the constructor the subsequent assignment wins. So
+
+  <?php
+  function __construct(private $f) {
+    $this->f = clone $f;
+  }
+
+becomes
+
+  function __construct(private $f) {
+    $this->f = $f;
+    $this->f = clone $f;
+  }
+
+The rationale here is that user visible code wins over generated argument promotion code.
+
+6) There should be no issue in pushing the assignment statements at the beginning of the constructor body. PHP does not enforce order of calls to the parent constructor so even if code is generated that precedes a call to parent or, say, assertions there should be no unexpected side effects.
+
+The one contrived case where one could run into problems is something like this because $f will be assigned before the if block:
+
+  public __construct(private $f) {
+    if ($f->isGoodForMe()) {
+      $this->f = $f;
+    }  // $f is null otherwise
+  }
+
+This feature should not be used when these semantics are required.
+
+7) One future extension to consider is automatically generating getters (and maybe setters) for the promoted parameters.
+
+8) We will not allow this feature inside traits since __construct may already be present in the using class and this will result in the trait __construct simply being dropped which is likely to lead to more confusion than it is worth.
+
+9) Properties promoted in this fashion would not have their own DocBlock which would be noticeable when reflecting over a class but this is the same as undeclared properties today.
+
+===== Backward Incompatible Changes =====
+
+None.
+
+===== Proposed PHP Version(s) =====
+
+HEAD / 5.6+
+
+===== Implementation =====
+
+https://github.com/sgolemon/php-src/commit/56010a74279435223b3ad391d9ee5a8020415192
+
+===== External Impact =====
+
+IDEs would need to update their parsing rules to auto-discover promoted properties.
+
