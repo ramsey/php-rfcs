@@ -1,0 +1,215 @@
+====== PHP RFC: Syntax for variadic functions ======
+  * Date: 2013-08-27
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Under Discussion
+  * Proposed for: PHP 5.6
+  * Patch: https://github.com/php/php-src/pull/421
+
+This RFC proposes to add a dedicated syntax for variadic functions (functions taking a variable number of arguments).
+
+===== Proposal =====
+
+==== Introduction ====
+
+Currently variadic functions are implemented by fetching the function arguments using ''func_get_args()''. The following code sample shows an implementation of a variadic function used to prepare and execute a MySQL query (I'll be making use of this example throughout the RFC):
+
+<code php>
+class MySQL implements DB {
+    protected $pdo;
+    public function query($query) {
+        $stmt = $this->pdo->prepare($query);
+        $stmt->execute(array_slice(func_get_args(), 1));
+        return $stmt;
+    }
+    // ...
+}
+
+$userData = $db->query('SELECT * FROM users WHERE id = ?', $userID)->fetch();
+</code>
+
+There are two issues with the above approach:
+
+Firstly, by just looking at the function signature ''public function query($query)'' you cannot know that this is actually a variadic function. You'd think that the function can only run a normal query and doesn't support bound parameters.
+
+Secondly, because ''func_get_args()'' returns *all* arguments passed to the function you first need to remove the ''$query''
+parameter using ''array_slice(func_get_args(), 1)''.
+
+This RFC proposed to solve these issues by adding a special syntax for variadic functions:
+
+<code php>
+class MySQL implements DB {
+    public function query($query, ...$params) {
+        $stmt = $this->prepare($query);
+        $stmt->execute($params);
+        return $stmt;
+    }
+    // ...
+}
+
+$userData = $db->query('SELECT * FROM users WHERE id = ?', $userID)->fetch();
+</code>
+
+The ''%%...$params%%'' syntax indicates that this is a variadic function and that all arguments after ''$query'' should be put into the ''$params'' array. Using the new syntax both of the issues mentioned above are solved.
+
+==== By-reference capture ====
+
+The new syntax additionally adds support for capturing variadic arguments by-reference, something that was previously not possible in userland code. Only internal functions could make use of this via ''ZEND_ACC_PASS_REST_BY_REF''.
+
+This would allow implementing functions like ''sscanf()'' or ''mysqli_stmt::bind_param()'' in userland. The following method uses the new syntax to prepare a query and bind parameters by-reference to it:
+
+<code php>
+class MySQL implements DB {
+    public function prepare($query, &... $params) {
+        $stmt = $this->prepare($query);
+        foreach ($params as $i => &$param) {
+            $stmt->bindParam($i + 1, $param);
+        }
+        return $stmt;
+    }
+    // ...
+}
+
+$stmt = $db->prepare('INSERT INTO users (name, email, age) VALUES (?, ?, ?)', $name, $email, $age);
+foreach ($usersToInsert as list($name, $email, $age)) {
+    $stmt->execute();
+}
+</code>
+
+A by-reference capture of variadic arguments is indicated by a ''&'' before the ellipsis ''%%...%%''.
+
+==== Type hints ====
+
+Furthermore it's possible to provide a typehint that all variadic arguments are checked against. E.g. this is how the signature of ''array_merge'' implemented in userland would look like:
+
+<code php>
+function array_merge(array... $arrays) { /* ... */ }
+</code>
+
+PHP would make sure that all arguments are actually arrays. This also works for all other typehints like ''%%callable... $callbacks%%'' or ''%%Route... $routes%%''.
+
+==== Prototype checks ====
+
+An advantage of declaring variadics in the parameter list is that the signature can be enforced by intefaces and during inheritance. The ''MySQL::query()'' and ''MySQL::prepare()'' examples above already referenced an interface ''DB''. This is how the interface could look like:
+
+<code php>
+interface DB {
+    public function query($query, ...$params);
+    public function prepare($query, &...$params);
+    // ...
+}
+</code>
+
+This interface will force any implementation to make both these functions variadic and will also enforce the by-ref capture for ''prepare()''.
+
+The exact protoype checks (what is valid and what is not) are outlined below:
+
+<code php>
+// INVALID: Turning a variadic function into a non-variadic one
+public function query($query, ...$params)
+public function query($query)
+
+// VALID: Turning a non-variadic function into a variadic one
+public function query($query)
+public function query($query, ...$params)
+// Note: This is allowed as ...$params is optional and PHP allows additional optional arguments
+
+// INVALID: Changing the passing mode for variadic parameters
+public function query($query, &...$params)
+public function query($query, ...$params)
+
+// INVALID: Chaning typehint of variadic parameter to incompatible typehint
+public function query($query, array ...$params)
+public function query($query, callable ...$params)
+
+// INVALID: Removing parameter before the variadic parameter
+public function query($query, ...$params)
+public function query(...$params)
+// Note: Personally I don't think this makes sense, but this is how
+//       PHP behaves in general, so I'm staying consistent with it
+
+// VALID: Adding additional optional parameter before the variadic parameter (with compatible typehint)
+public function query($query, array ...$params)
+public function query($query, array $extraParam = null, array ...$params)
+
+// INVALID: Adding additional optional parameter with incompatible typehint
+public function query($query, array ...$params)
+public function query($query, callable $extraParam = null, array ...$params)
+</code>
+
+==== Reflection ====
+
+Two new methods are added to Reflection:
+
+<code php>
+bool ReflectionFunction::isVariadic()
+bool ReflectionParameter::isVariadic()
+</code>
+
+The functions will return ''true'' is the function/parameter is variadic, ''false'' otherwise.
+
+==== Summary ====
+
+To sum up, the feature adds the following new syntax:
+
+  * ''%%function fn($arg, ...$args)%%'': Capture all variadic arguments into the ''$args'' array
+  * ''%%function fn($arg, &...$args)%%'': Do the capture by reference
+  * ''%%function fn($arg, array ...$args)%%'': Enforce that all variadic arguments are arrays (or some other typehint)
+  * ''%%function fn($arg, array& ...$args)%%'': Combine both - variadic arguments are arrays that are captured by-reference
+
+The advantages of the syntax are:
+
+  * It's immidiately clear that a function is variadic, without having to read documentation.
+  * It is no longer necessary to ''array_slice()'' the variadic arguments from ''func_get_args()''
+  * It is now possible to do variadic by-reference captures
+  * Variadic prototypes can be enforce in interfaces / by inheritance
+  
+===== Impact on internals =====
+
+The ''pass_rest_by_ref'' argument of ''ZEND_BEGIN_ARG_INFO'' and ''ZEND_BEING_ARG_INFO_EX'' is no longer used. Instead functions can declare a variadic argument in the arginfo using ''ZEND_ARG_VARIADIC_INFO''.
+
+For example, this is how the arginfo for ''sscanf'' changed:
+
+<code c>
+// OLD:
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sscanf, 1, 0, 2)
+    ZEND_ARG_INFO(0, str)
+    ZEND_ARG_INFO(0, format)
+    ZEND_ARG_INFO(1, ...)
+ZEND_END_ARG_INFO()
+ 
+// NEW:
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sscanf, 0, 0, 2)
+    ZEND_ARG_INFO(0, str)
+    ZEND_ARG_INFO(0, format)
+    ZEND_ARG_VARIADIC_INFO(1, vars)
+ZEND_END_ARG_INFO()
+</code>
+
+It would theoretically be possible to retain support for ''pass_rest_by_ref'' (by automatically generating a variadic arg), but as this is an exceedingly rarely used feature I don't think this is necessary. All usages of it in php-src have been replaced.
+
+Apart from this the change should be transparent from an internals point of view. Macros like ''ARG_MUST_BE_SENT_BY_REF''
+continue to work.
+  
+===== Backwards Compatability =====
+
+This change does not break backwards compatability for userland code.
+
+===== Discussion =====
+
+==== Choice of syntax ====
+
+Presumably this RFC will quickly deteriorate towards a bike-shedding of the best syntax for variadic parameters, so I'll try to explain my choice for the proposed syntax right away:
+
+The use of ''%%...%%'' is already familiar from the PHP documentation, where variadics are denoted using a trailing ''%%$...%%'' parameter. The reason ''%%...%%'' follows *before* the parameter in the proposed syntax is to clearly show that the typehint/ref-modifier before it applies to all arguments.
+
+Some possible alternative syntax and why I don't like it:
+
+  * ''%%$args...%%''. With ref-modifier (''%%&$args...%%'') this does not show well that the individual arguments are references, not ''$args'' itself. With typehint (''%%array $args...%%'') it also looks like the typehint applies to ''$args'' itself rather than all variadic arguments.
+  * ''*$args''. This is the syntax that both Ruby and Python use. For PHP this does not work well because ''*$'' is a weird combination. It gets work with a by-reference capture: ''&*$args''. This looks like a random sequences of special characters.
+  * ''params $args''. This is what C# does. This would require making ''params'' a keyword. Furthermore this doesn't have any nice way to declare typehints. In C# this is done using ''params type[] args'', but PHP doesn't have ''type[]'' hints and introducing them only here doesn't seem right.
+ 
+The proposed syntax is also used by Java.
+
+===== Patch =====
+
+Patch available in PR#421: https://github.com/php/php-src/pull/421
