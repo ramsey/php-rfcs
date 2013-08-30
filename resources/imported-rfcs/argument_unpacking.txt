@@ -1,0 +1,160 @@
+====== PHP RFC: Argument Unpacking ======
+  * Date: 2013-08-30
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Under Discussion
+  * Proposed for: PHP 5.6
+  * Patch: https://github.com/nikic/php-src/compare/variadics...splat
+
+===== Introduction =====
+
+This RFC complements the [[rfc:variadics|variadics RFC]]. It introduces a syntax for unpacking arrays and Traversables into argument lists (also known as "splat operator", "scatter operator" or "spread operator").
+
+As a usage example, consider a variadic method ''%%public function query($query, ...$params)%%''. You are provided a ''$query'' and an array of ''$params'' and want to call the method using these. Currently this is possible using ''call_user_func_array()'':
+
+<code php>
+call_user_func_array([$db, 'query'], array_merge(array($query), $params));
+</code>
+
+This RFC proposes a syntax for unpacking arguments directly in the call syntax:
+
+<code php>
+$db->query($query, ...$params);
+</code>
+
+===== Proposal =====
+
+An argument in a function call that is prefixed by ''%%...%%'' will be "unpacked": Instead of passing the argument itself to the function the elements it contains will be passed (as individual arguments). This works both for arrays and Traversables.
+
+As such all of the following function calls are equivalent:
+
+<code php>
+function test(...$args) { var_dump($args); }
+
+test(1, 2, 3);                         // [1, 2, 3]
+test(...[1, 2, 3]);                    // [1, 2, 3]
+test(...new ArrayIterator([1, 2, 3])); // [1, 2, 3]
+
+// Note: It doesn't really make sense to unpack a constant array like [1, 2, 3].
+//       Normally these would unpack some variable like ...$args
+</code>
+
+It's possible to use ''%%...%%'' multiple times in a call and it is possible to mix it with normal arguments:
+
+<code php>
+test(1, 2, ...[3, 4], 5, 6, ...[7, 8]); // [1, 2, 3, 4, 5, 6, 7, 8]
+</code>
+
+The ''%%...%%'' operator works in all argument lists, including ''new'' expressions:
+
+<code php>
+fn(...$args);
+$fn(...$args);
+$obj->fn(...$args);
+ClassName::fn(...$args);
+new ClassName(...$args);
+</code>
+
+Argument unpacking is not limit to variadic functions, it can also be used on "normal" functions:
+
+<code php>
+function test($arg1, $arg2, $arg3 = null) {
+    var_dump($arg1, $arg2, $arg3);
+}
+
+test(...[1, 2]);       // 1, 2
+test(...[1, 2, 3]);    // 1, 2, 3
+test(...[1, 2, 3, 4]); // 1, 2, 3 (remaining arg is not captured by the function declaration)
+</code>
+
+If you try to unpack something that is not an array or Traversable a warning is thrown, but apart from that the call continues as usual:
+
+<code php>
+var_dump(1, 2, ...null, 3, 4);
+// Warning: Only arrays and Traversables can be unpacked
+// int(1) int(2) int(3) int(4)
+</code>
+
+==== By-reference passing ====
+
+If an array is unpacked the elements will by passed by-value/by-reference according to the function definition:
+
+<code php>
+function test($val1, $val2, &...$refs) {
+    foreach ($refs as &$ref) ++$ref;
+}
+
+$array = [1, 2, 3, 4, 5];
+test(...$array);
+var_dump($array); // [1, 2, 4, 5, 6]
+</code>
+
+By-reference passing will not work if the unpacked entity is a Traversable. Instead an exception is thrown on encountering the first argument that would require by-reference passing:
+
+<code php>
+test(...new ArrayIterator([1, 2, 3, 4, 5]));
+// Exception: Cannot pass by-reference argument 3 of test() by unpacking a Traversable
+</code>
+
+The reasons why this is not allowed are two-fold: 
+
+  * It's not possible to determine the number of elements in a Traversable ahead of time. As such we can not know whether unpacking the Traversable will or will not hit a by-reference argument.
+  * It's not possible to determine if a Traversable has support for by-reference iteration or if it will trigger an error if this is requested.
+  
+An exception rather than an error is used here because a) Traversable related code uses exceptions rather than errors and b) the error would either have to be fatal or involve complicated stack cleanup that exceptions do automatically.
+
+===== Backward Compatibility =====
+
+This change does not break userland or internal compatibility.
+
+===== Advantages over call_user_func_array =====
+
+Usage of ''call_user_func_array'' becomes complicated if you need to pass fixed arguments as well. Compare:
+
+<code php>
+call_user_func_array([$db, 'query'], array_merge(array($query), $params));
+// vs
+$db->query($query, ...$params);
+</code>
+
+''call_user_func_array'' requires a callback. So even if the called function/method is known, you still need to use a dynamic string/array callback. This usually precludes any IDE support.
+
+''call_user_func_array'' does not work for constructors. Instead ''ReflectionClass::newInstanceArgs()'' has to be used:
+
+<code php>
+(new ReflectionClass('ClassName'))->newInstanceArgs($args);
+// vs
+new ClassName(...$args);
+</code>
+
+Futhermore ''call_user_func_array'' has a rather large performance impact. If a large number of calls go through it, this can make a signficant difference. For this reason projects ((I've seen this used at least in Laravel and Drupal and a bunch of other code)) often replace particularly common ''call_user_func_array'' calls with a switch statement of the following form:
+
+<code php>
+switch (count($args)) {
+    case 0: $func(); break;
+    case 1: $func($args[0]); break;
+    case 2: $func($args[0], $args[1]); break;
+    case 3: $func($args[0], $args[1], $args[2]); break;
+    case 4: $func($args[0], $args[1], $args[2], $args[3]); break;
+    case 5: $func($args[0], $args[1], $args[2], $args[3], $args[4]); break;
+    default: call_user_func_array($func, $args); break;
+}
+</code>
+
+The ''%%...%%'' argument unpacking syntax is about 3.5 to 4 times faster than ''call_user_func_args''. This solves the performance issue. [[https://gist.github.com/nikic/6390366|Benchmark code and results]].
+
+Lastly, it seems that people naturally expect that this syntax is present if the variadics syntax is present. So if we implement variadics, it's probably best to include this as well.
+
+===== Patch =====
+
+The diff can be found here: https://github.com/nikic/php-src/compare/variadics...splat
+
+The patch is based off the variadics implementation, but can also be implemented without it.
+
+===== Support in other languages =====
+
+This feature is supported by many languages. Some of the more important ones being:
+
+  * [[http://docs.python.org/2/tutorial/controlflow.html#unpacking-argument-lists|Python]] using the ''*args'' syntax
+  * [[http://endofline.wordpress.com/2011/01/21/the-strange-ruby-splat/#calling_methods|Ruby]] using Python's syntax
+  * Java supports this, but only for variadic parameters and without any special syntax (type based)
+  * JavaScript ([[http://wiki.ecmascript.org/doku.php?id=harmony:spread|ECMAScript Harmony]]) using the same syntax proposed here
