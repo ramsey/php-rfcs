@@ -1,0 +1,257 @@
+====== PHP RFC: Named Parameters ======
+  * Version: 0.9
+  * Date: 2013-09-06
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Under Discussion
+  * Proposed for: PHP 5.6
+
+===== State of this RFC =====
+
+This is a preliminary RFC for named parameters. It's purpose is to find out if we want to support them in the next PHP version and if so, how the implementation should work. The syntax and behavior described here are just basic ideas that still need to be fleshed out.
+
+The implementation that accompanies this proposal is not complete yet. As this is a very complicated feature I do not wish to spend time finishing it without knowing that we actually want this feature.
+
+The implementation is based off and includes the [[rfc:variadics]] and [[rfc:argument_unpacking]] RFCs. I think they are essential if we implement named params (otherwise we couldn't have good error handling for unknown named params and no unpacking support at all, unless we break BC in ''call_user_func_array''). The choice of how they should be implemented somewhat depends on whether we want to support named params, so I'm doing this proposal first.
+  
+===== What are named arguments? =====
+
+Named arguments are a way to pass arguments to a function, which makes use of the parameter names rather than the position of the parameters:
+
+<code php>
+// Using positional arguments:
+array_fill(0, 100, 42);
+// Using named arguments:
+array_fill(start_index => 0, num => 100, value => 42);
+</code>
+
+The order in which the named arguments are passed does not matter. The above example passes them in the same order as they are declared in the function signature, but any other order is possible too:
+
+<code php>
+array_fill(value => 42, num => 100, start_index => 0);
+</code>
+
+It is possible to combine named arguments with normal, positional arguments and it is also possible to specify only some of the optional arguments of a function, irregardless of their order:
+
+<code php>
+htmlspecialchars($string, double_encode => false);
+// Same as
+htmlspecialchars($string, ENT_COMPAT | ENT_HTML401, 'UTF-8', false);
+</code>
+
+===== What are the benefits of named arguments? =====
+
+One obvious benefit of named arguments can be seen in the last code sample (using ''htmlspecialchars''): You no longer have to specify all defaults until the one you want to change. Named args allow you to directly overwrite only those defaults that you wish to change.
+
+This is also possible with the [[rfc:skipparams]] RFC, but named args make the intended behavior a lot more clear. Compare:
+
+<code php>
+htmlspecialchars($string, default, default, false);
+// vs
+htmlspecialchars($string, double_encode => false);
+</code>
+
+Seeing the first line you will not know what the ''false'' argument does (unless you happen to know the ''htmlspecialchars'' signature by heart), whereas the ''%%double_encode => false%%'' variant makes the intention clear.
+
+The benefit of making code self-documenting obviously even applies when you are not skipping optional arguments. E.g. compare the following two lines:
+
+<code php>
+$str->contains("foo", true);
+// vs
+$str->contains("foo", caseInsensitive => true);
+</code>
+
+Currently you can already get something similar to named arguments by taking an ''$options'' array as a parameter, which would be used like this:
+
+<code php>
+htmlspecialchars($string, ['double_encode' => false]);
+</code>
+
+Using an ''$options'' array is not much more verbose at the call-site than named arguments, but it has several drawbacks which make it a lot less practical than actual named args:
+
+  * The available options are not documented in the signature. You have to look into the code to find out.
+  * Handling ''$options'' requires more code in the implementation, because default values have to be merged and values extracted. Especially if you also want to throw an error if an unknown option is specified things get complicated.
+  * Something like ''$options'' always needs to be explicitly implemented, whereas named arguments always work. In particular they will also be usable for existing (and internal) functions. All functions will be able to benefit from the readability improvements.
+
+Lastly, named arguments allow a new sort of variadic function, one which can take not just an ordered list of values, but also a list of key-value pairs. Sample application is the ''%%$db->query()%%'' method, which would now be able to support named parameters too:
+
+<code php>
+// currently possible:
+$db->query(
+    'SELECT * from users where firstName = ? AND lastName = ? AND age > ?',
+    $firstName, $lastName, $minAge
+);
+// named args additionally allow:
+$db->query(
+    'SELECT * from users where firstName = :firstName AND lastName = :lastName AND age > :minAge',
+    firstName => $firstName, lastName => $lastName, minAge => $minAge
+);
+</code>
+
+===== Implementation =====
+
+==== Internally ====
+
+Named args are internally passed the same way as other arguments (via the VM stack). They differ in that positional arguments are always passed on top of the stack whereas named arguments can be inserted into the "stack" in any order. Stack positions that are not used contain the value ''NULL''. The argument count that is pushed after the arguments includes the ''NULL'' arguments in the count.
+
+==== Errors ====
+
+While it is possible to mix positional and named arguments, the named arguments always have to come last. Otherwise a compile error is thrown:
+
+<code php>
+strpos(haystack => "foobar", "bar");
+// Fatal error: Cannot pass positional arguments after named arguments
+</code>
+
+If a named argument is not known (a parameter with that name does not exist) and the function is not variadic (more on that later) a fatal error is thrown:
+
+<code php>
+strpos(hasytack => "foobar", needle => "bar");
+// Fatal error: Unknown named argument $hasytack
+</code>
+
+When named arguments are in used, it can happen that the same parameter is set twice. In this case the newer value will overwrite the older one and a warning is thrown:
+
+<code php>
+function test($a, $b) { var_dump($a, $b); }
+
+test(1, 1, a => 2); // 2, 1
+// Warning: Overwriting already passed parameter 1 ($a)
+test(a => 1, b => 1, a => 2); // 2, 1
+// Warning: Overwriting already passed parameter 1 ($a)
+</code>
+
+==== Collecting unknown named arguments ====
+
+Functions declared as variadic using ''%%...$args%%'' syntax will also collect unknown named arguments into ''$args''. The unknown named arguments will always follow after any positional arguments and will be in the order in which they were passed.
+
+Example of the behavior:
+
+<code php>
+function test(...$args) { var_dump($args); }
+
+test(1, 2, 3, a => 'a', b => 'b');
+// [1, 2, 3, "a" => "a", "b" => "b"]
+</code>
+
+An example usage is the ''%%$db->query()%%'' method already mentioned above, which could now also work with named bound parameters.
+
+This feature is known as ''%%**kwargs%%'' in Python.
+
+==== Unpacking named arguments ====
+
+The ''%%foo(...$args)%%'' unpacking syntax from the [[rfc:argument_unpacking]] RFC also supports unpacking named parameters:
+
+<code php>
+$params = ['needle' => 'bar', 'haystack' => 'barfoobar', 'offset' => 3];
+strpos(...$params); // int(6)
+</code>
+
+Any value with a string key is unpacked as a named parameter. Other key types (for arrays only integers) are treated as normal positional arguments.
+
+It's possible to unpack both positional and named args in one go, but named arguments have to strictly follow any positional arguments. If a positional argument is encountered after a named argument a warning is thrown and the unpacking operation aborted.
+
+==== func_* and call_user_func_array ====
+
+If (due to the usage of named arguments) some arguments are missing (''NULL'' on the stack) the ''func_*'' functions behave as follows:
+
+  * ''func_get_args()'' will not include the missing offsets in the resulting array
+  * ''func_get_arg($n)'' will throw its usual "Argument %ld not passed to function" warning and return ''false''
+  * ''func_num_args()'' returns the number of arguments including the ''NULL''s.
+  
+All three functions are also oblivious to the collection of unknown named arguments by variadics. ''func_get_args()'' will not return the collected values and ''func_num_args()'' will not include them in the argument count.
+  
+The ''call_user_func_array'' function will continue behaving exactly as is - it does not support named parameters. Unpacking of named parameters is only supported using the ''%%...$options%%'' syntax. (Adding support to ''call_user_func_array'' would break any code that's passing an array with string keys.)
+
+Generally: The ''func_*'' and ''call_user_func_array'' functions are designed to stay close to their old behavior
+
+===== Open questions =====
+
+==== Syntax ====
+
+The current implementation (and proposal) support the following two syntaxes for named parameters:
+
+<code php>
+test(foo => "oof", bar => "rab");
+test("foo" => "oof", "bar" => "rab");
+</code>
+
+The second syntax is supported in order to allow named arguments where the parameter name is a reserved keyword:
+
+<code php>
+test(array => [1, 2, 3]);   // syntax error
+test("array" => [1, 2, 3]); // works
+</code>
+
+The choice of this syntax is mostly arbitrary, I didn't put much thought into it. Here are some alternative syntax proposals courtesy of Phil Sturgeon:
+
+<code php>
+// currently implemented:
+test(foo => "oof", bar => "rab");
+test("foo" => "oof", "bar" => "rab");
+
+// suggestions (can use keywords):
+test($foo => "oof", $bar => "rab");
+test(:foo => "oof", :bar => "rab");
+
+// suggestions (cannot use keywords):
+test(foo = "oof", bar = "rab");
+test(foo: "oof", bar: "rab");
+
+// not possible because already valid code:
+test($foo = "oof", $bar = "rab");
+</code>
+
+Which one(s) of these we want to support is up to discussion.
+
+==== Collection of unknown named args into ...$opts ====
+
+The current implementation / proposal suggests to use the ''%%...$opts%%'' syntax both for positional variadics and for named variadics. Python takes a different approach where the former are collected into ''%%*args%%'' and the latter into ''%%**kwargs%%''.
+
+Pro current solution:
+
+  * Seems very PHP-like to do it this way, because PHP allows mixing "normal" arrays and dictionaries, which is an option Python does not have.
+  
+Con current solution:
+
+  * Having a separate syntax for capturing unknown named args makes the intention clearer: You don't always want to support **both** positional and named variadics. Separate syntax allows you to enforce one type or the other.
+  
+Opinions and arguments how to handle this are welcome.
+
+==== Unpacking named args ====
+
+The same question comes up for argument unpacking: Should the ''%%...$foo%%'' notation be used both for unpacking positional and named arguments, or do we want separate ''%%*$foo%%'' and ''%%**$foo%%'' notations?
+
+In any case, this descision should mirror the one for the previous question.
+
+==== Parameters names are part of the contract ====
+
+Currently parameter names are not part of the contract: In an interface implementation you can rename parameters as much as you like, it won't make a difference to the caller. Named arguments change this. If an inheriting class changes a parameter name calls using named args might fail, thus violating LSP:
+
+<code php>
+interface A {
+	public function test($foo, $bar);
+}
+
+class B implements A {
+	public function test($a, $b) {}
+}
+
+$obj = new B;
+
+// Pass params according to A::test() contract
+$obj->test(foo => "foo", bar => "bar"); // ERROR!
+</code>
+
+If named parameters are introduced, signature validation should include parameter names. Throwing a fatal error (for the interface/class combination) would break backwards compatibility though. We could use some lower error type (warning, notice, strict) for this.
+
+===== Patch =====
+
+You can find the diff for the work-in-programm patch here: https://github.com/nikic/php-src/compare/splat...namedParams. The patch is incomplete, dirty and has known bugs.
+
+Credits: The patch includes some of the work that Stas' did for the skipparams RFC.
+
+Work that still needs to be done:
+
+  * Implement the results of "Open questions"
+  * Update all arginfos of internal functions to match the documentation (and improve names along the way). The current arginfo structs are hopelessly outdated. I hope that this work can be done mainly automatically. (Note: After named parameters are introduced the argument names are frozen and should not be changed.)
+  * Make sure that internal functions properly handle skipped arguments. This should work in most cases automatically, but I'm sure that there are quite a few cases where additional adjustments need to be done. Hopefully misbehaving functions can be found through fuzzing.
