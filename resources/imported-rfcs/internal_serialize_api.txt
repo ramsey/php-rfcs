@@ -1,21 +1,38 @@
-
 ====== PHP RFC: Internal Serialize API ======
-  * Version: 0.1
+  * Version: 1.0
   * Date: 2013-07-27
   * Author: Jakub Zelenka, bukka@php.net
   * Status: Under Discussion
 
 ===== Introduction =====
 
-This RFC proposes API for internal generating of serialization.
+This RFC proposes a new API for internal object serialization and unserialization.
 
+The current methods of serializing/unserializing of objects in extensions are following:
+  * Internal class has to to define object properties or use get_properties handler. The properties are then used for serialization. The object state can be restored using ''__wakeup'' user method.
+  * Using Serializable interface or serialize / unserialize ''zend_class_entry'' callbacks and then generate / parse custom serialized string
+
+The first method has one side effect. After unserializing of object, the properties are saved to the object properties HashTable. This requires more allocated memory for the object than it's usualy necassary. The usual purpose of unserializing the internal object is to get the object to the state when it was before serialization. These data are mostly saved in the object bucket and there is no point to save them to properties table as well. There also is an performance issue with serialization. In addition the serialization is quite slow because HashTable must be created and populated with zvals. This is much slower than simply transforming the state of the object to the string (see benchmarks).
+
+The second method requires generating and parsing serialized string which can require quite a lot of coding in C. Also the resulted string is never compatible with the string generate by the first method. It means that existing classes cannot be changed from the first method to the custom serialization without breaking BC.
+
+The proposed API resolves all mentioned problems and also simplify the way how internal objects are serialized/unserialized.
+
+  
 ===== Proposal =====
 
-The idea is that extension writers will be able to use class serialize callback for object serialization
+The purpose of the proposed API is simplified custom object serialization and unserialization for extension writers and also improve performance.
+
+The proposed changes does not have any influence on user space serialization/unserialization. The purpose is only to extend internal API for extensions.
+
+
+==== Serialization ====
+
+The first part of the proposal is API for generating serialized data for internal classes.
 
 === Serialize hook changes ===
 
-Currently ''zend_class_entry'' serializer callback ''serialize'' is used if callback exists and its return value is SUCCESS. The RFC proposes changing the possible return values to:
+Currently ''zend_class_entry'' serializer callback ''serialize'' is used if callback exists and its return value is ''SUCCESS''. The RFC proposes changing the possible return values to:
 
 <code>
 #define PHP_SERIALIZE_FAILURE (FAILURE)
@@ -23,93 +40,132 @@ Currently ''zend_class_entry'' serializer callback ''serialize'' is used if call
 #define PHP_SERIALIZE_OBJECT  (SUCCESS + 1)
 </code>
 
-If the return value is ''PHP_SERIALIZE_FAILURE'' or ''PHP_SERIALIZE_CUSTOM'', the behavior will be the same as it is now for FAILURE or SUCCESS. It's BC though. 
+If the return value is ''PHP_SERIALIZE_FAILURE'' or ''PHP_SERIALIZE_CUSTOM'', the behavior will be the same as it is now for FAILURE or SUCCESS. It means that the changes are backward compatible. 
 
-If the return value is ''PHP_SERIALIZE_OBJECT'', the custom class prefix generation in ''php_var_serialize_intern'' (C:class_name...) will be omitted and only the string returned from the callback will be used.
-
-
-=== Serialization state structure ===
-
-The new structure ''php_serialize_state'' for internal state of the generated serialization will be defined. The structure is important for pointing to the allocated data and checking correct order of API function calling.
+If the return value is ''PHP_SERIALIZE_OBJECT'', the custom class prefix generation in ''php_var_serialize_intern'' (C:class_name...) will be omitted and only the string returned from the callback will be used. In this case, the extension writer should always use new API functions (see bellow) that generates a valid string that can be later used for unserializing the object. 
 
 === Functions ===
 
+The RFC defines new PHPAPI exported helper functions that should be used for object serialization.
+
 <code>
-/* initialize serialize state */
-int php_serialize_init(php_serialize_state *state, unsigned char **buffer, zend_uint *buf_len);
-
-/* the final operations for internal data serialization */
-int php_serialize_finish(php_serialize_state *state);
-
-/* initialize serialize state and pre-allocate size of memory */
-int php_serialize_init_ex(php_serialize_state *state, unsigned char **buffer, zend_uint *buf_len, size_t size);
-
 /* add object serialization string prefix */
-int php_serialize_object_start(php_serialize_state *state, zval *object, zend_uint nprops);
-
-/* add object serialization string prefix */
-int php_serialize_object_start_ex(php_serialize_state *state, const char *class_name, zend_uint properties_num);
+PHPAPI void php_var_serialize_object_start(smart_str *buf, zval *object, zend_uint nprops TSRMLS_DC);
 
 /* append string that ends the object definition */
-int php_serialize_object_end(php_serialize_state *state);
+PHPAPI void php_var_serialize_object_end(smart_str *buf);
 
 /* append null property */
-int php_serialize_property_null(php_serialize_state *state, const char *key);
+PHPAPI void php_var_serialize_property_null(smart_str *buf, const char *key);
 
 /* append boolean property */
-int php_serialize_property_bool(php_serialize_state *state, const char *key, long value);
+PHPAPI void php_var_serialize_property_bool(smart_str *buf, const char *key, int value);
 
 /* append long property */
-int php_serialize_property_long(php_serialize_state *state, const char *key, long value);
+PHPAPI void php_var_serialize_property_long(smart_str *buf, const char *key, long value);
 
 /* append double property */
-int php_serialize_property_double(php_serialize_state *state, const char *key, double value);
+PHPAPI void php_var_serialize_property_double(smart_str *buf, const char *key, double value TSRMLS_DC);
 
 /* append string property */
-int php_serialize_property_string(php_serialize_state *state, const char *key, const char *value);
+PHPAPI void php_var_serialize_property_string(smart_str *buf, const char *key, const char *value);
 
 /* append string property */
-int php_serialize_property_stringl(php_serialize_state *state, const char *key, const char *value, size_t value_length);
-
-/* allocate data to value buffer that needs to filled afterwards */
-int php_serialize_property_stringl_ptr(php_serialize_state *state, const char *key, char **value, size_t value_length);
+PHPAPI void php_var_serialize_property_stringl(smart_str *buf, const char *key, const char *value, int value_len);
 
 /* append string property zval */
-int php_serialize_property_zval(php_serialize_state *state, const char *key, zval *value);
+PHPAPI void php_var_serialize_property_zval(smart_str *buf, const char *key, zval *value, zend_serialize_data *data TSRMLS_DC);
 
 /* append properties taken from HashTable */
-int php_serialize_hash_table(php_serialize_state *state, HashTable *properties);
+PHPAPI void php_var_serialize_properties(smart_str *buf, HashTable *properties, zend_serialize_data *data TSRMLS_DC);
 </code>
 
-All defined function return SUCCESS on success, otherwise FAILURE (it can happen if they are called in order that is not allowed). Some functions might be internally defined as macros.
+The functionality for all functions should be clear from the comments.
 
-The functionality for all functions should be clear from the comments. The exception is function ''php_serialize_property_stringl_ptr'' that needs further explanation. Its purpose is to prevent double allocations. It allocates ''value_length'' characters and the position of the first character is returned to ''value''. It is a user responsibility to copy exactly ''value_length'' characters to the ''value'' immediately after calling the function (it means before other function from the API is called).
+=== Example ====
 
-===== Examples =====
-
-This example shows how the new API could be used in DateTime serialization. There would be some extra checks if it was used. This is just an example of the API.
+This example shows how the new API could be used in extension.
 
 <code>
-int date_object_serialize(zval *object, unsigned char **buffer, zend_uint *buf_len, zend_serialize_data *data TSRMLS_DC)
+static int test_object_serialize(zval *object, unsigned char **buffer, zend_uint *buf_len, zend_serialize_data *data TSRMLS_DC)
 {
-    php_serialize_state state;
-    char *value, *date_str;
-    php_date_obj *dateobj = (php_date_obj *) zend_object_store_get_object(object TSRMLS_CC);
+    smart_str buf = {0};
 
-    php_serialize_init(&state, buffer, buf_len);
-    php_serialize_object_start(&state, object, 3);
-    date_str = date_format("Y-m-d H:i:s", 12, dateobj->time, 1);
-    php_serialize_property_string(&state, "date", date_str);
-    php_serialize_property_long(&state, "timezone_type", dateobj->time->zone_type);
-    php_serialize_property_stringl_ptr(&state, "timezone", &value, sizeof("+05:00"));
-    snprintf(value, sizeof("+05:00"), "%c%02d:%02d", dateobj->time->z > 0 ? '-' : '+', abs(dateobj->time->z / 60), abs(dateobj->time->z % 60));
-    php_serialize_object_end(&state);
-    php_serialize_finish(&state);
-
-    efree(date_str);
+    php_var_serialize_object_start(&buf, object, 3 TSRMLS_CC);
+    php_var_serialize_property_bool(&buf, "valid", 1);
+    php_var_serialize_property_long(&buf, "count", 23);
+    php_var_serialize_property_double(&buf, "average", 1.23 TSRMLS_CC);
+    php_var_serialize_property_string(&buf, "name", "test");
+    php_var_serialize_object_end(&buf);
+    
     return PHP_SERIALIZE_OBJECT;
 }
 </code>
+
+
+==== Unserialization ====
+
+The second part of the proposal is API for parsing serialized string for internal classes.
+
+=== Unserialize hook changes ===
+
+Currently ''zend_class_entry'' unserializer callback ''unserialize'' is used for custom classes (when serialized string prefix is C:). The expected return value is ''SUCCESS'' on success, otherwise ''FAILED''.
+
+The RFC proposes calling unserialize callback for custom classes as well as for normal internal classes (prefixed O:) that have ''unserialize'' not null. For the normal internal classes the meaning of return value is following:
+
+The return value is number of characters left in the buffer after processing serialized string. In case of error, the return value should be negative number (usually -1). This behavior is backward compatible.
+
+=== Functions ===
+
+The RFC defines new PHPAPI exported helper functions that should be used for object unserialization.
+
+<code>
+/* unserialize one property (key and value) of the serialized object */
+PHPAPI int php_var_unserialize_property(zval *key, zval *value, const unsigned char **buf, zend_uint *buf_len, zend_unserialize_data *data TSRMLS_DC);
+
+/* unserialize all properties of the serialized object and save them to ht */
+PHPAPI int php_var_unserialize_properties(HashTable *ht, const unsigned char **buf, zend_uint *buf_len, zend_uint elements, zend_unserialize_data *data TSRMLS_DC);
+</code>
+
+The functionality for all functions should be clear from the comments.
+
+=== Example ====
+
+This example shows how the new API could be used in extension.
+
+<code>
+static int test_object_unserialize(zval **object, zend_class_entry *ce, const unsigned char *buf, zend_uint buf_len, zend_unserialize_data *data TSRMLS_DC)
+{
+    zval key, value;
+
+	if (!php_var_unserialize_property(&key, &value, &buf, &buf_len, data TSRMLS_CC)) {
+        return -1;
+	}
+	/* process first key and value... */
+
+	if (!php_var_unserialize_property(&key, &value, &buf, &buf_len, data TSRMLS_CC)) {
+        return -1;
+	}
+	/* process second key and value... */
+
+	if (!php_var_unserialize_property(&key, &value, &buf, &buf_len, data TSRMLS_CC)) {
+        return -1;
+	}
+	/* process third key and value... */
+
+	if (!php_var_unserialize_property(&key, &value, &buf, &buf_len, data TSRMLS_CC)) {
+        return -1;
+	}
+	/* process fourth key and value... */
+
+	return (int) buf_len;
+}
+</code>
+
+===== Benchmark and more examples =====
+
+The extension with tests and benchmarks is available at https://github.com/bukka/php-extest/blob/master/doc/serialize.md
+
 ===== Patches and Tests =====
 
-Will be after agreeing on API spec...
+Pull request is at https://github.com/php/php-src/pull/453
