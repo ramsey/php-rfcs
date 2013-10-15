@@ -1,0 +1,173 @@
+
+====== TLS Peer Verification ======
+  * Version: 0.1
+  * Date: 2013-10-15
+  * Author: Daniel Lowrey, rdlowrey@gmail.com
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/peer-verification
+
+===== Introduction =====
+
+PHP client stream encryption is insecure by default. This RFC explores the problematic nature of the current implementation, proposes fixes for its vulnerabilities and suggests new features to improve security going forward. The end result is a more secure implementation that "just works" with a minimum level of user knowledge required. Meanwhile, full configurability is retained should userland code wish to override secure defaults and/or auto-detected values.
+
+===== The Current State of Things =====
+
+The most basic requirement for secure communication is to first establish that you are actually
+communicating directly with the intended party. Absent this assurance all the encryption in the world
+won't afford adequate security. Regrettably, PHP's existing SSL/TLS stream wrappers fail this
+requirement. Although choosing //not// to verify peers makes it exceedingly simple to access encrypted
+resources, it also leaves many (most?) encrypted userland communications open to Man-in-the-Middle (MitM)
+attacks:
+
+<code php>
+<?php
+// No peer verification: all your bank account are belong to us
+$uri = 'https://www.bankofamerica.com/';
+$html = file_get_contents($uri);
+</code>
+
+Of course it //is// possible to solve this problem by passing an ssl stream context as demonstrated below:
+
+<code php>
+<?php
+$uri = 'https://www.bankofamerica.com/';
+$ctx = stream_context_create(['ssl' => [
+    'verify_peer' => true,
+    'cafile' => '/hard/path/to/cacert.pem',
+    'CN_match' => 'www.bankofamerica.com'
+]]);
+$html = file_get_contents($uri, FALSE, $ctx); // okay, we're good here
+</code>
+
+This method works but it relies on one extremely optimistic assumption:
+
+  * That PHP developers will have a functioning knowlege of transport layer security.
+
+Unfortunately, a large number of real-world
+implementations are naive to the need for additional peer verification context options. This is an
+untenable situation and by defaulting to insecure practices PHP is complicit in the compromise of
+user data.
+
+===== Proposal =====
+
+  * All encrypted client streams enable peer verification by default.
+  * Peer names are automatically detected from the URI at connection time (eliminating the need for any configuration on the part of the user) with the option to manually override this detection with a custom value stored in the ''CN_match'' context option.
+  * Global CA defaults may be specified via new ''openssl.cafile'' and ''openssl.capath'' php.ini directives.
+  * Per-stream CA paths may still be specified at call time by passing the existing ''cafile'' or ''capath'' ssl options in the stream context (the new php.ini directives exist as a fallback).
+  * If none of the above methods are used to specify the necessary CA file (or path) an ''E_WARNING'' is triggered explaining that peer verification is necessary to prevent Man-in-the-Middle attacks and that users must specify a CA or disable peer verification.
+
+===== Usage Examples =====
+
+Specifying a global CA file via ''ini_set()'' at runtime:
+
+<code php>
+<?php
+$cafile = '/path/to/cacert.pem';
+ini_set('openssl.cafile', $cafile);
+$html = file_get_contents('https://somesite.com/');
+</code>
+
+Specifying a CA file using a stream context option at call time:
+
+<code php>
+<?php
+$uri = 'https://www.github.com/';
+$cafile = '/path/to/cacert.pem';
+$ctx = stream_context_create(['ssl' => [
+    'cafile' => $cafile
+]]);
+file_get_contents($uri, FALSE, $ctx);
+</code>
+
+Overriding automatic peer name detection:
+
+<code php>
+<?php
+$uri = 'https://74.125.224.72/';
+$cafile = '/path/to/cacert.pem';
+$ctx = stream_context_create(['ssl' => [
+    'cafile' => $cafile,
+    'CN_match' => 'google.com'
+]]);
+file_get_contents($uri, FALSE, $ctx);
+</code>
+
+Disabling peer verification:
+
+<code php>
+<?php
+$ctx = stream_context_create(['ssl' => [
+    'verify_peer' => false
+]]);
+$html = file_get_contents('https://somesite.com/', FALSE, $ctx);
+</code>
+
+===== Backward Incompatible Changes =====
+
+With the specification of the ''openssl.cafile'' directive almost all preexisting code is expected work
+without any BC implications once a CA file is specified. Installations that do not add this directive
+will see existing usages that do not explicitly enable/disable peer verification fail with an
+''E_WARNING'' explaining how to fix the problem.
+
+===== Proposed PHP Version =====
+
+This RFC is proposed for implementation in PHP 5.6.
+
+===== Impact to Existing Extensions =====
+
+This patch impacts ''ext/openssl''. The openssl module registers two new php.ini directives but module
+initialization and shutdown routines are otherwise unaffected and no module globals are added.
+
+===== php.ini Defaults =====
+
+This patch proposes two new php.ini directives as part of the openssl module:
+
+  * ''openssl.cafile''
+
+The biggest impediment to secure peer verification is the lack of a CA file for name verification.
+By exposing a php.ini directive specifying a global CA file users/distros can eliminate the need
+for stream contexts to achieve secure peer verification. Also, by allowing this global php.ini directive
+it's possible to bundle a CA file with the PHP distribution and default to secure settings
+without breaking BC. An example of this kind of file is the [[http://curl.haxx.se/ca/|CA file used by the cURL distribution]]
+(by way of mozilla.org).
+
+  * ''openssl.capath''
+
+The ''openssl.capath'' directive should remain empty unless users wish to explicitly avoid specifying
+their own custom hashed certificate directory path on each encrypted stream connection. The directive
+exists solely as a convenience for these users and as such can safely be left empty or unspecified both
+in development and production environments. Its use corresponds to the ''"capath"'' ssl stream context option.
+
+===== Unaffected PHP Functionality =====
+
+This proposal //does not// affect the default peer verification settings for //server// streams.
+Default verification at the language-level is only sensible for clients and steps have been 
+taken to ensure server streams relying on the same underlying code remain unaffected.
+
+===== Open Issues =====
+
+  * Should PHP bundle a default CA File with the distribution?
+
+===== Proposed Voting Choices =====
+
+  * Should secure-by-default client peer verification be implemented for 5.6?
+  * If secure-by-default verification is implemented, should PHP bundle a default CA file with the distribution and pre-populate the ''openssl.cafile'' php.ini directive to ensure maximum backward compatibility with existing code?
+
+===== Patches and Tests =====
+
+The patch linked below is intended as final (subject to any changes instigated during the RFC process). There are still a couple of failing openssl tests that are broken by the change to default
+verification. These will be amended soon.
+
+  * https://github.com/rdlowrey/php-src/compare/verify_peers
+
+===== Implementation =====
+
+TBD
+
+===== References =====
+
+  * [[http://curl.haxx.se/ca/|cURL CA File]]
+
+===== Rejected Features =====
+
+TBD
