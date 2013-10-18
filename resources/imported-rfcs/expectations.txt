@@ -1,0 +1,253 @@
+
+====== PHP RFC: Expectations ======
+
+  * Version: 0.1
+  * Date: 2013-10-18 
+  * Author: Joe Watkins, krakjoe@php.net
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/expectations
+
+===== Introduction =====
+
+This functionality was meant to replace the assert() API that currently exists in PHP, because of problems replacing it in a compatible manner, we have renamed the implementation to **expect**.
+
+The *expect* statement has two forms:
+
+<code>
+T_EXPECT expression ';'
+</code>
+
+<code>
+T_EXPECT expression ':' message ';'
+</code>
+
+At execution time, **expression** will be evaluated, if the result is false, an **ExpectationException** will be thrown. Where **message** is provided, **Expectation::getMessage** will return **message**, otherwise the **expect** statement will be used.
+
+In most cases, **expression** will be an expensive evaluation that you do not wish to execute in a production environment, **expectations** can therefore be disabled and enabled via the **PHP_INI_SYSTEM** configuration setting **zend.expectations**. Disabling Expectations will almost entirely eliminate the performance penalty making them equivalent to an empty statement.
+
+===== Scope of Expectations =====
+
+PHP programmers tend to document how their code is supposed to work in comments, this is a fine approach for generating automated documentation, but leaves us a little bewildered, and tired of digging through documentation at runtime when things go wrong:
+
+<code php>
+    if ($i % 3 == 0) {
+        ...
+    } else if ($i % 3 == 1) {
+        ...
+    } else { // We know ($i % 3 == 2)
+        ...
+    }
+</code>
+
+Becomes:
+
+<code php>
+    if ($i % 3 == 0) {
+        ...
+    } else if ($i % 3 == 1) {
+        ...
+    } else {
+        expect ($i % 3 == 2);
+    }
+</code>
+
+In a development environment, this forces the executor to make you aware of your mistake.
+
+Another good example for using **Expectations** might be a switch block with no default case:
+
+<code php>
+switch ($suit) {
+    case CLUBS:
+        /* ... */
+    break;
+    
+    case DIAMONDS:
+        /* ... */
+    break;
+    
+    case HEARTS:
+        /* ... */
+    break;
+    
+    case SPADES:
+        /* ... */
+    break;
+}
+</code>
+
+The above switch assumes that **suit** can only be one of four values, to test this assumption add the default case:
+
+<code php>
+switch ($suit) {
+    case CLUBS:
+        /* ... */
+    break;
+    
+    case DIAMONDS:
+        /* ... */
+    break;
+    
+    case HEARTS:
+        /* ... */
+    break;
+    
+    case SPADES:
+        /* ... */
+    break;
+    
+    default:
+        expect false : "Unrecognized suit passed through switch"
+}
+</code>
+
+The previous example highlights another general area where you should use expectations: **place an expectation at any location you assume will not be reached**. The statement to use is:
+
+<code php>
+expect false;
+</code>
+
+Suppose you have a method that looks like:
+
+<code php>
+public function method() {
+    for (/*...*/) {
+    
+        if (/* ... */)
+           return true;
+    }
+    
+}
+</code>
+
+The above code assumes that one of the iterations results in a return value being passed back to the caller of **::method()**, to test this assumption:
+
+<code php>
+public function method() {
+    for (/*...*/) {
+    
+        if (/* ... */)
+           return true;
+    }
+    expect false;
+}
+</code>
+
+**Expectations** allow the possibility to perform //precondition// and //postcondition// checks:
+
+<code php>
+public function setResponseCode($code) {
+    $this->code = $code;
+}
+</code>
+
+Becomes:
+
+<code php>
+public function setResponseCode($code) {
+    expect $code < 550 && $code > 100;
+    
+    $this->code = $code;
+}
+</code>
+
+The example above performs a //precondition// check on the **code** parameter.
+
+The same kind of logic can be applied to internal object state:
+
+<code php>
+public function getResponseCode($code) {
+    expect !$this->code : "The response code was already set";
+    
+    $this->code = $code;
+}
+</code>
+
+//postcondition// checks might also be carried out with expect:
+
+<code php>
+public function getHeader() {
+    $header = $this->headers[++$this->next];
+    
+    expect $header : "empty header found in headers array";
+    
+    return $header;
+}
+</code>
+
+===== Managing Expectations =====
+
+When an **expectation** fails, an **ExpectationError** is thrown, these can be caught in the normal way, and come with a stack trace and a useful message about the **expectation**.
+
+Here is an example of managing execution of an object whose methods use the **expectations** API:
+
+<code php>
+$done = false;
+$headers = [];
+do {
+
+   try {
+   
+       while (($header = $request->getHeader())) {
+           /* ... */
+           $headers[] = $header;
+       }
+       $done = true;
+          
+   } catch (ExpectationException $ex) {
+       printf("Failed getting headers from Request: %s\n", $ex->getMessage());
+       /* ... output stack trace in some pretty way perhaps ... */
+   }
+} while (!$done);
+
+/* we will continue if there are headers, regardless of previous exceptions */
+if (count($headers)) {
+    /* ... */
+}
+</code>
+
+Sometimes, even where expectations fail, the program wants to continue executing, even in an unstable state, the ability to catch **ExpectationExceptions** allows the program to do that.
+
+===== Backward Incompatible Changes =====
+
+Nothing
+
+===== Proposed PHP Version(s) =====
+
+Undecided
+
+===== Impact to Existing Extensions =====
+
+None that are obvious, this does introduce a new opcode so anything working with opcodes may need adjustment.
+
+===== php.ini Defaults =====
+
+If there are any php.ini settings then list:
+  * zend.expectations=1
+
+===== Unaffected PHP Functionality =====
+
+The current assertion API is completely unaffected by this addition.
+
+===== Proposed Voting Choices =====
+
+Simple
+
+===== Patches and Tests =====
+
+https://github.com/krakjoe/php-src/compare/expect
+
+This is a working implementation of Expectations as documented here.
+
+===== References =====
+
+Link to the original internals thread that discussed the proposal to replace assert with new functionality:
+
+http://php.markmail.org/search/?q=net.php.lists.internals+order%3Adate-backward+assertions#query:net.php.lists.internals%20order%3Adate-backward%20assertions+page:1+mid:nxbxke2z5oykztys+state:results
+
+Link to the internals thread discussing this particular RFC:
+
+not posted yet ...
+
+===== Rejected Features =====
+
+N/A
