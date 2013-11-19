@@ -1,0 +1,92 @@
+
+====== PHP RFC: Slim POST data ======
+  * Version: 1.0
+  * Date: 2013-11-19
+  * Author: Michael Wallner <mike@php.net>
+  * Status: Thought it's done already
+  * First Published at: https://wiki.php.net/rfc/slim_post_data
+
+===== Introduction =====
+
+This is not a new feature per-se.
+
+It is a memory usage improvement regarding receiving HTTP payloads with a potential reduction of 200-300%.
+
+===== Proposal =====
+
+This change replaces the SAPI layer's (raw_)post_data entries with a temporary PHP stream. 
+
+If the request was a standard www-form-urlencoded or form-data POST, everything is just as it was before. 
+
+If the request had another request method or an unrecognized content type, the payload is available through the re-usable, just-in-time %%php://input%% stream.
+
+===== Backward Incompatible Changes =====
+
+$HTTP_RAW_POST_DATA and always_populate_raw_post_data were removed.
+
+BC can be restored with:
+
+<code php>
+$GLOBALS["HTTP_RAW_POST_DATA"] = file_get_contents("php://input");
+</code>
+
+However, always_populate_raw_post_data may be re-introduced again to mitigate part of this BC issue. It could even be made PHP_INI_USER to further minimize the impact, but I guess it makes no difference if one has to call ini_set or file_get_contents...
+
+===== Proposed PHP Version(s) =====
+
+Next 5.x, i.e. 5.6
+
+===== SAPIs Impacted =====
+
+Web-SAPIs.
+
+===== Impact to Existing Extensions =====
+
+Extensions utilizing %%SG(request_info).(raw_)post_data(_len)%%.
+
+In case of mbstring, the fix was as simple and ineffective as:
+<code diff>
+@@ -376,7 +377,10 @@ SAPI_POST_HANDLER_FUNC(php_mb_post_handler)
+        info.num_from_encodings     = MBSTRG(http_input_list_size); 
+        info.from_language          = MBSTRG(language);
+ 
+-       detected = _php_mb_encoding_handler_ex(&info, arg, SG(request_info).post_data TSRMLS_CC);
++       php_stream_rewind(SG(request_info).request_body);
++       php_stream_copy_to_mem(SG(request_info).request_body, &post_data_str, PHP_STREAM_COPY_ALL, 0);
++       detected = _php_mb_encoding_handler_ex(&info, arg, post_data_str TSRMLS_CC);
++       STR_FREE(post_data_str);
+</code>
+
+===== Open Issues =====
+
+  * Reintroduce always_populate_raw_post_data?
+
+===== Unaffected PHP Functionality =====
+
+Standard form POSTs and file uploads.
+
+===== Future Scope =====
+
+The SAPI layer might be improved for SAPIs to provide their own PHP stream for POST data implementation, instead of soaking everything into the temp stream.
+
+===== Proposed Voting Choices =====
+
+  * Yes, leave it as is.
+  * Yes, but re-introduce always_populate_raw_post_data.
+  * No, go away.
+
+===== Patches and Tests =====
+
+More or less:
+
+<code shell>
+git diff 1c15d70^..e6084da
+</code>
+
+http://git.php.net/?p=php-src.git;a=commitdiff;h=e6084da4735c945cb071c4d9259ea0d702eb77c6;hp=52ff129607a7193cccbc6bdfbf1c1e8586e8d0d2
+
+===== References =====
+
+  * http://marc.info/?t=137760545600006&r=1&w=2
+  * http://marc.info/?l=php-internals&m=138303606829213&w=2
+  * http://marc.info/?t=138449998700002&r=1&w=2
