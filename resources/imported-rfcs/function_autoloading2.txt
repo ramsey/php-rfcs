@@ -1,0 +1,388 @@
+====== PHP RFC: Function Autoloading ======
+
+  * Version: 0.3
+  * Date: 2013-08-29
+  * Author: Anthony Ferrara <ircmaxell@php.net>
+  * Author: Igor Wiedler <igor@wiedler.ch>
+  * Status: In Draft
+  * First Published at: http://wiki.php.net/rfc/function_autoloading
+
+===== Introduction =====
+
+PHP presently offers the ability to import class-like structures (classes, interfaces and traits) via a callback (or series of them) that can be registered. This lets a developer "catch" the fact that a class isn't present, and gives them a chance to load it. This is used to great effect in the PHP community.
+
+Presently, other types of symbols tables are not autoloadable. This RFC proposes a new unified autoloading mechanism to unify autoloading efforts across all three symbol tables (class, function and constant).
+
+===== Proposal =====
+
+This RFC proposes to add a suite of functions and constants in the //php// namespace to achieve total control over autoloading.
+
+==== Constants ====
+
+This proposal registers the following constants:
+
+   * //php\AUTOLOAD_ALL => ~0// - Represents all possible autoloading types (including future ones)
+   * //php\AUTOLOAD_CLASS => 1// - Represents Class autoloading
+   * //php\AUTOLOAD_FUNCTION => 2// - Represents Function autoloading
+   * //php\AUTOLOAD_CONSTANT => 4// - Represents Constant autoloading
+
+==== Functions ====
+
+This proposal registers the following functions:
+
+=== bool php\autoload_register(callable $callback, int $type = php\AUTOLOAD_ALL, bool $prepend = false) ===
+
+This function behaves similar to the current //spl_autoload_register// function.
+
+=== bool php\autoload_unregister(callable $callback) ===
+
+This function behaves similar to the current //spl_autoload_unregister// function, and unregisters a callback that was previously registered.
+
+==== Behavior ====
+
+Registering autoloaders with the new API will allow callbacks to be fired on class, function and/or constant missing errors.
+
+=== Default Behavior ===
+
+The default behavior is to respond to all types of missing constructs. The second parameter to the callback will be set to the value of a single constant indicating the type of construct being requested.
+
+<file php basic_usage.php>
+<?php
+php\autoload_register(function($name, $type) {
+    var_dump($name, $type);
+    switch ($type) {
+        case php\AUTOLOAD_FUNCTION:
+            eval("function $name(){}");
+            break;
+        case php\AUTOLOAD_CLASS:
+            eval("class $name {}");
+            break;
+        case php\AUTOLOAD_CONSTANT:
+            define($name, $name);
+            break;
+    }
+});
+foo(); // string(3) "foo" int(2)
+new foo(); // string(3) "foo" int(1)
+foo; // string(3) "foo" int(3)
+?>
+</file>
+
+=== Single Type Behavior ===
+
+By passing a single constant to the register function, the callback will only be called for types that match (the //$type// parameter is still set, but will never vary).
+
+<file php single_type.php>
+<?php
+php\autoload_register(function($name, $type) {
+    var_dump($name, $type);
+    eval("function $name(){}");
+    // We don't need a switch, since we only register for functions.
+}, php\AUTOLOAD_FUNCTION);
+foo(); // string(3) "foo" int(2)
+new foo(); // FATAL_ERROR
+?>
+</file>
+
+=== Multiple Type Behavior ===
+
+By passing a bitwise combination of constants to the register function, the callback will only be called for types that match.
+
+<file php multiple_type.php>
+<?php
+php\autoload_register(function($name, $type) {
+    var_dump($name, $type);
+    switch ($type) {
+        case php\AUTOLOAD_FUNCTION:
+            eval("function $name(){}");
+            break;
+        case php\AUTOLOAD_CONSTANT:
+            define($name, $name);
+            break;
+    }
+}, php\AUTOLOAD_FUNCTION | php\AUTOLOAD_CONSTANT);
+foo(); // string(3) "foo" int(2)
+foo; // string(3) "foo" int(3)
+new foo(); // FATAL_ERROR
+?>
+</file>
+
+=== Registering The Same Callback Multiple Times ===
+
+Only the first registration of a callback will succeed:
+
+<file php single_registration.php>
+<?php
+$callback = function($name, $type) {
+    var_dump($name, $type);
+    switch ($type) {
+        case php\AUTOLOAD_FUNCTION:
+            eval("function $name(){}");
+            break;
+        case php\AUTOLOAD_CLASS:
+            eval("class $name {}");
+            break;
+        case php\AUTOLOAD_CONSTANT:
+            define($name, $name);
+            break;
+    }
+};
+php\autoload_register($callback, php\AUTOLOAD_FUNCTION);
+php\autoload_register($callback, php\AUTOLOAD_FUNCTION | php\AUTOLOAD_CONSTANT); // returns false, as it could not be re-registered
+foo(); // string(3) "foo" int(2)
+foo; // FATAL_ERROR
+?>
+</file>
+
+==== Performance ====
+
+The following benchmarks are all run on a non-debug build compiled with //--disable-all --disable-cgi//. Note that the numbers provided are the average of the 3 fastest runs for a specific test (higher numbers are thrown out).
+
+=== Class Loading ===
+
+1000 classes were generated, each in a single file. The following test script was used to execute the following tests:
+
+<file php benchmark_autoloading.php>
+<?php
+spl_autoload_register(function($class) {
+        require __DIR__ . '/files/' . $class . '.php';
+});
+
+$start = microtime(true);
+for ($i = 0; $i < 1000; $i++) {
+        $class = 'test' . $i;
+        new $class;
+}
+$end = microtime(true);
+
+echo "Completed in " . ($end - $start) . " seconds\n";
+?>
+</file>
+
+  * Master's //spl_autoload// loader: average 0.0225 seconds to load 1000 class files.
+  * Proposed //php\autoload_register// loader: average 0.0219 seconds to load 1000 class files. (called via spl_autoload_register)
+
+Therefore, there is no performance regression when autoloading classes (in fact, it is slightly improved, since one additional //zend_function_call// call is removed).
+
+=== Functions ===
+
+1000 functions were generated and placed in a single file. The following test script was used to test if there was any change to function call time for a defined function:
+
+<file php benchmark_functions.php>
+<?php
+require_once 'functions.php';
+
+$start = microtime(true);
+for ($i = 0; $i < 1000; $i++) {
+        $func = 'test' . $i;
+        $func();
+}
+$end = microtime(true);
+
+echo "Completed in " . ($end - $start) . " seconds\n";
+?>
+</file>
+
+  * Master: average 0.000216 Seconds to call 1000 functions
+  * Proposal: average 0.000218 Seconds to call 1000 functions
+
+
+Therefore, there is no performance regression to normal function calls (defined functions). The margin of error for this test was on the order of +-0.00004 seconds.
+
+=== Constants ===
+
+1000 constants were generated and placed in a single file. The following test script was used to test if there was any change to function call time for a defined function:
+
+<file php benchmark_constants.php>
+<?php
+require_once 'constants.php';
+
+$start = microtime(true);
+for ($i = 0; $i < 1000; $i++) {
+        $name = 'test' . $i;
+        constant($name);
+}
+$end = microtime(true);
+
+echo "Completed in " . ($end - $start) . " seconds\n";
+?>
+</file>
+
+  * Master: average 0.000228 Seconds to call 1000 constants
+  * Proposal: average 0.000221 Seconds to call 1000 constants
+
+Therefore, there is no performance regression to normal constant lookups (defined constants).
+
+==== Userland Backwards Compatibility ====
+
+=== SPL ===
+
+This RFC proposes to strip the current //spl_autoload_register// functionality, and make //spl_autoload_*// simple proxies for registering core autoloaders. They will function exactly as they do now, but under the hood they will be using the new interface.
+
+This means that calls to //spl_autoload_functions()// will include any autoloader (which indicates support for //php\AUTOLOAD_CLASS//) registered through //php\autoload_register()//.
+
+=== __autoload() ===
+
+The legacy //<nowiki>__</nowiki>autoload()// function still works (only for classes) if no autoloader has been registered. If any autoloader is registered (class, function or constant), the legacy system will disable itself (this is how it works currently).
+
+==== C API Backwards Compatibility ====
+
+=== SPL ===
+
+The autoload related SPL globals have been removed, due to the implementation being centralized.
+
+=== Zend ===
+
+A pair of new functions have been added:
+
+  * //ZEND_API int zend_lookup_function(const char *name, int name_length, zend_function <nowiki>**</nowiki>fbc TSRMLS_DC)//
+  * //ZEND_API int zend_lookup_function_ex(const char *name, int name_length, const zend_literal *key, int use_autoload, zend_function <nowiki>**</nowiki>fbc TSRMLS_DC)//
+
+These will do a normal lookup for a function, and then fall back to an autoloader.
+
+A pair of new "helper macros" have also been added:
+
+  * //ZEND_LOOKUP_FUNCTION_BY_NAME(name, name_length, fbc)//
+
+  * //ZEND_LOOKUP_FUNCTION_BY_LITERAL(name, name_length, literal, fbc)//
+
+These two will do a legacy style hash-table lookup before triggering the autoloading function call (to //zend_lookup_function()//). The reason for this is performance. 
+
+Opcodes which lookup functions, are using this new macro. This way, there should be no performance regression at all (thanks to short-circuit operators) for defined functions.
+
+===== General questions & answers =====
+
+==== Why Rewrite A Complete Autoloader? ====
+
+Initially, I implemented this as //spl_function_autoload_register//. Quickly, it became clear that there was a lot of duplication, and the original system was a bit stringy.
+
+This implementation greatly simplifies the (internal) handling of autoloading in general.
+
+==== Why support multiple "types" for a single autoloader? ====
+
+It is more of a "why not" question. Supporting multiple types of autoloaded constructs in a single callback can result in a more flexible architecture for end users.
+
+==== What Filename Conventions Does This Support? ====
+
+None, and all. This proposal presently implements no type of file loading handler.
+
+The only thing that is implemented is the ability to register a callback to attempt to load a function or constant (or class) when it is missing. How the callback maps structures to files is outside of the scope of this RFC.
+
+==== Doesn't This Complicate The Engine? ====
+
+Nope! The reason is that the current autoloading mechanism for classes is extremely fragile as is.
+
+For example, the implementation hinges on a global variable which sets the php-level callback to call on autoload. This requires setting up a //zend_fcall_info// struct, and a //zend_fcall_info_cache// struct, as well as dispatching a function internally to autoload. [[https://github.com/php/php-src/blob/9e17094cf4dde60432569246a9a59e48783530bb/Zend/zend_execute_API.c#L1066|The Current Implementation]].
+
+The implementation of //spl_autoload_call// and //spl_autoload_register// are also extremely complicated. [[https://github.com/php/php-src/blob/9e17094cf4dde60432569246a9a59e48783530bb/ext/spl/php_spl.c#L466|The current SPL implementation]].
+
+This refactor cleans both of these pieces up significantly.
+
+===== Backward Incompatible Changes =====
+
+==== Userland ====
+
+There should be no user-land BC changes.
+
+==== PECL ====
+
+=== EG(autoload_func) ====
+
+PECL extensions which rely on the //EG(autoload_func)// global variable will break (due to refactor).
+
+A quick scan of LXR shows that only the [[http://lxr.php.net/xref/PECL/optimizer/optimize.c#4660|optimizer]] extension would change.
+
+=== autoload_func_info ===
+
+PECL extensions which reply on the SPL type //autoload_func_info// will break (due to refactor).
+
+A quick scan of LXR shows that no extensions use this.
+
+=== SPL_G(autoload_functions) ===
+
+PECL extensions which rely on the SPL globals will break (due to refactor).
+
+A quick scan of LXR shows that no extensions use this.
+
+===== Proposed PHP Version(s) =====
+
+PHP 5.6.x
+
+===== SAPIs Impacted =====
+
+None.
+
+===== Impact to Existing Extensions =====
+
+See Backward Incompatible Changes
+
+===== New Constants =====
+
+   * //php\AUTOLOAD_ALL => ~0// - Represents all possible autoloading types (including future ones)
+   * //php\AUTOLOAD_CLASS => 1// - Represents Class autoloading
+   * //php\AUTOLOAD_FUNCTION => 2// - Represents Function autoloading
+   * //php\AUTOLOAD_CONSTANT => 4// - Represents Constant autoloading
+
+===== php.ini Defaults =====
+
+None.
+
+===== Open Issues =====
+
+None yet.
+
+===== Discussion Points =====
+
+==== Autoloading Constants ====
+
+=== Summary ===
+
+When refactoring the autoloader to support functions, adding support for constants isn't significantly difficult, yet can have an advantage.
+
+=== Stance ===
+
+This RFC takes the stance that it is worth while autoloading constants for consistency.
+
+==== Deprecation of __autoload() ====
+
+=== Summary ===
+
+The legacy //function <nowiki>__</nowiki>autoload()// can be deprecated.
+
+=== Stance ===
+
+This is out of scope for this RFC.
+
+==== Deprecation of spl_autoload_register() ====
+
+=== Summary ===
+
+Since there is a new implementation which supports class autoloading, //spl_autoload_register()// is redundant. Therefore, it can be deprecated.
+
+=== Stance ===
+
+This RFC takes the stance that deprecation should not happen right away, if at all. It is therefore out of scope for this RFC.
+
+===== Patches and Tests =====
+
+There is a proof-of-concept patch against PHP-5.6 (currently master) [[https://github.com/igorw/php-src/compare/function-autoloading|Github Branch]]. Note that this includes the accepted but not merged implementation of [[rfc:use_function|RFC: Use Function]].
+
+This patch is not production ready, but serves as a demonstration of the functionality.
+
+===== References =====
+
+  * Importing namespaces: http://php.net/manual/en/language.namespaces.importing.php
+  * SPL Autoloading: http://php.net/manual/en/language.oop5.autoload.php
+
+===== Rejected Features =====
+
+- None.
+
+===== Vote =====
+
+
+===== Changelog =====
+
+  * 2013-08-29 0.1 Initial Creation
+  * 2013-08-30 0.2 Add performance section and basic benchmarks
+  * 2013-12-12 0.3 Forked from Anthony's original RFC to Igor's version
