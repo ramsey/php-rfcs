@@ -1,10 +1,11 @@
 
 ====== TLS Peer Verification ======
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2013-10-15
   * Author: Daniel Lowrey, rdlowrey@gmail.com
   * Status: Voting
   * First Published at: http://wiki.php.net/rfc/tls-peer-verification
+  * Major Revision (v0.1 -> v0.2): 2013-12-17
 
 ===== Introduction =====
 
@@ -13,11 +14,11 @@ PHP client stream encryption is insecure by default. This RFC explores the probl
 ===== The Current State of Things =====
 
 The most basic requirement for secure communication is to first establish that you are actually
-communicating directly with the intended party. Absent this assurance all the encryption in the world
-won't afford adequate security. Regrettably, PHP's existing SSL/TLS stream wrappers fail this
-requirement. Although choosing //not// to verify peers makes it exceedingly simple to access encrypted
-resources, it also leaves many (most?) encrypted userland communications open to Man-in-the-Middle (MitM)
-attacks:
+communicating directly with the intended party (without unwanted intermediaries). Absent this
+assurance all the encryption in the world won't afford adequate security. Regrettably, PHP's
+existing SSL/TLS stream wrappers fail this requirement. Although choosing //not// to verify
+peers makes it exceedingly simple to access encrypted resources, it also leaves many (most?)
+encrypted userland communications open to Man-in-the-Middle (MitM) attacks:
 
 <code php>
 <?php
@@ -54,9 +55,32 @@ user data.
   * Peer names are automatically detected from the URI at connection time (eliminating the need for any configuration on the part of the user) with the option to manually override this detection with a custom value stored in the ''CN_match'' context option.
   * Global CA defaults may be specified via new ''openssl.cafile'' and ''openssl.capath'' php.ini directives.
   * Per-stream CA paths may still be specified at call time by passing the existing ''cafile'' or ''capath'' ssl options in the stream context (the new php.ini directives exist as a fallback).
-  * If none of the above methods are used to specify the necessary CA file (or path) an ''E_WARNING'' is triggered explaining that peer verification is necessary to prevent Man-in-the-Middle attacks and that users must specify a CA or disable peer verification.
+
+//NEW ADDITIONS://
+
+  * If none of the above methods are used to specify the necessary CA file/path info PHP will fall back to the defaults built into OpenSSL at compile time. This means that those using a distro-supplied can expect existing code to "just work" for most cases.
+  * Only if the OpenSSL defaults cannot be loaded and no manual user assignments exist via the .ini directives or stream context options is an ''E_WARNING'' triggered due to insufficient CA settings. Manually disabling peer verification at call time can (as in the original proposal) prevent such failures.
+
+===== Differences From the Original Proposal =====
+
+The first iteration of the RFC did not take advantage of the compiled OpenSSL lib's CA defaults. This change -- though trivial in terms of LoC -- is a significant improvement over the original patch. Users employing a distro-supplied PHP version will have all the benefits of peer verification without any changes to existing code in most scenarios.
+
+Notes on this change:
+
+  * OpenSSL does NOT include any CA files or hashed directories as part of its distribution.
+  * Distros use their own values when compiling OpenSSL to manually specify defaults corresponding to their CA file/dir locations. As a result userland PHP code is able to use OS-managed CA files for peer verification. This is the best of all possible worlds because it prevents any fussing about with CA files on our end. Also, the OS is in charge of updating these files as needed which prevents any cert maintenance associated with managing our own CA file.
+  * Because the defaults are specified when the OpenSSL lib is compiled users building ext/openssl against manually-compiled OpenSSL libs will need to either: specify the CA defaults when compiling the lib, manually place PEM-formatted versions of the necessary files in the appropriate directory or specify a location via the new .ini directives to enjoy the benefits of distro-managed CA files.
+  * Users may check the default CA file location of their OpenSSL binary using the ''openssl version -d'' command
 
 ===== Usage Examples =====
+
+Distro defaults prevent most BC-breakage:
+
+<code php>
+<?php
+// Look 'ma, no BC-breaks!
+$html = file_get_contents('https://www.google.com/');
+</code>
 
 Specifying a global CA file via ''ini_set()'' at runtime:
 
@@ -104,10 +128,7 @@ $html = file_get_contents('https://somesite.com/', FALSE, $ctx);
 
 ===== Backward Incompatible Changes =====
 
-With the specification of the ''openssl.cafile'' directive almost all preexisting code is expected work
-without any BC implications once a CA file is specified. Installations that do not add this directive
-will see existing usages that do not explicitly enable/disable peer verification fail with an
-''E_WARNING'' explaining how to fix the problem.
+Most preexisting code is expected work without any BC implications when using a distro-supplied PHP version. Manually compiled installations and those whose ext/openssl is built against a custom OpenSSL build will need to modify either the compiled OpenSSL settings or assign values to the new php.ini directives to enjoy the benefits of distro-managed CA files without updating their code. Existing code accessing encrypted resources which cannot be verified via the OS-managed CA store will fail with an ''E_WARNING'' explaining the problem. Any code that fails as a result of this patch can pass a ''"verify_peer" => false'' context option to regain the old (insecure) functionality.
 
 ===== Proposed PHP Version =====
 
@@ -126,17 +147,20 @@ This patch proposes two new php.ini directives as part of the openssl module:
 
 The biggest impediment to secure peer verification is the lack of a CA file for name verification.
 By exposing a php.ini directive specifying a global CA file users/distros can eliminate the need
-for stream contexts to achieve secure peer verification. Also, by allowing this global php.ini directive
-it's possible to bundle a CA file with the PHP distribution and default to secure settings
-without breaking BC. An example of this kind of file is the [[http://curl.haxx.se/ca/|CA file used by the cURL distribution]]
-(by way of mozilla.org).
+for stream contexts to achieve secure peer verification. This global php.ini directive simplifies
+the process of specifying CA files in custom environments. This value should be left empty when using
+distros that supply a PHP version built against their own pre-compiled OpenSSL lib. Essentially,
+this directive is a convenience for power-users. If you are unsure of whether or not you need to
+specify a value for this directive then the answer is very likely, "No."
 
   * ''openssl.capath''
 
 The ''openssl.capath'' directive should remain empty unless users wish to explicitly avoid specifying
 their own custom hashed certificate directory path on each encrypted stream connection. The directive
 exists solely as a convenience for these users and as such can safely be left empty or unspecified both
-in development and production environments. Its use corresponds to the ''"capath"'' ssl stream context option.
+in development and production environments. Its use corresponds to the ''"capath"'' ssl stream context
+option and exists for power-users. If you are unsure of whether or not you need to specify a value for
+this directive then the answer is very likely, "No."
 
 ===== Unaffected PHP Functionality =====
 
@@ -158,27 +182,26 @@ taken to ensure server streams relying on the same underlying code remain unaffe
 The patch linked below is intended as final (subject to any changes instigated during the RFC process):
 
   * https://github.com/php/php-src/pull/494
+  * (update 2013-12-17) https://github.com/rdlowrey/php-src/commit/ae1a0479d562b2baed191a28ccd1b044db0c9d40
 ===== Implementation =====
 
 TBD
 
 ===== References =====
 
-  * [[http://curl.haxx.se/ca/|cURL CA File]]
   * [[http://phpsecurity.readthedocs.org/en/latest/Transport-Layer-Security-(HTTPS-SSL-and-TLS).html#ssl-tls-from-php-server-to-server|External Discussion of the Peer Verification Problem]]
 
 ===== Vote =====
 
-Voting has been extended to Dec. 31 ... happy holidays!
+// The initial vote was halted to clarify voting options and improve the implementation. Please read the updated section titled "Differences From the Original Proposal" for information on the differences between the original proposal and what is now under consideration. //
 
-Either "Yes" option is a vote for the patch. If the patch is accepted with a 2/3 majority then the maintenance and inclusion of a bundled CA file depends on a simple majority between the two "Yes" options.
+Voting closes Dec. 31 ... happy holidays!
 
 <doodle title="Should encrypted client streams verify peers by default in PHP 5.6?" auth="rdlowrey" voteType="single" closed="false">
    * Yes
-   * Yes, and package a default CA file with the distribution
    * No
 </doodle>
 
 ===== Rejected Features =====
 
-TBD
+The original vote offered an option to maintain a CA file as part of the PHP distribution. This option was discarded with the introduction of distro-managed CA stores as part of the implementation.
