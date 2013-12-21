@@ -1,0 +1,165 @@
+
+====== PHP RFC: Introduce session.lock, session.lazy_write and session.lazy_destory ======
+  * Version: 0.9
+  * Date: 2013-12-21 
+  * Author: Yasuo Ohgaki, yohgaki@ohgaki.net
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/session-lock-ini
+
+===== Introduction =====
+
+First proposal:
+
+Session module locks session data while executing script by default. This makes sure session data integrity by serializing script execution. i.e. Only a script may have control of session data at a time.
+
+Current behavior makes sure session data integrity, but it serializes script execution and slows down application performance.
+
+Memcache/Memcached session save handlers have lock ini option for better performance by sacrificing integrity a little. 
+
+Second proposal:
+
+Session data do not have to write back to session data storage if session data has not changed. By omitting write, overall system performance may improve. 
+
+
+Third proposal:
+
+When session ID is renewed, race condition may occur. 
+
+  * Script A renewed session ID
+  * Script B accessed to server with old session ID
+
+Current session module simply deletes session data. Therefore, script B can access server with old session ID. Without session.strict_mode=On, session module may reinitialize session data with old ID which may be known to attackers.
+
+Lazy session data deletion solves this issue.
+
+
+===== Proposal 1 - session.lock =====
+
+Introduce session.lock that enable/disable session data lock.
+
+  session.lock - On by default.
+
+When session.lock=On, save handler works exactly as it is now.
+
+When session.lock=Off, save handler lock session data only when locking is strictly needed. For files save handler, it locks only when reading/writing data.
+
+Current behavior:
+
+  Open session data   -----------------
+   ↓                         ↑
+  Read session data           ｜
+   ↓
+  （Script execution）      Locked
+   ↓
+  Write session data          ｜
+   ↓　                       ↓
+  Close session data  ------------------
+
+New behavior with session.lock=Off:
+        
+  Open session data 
+   ↓               
+  Read session data   ←   Locked
+   ↓
+  （Script execution）      
+   ↓
+  Write session data  ←   Locked
+   ↓　               
+  Close session data
+
+
+===== Proposal 2 - session.lazy_wirte =====
+
+Introduce session.lazy_write that enable/disable lazy session data writing.
+
+  session.lazy_write - Off by default
+
+When session.lazy_write=Off, session module works exactly as it is now.
+
+WHen session.lazy_write=On, session module save session data only when session data has been changed.
+
+When reading session data, session module takes MD5 hash for read data. When writing session data, session module compares old MD5 and new MD5 of session data and save session data only when MD5 differs.
+
+Since write is omitted, save handler may not change "last updated time". This may result deleting session data by timeout. To prevent unwanted expiration of session, introduce new save handler API that update "last updated time" of session data.
+
+  PS_UPDATE()
+
+Session module calls PS_UPDATE() instead of PS_WRITE() when session.lazy_write=On.
+
+==== files save handler implementation ====
+
+For files save handler, PS_UPDATE() is not needed as it can update mtime at PS_OPEN(). Files save handler's PS_UPDATE() will be empty function that simply return true.
+
+
+===== Proposal 3 - session.lazy_destroy =====
+
+Introduce session.lazy_destroy that enable/disable lazy session data deletion.
+
+  session.lazy_destory - Off by default
+
+
+In order to session module to know if the session data is already deleted and accessible, there must be flag/time stamp for deletion/access control.
+
+First option:
+
+Save time stamp in $_SESSION['__SESSION_DESTROYED__']. 
+
+  * Pros - simple and fast.
+  * Cons - exposed internal data.
+
+Alternative option:
+
+Introduce new save handler API that saves flag/time stamp else where.
+
+  * Pros - clean. no exposed data.
+  * Cons - complex and slow.
+
+
+===== Backward Incompatible Changes =====
+
+None.
+
+===== Proposed PHP Version(s) =====
+
+PHP 5.6 and later.
+
+
+===== Impact to Existing Extensions =====
+
+None.
+
+Save handler module needs to be recompiled, but recompile is required for new release anyway.
+
+
+===== php.ini Defaults =====
+
+  * session.lock=On
+  * session.lazy_write=Off
+
+for hardcoded/development/production.
+
+===== Open Issues =====
+
+Proposal 3 option
+
+===== Proposed Voting Choices =====
+
+Yes/No
+
+===== Patches and Tests =====
+
+Not yet.
+
+===== Implementation =====
+
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+
+None.
+
+===== Rejected Features =====
+
