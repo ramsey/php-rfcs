@@ -8,20 +8,12 @@
 
 ===== Introduction =====
 
-**1st proposal: session.lock**
-
-Session module locks session data while executing script by default. This make sure session data integrity by serializing script execution. i.e. Only a script may have control of session data at a time.
-
-Current behavior ensure session data integrity, but it serializes script execution and slows down application performance.
-
-Memcached session save handler has lock ini option for better performance by sacrificing integrity a little. Second proposal mitigates broken integrity by unlocked session data access.
-
-**2nd proposal: session.lazy_wirte**
+**proposal 1: session.lazy_wirte**
 
 Session data does not have to write back to session data storage if session data has not changed. By omitting write, overall system performance may improve. It also helps keep session integrity for unlocked session access.
 
 
-**3rd proposal: session.lazy_destroy**
+**proposal 2: session.lazy_destroy**
 
 When session ID is renewed, race condition may occur. 
 
@@ -36,48 +28,11 @@ Lazy session data deletion solves this issue. It also solves reliability issue o
 
 
 **Summary:**
-For concurrent session access, current session module saves "the last one write to session data". New session modules with new INI parameters enabled, module saves "the one changed session data".
+Currently, programmer has no control which session data is saved. New behavior allows programmer to control save changed session data when there are concurrent access. [1] 
 
-Currently, programmer has no control which session data is saved. New behavior allows programmer to control save changed session data when there are concurrent access. 
+When client access to server concurrently, the order of requests cannot be guaranteed especially under mobile applications. This results in unreliable session_regenerate_id() operation that is closely related to we security. New behavior mitigate race condition. [2]
 
-===== Proposal 1 - session.lock =====
-
-Introduce session.lock that enable/disable session data lock.
-
-  session.lock - On by default.
-
-When session.lock=On, save handler works exactly as it is now.
-
-When session.lock=Off, save handler lock session data only when locking is strictly needed. For files save handler, it locks only when reading/writing data.
-
-Current behavior:
-
-  Open session data   -----------------
-   ↓                         ↑
-  Read session data           ｜
-   ↓
-  （Script execution）      Locked
-   ↓
-  Write session data          ｜
-   ↓　                       ↓
-  Close session data  ------------------
-
-New behavior with session.lock=Off:
-        
-  Open session data 
-   ↓               
-  Read session data   ←   Locked
-   ↓
-  （Script execution）      
-   ↓
-  Write session data  ←   Locked
-   ↓　               
-  Close session data
-
-
-
-
-===== Proposal 2 - session.lazy_wirte =====
+===== Proposal 1 - session.lazy_wirte =====
 
 Introduce session.lazy_write that enable/disable lazy session data writing.
 
@@ -105,7 +60,7 @@ For memcache/memcached/redis save handlers, PS_UPDATE() is not needed since read
 Other save handlers should support PS_UPDATE() API to update last access time. Otherwise, garbage correction may remove active sessions. Alternatively, save handler may update last access time when PS_OPEN()/PS_READ() is called, then PS_UPDATE() may return true simply.
 
 
-===== Proposal 3 - session.lazy_destroy =====
+===== Proposal 2 - session.lazy_destroy =====
 
 Introduce session.lazy_destroy that enable/disable lazy session data deletion. Delayed deletion is required for reliable session_regenerate_id() operation.
 
@@ -132,7 +87,7 @@ Introduce new save handler API that saves flag/time stamp else where.
 
 Since alternative option could impact performance a lot. This RFC chooses first option.
 
-
+By introducing this feature, session_regenerate_id(true) (delete old session) could be a default.
 
 ===== Backward Incompatible Changes =====
 
@@ -156,7 +111,6 @@ Save handler module needs to be recompiled, but recompile is required for new re
 
 ===== php.ini Defaults =====
 
-  - session.lock=On
   - session.lazy_write=Off
   - session.lazy_destroy=90 
 
@@ -172,22 +126,15 @@ None.
   - session_abort() - Implemented (5.6 and up). End session without saving session data.
   - session_unlock() - Will be implemented (5.6 and up). Unlock session data. Session data is saved at close. i.e. session_commit() or module shutdown.
 
-  - session_regenerate_id() - It cannot be delete old session reliably without session.lazy_destroy. 
+  - session_regenerate_id() - It cannot be delete old session reliably without session.lazy_destroy. "delete old session" option default changed to TRUE by default.
 
 
 ===== Proposed Voting Choices =====
 
-  * Proposal1,2,3: Yes / No for each feature. 
+  * Proposal1,2: Yes / No for each feature. 
 
-**1) session.lock** that minimizes locked time. 
 
-**Pros.**
-  - Application that are secure with this option can have much better concurrency and performance without additional/modified code. i.e. Explicit session_commit(), session_write_close(), session_abort() or session_unlock() calls for each session could be eliminated to archive concurrency.
-
-**Cons.**
-  - Users may enable this option even if application does not support this. This could result in strange application behavior.
-
-**2) session.lazy_write** that writes only session data has changed. 
+**1) session.lazy_write** that writes only session data has changed. 
 
 **Pros.**
   - session.lazy_write=On could improved 2 times or better performance by removing write() calls.
@@ -198,7 +145,7 @@ None.
   - Programmers are responsible for ensuring data consistency when session.lock=Off.
 
 
-**3) session.lazy_destroy** that allows delayed session data deletion for concurrent accesses and reliable session_regenerate_id() operation.
+**2) session.lazy_destroy** that allows delayed session data deletion for concurrent accesses and reliable session_regenerate_id() operation.
 
 **Pros**
   - session_regenerate_id() becomes more reliable for reasons described below.
@@ -220,19 +167,13 @@ Please vote feature by feature.
 
 The voting period is 2014/01/20 until 2014/01/30.
 
-1) Introduce session.lock INI option.
-<doodle title="RFC/session_lock" auth="user" voteType="single" closed="true">
-   * Yes
-   * No
-</doodle>
-
-2) Introduce session.lazy_write INI option.
+1) Introduce session.lazy_write INI option.
 <doodle title="RFC/session_lazy_write" auth="user" voteType="single" closed="true">
    * Yes
    * No
 </doodle>
 
-3) Introduce session.lazy_destroy INI option.
+2) Introduce session.lazy_destroy INI option.
 <doodle title="RFC/session_lazy_destroy" auth="user" voteType="single" closed="true">
    * Yes
    * No
