@@ -75,6 +75,13 @@ New behavior with session.lock=Off:
   Close session data
 
 
+**Pros.**
+  * Application that are secure with this option can have much better concurrency and performance without additional/modified scripts.
+
+**Cons.**
+  * Users may enable this option even if application does not support this. This could result in strange application behavior.
+
+
 ===== Proposal 2 - session.lazy_wirte =====
 
 Introduce session.lazy_write that enable/disable lazy session data writing.
@@ -93,16 +100,28 @@ Since write is omitted, save handler may not change "last updated time". This ma
 
 Session module calls PS_UPDATE() instead of PS_WRITE() when session.lazy_write=On.
 
-**files save handler implementation**
+**Pros.**
+  * session.lazy_write=On could improved 2 times or better performance by removing write() calls.
+  * session.lazy_write=On provides better data consistency since only modified session data is written when session.lock=Off, 
 
-For files save handler, PS_UPDATE() is not needed as it can update mtime at PS_OPEN(). Files save handler's PS_UPDATE() will be empty function that simply return true.
+**Cons.**
+  * Session behavior is changed. When session.lazy_write=Off, "last session written" wins. When session.lazy_write=On, "last session modified" wins. 
+  * Programmers are responsible for ensuring data consistency when session.lock=Off.
+
+**NOTE: save handler implementation**
+
+For files save handler, PS_UPDATE() is not needed as it can update mtime at PS_OPEN(). Files save handler's PS_UPDATE() will be empty function that simply return true. 
+
+For memcache/memcached/redis save handlers, PS_UPDATE() is not needed since read access(PS_READ()) updates last access time stamp. PS_UPDATE() may return true simply.
+
+Other save handlers should support PS_UPDATE() API to update last access time. Otherwise, garbage correction may remove active sessions. Alternatively, save handler may update last access time when PS_OPEN()/PS_READ() is called, then PS_UPDATE() may return true simply.
 
 
 ===== Proposal 3 - session.lazy_destroy =====
 
 Introduce session.lazy_destroy that enable/disable lazy session data deletion.
 
-  session.lazy_destroy - Off by default
+  session.lazy_destroy - 0 by default. Seconds that app may access session marked to be deleted.
 
 
 In order to session module to know if the session data is already deleted and accessible, there must be flag/time stamp for deletion/access control.
@@ -126,9 +145,22 @@ Introduce new save handler API that saves flag/time stamp else where.
 Since alternative option could impact performance a lot. This RFC choose first option.
 
 
+**Pros and Cons for this proposal**
+
+**Pros**
+  * session_regenerate_id() becomea more reliable for reasons described below.
+  * Mitigate race condition that creates unneeded sessions. NOTE: Unneeded session created by race condition could be known session to attacker. Unneeded session increase system load.
+  * Ensure proper application behavior even when network connection is unreliable. This is important for mobile applications especially.
+
+**Cons**
+  * Deleted session is accessible by specified time. NOTE: Access to deleted session is required for reliable session_regenerate_id() operation.
+  * Deleted session contains time stamp variable in $_SESSION. NOTE: Time stamp is mandatory and storing it in $_SESSION is the fastest and simplest way. 
+
 ===== Backward Incompatible Changes =====
 
-None, as long as user uses default settings.
+None.
+
+As long as user uses default settings.
 
 ===== Proposed PHP Version(s) =====
 
@@ -137,7 +169,9 @@ PHP 5.6 and later.
 
 ===== Impact to Existing Extensions =====
 
-None. Old save handler works without new php.ini support.
+None. 
+
+Old save handler works without new INI or API support.
 
 Save handler module needs to be recompiled, but recompile is required for new release anyway.
 
@@ -145,14 +179,14 @@ Save handler module needs to be recompiled, but recompile is required for new re
 ===== php.ini Defaults =====
 
   * session.lock=On
-  * session.lazy_write=Off
+  * session.lazy_write=0
   * session.lazy_destroy=Off
 
 for hardcoded/development/production.
 
 ===== Open Issues =====
 
-None
+None.
 
 ===== Related Features ====
 
@@ -169,8 +203,9 @@ None
 
 2) session.lazy_write that write only session data has changed. 
 
-3) session.lazy_destroy that allows delayed session data deletion for concurrent accesses.
+3) session.lazy_destroy that allows delayed session data deletion for concurrent accesses and reliable session_regenerate_id() operation.
 
+Please note that session.lazy_destroy is **mandatory for reliable session_regenerate_id()**. Please refer to referenced discussion for details.
 
 ===== Vote =====
 
