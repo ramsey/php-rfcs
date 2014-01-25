@@ -36,13 +36,13 @@ Even when old session ID is destroyed, script B can access server with old sessi
 
 Lazy session data deletion solves this issue. It also solves reliability issue of session_regenerate_id() on unreliable networks.
 
-**proposal 5: session_info()**
+**proposal 5: session_module_feature()**
 
 Add
 
-  array session_info(void)
+  array session_module_feature(void)
 
-that returns current session related setting, compiled default, including save handler capability. 
+that returns current save handler capability. 
 
 **Summary**
 There is no new INI option and new options could be specified via session_start(). Users cannot change session behavior by mistake. [1]
@@ -170,21 +170,29 @@ Since alternative option could impact performance a lot. This RFC chooses first 
 By introducing this feature, session_regenerate_id(true) (delete old session) could be a default.
 
 
-===== Proposal 5: Add session_info() =====
+===== Proposal 5: Add session_module_feature() =====
 
-  array session_info(void)
+  array session_module_feature(void)
 
-Returns current session related INI setting, compiled default, including save handler capability. 
+Returns current session save handler capability. 
 
-  * All INI settings.
-  * lock_control - TRUE/FALSE/NULL (e.g. mm save handler does not have lock at all)
-  * lock - TRUE/FALSE
-  * lazy_write - TRUE/FALSE
-  * lazy_destroy - LONG
-  * PS_FUNCS that save handler is supporting.
-  * API version that save handler is supporting.
-  * API version that serialize handler is supporting.
+  * gc - If module supports GC function (actually delete expired data or not)
+  * create_sid - Custom session ID creation. (e.g. files handler supports collision detection)
+  * use_strict_mode - Strict mode support. (Do not allow use of uninitialized session ID)
+  * minimize_lock - Minimize session data lock. (For better concurrency)
+  * lazy_write - Write data only when data is changed.
 
+<code>
+$ ./php-bin -r "session_start();print_r(session_module_feature());"
+Array
+(
+    [gc] => Partially Supported
+    [create_sid] => Supported
+    [use_strict_mode] => Supported
+    [minimize_lock] => Supported
+    [lazy_write] => Supported
+)
+</code>
 
 ===== Backward Incompatible Changes =====
 
@@ -221,6 +229,11 @@ None.
   - session_unlock() - Will be implemented (5.6 and up). Unlock session data. Session data is saved at close. i.e. session_commit() or module shutdown.
 
   - session_regenerate_id() - It cannot be delete old session reliably without session.lazy_destroy. "delete old session" option default changed to TRUE by default.
+
+===== Patch =====
+
+https://github.com/yohgaki/php-src/compare/PHP-5.6-rfc-session-lock
+
 
 
 ===== Proposed Voting Choices =====
@@ -271,6 +284,16 @@ Please propose alternative solution if you vote no to this proposal. This is sec
 
 Developers need to know what session modules does.
 
+===== Benchmark =====
+
+== lazy_write: on, minimize_lock: on ==
+  Requests per second:    1894.61 [#/sec] (mean)
+  100%     67 (longest request)
+
+== lazy_write: off, minimize_lock: off ==
+  Requests per second:    445.19 [#/sec] (mean)
+  100%   1547 (longest request)
+
 ===== Vote =====
 
 Please vote feature by feature.
@@ -301,7 +324,7 @@ The voting period is 2014/01/20 until 2014/01/30.
    * No
 </doodle>
 
-5) Introduce session_info().
+5) Introduce session_module_feature().
 <doodle title="RFC/session_lazy_destroy" auth="user" voteType="single" closed="true">
    * Yes
    * No
@@ -328,5 +351,175 @@ After the project is implemented, this section should contain
 
   - session_regenerated_id() discussion - http://marc.info/?l=php-internals&m=138242492914526&w=2
   - session.lock discussion - http://marc.info/?l=php-internals&m=138445826032002&w=2
+
+===== Benchmark Detail ======
+
+ Since files save handler does not flush data to disk,
+it's like a accessing memory and minimize_lock=on could be a bit slower. 
+lazy_write=on may not change performance since disk access is not a 
+performance bottle neck. 
+
+To  see the benefit, database storage and more complex script would be needed.
+
+To make benchmark is more realistic, following script generates 10 sessions, client
+concurrently connects to apache using 50 connection. (5 connections/session)
+
+http://stackoverflow.com/questions/985431/max-parallel-http-connections-in-a-browser
+
+Most scripts are much more complex, so there is usleep() simulate it.
+
+== lazy_write: on, minimize_lock: on ==
+Requests per second:    1894.61 [#/sec] (mean)
+ 100%     67 (longest request)
+
+== lazy_write: off, minimize_lock: off ==
+Requests per second:    445.19 [#/sec] (mean)
+ 100%   1547 (longest request)
+
+This test case is rather extreme, but if everything in web page (i.e. images, etc) is 
+access controlled by session, this can be a usual case.
+
+<code php>
+<?php
+ini_set('session.use_trans_sid',TRUE);
+ini_set('session.use_cookies',FALSE);
+ini_set('session.use_only_cookies',FALSE);
+ini_set('session.use_strict_mode',FALSE);
+ini_set('session.save_path', '/usr/tmp/');
+
+session_id('TESTID'.mt_rand(1, 10));
+session_start(['lazy_write'=>$_GET['lazy_write'], 'minimize_lock'=>$_GET['minimize_lock']]);
+
+if (!isset($session['x'])) {
+  $_SESSION['x'] = str_repeat('x', 1024*10);
+}
+
+echo session_id();
+var_dump(session_module_feature());
+
+usleep(20000);
+</code>
+
+=============== lazy_write: on, minimize_lock: on ===============
+
+<code>
+$ ab -c 50 -n 20000 'http://localhost:1080/session.php?lazy_write=1&minimize_lock=1'
+This is ApacheBench, Version 2.3 <$Revision: 1430300 $>
+Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+Licensed to The Apache Software Foundation, http://www.apache.org/
+
+Benchmarking localhost (be patient)
+Completed 2000 requests
+Completed 4000 requests
+Completed 6000 requests
+Completed 8000 requests
+Completed 10000 requests
+Completed 12000 requests
+Completed 14000 requests
+Completed 16000 requests
+Completed 18000 requests
+Completed 20000 requests
+Finished 20000 requests
+
+
+Server Software:        Apache/2.2.22
+Server Hostname:        localhost
+Server Port:            1080
+
+Document Path:          /session.php?lazy_write=1&minimize_lock=1
+Document Length:        246 bytes
+
+Concurrency Level:      50
+Time taken for tests:   10.556 seconds
+Complete requests:      20000
+Failed requests:        1983
+   (Connect: 0, Receive: 0, Length: 1983, Exceptions: 0)
+Write errors:           0
+Total transferred:      11661983 bytes
+HTML transferred:       4921983 bytes
+Requests per second:    1894.61 [#/sec] (mean)
+Time per request:       26.391 [ms] (mean)
+Time per request:       0.528 [ms] (mean, across all concurrent requests)
+Transfer rate:          1078.85 [Kbytes/sec] received
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        0    0   0.2      0       6
+Processing:    21   26   4.4     25      66
+Waiting:       18   26   4.2     25      66
+Total:         21   26   4.4     26      67
+
+Percentage of the requests served within a certain time (ms)
+  50%     26
+  66%     28
+  75%     29
+  80%     30
+  90%     32
+  95%     34
+  98%     37
+  99%     40
+ 100%     67 (longest request)
+</code>
+
+=============== lazy_write: off, minimize_lock: off ===============
+
+<code>
+$ ab -c 50 -n 20000 'http://localhost:1080/session.php?lazy_write=0&minimize_lock=0'
+This is ApacheBench, Version 2.3 <$Revision: 1430300 $>
+Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+Licensed to The Apache Software Foundation, http://www.apache.org/
+
+Benchmarking localhost (be patient)
+Completed 2000 requests
+Completed 4000 requests
+Completed 6000 requests
+Completed 8000 requests
+Completed 10000 requests
+Completed 12000 requests
+Completed 14000 requests
+Completed 16000 requests
+Completed 18000 requests
+Completed 20000 requests
+Finished 20000 requests
+
+
+Server Software:        Apache/2.2.22
+Server Hostname:        localhost
+Server Port:            1080
+
+Document Path:          /session.php?lazy_write=0&minimize_lock=0
+Document Length:        246 bytes
+
+Concurrency Level:      50
+Time taken for tests:   44.924 seconds
+Complete requests:      20000
+Failed requests:        1938
+   (Connect: 0, Receive: 0, Length: 1938, Exceptions: 0)
+Write errors:           0
+Total transferred:      11661938 bytes
+HTML transferred:       4921938 bytes
+Requests per second:    445.19 [#/sec] (mean)
+Time per request:       112.310 [ms] (mean)
+Time per request:       2.246 [ms] (mean, across all concurrent requests)
+Transfer rate:          253.51 [Kbytes/sec] received
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        0    0   0.1      0       2
+Processing:    21  112 131.0     61    1547
+Waiting:       20  112 131.0     61    1547
+Total:         21  112 131.0     61    1547
+
+Percentage of the requests served within a certain time (ms)
+  50%     61
+  66%     90
+  75%    124
+  80%    160
+  90%    275
+  95%    390
+  98%    545
+  99%    647
+ 100%   1547 (longest request)
+</code>
 
 ===== Rejected Features =====
