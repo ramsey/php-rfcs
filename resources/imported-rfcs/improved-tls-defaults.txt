@@ -1,0 +1,139 @@
+
+====== Improved TLS Defaults ======
+  * Version: 0.1
+  * Date: 2014-01-28
+  * Author: Daniel Lowrey, rdlowrey@gmail.com
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/improved-tls-defaults
+
+===== Introduction =====
+
+PHP stream encryption currently employs several potentially insecure default settings. This RFC explores the problematic nature of the current settings and proposes several improvements. Implementing the proposed solutions would result in a more secure implementation without requiring any additional knowledge on the part of the end user. The proposed improvements are not without cost, however, as there exists a minimal potential for BC breakage.
+
+This RFC complements the previously accepted [[https://wiki.php.net/rfc/tls-peer-verification|TLS Peer Verification RFC]] which is insufficient as a standalone measure to address potential TLS pitfalls. To clarify: this RFC suggests that peer verification is only part of the picture and that it does little good to verify peers (for example) if the implementation then unwittingly negotiates weak or insecure ciphers to encrypt transfers to the verified peer.
+
+
+===== https:// Wrapper =====
+
+The http fopen wrapper [[http://lxr.php.net/xref/PHP_5_5/ext/standard/http_fopen_wrapper.c#193|currently defaults to the ssl:// stream transport]]. This makes it possible for users to unwittingly negotiate both the hopelessly broken SSLv2 and the outdated SSLv3 encryption protocol.
+
+**Proposal**
+
+  * Change default http wrapper stream transport from ssl to tls.
+
+**Logic**
+
+As of January 2014 Qualys reports that [[https://www.trustworthyinternet.org/ssl-pulse/|99.3% of HTTP servers support at least TLSv1]]. Allowing users who don't know better to negotiate insecure protocols by default is an unsustainable practice. Moreover, users wishing to negotiate the older protocols may still specify the "crypto_method" SSL context option (introduced with PHP 5.6) to use the insecure protocols should this proposal be accepted.
+
+
+===== DEFAULT Ciphers =====
+
+Currently all ssl and tls stream transports use the openssl ''DEFAULT'' cipher list unless manually specified via the "ciphers" SSL context option. This behavior exposes unwitting users to the possibility that very weak ciphers will be negotiated for SSL/TLS sessions. Use of such ciphers renders current encryption measures ineffective against sophisticated attackers.
+
+**Proposal**
+
+  * Change the default cipher list to the following (pending RFC discussion). Note that users may override these settings manually at any time by specifying their own cipher list via the "ciphers" SSL context option.
+
+''!SSLv2:!aNULL:!eNULL:!EXPORT:!LOW:!ADH:!MD5:!DSS:!RC4:TLSv1+HIGH@STRENGTH''
+
+**Logic**
+
+''!SSLv2''
+
+  * The use of SSLv2 is widely and strongly discouraged and should not be enabled by default. Some OpenSSL libs are already compiled without SSLv2 support, but explicitly disallowing SSLv2 ciphers will provide more protection for users building ''ext/openssl'' against older libraries.
+
+''!aNULL:!eNULL''
+
+  * Prevent ciphers that do not require authentication or encryption (self-explanatory).
+
+''!EXPORT:!LOW:!ADH:!MD5:!DSS''
+
+  * Disallow ciphers known to be weak/broken
+
+''!RC4''
+
+  * Reputable outlets now recommend against allowing RC4 ciphers:
+
+  * [[https://community.qualys.com/blogs/securitylabs/2013/03/19/rc4-in-tls-is-broken-now-what|RC4 in TLS is Broken: Now What]]
+
+  * [[http://blogs.technet.com/b/srd/archive/2013/11/12/security-advisory-2868725-recommendation-to-disable-rc4.aspx|Microsoft Security Advisory 2868725: Recommendation to disable RC4]]
+
+''@STRENGTH''
+
+  * Order cipher preferences by strength
+
+
+===== TLS Compression =====
+
+As of PHP 5.4.13 users may specify the "disable_compression" SSL context option to prevent the CRIME attack vector. However, to benefit from this protection users must recognize the threat and manually assign the relevant context option.
+
+**Proposal**
+
+  * Disable TLS compression by default.
+
+**Logic**
+
+Users are [[https://isecpartners.com/blog/2012/september/details-on-the-crime-attack.aspx|generally advised to disable compression]] as a low-cost method for mitigate CRIME attacks. It's sensible to enable this protection by default as users wishing to re-enable compression at the TLS layer may do so by assigning a falsy value to the "disable_compression" SSL context option.
+
+
+===== Honor Cipher Order =====
+
+The [[http://contextis.com/research/blog/server-technologies-https-beast-attack/|BEAST]] TLS attack vector was [[http://en.wikipedia.org/wiki/Transport_Layer_Security#BEAST_attack|first publicized in 2011]]. Mitigating this
+attack is relatively simple: servers have only to [[https://community.qualys.com/blogs/securitylabs/2011/10/17/mitigating-the-beast-attack-on-tls|prioritize ciphers]] that aren't susceptible to the attack. However, unless instructed otherwise, OpenSSL uses the client's preferences when negotiating the cipher. To prevent nefarious (or naive) clients from prioritizing susceptible ciphers servers must configure SSL sessions using OpenSSL's ''SSL_OP_CIPHER_SERVER_PREFERENCE'' context option.
+
+
+
+**Proposal**
+
+  * Add (and enable by default) a new boolean "honor_cipher_order" ssl context option.
+
+**Logic**
+
+Exposing this capability to userland allows encrypted stream servers to transparently mitigate BEAST vulnerabilities and control cipher ordering preferences during negotiation (important).
+
+
+===== Backward Incompatible Changes =====
+
+Most existing code is expected work without any BC implications. The only source of potential breakage involves the scenario where users connect to servers who employ //severely// outdated encryption technologies that are known to be insecure. For these users the option always exists to manually override secure defaults with insecure settings.
+
+The proposed changes are offered as an RFC due to the possibility for minimal BC breakage.
+
+
+===== Proposed PHP Version =====
+
+This RFC is proposed for implementation in PHP 5.6.
+
+
+===== Impact to Existing Extensions =====
+
+The proposed changes would minimally impact ''ext/openssl''. There is also a one-line change required in ''ext/standard/http_fopen_wrapper.c'' to change from ssl to tls as the default for https usages.
+
+
+===== Open Issues =====
+
+  * Feedback on the proposed default cipher list?
+
+  
+===== Proposed Voting Choices =====
+
+  * Should 5.6 implement more secure stream encryption defaults?
+
+  
+===== Patches and Tests =====
+
+There is no patch at this time. However the proposed changes are straightforward to implement and a patch + applicable tests will be added prior to the initiation of a vote.
+
+
+===== Implementation =====
+
+TBD
+
+  
+===== Vote =====
+
+TBD
+
+
+===== Rejected Features =====
+
+TBD
