@@ -6,9 +6,11 @@
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/improved-tls-defaults
   * Minor Revision (v0.1 → v0.2): 2014-01-28
+  * Major Revision (v0.2 → v0.3): 2014-01-29
 
 == Revisions ==
 
+v0.3: Add "Stream Wrapper Creep" section
 v0.2: Update cipher list recommendations and s/DSS/DES/ typo.
 
 ===== Introduction =====
@@ -115,6 +117,84 @@ attack is relatively simple: servers have only to [[https://community.qualys.com
 
 Exposing this capability to userland allows encrypted stream servers to transparently mitigate BEAST vulnerabilities and control cipher ordering preferences during negotiation (important).
 
+===== Stream Wrapper Creep (added v0.3) =====
+
+The following stream encryption wrappers currently exist in userland:
+
+  * ''ssl''
+  * ''sslv2''
+  * ''sslv3''
+  * ''tls''
+
+Meanwhile, 5.6 has added the following new wrappers:
+
+  * ''tlsv1.0''
+  * ''tlsv1.1''
+  * ''tlsv1.2''
+
+//Full disclosure: I'm responsible for the new wrappers (sorry!).//
+
+**Yeah, So?**
+
+The problem with this design should be obvious: it grows linearly as each new encryption protocol
+is standardized and unleashed on the world. Choosing the correct wrapper is already a daunting task
+for users unfamiliar with the various transport layer security protocols and this situation will only
+deteriorate as new protocols are continuously adopted.
+
+Beyond the "creep" of new stream wrappers there also exists a consistency problem. Do all users
+understand that the ''ssl'' wrapper technically can negotiate //any// of the supported protocols? Do
+they know that in contrast the ''tls'' wrapper will //only// negotiate TLSv1 and not the newer TLS
+iterations? Do they realize that the ''ssl'' wrapper potentially exposes their transfers to the
+broken/insecure SSLv2 and SSLv3 protocols? How can they tell PHP to use (for example) only TLSv1.1
+or TLSv1.2?
+
+This design is confusing and has aged poorly in a world where new protocols arrive periodically to
+address the shortcomings of previous iterations. Moreover, PHP is built on the foundation of hiding
+these kinds of minute details from the user. Developers shouldn't require a full understanding of
+the underlying transport layer security protocols to robustly conduct safe encrypted transfers.
+
+The goal must always be to make things "just work" in a secure manner without any knowledge on the part of the user.
+
+**Source of the Problem**
+
+The discrete stream wrapper approach is necessary because it depends on //value// assignments to determine the
+allowed protocols instead of //flags//. This makes it impossible to achieve fine-grained control over
+which protocols are used without fractaling out new constants for every conceivable combination of
+protocols. The //value// approach essentially locks users into either "one narrow protocol" or "all
+protocols regardless of how secure some of those protocols may or may not be."
+
+This issue is particularly acute for ''stream_socket_server()'' users who need fine-grained control
+over which protocols are allowed in their servers (while disallowing the insecure protocols). For
+example, a server may wish to only allow TLSv1.1 and TLSv1.2. The existing paradigm makes this
+impossible.
+
+**Proposal**
+
+  - Assign crypto methods using bitwise flags instead of values. Users may specify any combination of the existing or new ''STREAM_CRYPTO_METHOD_*'' constants to control the allowed protocols for a given client or server stream. Meanwhile, the "crypto_method" context option already included as part of 5.6 allows //all// code to control exactly which methods are appropriate for a given operation (e.g. ''file_get_contents('https://somesite.com', FALSE, $context);'') with default support for the TLS family of protocols.
+  - Add new ''STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT/SERVER'' constants to allow specific inclusion of TLSv1 in bitwise crypto method assignments.
+  - Remove the new wrappers intended for 5.6 (tlsv1.0, tlsv1.1, tlsv1.2)
+  - Soft-deprecate ssl, sslv2 and sslv3 in 5.6 with ''E_DEPRECATED'' to funnel users to the more secure ''tls'' protocol wrapper.
+  - Add ''E_WARNING'' in 5.6 when the ssl/sslv2/sslv3 protocols are used to notify users that they are potentially insecure to funnel users to the more secure ''tls'' protocol wrapper. Schedule removal of the deprecated stream wrappers for 5.7
+
+**BC Implications of Proposed Stream Wrapper Changes**
+
+//None.//
+
+The only implications for existing code are the ''E_DEPRECATED'' and ''E_WARNING'' messages for the SSL family of stream wrappers.
+
+**IMPORTANT:**
+
+Note that all uses of the SSL protocols //will not// trigger warnings/deprecation notices; only the related
+stream wrappers have this effect. Users who know what they're doing may explicitly allow these
+protocols in their stream contexts without being hassled about security.
+
+The overarching goals here are twofold:
+
+  - We want to keep users //safe by default// without inhibiting their ability to purposefully allow the old protocols;
+  - We want to eliminate the confusion of having many different stream wrappers. By deprecating the ''ssl'', ''sslv2'' and ''sslv3'' in 5.6 we pave the way for a single unified encryption wrapper (''tls'') going forward which allows for all of the same functionality, is secure-by-default and offers fine-grained control (via stream contexts) over the exact protocols used.
+
+
+
 
 ===== Backward Incompatible Changes =====
 
@@ -140,12 +220,12 @@ The proposed changes would minimally impact ''ext/openssl''. There is also a one
   
 ===== Proposed Voting Choices =====
 
-  * Should 5.6 implement more secure stream encryption defaults?
+  * Should 5.6 implement more secure stream encryption defaults and use flag-based protocol selection?
 
   
 ===== Patches and Tests =====
 
-There is no patch at this time. However the proposed changes are straightforward to implement and a patch + applicable tests will be added prior to the initiation of a vote.
+There is no patch publicly available at this time. Each of the proposed changes have been implemented locally at this time to ensure feasibility. A public patch + applicable tests is in the works and will be added prior to the initiation of a vote.
 
 
 ===== Implementation =====
