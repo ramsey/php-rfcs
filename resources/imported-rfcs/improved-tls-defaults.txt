@@ -13,6 +13,8 @@
 
 ===== Introduction =====
 
+**If you're short on time: [[https://wiki.php.net/rfc/improved-tls-defaults#tldr_definitive_progress|TL;DR Definitive Progress]]**
+
 PHP stream encryption uses several potentially insecure default settings. This RFC explores the
 problematic nature of the current settings and recommends actionable improvements. The proposed
 changes increase the security of encrypted stream transmissions at the same time they eliminate the
@@ -34,10 +36,11 @@ remaining side of the encrypted transfer equation to transparently maximize data
 
 ===== Proposed Change Summary =====
 
-  * [[https://wiki.php.net/rfc/improved-tls-defaults?do=edit&rev=0#default_ciphers|Strengthen default cipher list]]
-  * [[https://wiki.php.net/rfc/improved-tls-defaults?do=edit&rev=0#tls_compression|Disable TLS compression by default]]
-  * [[https://wiki.php.net/rfc/improved-tls-defaults?do=edit&rev=0#honor_cipher_order|Create "honor_cipher_order" context option]]
-  * [[https://wiki.php.net/rfc/improved-tls-defaults?do=edit&rev=0#stream_wrapper_creep|Deprecate superfluous stream wrappers and allow protocol flags]]
+  * [[https://wiki.php.net/rfc/improved-tls-defaults#default_ciphers|Strengthen default cipher list]]
+  * [[https://wiki.php.net/rfc/improved-tls-defaults#tls_compression|Disable TLS compression by default]]
+  * [[https://wiki.php.net/rfc/improved-tls-defaults#honor_cipher_order|Create "honor_cipher_order" context option]]
+  * [[https://wiki.php.net/rfc/improved-tls-defaults#verify_depth|Set default "verify_depth" value]]
+  * [[https://wiki.php.net/rfc/improved-tls-defaults#stream_wrapper_creep|Deprecate superfluous stream wrappers and allow protocol flags]]
 
 ===== DEFAULT Ciphers =====
 
@@ -109,6 +112,10 @@ may or may not be available on a given system.
 
 <code php>
 <?php
+
+// New informational constant exposed to userland
+var_dump(OPENSSL_DEFAULT_STREAM_CIPHERS);
+// string(67) "!SSLv2:!aNULL:!eNULL:!EXPORT:!LOW:!MD5:!DES:!ADH:!RC4:HIGH@STRENGTH"
 
 /**
  * All encrypted streams use the new default cipher list automatically
@@ -198,6 +205,40 @@ $html = file_get_contents($uri, FALSE, $context);
 
 ?>
 </code>
+
+
+===== Verify Depth =====
+
+**Proposal**
+
+  * Use a default ''"verify_depth"'' value of 3
+
+**Logic**
+
+Users can control how deeply PHP should verify certificates before concluding that the peer's
+certificate is invalid via the existing ''"verify_depth"'' context option. In these scenarios the
+"depth" is the maximum allowed number of intermediate certificate issuers. So, for example, setting
+''"verify_depth" => 0'' means that //only// self-signed client certificates would be accepted as
+valid. By default PHP sets no limit on how deeply certificate chains can be verified.
+
+This proposal specifies a default ''"verify_depth"'' of 3 if not specified by the user.
+
+**Example**
+
+<code php>
+<?php
+
+// New informational constant exposed to userland
+var_dump(OPENSSL_DEFAULT_STREAM_VERIFY_DEPTH); // int(3)
+
+$context = stream_context_create(['ssl' => [
+    'verify_depth' => 10 // Override the default value
+]]);
+
+$html = file_get_contents('https://www.bankofamerica.com/', FALSE, $context);
+
+</code>
+
 
 ===== Stream Wrapper Creep =====
 
@@ -447,6 +488,58 @@ stream_socket_enable_crypto($stream , $enable = TRUE, $cryptoMethod);
 </code>
 
 
+===== TL;DR Definitive Progress =====
+
+**Requirements for a secure transfer prior to PHP 5.6:**
+
+<code php>
+<?php
+$context = stream_context_create(array(
+    'ssl' => array(
+        'ciphers' => 'DO USERS KNOW WHAT TO PUT HERE? NO.',
+        'verify_peer' => true,
+        'cafile' => 'DO USERS KNOW WHAT TO PUT HERE? NO.',
+        'CN_match' => 'somesite.com',
+        'verify_depth' => 3,
+        'disable_compression' => true,
+        'SNI_enabled' => true,
+        'SNI_server_name' => 'somesite.com'
+    )
+));
+
+$html = file_get_contents('https://somesite.com', null, $context);
+?>
+</code>
+
+**Requirements for a secure transfer in 5.6 without this proposal:**
+
+<code php>
+<?php
+$context = stream_context_create(array(
+    'ssl' => array(
+        'ciphers' => 'DO USERS KNOW WHAT TO PUT HERE? NO.',
+        'verify_depth' => 3,
+        'disable_compression' => true
+    )
+));
+
+$html = file_get_contents('https://somesite.com', null, $context);
+?>
+</code>
+
+
+**Requirements for a secure transfer in 5.6 if this RFC passes:**
+
+Users are encouraged to merge the provided patch and view the HTML returned in the following code
+which accesses "howsmyssl.com" (a general gauge of the security measures of your client).
+
+<code php>
+<?php
+$html = file_get_contents('https://howsmyssl.com');
+?>
+</code>
+
+
 ===== Backward Incompatible Changes =====
 
 Most existing code is expected work without any BC implications. The only source of potential breakage
@@ -462,7 +555,11 @@ This RFC is proposed for implementation in PHP 5.6.
 
 ''OPENSSL_DEFAULT_STREAM_CIPHERS''
 
-Provides userland access to the default cipher list used for stream encryption.
+Provides userland access to the default cipher list used for stream encryption
+
+''OPENSSL_DEFAULT_STREAM_VERIFY_DEPTH''
+
+Provides userland access to the default verify depth used for stream encryption
 
 ''STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT''
 
@@ -492,7 +589,7 @@ TBD
 
 ===== Vote =====
 
-TBD
+//Voting will begin on Feb. 11//
 
 ===== Rejected Features =====
 
@@ -502,7 +599,7 @@ TBD
 
 == Revisions ==
 
-v0.6  Added patch + usage examples; cipher list updated; new constants; general improvements
+v0.6  Added patch, examples; cipher list updated; new constants; verify_depth, general improvements
 
 v0.5: Removal of protocol-specific stream wrappers now recommended for PHP 6 (was 5.7)
 
