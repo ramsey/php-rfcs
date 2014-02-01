@@ -1,6 +1,6 @@
 
 ====== PHP RFC: Introduce session options - read_only, unsafe_lock, lazy_write and lazy_destroy ======
-  * Version: 1.5
+  * Version: 1.6
   * Date: 2014-02-02 
   * Author: Yasuo Ohgaki, yohgaki@ohgaki.net
   * Status: Under Discussion
@@ -46,9 +46,9 @@ There is no new INI option and new options could be specified via session_start(
 
 Read only session makes sense since there are applications that do not require writing at all except when regenerating session ID/update authentication status. [1]
 
-Session lock control could be API. e.g. session_lock() However, changing lock status after session started is complex. session_start() option is simpler. [2]
+Currently, programmer has no control which session data is saved. New behavior allows programmer to control save changed session data when there are concurrent access. [2] 
 
-Currently, programmer has no control which session data is saved. New behavior allows programmer to control save changed session data when there are concurrent access. [3] 
+Session lock control could be API. e.g. session_lock() However, changing lock status after session started is complex. session_start() option is simpler. [3]
 
 When client access to server concurrently, the order of requests cannot be guaranteed especially under mobile applications. This results in unreliable session_regenerate_id() operation that is closely related to web security. New behavior mitigate race condition. [4]
 
@@ -80,18 +80,18 @@ When reading session data, session module takes MD5 hash for read data. When wri
 
 Since write is omitted, save handler may not change "last updated time". This may result deleting session data by timeout. To prevent unwanted expiration of session, introduce new save handler API that update "last updated time" of session data.
 
-  PS_UPDATE()
+  PS_UPDATE_FUNC()
 
-Session module calls PS_UPDATE() instead of PS_WRITE() when lazy_write=On.
+Session module calls PS_UPDATE_FUNC() instead of PS_WRITE_FUNC() when lazy_write=On.
 
 
 **NOTE: save handler implementation**
 
-For files save handler, PS_UPDATE() is not needed as it can update mtime at PS_OPEN(). Files save handler's PS_UPDATE() will be empty function that simply return true.
+For files save handler, PS_UPDATE_FUNC() is not needed as it can update mtime at PS_OPEN_FUNC(). Files save handler's PS_UPDATE_FUNC() will be empty function that simply return true.
 
-For memcache/memcached/redis/etc save handlers, PS_UPDATE() is not needed since read access(PS_READ()) updates last access time stamp. PS_UPDATE() may return true simply.
+For memcache/memcached/redis/etc save handlers, PS_UPDATE_FUNC() is not needed since read access(PS_READ_FUNC()) updates last access time stamp. PS_UPDATE_FUNC() may return true simply.
 
-Other save handlers should support PS_UPDATE() API to update last access time. Otherwise, garbage correction may remove active sessions. Alternatively, save handler may update last access time when PS_OPEN()/PS_READ() is called, then PS_UPDATE() may return true simply.
+Other save handlers should support PS_UPDATE_FUNC() API to update last access time. Otherwise, garbage correction may remove active sessions. Alternatively, save handler may update last access time when PS_OPEN()/PS_READ_FUNC() is called, then PS_UPDATE_FUNC() may return true simply.
 
 ===== Proposal 3 unsafe_lock option=====
 
@@ -183,8 +183,6 @@ None for most applications.
 
 lazy_destroy is enabled by default for reliable session_regenerate_id() operation. This could be issue for test scripts.
 
-cookie_httponly could be a issue, if client's JavaScript uses it. It's not a good practice.
-
 
 ===== Proposed PHP Version(s) =====
 
@@ -193,7 +191,7 @@ PHP 5.6 and later.
 
 ===== Impact to Existing Extensions =====
 
-None. 
+None other than session. 
 
 Old save handler works without new INI or API support.
 
@@ -213,18 +211,10 @@ None.
   - session_commit()/session_write_close() - Implemented (PHP 4.0 and up). End session and write session data.
   - session_abort() - Implemented (5.6 and up). End session without saving session data.
   - session_regenerate_id() - It cannot be delete old session reliably without session.lazy_destroy. "delete old session" option default changed to TRUE by default.
-  - session_create_id() - Create session ID using session module code. Added by this RFC patch.
+  - session_create_id() - Create session ID using session module code. Added by as part of RFC patch.
   - session_set_save_handler() - Additional functions/methods added. Added by this RFC.
-  - session_module_feature() - Returns current session save handler capability. Added by this RFC.
 
-  * gc - If module supports GC function (actually delete expired data or not)
-  * create_sid - Custom session ID creation. (e.g. files handler supports collision detection)
-  * use_strict_mode - Strict mode support. (Do not allow use of uninitialized session ID)
-  * unsafe_lock - Minimize session data lock. (For better concurrency)
-  * lazy_write - Write data only when data is changed.
-
-
-  - session_unlock() - Unlock session data. Session data is saved at close. i.e. session_commit() or module shutdown. This will not be implemented as it could be complex and slow. 'unsafe_lock' should be used instead.
+  - session_unlock() - Unlock active session data. Session data is saved at close. i.e. session_commit() or module shutdown. This will not be implemented as it could be complex and slow. 'unsafe_lock' should be used instead.
 
 
 
@@ -267,7 +257,7 @@ None.
   - Deleted session contains time stamp variable in $_SESSION. NOTE: Time stamp is mandatory and storing it in $_SESSION is the fastest and simplest way. 
 
 
-Please note that **lazy_destroy is mandatory for reliable session_regenerate_id()** operation even if this RFC is proposing to disable it by default. Please refer to referenced discussion for details. 
+Please note that **lazy_destroy is mandatory for reliable session_regenerate_id()/session_destroy()** operation even if this RFC is proposing to disable it by default. Please refer to referenced discussion for details. 
 
 Please propose alternative solution if you vote no to this proposal. This is security related change so there must be alternative solution. session_regenerate_id() cannot delete old session without delayed deletion or alternative solution if there is.
 
