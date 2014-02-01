@@ -18,14 +18,13 @@ Following options are new options for session and these options are not INI opti
 
 Open session for reading. Close session immediately after read. This is the fastest way to read session.
 
-**proposal 2: unsafe_lock**
-
-Add unsafe_lock option for concurrent script execution. Currently, script execution is serialized when session is used.
-
-**proposal 3: lazy_write**
+**proposal 2: lazy_write**
 
 Session data does not have to write back to session data storage if session data has not changed. By omitting write, overall system performance may improve. It also helps keep session integrity for unlocked session access.
 
+**proposal 3: unsafe_lock**
+
+Add unsafe_lock option for concurrent script execution. Currently, script execution is serialized when session is used.
 
 **proposal 4: lazy_destroy**
 
@@ -66,7 +65,35 @@ Example:
 
 Just read session data and close session immediately.
 
-===== Proposal 2 unsafe_lock option=====
+
+===== Proposal 2 - lazy_wirte =====
+
+Introduce lazy_write option to session_start() that enable/disable lazy session data writing.
+
+  lazy_write - FALSE by default
+
+When lazy_write=FALSE, session module works exactly as it is now.
+
+When lazy_write=TRUE, session module save session data only when session data has been changed.
+
+When reading session data, session module takes MD5 hash for read data. When writing session data, session module compares old MD5 and new MD5 of session data and save session data only when MD5 differs.
+
+Since write is omitted, save handler may not change "last updated time". This may result deleting session data by timeout. To prevent unwanted expiration of session, introduce new save handler API that update "last updated time" of session data.
+
+  PS_UPDATE()
+
+Session module calls PS_UPDATE() instead of PS_WRITE() when lazy_write=On.
+
+
+**NOTE: save handler implementation**
+
+For files save handler, PS_UPDATE() is not needed as it can update mtime at PS_OPEN(). Files save handler's PS_UPDATE() will be empty function that simply return true.
+
+For memcache/memcached/redis/etc save handlers, PS_UPDATE() is not needed since read access(PS_READ()) updates last access time stamp. PS_UPDATE() may return true simply.
+
+Other save handlers should support PS_UPDATE() API to update last access time. Otherwise, garbage correction may remove active sessions. Alternatively, save handler may update last access time when PS_OPEN()/PS_READ() is called, then PS_UPDATE() may return true simply.
+
+===== Proposal 3 unsafe_lock option=====
 
 NOTE: Default files save handler will not support this, but PECL files_ext. For files save handler, this option does not do anything. (Is this needed? Just a few lines of difference)
 
@@ -108,34 +135,6 @@ New behavior with lock=Off:
   Write session data  ←   Locked
    ↓　               
   Close session data
-
-===== Proposal 3 - lazy_wirte =====
-
-Introduce lazy_write option to session_start() that enable/disable lazy session data writing.
-
-  lazy_write - FALSE by default
-
-When lazy_write=FALSE, session module works exactly as it is now.
-
-When lazy_write=TRUE, session module save session data only when session data has been changed.
-
-When reading session data, session module takes MD5 hash for read data. When writing session data, session module compares old MD5 and new MD5 of session data and save session data only when MD5 differs.
-
-Since write is omitted, save handler may not change "last updated time". This may result deleting session data by timeout. To prevent unwanted expiration of session, introduce new save handler API that update "last updated time" of session data.
-
-  PS_UPDATE()
-
-Session module calls PS_UPDATE() instead of PS_WRITE() when lazy_write=On.
-
-
-**NOTE: save handler implementation**
-
-For files save handler, PS_UPDATE() is not needed as it can update mtime at PS_OPEN(). Files save handler's PS_UPDATE() will be empty function that simply return true.
-
-For memcache/memcached/redis/etc save handlers, PS_UPDATE() is not needed since read access(PS_READ()) updates last access time stamp. PS_UPDATE() may return true simply.
-
-Other save handlers should support PS_UPDATE() API to update last access time. Otherwise, garbage correction may remove active sessions. Alternatively, save handler may update last access time when PS_OPEN()/PS_READ() is called, then PS_UPDATE() may return true simply.
-
 
 ===== Proposal 4 - lazy_destroy =====
 
@@ -231,26 +230,13 @@ None.
 
 ===== Proposed Voting Choices =====
 
-  * Proposal 0,1,3: Yes / No 
-  * Proposal 2: Yes / No
+  * Proposal 1,2: Yes / No 
+  * Proposal 3: Yes / No
   * Proposal 4: Yes / No
-
-**0) Add session_start() option parameter.**
-
-If this feature denied, INI is used.
 
 **1) read_only** for reading only.
 
-**2) unsafe_lock** that control session data locking.
-
-**Pros**
-  - Simpler and faster than session_lock() API. e.g. This API requires additional access to data storage which make data handling more complex and slower.
-  - Allow concurrency without explicit calls of session_commit(), session_write_close(), session_abort().
-
-**Cons**
-  - Misuse of this feature could be a cause of bugs.
-
-**3) lazy_write** that writes only session data has changed. 
+**2) lazy_write** that writes only session data has changed. 
 
 **Pros.**
   - lazy_write=TRUE could improved 2 times or better performance by removing write() calls.
@@ -260,7 +246,14 @@ If this feature denied, INI is used.
   - Session behavior is changed. When lazy_write=Off, "last session written" wins. When lazy_write=TRUE, "last session modified" wins. 
   - Programmers are responsible for ensuring data consistency when lock=FALSE.
 
+**3) unsafe_lock** that control session data locking.
 
+**Pros**
+  - Simpler and faster than session_lock() API. e.g. This API requires additional access to data storage which make data handling more complex and slower.
+  - Allow concurrency without explicit calls of session_commit(), session_write_close(), session_abort().
+
+**Cons**
+  - Misuse of this feature could be a cause of bugs.
 
 **4) lazy_destroy** that allows delayed session data deletion for concurrent accesses and reliable session_regenerate_id() operation.
 
@@ -296,15 +289,15 @@ https://wiki.php.net/rfc/session-lock-ini#benchmark_detail
 
 Please vote feature by feature.
 
-The voting period is 2014/01/20 until 2014/01/30.
+The voting period is 2014/02/03 until 2014/02/10.
 
-0,1,3) Introduce read_only, lazy_write to session_start() option. 
+1,2) Introduce read_only, lazy_write to session_start() option. 
 <doodle title="Read only, lazy write option" auth="user" voteType="single" closed="true">
    * Yes
    * No
 </doodle>
 
-2) Introduce unsafe_lock option. 
+3) Introduce unsafe_lock option. 
 <doodle title="Unsafe lock option" auth="user" voteType="single" closed="true">
    * Yes
    * No
