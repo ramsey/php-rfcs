@@ -1,6 +1,6 @@
 
 ====== Improved TLS Defaults ======
-  * Version: 0.9
+  * Version: 0.10
   * Date: 2014-01-28
   * Author: Daniel Lowrey, rdlowrey@php.net
   * Status: Vote
@@ -13,6 +13,7 @@
   * Minor Revision (v0.6 → v0.7): 2014-02-02
   * Minor Revision (v0.7 → v0.8): 2014-02-03
   * Minor Revision (v0.8 → v0.9): 2014-02-06
+  * Minor Revision (v0.9 → v0.10): 2014-02-11
 
 ===== Introduction =====
 
@@ -42,7 +43,6 @@ remaining side of the encrypted transfer equation to transparently maximize data
   * [[https://wiki.php.net/rfc/improved-tls-defaults#default_ciphers|Strengthen default cipher list]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#tls_compression|Disable TLS compression by default]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#honor_cipher_order|Create "honor_cipher_order" context option]]
-  * [[https://wiki.php.net/rfc/improved-tls-defaults#verify_depth|Set default "verify_depth" value]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#expose_negotiated_values|Expose negotiated values]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#forward_secrecy_for_servers|Forward secrecy for servers]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#expose_default_cert_paths|Expose default cert paths]]
@@ -170,49 +170,17 @@ vulnerabilities and control cipher ordering preferences during negotiation.
 <?php
 
 $context = stream_context_create(['ssl' => [
-    'honor_cipher_order' => TRUE
+    "crypto_method"         => STREAM_CRYPTO_METHOD_TLS_SERVER,
+    "local_cert"            => "/path/to/my/server.pem",
+    "local_pk"              => "/path/to/my/private.key",
+    "honor_cipher_order"    => TRUE
 ]]);
-
-$uri = 'https://www.bankofamerica.com/';
-$html = file_get_contents($uri, FALSE, $context);
+ 
+$socketFlags = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN;
+$server = stream_socket_server('tls://127.0.0.1:443', $errno, $errstr, $socketFlags, $context);
 
 ?>
 </code>
-
-
-===== Verify Depth =====
-
-**Proposal**
-
-  * Use a default ''"verify_depth"'' value of 3
-
-**Logic**
-
-Users can control how deeply PHP should verify certificates before concluding that the peer's
-certificate is invalid via the existing ''"verify_depth"'' context option. In these scenarios the
-"depth" is the maximum allowed number of intermediate certificate issuers. So, for example, setting
-''"verify_depth" => 0'' means that //only// self-signed client certificates would be accepted as
-valid. By default PHP sets no limit on how deeply certificate chains can be verified.
-
-This proposal specifies a default ''"verify_depth"'' of 3 if not specified by the user.
-
-**Example**
-
-<code php>
-<?php
-
-// New informational constant exposed to userland
-var_dump(OPENSSL_DEFAULT_STREAM_VERIFY_DEPTH); // int(3)
-
-$context = stream_context_create(['ssl' => [
-    'verify_depth' => 10 // Override the default value
-]]);
-
-$html = file_get_contents('https://www.bankofamerica.com/', FALSE, $context);
-
-?>
-</code>
-
 
 ===== Expose Negotiated Values =====
 
@@ -372,7 +340,6 @@ The following stream encryption wrappers currently exist in userland:
 
 Meanwhile, 5.6 has added the following new wrappers:
 
-  * ''tlsv1.0''
   * ''tlsv1.1''
   * ''tlsv1.2''
 
@@ -418,7 +385,6 @@ maximize transmission safety. The existing paradigm makes this level of control 
 
   * Internally re-value the existing ''STREAM_CRYPTO_METHOD_*'' constants to allow the assignment of crypto methods using bitwise flags instead of values. Users may specify any combination of these constants to control the allowed protocols for a given client or server stream. Meanwhile, the ''"crypto_method"'' context option already included as part of 5.6 allows all code to specify exactly which methods are appropriate for a given operation.
   * Remove the new stream wrappers previously merged for inclusion in 5.6:
-        * ''tlsv1.0''
         * ''tlsv1.1''
         * ''tlsv1.2''
   * Deprecate the following stream wrappers in PHP 5.6 with removal (tentatively) scheduled for PHP 6:
@@ -445,16 +411,16 @@ specified using the ''"ssl"'' key so the choice remains consistent with the exis
 Note again that these stream wrappers //are not// removed. Their use will trigger an
 ''E_DEPRECATED'' warning but they will continue to function as before.
 
-Note also that though the ''tls'' stream wrapper is officially deprecated it will now negotiate the
-best available of the TLS1, TLSv1.1 and TLSv1.2 protocols. Because ''ext/openssl'' did not support
-TLSv1.1 and TLSv1.2 prior to PHP 5.6 this wrapper was previously only able to utilize TLSv1.
+Note also that the ''tls'' stream wrapper will now negotiate the best available of the TLS1, TLSv1.1
+and TLSv1.2 protocols. Because ''ext/openssl'' did not support TLSv1.1 and TLSv1.2 prior to PHP 5.6
+this wrapper was previously only able to negotiate TLSv1.
 
 **BC Implications of Proposed Stream Wrapper Changes**
 
 //None.//
 
-The only implications for existing code are the ''E_DEPRECATED'' messages for the ''sslv2'',
-''sslv3'' and ''tls'' stream wrappers. Note that //only// stream wrapper usages trigger deprecation
+The only implications for existing code are the ''E_DEPRECATED'' messages for the ''sslv2'' and
+''sslv3'' stream wrappers. Note that //only// stream wrapper usages trigger deprecation
 notices. This notice triggering has nothing to do with the underlying protocols; it only occurs when
 using the wrappers made unnecessary by the introduction of protocol flags. Users are encouraged to
 specify protocol flags in their stream contexts to avoid these deprecation notices.
@@ -474,6 +440,7 @@ typedef enum {
 	STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT = (1 << 4 | 1), /* New in 5.6 */
 	STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT = (1 << 5 | 1), /* New in 5.6 */
 	STREAM_CRYPTO_METHOD_TLS_CLIENT = ((1 << 3) | (1 << 4) | (1 << 5) | 1), /* Any TLS protocol */
+	STREAM_CRYPTO_CLIENT = ((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | 1), /* Any protocol */
 	STREAM_CRYPTO_METHOD_SSLv2_SERVER = (1 << 1),
 	STREAM_CRYPTO_METHOD_SSLv3_SERVER = (1 << 2),
 	STREAM_CRYPTO_METHOD_SSLv23_SERVER = ((1 << 1) | (1 << 2)), /* SSLv2 or SSLv3 */
@@ -481,6 +448,7 @@ typedef enum {
 	STREAM_CRYPTO_METHOD_TLSv1_1_SERVER = (1 << 4), /* New in 5.6 */
 	STREAM_CRYPTO_METHOD_TLSv1_2_SERVER = (1 << 5), /* New in 5.6 */
 	STREAM_CRYPTO_METHOD_TLS_SERVER = ((1 << 3) | (1 << 4) | (1 << 5)) /* Any TLS protocol */
+	STREAM_CRYPTO_SERVER = ((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)), /* Any protocol */
 } php_stream_xport_crypt_method_t;
 </code>
 
@@ -512,7 +480,7 @@ Only allow TLSv1, TLSv1.1, TLSv1.2:
 $context = stream_context_create(['ssl' => [
     'crypto_method' => STREAM_CRYPTO_METHOD_TLS_CLIENT
 ]]);
-$html = file_get_contents('https://github.com', null, $context);
+$html = file_get_contents('https://github.com', false, $context);
 
 ?>
 </code>
@@ -522,7 +490,7 @@ Use any combination of available flags to limit allowed protocols:
 <code php>
 <?php
 
-$allowedProtocols = STREAM_CRYPTO_METHOD_SSLv3_CLIENT  | STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT;
+$allowedProtocols = STREAM_CRYPTO_METHOD_SSLv3_CLIENT | STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT;
 $context = stream_context_create(['ssl' => [
     'crypto_method' => $allowedProtocols
 ]]);
@@ -549,36 +517,28 @@ $server = stream_socket_server('ssl://127.0.0.1:443', $errno, $errstr, $bindFlag
 ?>
 </code>
 
-Connect using the (deprecated) ''tls'' stream wrapper. The connection will negotiate the best
-available protocol of TLSv1, TLSv1.1, TLSv1.2. The stream is created successfully and an
-E_DEPRECATED error is triggered to encourage users to use the catch-all ''ssl'' wrapper:
+Connect using the ''tls'' stream wrapper. The connection will negotiate the best
+available protocol of TLSv1, TLSv1.1, TLSv1.2:
 
 <code php>
 <?php
 
-// Triggers E_DEPRECATED, still works
-$sock = stream_socket_client('tls://github.com:443');
+$timeout = 42;
+$connFlags = STREAM_CLIENT_CONNECT;
 
-?>
-</code>
+// Works as before
+$sock = stream_socket_client('tls://github.com:443', $errno, $errstr, $timeout, $connFlags, $context);
 
-The //only// wrapper for which the "crypto_method" flags have any effect is ''ssl''. Assigning this
-context option for the deprecated wrappers has no effect:
-
-<code php>
-<?php
-
+// Negotiates SSLv3, TLSv1.1 or TLSv1.2 because tls:// default is overridden by the context
 $context = stream_context_create(['ssl' => [
-    'crypto_method' => STREAM_CRYPTO_METHOD_SSLv3_CLIENT // <-- Won't work; you're stuck with TLS.
+    'crypto_method' => STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT | STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT | STREAM_CRYPTO_METHOD_SSLv3_CLIENT
 ]]);
-
-// Triggers E_DEPRECATED, still works
-$sock = stream_socket_client('tls://github.com:443');
+$sock = stream_socket_client('tls://github.com:443', $errno, $errstr, $timeout, $connFlags, $context);
 
 ?>
 </code>
 
-There is no need to use the deprecated wrappers as the ''ssl'' wrapper automatically negotiates
+There is no need to use the deprecated wrappers as the ''ssl'' and ''tls'' wrappers automatically negotiates
 the best available protocol. However, for the sake of completeness, note that the following still
 works:
 
@@ -598,6 +558,19 @@ parameter 3. Flags are now accepted as shown here:
 
 $cryptoMethod = STREAM_CRYPTO_METHOD_TLSv1_1_SERVER | STREAM_CRYPTO_METHOD_TLSv1_2_SERVER;
 stream_socket_enable_crypto($stream , $enable = TRUE, $cryptoMethod);
+
+?>
+</code>
+
+Encrypt an existing stream choosing from any protocol we can possibly support using the new catch-all
+''STREAM_CRYPTO_CLIENT'' constant. This method will try all possible protocols:
+
+<code php>
+<?php
+
+$sock = stream_socket_client('tcp://github.com:443');
+var_dump($sock); // resource(%d) of type (stream)
+var_dump(stream_socket_enable_crypto($sock, TRUE, STREAM_CRYPTO_CLIENT));
 
 ?>
 </code>
@@ -622,7 +595,6 @@ $context = stream_context_create(array(
         'verify_peer' => true,
         'cafile' => 'DO USERS KNOW WHAT TO PUT HERE? NO.',
         'CN_match' => 'somesite.com',
-        'verify_depth' => 3,
         'disable_compression' => true,
         'SNI_enabled' => true,
         'SNI_server_name' => 'somesite.com'
@@ -640,7 +612,6 @@ $html = file_get_contents('https://somesite.com', null, $context);
 $context = stream_context_create(array(
     'ssl' => array(
         'ciphers' => 'DO USERS KNOW WHAT TO PUT HERE? NO.',
-        'verify_depth' => 3,
         'disable_compression' => true
     )
 ));
@@ -662,6 +633,17 @@ $html = file_get_contents('https://howsmyssl.com');
 </code>
 
 
+===== Removed Features Originally Planned for 5.6 =====
+
+The following stream wrappers currently merged into 5.6 are marked for removal in this proposal:
+
+- tlsv1.1://
+- tlsv1.2://
+
+These wrappers were added for 5.6 prior to the advent of bitwise crypto method specification. The
+direction chosen in this proposal obviates the need for these wrappers which have never
+been part of an official release. Their removal has no BC implications.
+
 ===== Backward Incompatible Changes =====
 
 Most existing code is expected to work without any BC implications. The only source of potential breakage
@@ -677,19 +659,25 @@ This RFC is proposed for implementation in PHP 5.6.
 
 ''OPENSSL_DEFAULT_STREAM_CIPHERS''
 
-Provides userland access to the default cipher list used for stream encryption
+Provides userland access to the default cipher list used for stream encryption.
 
-''OPENSSL_DEFAULT_STREAM_VERIFY_DEPTH''
+''STREAM_CRYPTO_CLIENT''
 
-Provides userland access to the default verify depth used for stream encryption
+Crypto method interpreted as "any client crypto method we can possibly support." Applications may
+use this method for maximum compatibility with SSLv2, SSLv3, TLSv1, TLSv1.1 and TLSv1.2 servers.
+
+''STREAM_CRYPTO_SERVER''
+
+Crypto method interpreted as "any server crypto method we can possibly support." Applications may
+use this method for maximum compatibility with SSLv2, SSLv3, TLSv1, TLSv1.1 and TLSv1.2 clients.
 
 ''STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT''
 
-Flag allowing specific TLSv1 usage in encrypted client streams
+Crypto method flag allowing specific TLSv1 usage in encrypted client streams.
 
 ''STREAM_CRYPTO_METHOD_TLSv1_0_SERVER''
 
-Flag allowing specific TLSv1 usage in encrypted server streams
+Crypto method flag allowing specific TLSv1 usage in encrypted server streams.
 
 ===== Proposed Voting Choices =====
 
@@ -697,11 +685,7 @@ Flag allowing specific TLSv1 usage in encrypted server streams
 
 ===== Patches and Tests =====
 
-The linked patch is ready to merge against PHP-5.6 and includes several .phpt tests:
-
-https://gist.github.com/rdlowrey/2b3895db9329582d37f6
-
-The changes are also visible here for those who don't like patch files:
+The proposed changes and tests are available here:
 
 https://github.com/rdlowrey/php-src/compare/php:PHP-5.6...improved-tls-defaults
 
@@ -712,6 +696,10 @@ TBD
 ===== Vote =====
 
 Voting period: //2014/02/11 - 2014/02/19//
+
+Note that the minor revisions in v0.10 of this RFC were introduced soon after the initial vote
+announcement (in response to feedback). The changes are cosmetic in relation to the main elements
+of the RFC. They are noted here to avoid confusion.
 
 <doodle title="Should the proposed TLS changes be merged for 5.6?" auth="rdlowrey" voteType="single" closed="false">
    * Yes
@@ -727,6 +715,8 @@ TBD
 
 
 == Revisions ==
+
+v0.10 Removed default verify depth setting; tls:// wrapper no longer deprecated
 
 v0.9  Added server forward secrecy, updated default cipher list
 
