@@ -1,6 +1,6 @@
 
 ====== Improved TLS Defaults ======
-  * Version: 0.10
+  * Version: 0.11
   * Date: 2014-01-28
   * Author: Daniel Lowrey, rdlowrey@php.net
   * Status: Vote
@@ -14,6 +14,7 @@
   * Minor Revision (v0.7 → v0.8): 2014-02-03
   * Minor Revision (v0.8 → v0.9): 2014-02-06
   * Minor Revision (v0.9 → v0.10): 2014-02-11
+  * Minor Revision (v0.10 → v0.11): 2014-02-16
 
 ===== Introduction =====
 
@@ -46,7 +47,7 @@ remaining side of the encrypted transfer equation to transparently maximize data
   * [[https://wiki.php.net/rfc/improved-tls-defaults#expose_negotiated_values|Expose negotiated values]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#servers_forward_secrecy|Server forward secrecy]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#expose_default_cert_paths|Expose default cert paths]]
-  * [[https://wiki.php.net/rfc/improved-tls-defaults#stream_wrapper_creep|Deprecate superfluous stream wrappers and allow protocol flags]]
+  * [[https://wiki.php.net/rfc/improved-tls-defaults#stream_wrapper_creep|Allow fine-grained protocol selection flags]]
 
 ===== Default Ciphers =====
 
@@ -192,10 +193,10 @@ $server = stream_socket_server('tls://127.0.0.1:443', $errno, $errstr, $socketFl
 
 Users may wish to access information regarding the negotiated protocol and/or cipher for a given
 encrypted session. The ''stream_get_meta_data()'' wrapper_data abstraction is avoided here to prevent
-conflicts with other wrappers (I'm looking at you, ''http'' wrapper). The context option approach
-also remains consistent with the existing ''capture_peer_cert'' and ''capture_peer_cert_chain'' boolean
-context abstractions. When the new context option is truthy the ''['ssl']['session_meta']'' context
-option is populated with an informational array as shown here:
+conflicts with other wrappers. The context option approach also remains consistent with the existing
+''capture_peer_cert'' and ''capture_peer_cert_chain'' boolean context abstractions. When the new
+context option is truthy the ''['ssl']['session_meta']'' context option is populated with an
+informational array as shown here:
 
 **Example**
 
@@ -389,42 +390,8 @@ maximize transmission safety. The existing paradigm makes this level of control 
 **Proposal**
 
   * Internally re-value the existing ''STREAM_CRYPTO_METHOD_*'' constants to allow the assignment of crypto methods using bitwise flags instead of values. Users may specify any combination of these constants to control the allowed protocols for a given client or server stream. Meanwhile, the ''"crypto_method"'' context option already included as part of 5.6 allows all code to specify exactly which methods are appropriate for a given operation.
-  * Remove the new stream wrappers previously merged for inclusion in 5.6:
-        * ''tlsv1.1''
-        * ''tlsv1.2''
-  * Deprecate the following stream wrappers in PHP 5.6 with removal (tentatively) scheduled for PHP 6:
-        * ''sslv2''
-        * ''sslv3''
-
-**Logic**
-
-The main reason for reshuffling the stream wrappers is simplicity. Most users are unlikely to know
-the difference between the various protocols much less which they should use. It's not difficult to
-imagine a scenario in which a user reasons, //"If SSL is safe, SSLv2 and SSLv3 must be REALLY safe.
-I should use those."// Such users are likely to have no idea what "tls" means and forego it completely
-despite its standing as the most secure option.
-
-So the overarching goal in this change is two-fold:
-
-  * Keep users safe by default without preventing them from doing insecure things if they need to do so;
-  * Eliminate the confusion of having many different wrappers for encrypted streams. By deprecating the superfluous stream wrappers we //simplify// the ecosystem at the same time we're actually //adding// new functionality (via customized flag protocol specification).
-
-Note again that the protocol-specific stream wrappers //are not// removed. Their use will trigger an
-''E_DEPRECATED'' warning but they will continue to function as before.
-
-Note also that the ''tls'' stream wrapper will now negotiate the best available of the TLS1, TLSv1.1
-and TLSv1.2 protocols. Because ''ext/openssl'' did not support TLSv1.1 and TLSv1.2 prior to PHP 5.6
-this wrapper was previously only able to negotiate TLSv1.
-
-**BC Implications of Proposed Stream Wrapper Changes**
-
-//None.//
-
-The only implications for existing code are the ''E_DEPRECATED'' messages for the ''sslv2'' and
-''sslv3'' stream wrappers. Note that //only// stream wrapper usages trigger deprecation
-notices. This notice triggering has nothing to do with the underlying protocols; it only occurs when
-using the wrappers made unnecessary by the introduction of protocol flags. Users are encouraged to
-specify protocol flags in their stream contexts to avoid these deprecation notices.
+  * New ''tlsv1.0'' wrapper to represent the OpenSSL ''TLSv1_server_method()'' and ''TLSv1_client_method()'' API
+  * Repurpose the ''tls'' wrapper to mean "Any TLS protocol (1, 1.1, 1.2)" instead of "only TLSv1"
 
 **Existing Constant Re-Valuing**
 
@@ -540,18 +507,6 @@ $sock = stream_socket_client('tls://github.com:443', $errno, $errstr, $timeout, 
 ?>
 </code>
 
-There is no need to use the deprecated wrappers as the ''ssl'' and ''tls'' wrappers automatically negotiates
-the best available protocol. However, for the sake of completeness, note that the following still
-works:
-
-<code php>
-<?php
-
-$sock = stream_socket_client('sslv3://github.com:443'); // Triggers E_DEPRECATED, still works
-
-?>
-</code>
-
 Enable crypto on an existing stream. Previously only a single value constant could be used at
 parameter 3. Flags are now accepted as shown here:
 
@@ -638,21 +593,19 @@ $html = file_get_contents('https://howsmyssl.com');
 
 ===== Removed Features Originally Planned for 5.6 =====
 
-The following stream wrappers currently merged into 5.6 are marked for removal in this proposal:
-
-  - tlsv1.1
-  - tlsv1.2
-
-These wrappers were added for 5.6 prior to the advent of bitwise crypto method specification. The
-direction chosen in this proposal obviates the need for these wrappers which have never
-been part of an official release. Their removal has no BC implications.
+Originally this RFC proposed the deprecation and future remove of the protocol-specific wrappers.
+This recommendation was removed to retain the ability for streams without access to a stream context
+to interface with protocol-specific clients and servers. In particular, the ''fsockopen'' function
+cannot accept a stream context. As a result, removing protocol-specific stream wrappers would render
+''fsockopen'' unusable for encrypted transfers with parties not using broadly compatible handshake
+hello methods.
 
 ===== Backward Incompatible Changes =====
 
 Most existing code is expected to work without any BC implications. The only source of potential breakage
-involves the scenario where users connect to servers employing outdated/insecure encryption technologies.
-For these users the option always exists to manually override secure defaults with insecure settings
-in the stream context.
+involves the scenario where users connect to servers employing seriously outdated/insecure encryption
+technologies. For these users the option always exists to manually override secure defaults with
+insecure settings in the stream context.
 
 ===== Proposed PHP Version =====
 
@@ -718,6 +671,8 @@ TBD
 
 
 == Revisions ==
+
+v0.11 Updated constant names, reinstated protocol-specific stream wrappers
 
 v0.10 Removed default verify depth setting; tls:// wrapper no longer deprecated
 
