@@ -44,7 +44,7 @@ remaining side of the encrypted transfer equation to transparently maximize data
   * [[https://wiki.php.net/rfc/improved-tls-defaults#tls_compression|Disable TLS compression by default]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#honor_cipher_order|Create "honor_cipher_order" context option]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#expose_negotiated_values|Expose negotiated values]]
-  * [[https://wiki.php.net/rfc/improved-tls-defaults#forward_secrecy_for_servers|Forward secrecy for servers]]
+  * [[https://wiki.php.net/rfc/improved-tls-defaults#servers_forward_secrecy|Server forward secrecy]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#expose_default_cert_paths|Expose default cert paths]]
   * [[https://wiki.php.net/rfc/improved-tls-defaults#stream_wrapper_creep|Deprecate superfluous stream wrappers and allow protocol flags]]
 
@@ -223,14 +223,18 @@ Array
 ?>
 </code>
 
-===== Forward Secrecy for Servers =====
+===== Server Forward Secrecy =====
 
 **Proposal**
 
-Encrypted client streams already support [[http://en.wikipedia.org/wiki/Forward_secrecy|forward secrecy]]
-as this functionality is largely implemented server-side. However, the patch proposed here makes it possible for
-encrypted PHP stream //servers// to also achieve (perfect) forward secrecy when negotiating cipher
-suites that utilize ephemeral key agreements.
+Encrypted client streams already fully support [[http://en.wikipedia.org/wiki/Forward_secrecy|forward secrecy]]
+(PFS) as this functionality is largely implemented server-side. Servers currenty have some limited
+support for PFS, however, the proposed patch adds several new context options for fine-grained control
+in servers negotiating cipher suites that utilize ephemeral key agreements.
+
+//NOTE:// Servers deploying certificates capable of PFS aren't required to take any additional action
+to achieve forward secrecy. The proposed context options simply allow fine-grained configuration and
+broader potential FS support/compatibility for older clients.
 
 **New Context Options**
 
@@ -290,7 +294,7 @@ stream_set_blocking($server, FALSE);
 // stream_socket_enable_crypto() is used after client sockets are accepted
 // to enable crypto in a non-blocking way ...
 
-stream_socket_enable_crypto($client, $enable = TRUE, STREAM_CRYPTO_SERVER);
+stream_socket_enable_crypto($client, $enable = TRUE, STREAM_CRYPTO_METHOD_ANY_SERVER);
 
 ?>
 </code>
@@ -437,7 +441,7 @@ typedef enum {
 	STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT = (1 << 4 | 1), /* New in 5.6 */
 	STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT = (1 << 5 | 1), /* New in 5.6 */
 	STREAM_CRYPTO_METHOD_TLS_CLIENT = ((1 << 3) | (1 << 4) | (1 << 5) | 1), /* Any TLS protocol */
-	STREAM_CRYPTO_CLIENT = ((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | 1), /* Any protocol */
+	STREAM_CRYPTO_METHOD_ANY_CLIENT = ((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | 1), /* Any protocol */
 	STREAM_CRYPTO_METHOD_SSLv2_SERVER = (1 << 1),
 	STREAM_CRYPTO_METHOD_SSLv3_SERVER = (1 << 2),
 	STREAM_CRYPTO_METHOD_SSLv23_SERVER = ((1 << 1) | (1 << 2)), /* SSLv2 or SSLv3 */
@@ -445,7 +449,7 @@ typedef enum {
 	STREAM_CRYPTO_METHOD_TLSv1_1_SERVER = (1 << 4), /* New in 5.6 */
 	STREAM_CRYPTO_METHOD_TLSv1_2_SERVER = (1 << 5), /* New in 5.6 */
 	STREAM_CRYPTO_METHOD_TLS_SERVER = ((1 << 3) | (1 << 4) | (1 << 5)) /* Any TLS protocol */
-	STREAM_CRYPTO_SERVER = ((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)), /* Any protocol */
+	STREAM_CRYPTO_METHOD_ANY_SERVER = ((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)), /* Any protocol */
 } php_stream_xport_crypt_method_t;
 </code>
 
@@ -455,7 +459,7 @@ of the openssl extension. As far as the underlying OpenSSL library is concerned,
 translates to "every protocol you can possibly support (including TLS protocols)." This reuse of a
 legacy naming convention is a source of constant confusion for users not versed in the inner-workings
 of OpenSSL. Here we use the more natural connotation and translate ''SSLv23'' for our purposes to
-mean "either SSLv2 or SSLv3." ''STREAM_CRYPTO_CLIENT'' and ''STREAM_CRYPTO_SERVER'' are added to
+mean "either SSLv2 or SSLv3." ''STREAM_CRYPTO_METHOD_ANY_CLIENT'' and ''STREAM_CRYPTO_METHOD_ANY_SERVER'' are added to
 represent //"any protocol we can support."//
 
 **Examples**
@@ -561,14 +565,14 @@ stream_socket_enable_crypto($stream , $enable = TRUE, $cryptoMethod);
 </code>
 
 Encrypt an existing stream choosing from any protocol we can possibly support using the new catch-all
-''STREAM_CRYPTO_CLIENT'' constant. This method will try all possible protocols:
+''STREAM_CRYPTO_METHOD_ANY_CLIENT'' constant. This method will try all possible protocols:
 
 <code php>
 <?php
 
 $sock = stream_socket_client('tcp://github.com:443');
 var_dump($sock); // resource(%d) of type (stream)
-var_dump(stream_socket_enable_crypto($sock, TRUE, STREAM_CRYPTO_CLIENT));
+var_dump(stream_socket_enable_crypto($sock, TRUE, STREAM_CRYPTO_METHOD_ANY_CLIENT));
 
 ?>
 </code>
@@ -578,8 +582,9 @@ var_dump(stream_socket_enable_crypto($sock, TRUE, STREAM_CRYPTO_CLIENT));
 
 **Forward Secrecy**
 
-Encrypted stream servers now support forward secrecy using ephemeral key exchange via RSA, DH //and//
-elliptic curve DH.
+Encrypted stream servers support improved forward secrecy using ephemeral key exchange via RSA, DH
+and elliptic curve DH. No additional action is required for servers deploying certificates capable
+of ephemeral key exchange; new context options for fine-grained configuration are available.
 
 **Requirements for a secure client transfer prior to PHP 5.6:**
 
@@ -659,12 +664,12 @@ This RFC is proposed for implementation in PHP 5.6.
 
 Provides userland access to the default cipher list used for stream encryption.
 
-''STREAM_CRYPTO_CLIENT''
+''STREAM_CRYPTO_METHOD_ANY_CLIENT''
 
 Crypto method interpreted as "any client crypto method we can possibly support." Applications may
 use this method for maximum compatibility with SSLv2, SSLv3, TLSv1, TLSv1.1 and TLSv1.2 servers.
 
-''STREAM_CRYPTO_SERVER''
+''STREAM_CRYPTO_METHOD_ANY_SERVER''
 
 Crypto method interpreted as "any server crypto method we can possibly support." Applications may
 use this method for maximum compatibility with SSLv2, SSLv3, TLSv1, TLSv1.1 and TLSv1.2 clients.
