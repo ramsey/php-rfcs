@@ -1,72 +1,74 @@
 
 ====== PHP RFC: Make session_regenerate_id()'s delete_old_session parameter required gracefully ======
   * Version: 0.91
-  * Date: 2013-10-30
+  * Date Created: 2013-10-30
+  * Date Updatead: 2014-03-19
   * Author: Yasuo Ohgaki <yohgaki@php.net>
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/session_regenerate_id
 
 ===== Introduction =====
 
-session_regenerate_id() is used to generate new session ID. It better to delete old session data to reduce risk of session hijack. Currently session_regenerate_id()'s delete_old_session(bool) parameter is optional and default to false which increase risk of session hijack.
+Keeping HTTP session as secure as possible is what the session manager's task. **Session manager can improve HTTP session security without code modification while keeping compatibility with existing applications.**
 
-===== Details =====
+session_regenerate_id() is used to generate new session ID. It better to delete old session data to reduce risk of session hijack. Currently session_regenerate_id() leave old session data by default. Old session data is active and usable until GC. 
 
-Old session data is better to be deleted. However, initial session_regenerate_id() implementation didn't, so 'delete_old_session'(bool) option is added later to keep compatibility back in PHP 4.x.
+Old session is left for reliable session ID regeneration. There are many reasons why old session is left. Browsers connect to web server with multiple connection. Mobile network may lost radio, may have hand over, etc. Large network providers have multiple gateways to off load traffic and packets may arrive out of order.
 
-Session module have session data lock to keep consistency, but if there is no session data (i.e. deleted by session_regenerate_id()) lock will not work and race condition could occur. For instance, users may have multiple iframes in a page, then concurrent access from a session owner could happen as most browsers download resources concurrently. Developers can mitigate this race condition by deleting old session data later. (I have plan mitigate it in session module, but it will be proposed in different RFC.) If there is not pages that access session concurrently, users may safely set 'delete_old_session' to true.
 
-Although session_regenerate_id(true) is recommended, but session_regenerate_id(false) has it use even if session module have race condition mitigation. Therefore, the option itself is better to be left as it is now.
+Leaving old session opens window to attacker widely:
+  - Old session lives long term and never expires if there is access to it. i.e. Attacker may access periodically
+  - There is no mechanism to detect possibles attack even if session manager may detect attacks.
+
+Counter measure for session hijack: Requirement - Session ID regeneration must be reliable.
+  - Make sure old session is deleted certain period.
+  - Raise error/exception for invalid access. (Raise error for should be deleted session access)
+
+Problem of immediate old session deletion:
+  - Make session ID regeneration unreliable.
+  - Remove alarm for possible attacks.
+
+**"Make sure old session is deleted certain period"** and **"Raise error/exception for invalid access"** provides much better security than current.
+
+
 ===== Proposal =====
 
-When session_regenerate_id() is called without delete_old_session parameter, raise E_DEPRECATED error with following error message.
+==== Add __SESSION_REGENERATE_ID_EXPIRE__ time stamp ====
 
-Message1
-  delete_old_session parameter is omitted. Old session data deletion is encouraged for better security.
+**"Make sure old session is deleted certain period"** can be achieved by time stamp in session data. When session_regenerate_id() called, session manager sets
 
-or
+  $_SESSION['__SESSION_REGENERATE_ID_EXPIRE__'] = time() + ini_get('session.regenerate_id_expire');
 
-Message2
-  Calling session_regenerate_id() without a parameter is deprecated. Passing true is encouraged for better security
+When session manager initializes session, check above value. If expired session is accessed, session manager raises "SessionExpiredAccessException".
 
-For future version (5 or 10 years later), delete_old_session parameter may be a required parameter.
+
+
 ===== Backward Incompatible Changes =====
 
-None, except E_DEPRECATED is raised when parameter is omitted.
+  * If user script has __SESSION_REGENERATE_ID_EXPIRE__ key in $_SESSION, it may break application.
+  * Raised exception may break application.
+
 
 ===== Proposed PHP Version(s) =====
 
-PHP 5.6.0
+PHP 5.X+
 
 
 ===== Proposed Voting Choices =====
 
-  * Raise "message1"
-  * Raise "message2"
-  * Keep current behavior
+  * Add __SESSION_REGENERATE_ID_EXPIRE__ time stamp Yes/No
+
 
 ===== Patches and Tests =====
 
-  diff --git a/ext/session/session.c b/ext/session/session.c
-  index 5b4820a..71ccfd0 100644
-  --- a/ext/session/session.c
-  +++ b/ext/session/session.c
-  @@ -1958,6 +1958,10 @@ static PHP_FUNCTION(session_regenerate_id)
-                  RETURN_FALSE;
-          }
-   
-  +       if (ZEND_NUM_ARGS() == 0) {
-  +               php_error_docref(NULL TSRMLS_CC, E_DEPRECATED, "delete_old_session parameter is omitted. Old session data deletion is encouraged for better security");
-  +       }
-  +
-          if (PS(session_status) == php_session_active) {
-                  if (PS(id)) {
-                          if (del_ses && PS(mod)->s_destroy(&PS(mod_data), PS(id) TSRMLS_CC) == FAILURE) {
+TBD
+
 ===== References =====
 
   * http://us3.php.net/session_regenerate_id
 
 ===== ChangeLog =====
 
+  * 2014/03/18 - Change RFC to propose time stamping.
   * 2013/10/30 - Added details and message option.
   * 2013/10/29 - Created RFC
