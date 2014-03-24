@@ -1,24 +1,25 @@
 
-====== PHP RFC: Revert/extend/postpone original RFC about read_only, lazy_write sessions ======
-  * Version: 0.3
+====== PHP RFC: Sessions: Improve original RFC about read_only, lazy_write features ======
+  * Version: 0.4
   * Date: 2014-03-14
   * Author: Andrey Andreev, narf@devilix.net
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/session-read_only-lazy_write
 
-This is a proposal to override the decisions taken in the [[rfc:session-lock-ini]] RFC. Not in the sense of completely rejecting the RFC, but rather redesign the already accepted solutions, namely the 'read_only' and 'lazy_write' options passed to session_start().
+This is a proposal to make an update, or override the decisions taken in the [[rfc:session-lock-ini]] RFC. Not in the sense of rejecting the RFC, but rather redesign the already accepted solutions, namely the 'read_only' and 'lazy_write' options passed to session_start().
 
-The [[rfc:session-lock-ini]] has IMHO not been handled properly, to say the least. What ended up as accepted from it is mostly unrelated to what it was originally all about (locking options). It lacks a lot of information and has not been given the required attention for something as critical as Sessions - a fundamental feature in most web applications.
+The [[rfc:session-lock-ini]] has IMHO not been handled or thought out properly. What ended up as accepted from it is mostly unrelated to what it was originally all about (locking options). It (the RFC description) lacks a lot of information and implementation details, that are otherwise part of the patch (but not obvious).
+This has made it possible for such details to either be overlooked completely or to not receive the deserved attention for something as critical as Sessions.
 
-As a result, we have a solution that is broken by design and this is an attempt to fix it before there's no way going back from it.
+I feel that there's room for improvement in regards to backwards and forward compatibility, as well as an overall better API design. This is an attempt to make those improvements before there's no coming back from what I believe to be flaws in the initial design.
 
 ===== Introduction =====
 
-The problems with the already accepted solutions are the following:
+The problems, or missing information on the already accepted solutions are the following:
 
 **read_only**
 
-The name itself is highly misleading, especially for the context in which it is used.
+1. The name itself is highly misleading, especially for the context in which it is used.
 
 What this option does is to cause ''session_start()'' to read the session data, populate the ''$_SESSION'' super-global and close the session immediately afterwards. However, nothing in the following code implies such behavior:
 
@@ -29,88 +30,137 @@ What any programmer would //assume// from the above code with no prior knowledge
 This could and //will// lead to a lot of confusion, which in turn will result in a lot of malfunctioning userland code. Assume concurrency with the same session ID in the following example:
 
   // $_SESSION['logged_in'] has been set in a previous request
-  Request 1: session_start(['read_only' => TRUE]);
-  Request 2: session_start(); unset($_SESSION['logged_in']); session_write_close();
-  Request 1: if ($_SESSION['logged_in']) { /* logic */ } // evaluates to TRUE
+  
+  /* Request 1: */
+  session_start(['read_only' => TRUE]);
+  
+  /* Request 2: */
+  session_start();
+  unset($_SESSION['logged_in']);
+  session_write_close();
+  // Delete temporary DB rows, i.e. cart contents
+  
+  /* Request 1 */
+  if ($_SESSION['logged_in']) // evaluates to TRUE
+  {
+	// Do something with cart contents, assuming that they exist
+  }
 
-This is downright dangerous, yet it is very easy to fall into that trap.
+This is downright dangerous and ext/sessions has always functioned in a way that prevents race conditions, yet it is very easy to fall into this trap.
 
-Furthermore, using the 'read_only' name for 'start-read-and-close' functionality prevents implementing a read-only session mode in the future (have a look at the [[rfc:session-read_only-lazy_write#future_scope|future scope]] section), for which it would be a perfect fit.
+Furthermore, using the 'read_only' name for 'start-read-and-close' functionality prevents using the same name to implement a [[http://en.wikipedia.org/wiki/Read-only|read-only]] session mode in the future.
+Refer to the [[rfc:session-read_only-lazy_write#future_scope|future scope]] section, for details on a possible future implementation of a read-only mode, for which 'read_only' would be the perfect name.
+
+2. It is implemented as an option and not a stand-alone function.
+
+This is somewhat the same issue as described above, but a different API design problem otherwise.
+
+In general, when an option/parameter/argument/whatever is passed to a function, it should act as a mode of operation for that function.
+As it is currently, passing 'read_only' does not enter some particular mode, but rather makes session_start() to act as an optimized version of the following:
+
+  session_start();
+  session_commit();
+
+//Maybe//, if session_start() didn't accept //mode// parameters, that would've been fine. However, session_start() also accepts all session.* INIs + 'lazy_write' and all of those are modes of operation and not additional actions per se. So that makes it not only strange, but also inconsistent.
 
 **lazy_write**
 
-The issues with this option are more diverse, but if it has to be described in one word, that would be: incomplete.
+The issues with this option are non-obvious, more diverse and are mostly related to userland session handlers.
+Below is the description of how it works, that was missing from the original RFC, and is only evident by the patch and the author's comments during the discussion of this RFC.
 
-There is little reason for the option to exist //as is// in the first place. It is mostly a performance improvement instead of a //functional// change. I'm saying "mostly", because of a very important detail that has not been addressed - custom session handlers.
+//Note: PS_UPDATE_TIMESTAMP() is updateTimestamp() in userland, but it was previously called PS_UPDATE_FUNC() (or update()). It was changed for a more descriptive name.//
 
-1. Because it was designed as a function argument only (and not an INI setting), there is no API to tell users if/when 'lazy_write' is currently used.
+  * When ''$_SESSION'' is not changed: call ''PS_UPDATE_TIMESTAMP_FUNC()'' instead of ''PS_WRITE_FUNC()''.
+  * ''PS_UPDATE_TIMESTAMP_FUNC()'' only changes the "last modified" timestamp (or a similar timestamp, depending on the storage in use) instead of re-writing all of the data. This is the performance improvement.
+  * Userland session handlers can use ''updateTimestamp()'' to replicate ''PS_UPDATE_TIMESTAMP_FUNC()''.
+  * ''updateTimestamp()'' is NOT added to the ''SessionHandler'' class to maintain BC.
+    * This means that userland session handlers extending ''SessionHandler'' can't call ''parent::updateTimestamp()''.
+    * It is made that way because the internal handler that ''SessionHandler'' wraps, may or may not have ''PS_UPDATE_TIMESTAMP_FUNC()'' (PECL extensions) and this is not detectable at runtime.
+  * ''updateTimestamp()'' is NOT added to ''SessionHandlerInterface'' (to maintain BC), but is added to a new interface called ''SessionUpdateTimestampInterface''.
+    * This is because of internal implementation details that were originally designed to just register all of the methods from ''SessionHandlerInterface'', so now you have to use //some// interface to add new methods.
+  * If there's a userland session handler in use:
+    * If the handler doesn't have ''updateTimestamp()'' - call ''write()'' to maintain BC.
+    * If the handler has updateTimestamp() - call it.
+       * As listed above, a class extending ''SessionHandler'' can NOT call ''parent::updateTimestamp()''. It has to call parent::write() to "extend" the internal handler.
 
-I understand this is because users don't like INI settings and that there are way too many of them for sessions already. This is a valid argument of course, but it completely ignores the fact that INIs exist for a reason and they are a necessity in some cases. This is one of those cases.
+And now, the problems with it:
 
-2. The [[rfc:session-lock-ini#proposal_2_-_lazy_wirte|RFC]] describes that with 'lazy_write' set to TRUE, if no change was made to session data, then ''PS_UPDATE_FUNC()'' will be called instead of ''PS_WRITE_FUNC()''. However, it only talks about internal implementation and fails to address (or at least mention) that a custom session handler should now also have an ''update()'' method.
+1. You can't call parent::updateTimestamp().
 
-This in turn implies that ''update()'' is added to ''SessionHandlerInterface'', which is a major breaking change **and** it is completely unclear how that is handled with pre-PHP5.4-style save handlers that don't implement ''SessionHandlerInterface''.
+The SessionHandler class was //made// to expose the internal implementation. To put emphasis on the problem, the following combination beats the whole purpose of having the SessionHandler class:
 
-It is the kind of change that IMO should've been left for PHP6, where 'lazy_write' could be safely implemented as mandatory, non-optional behavior and without that much concerns about breaking BC.
+  * PHP will call SessionHandler::updateTimestamp(), if you have it.
+  * You can't call parent::updateTimestamp() from it.
+
+This is an unnecessary limitation, given that only a few PECL extensions wouldn't support the feature, which is a new one and this is not a BC concern.
+
+2. There is little reason for the //option// (not the feature) to exist in the first place.
+
+It is mostly a performance improvement instead of a //functional// change. It is somewhat a behavioral change, but still a performance improvement and designed in a way that doesn't break existing applications.
+
+Performance improvements should not be optional, unless they break backwards compatibility and this one is designed to avoid that. Therefore, it should not be optional.
+
+3. No API to detect the option, at all.
+
+'lazy_write' was originally proposed as an INI setting. However, it was reduced to being just a session_start() option because of feedback on the RFC discussion stating that "users don't like INI settings", or that there are too many INIs already. This is a valid point, but it ignores the fact that INI settings do have a purpose and are in some cases a necessity. For 'lazy_write' to be optional and with no other API available, ini_get() would've been a way for userland code to detect it. Furthermore, with session_start() also accepting existing session.* INI settings, this is yet another inconsistency.
+
+Also, the whole feature was inspired by a [[https://bugs.php.net/bug.php?id=17860|feature request]] for an API to detect if $_SESSION has been changed or not.
 
 ===== Proposal =====
 
-==== On 'read_only' ====
+==== Make 'read_only' a standalone function ====
 
-=== Completely drop the current 'read_only' functionality ===
-
-As described above, the currently existing 'read_only' is highly misleading, probably even to the extent that some of the people who voted for it didn't understand what it meant. If that turns out to be true, or if this RFC manages to change opinions on it, then dropping the whole thing altogether should be an option.
-
-=== Rename the current 'read_only' option ===
-
-If the feature is to be retained, it should be renamed to a standalone function with a better name. It must be descriptive //enough// and at the very least - intuitive.
-
+The feature (start, read and close session) should be available through a stand-alone function, named appropriately to describe what it does.
 In order to be consistent with the new ability for ''session_start()'' to accept options (INI or not) in an array, both ''session_start()'' and the new function should accept/share the same arguments:
 
   bool function session_start_close(array $options = NULL)
 
-//Note: session_start_close() is an example name, actual name is the subject of discussion - feedback is necessary.//
+//Note: Feedback on a name better than session_start_close() is welcome.//
 
-=== Reserve the 'read_only' name for future functionality ===
-
-Please refer to the [[rfc:session-read_only-lazy_write#future_scope|Future scope]] section.
-
-//Note: Voting here will be only for reserving the 'read_only' name and not the feature specifics.//
+Unofficially, the 'read_only' name should be reserved for what it truly means. For an example, please refer to the [[rfc:session-read_only-lazy_write#future_scope|Future scope]] section.
 
 ==== On 'lazy_write' ====
 
-=== Postpone for PHP 6 ===
+A combination of multiple (but not all) of the following:
 
-Because of the breaking changes that it introduces to userland session handlers and given the importance of sessions, this would make a lot of sense.
+=== Merge updateTimestamp() into write() ===
 
-=== Keep it, but provide the necessary tools to work around or with it ===
+SessionHandler::write() should decide whether all data should be written or just the timestamp updated.
 
-If it is decided to keep the feature, the least it could be done is to complete it. This could involve any (and multiple) of the following, subject to feedback from discussion:
+This solves all problems:
 
-  * Introduce a 'session.lazy_write' option, defaulting to FALSE.
-  * ''SessionHandlerInterface::__construct(array $options = NULL)'' as a way to handle options passed to ''session_start()''. Each option should be set as a property.
-  * ''bool SessionHandlerInterface::update($session_id)''
-  * Handle ''PS_UPDATE_FUNC()'' via ''SessionHandlerInterface::open()'' and add a new parameter to determine wheter only a timestamp update should be performed.
-  * Somehow detect when the userland implementation doesn't have an ''update()'' method and work around it.
-    * Trigger an E_WARNING in this case.
-  * Ignore 'lazy_write' for userland implementations.
-  * Document it as a backwards-incompatible change.
+  * Not adding an unnecessary interface (SessionUpdateTimestampInterface).
+  * Maintaining backwards compatibility, even with PECL extensions.
+  * Enabling userland code to call parent::methodName().
+  * No API changes, at all.
 
-Where ''SessionHandlerInterface'' is mentioned above, it of course also means implementing the same feature in the ''SessionHandler'' class.
+=== Add SessionHandler::updateTimestamp(), when available ===
+
+updateTimestamp() can be added to SessionHandler at instantiation time, depending on whether the current session.save_handler supports it. This is of course an alternative to moving its logic to write().
+
+It might not be convenient for some session modules to have the method and others not, but users are in general careful with PECL extensions and of course, it should be properly documented. Anybody could write a PHP extension that provides a session handler that even breaks current functionality - there's no guarantee on that.
+What can be done however, is to not put unnecessary limits because of third-party extensions. It's a good enough trade-off, IMO.
+
+And this wouldn't be a precedent, many MySQLi functions only exist if mysqlnd support is present.
+
+=== Add API exposing $_SESSION changes status ===
+
+This is what was originally asked for via feature request [[https://bugs.php.net/bug.php?id=17860|#17860]] and would be useful even without 'lazy_write', allowing users to make the performance improvement on their own.
+
+It can be a "magic constant" like the currently existing 'SID'.
+It can be a function, i.e. session_is_changed().
+It can be a property or a method of the SessionHandler class.
+
+Either of the above would be sufficient, it doesn't matter, just as long as the user has a way of accessing that state.
+
+=== Always do "lazy writes" ===
+
+There's no reason for this feature to be optional, as explained above - it is a performance improvement and the patch already calls write() if updateTimestamp() doesn't exist. If this RFC is accepted, it would make even less sense to keep it optional.
+Worst thing that could happen is to fallback to the old behavior where session data is written at all times.
 
 ===== Backward Incompatible Changes =====
 
-This RFC aims to revert unexpected backwards incompatible changes that are supposed to be released with PHP 5.6.
-
-  * read_only
-    * If dropped or renamed before PHP 5.6: none.
-    * If dropped or renamed after PHP 5.6: in cases where it was used, a performance hit is expected.
-    * If kept as is: forward-compatibility will be affected.
-
-  * lazy_write
-    * If postponed for PHP 6 (which at this time means dropped from PHP 5.6): none.
-    * If kept as is: major.
-    * If kept with additions: hard to tell, to be estimated during the discussion.
+None, the aim is to make the already accepted solution even easier to handle in regards to older versions, given that it is accepted for PHP 5.6.
 
 ===== Proposed PHP Version(s) =====
 
@@ -120,15 +170,11 @@ However, due to Beta 1 approaching, this is subject to change and heavy edits.
 
 ===== Impact to Existing Extensions =====
 
-ext/session and possibly all extensions providing a session handler.
+ext/session and all extensions providing a session handler.
 
 ===== php.ini Defaults =====
 
-For 'lazy_write', this //could// be 'session.lazy_write':
-
-  * hardcoded: 0
-  * php.ini-development: 0
-  * php.ini-production: 0
+None.
 
 ===== Open Issues =====
 
@@ -152,9 +198,7 @@ Should require 50% + 1 votes.
 
 ===== Patches and Tests =====
 
-No patch is available at this time, the ultimate goal is to revert existing ones.
-
-If patches becomes necessary, I'll be looking for a volunteer with Yasuo Oghaki being a likely candidate.
+No patch is available at this time, I'll be looking for a volunteer with Yasuo Oghaki being a likely candidate.
 
 ===== Implementation =====
 
@@ -167,6 +211,8 @@ After the project is implemented, this section should contain
 
   * [[rfc:session-lock-ini|Original RFC about read_only, lazy_write]]
   * [[http://grokbase.com/t/php/php-internals/143brgjp9d/revert-session-serializer-name-session-gc|A somewhat related discussion that influenced this RFC]]
+  * [[http://grokbase.com/t/php/php-internals/143fagz0a7/rfc-revert-extend-postpone-original-rfc-about-read-only-lazy-write-sessions|First discussion on this RFC]]
+  * [[https://bugs.php.net/bug.php?id=17860|Feature request for detecting $_SESSION changes]]
 
 ===== Rejected Features =====
 
