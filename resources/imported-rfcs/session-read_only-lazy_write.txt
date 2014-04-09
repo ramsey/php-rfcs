@@ -1,12 +1,12 @@
 
-====== PHP RFC: Sessions: Improve original RFC about read_only, lazy_write features ======
-  * Version: 0.5
+====== PHP RFC: Sessions: Improve original RFC about lazy_write ======
+  * Version: 0.6
   * Date: 2014-03-14
   * Author: Andrey Andreev, narf@devilix.net
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/session-read_only-lazy_write
 
-This is a proposal to make an update, or override the decisions taken in the [[rfc:session-lock-ini]] RFC. Not in the sense of rejecting the RFC, but rather redesign the already accepted solutions, namely the 'read_only' and 'lazy_write' options passed to session_start().
+This is a proposal to make an update, or override a decision taken in the [[rfc:session-lock-ini]] RFC. Not in the sense of rejecting the RFC, but rather redesign the already accepted solution, namely the 'lazy_write' option passed to session_start().
 
 The [[rfc:session-lock-ini]] has IMHO not been handled or thought out properly. What ended up as accepted from it is mostly unrelated to what it was originally all about (locking options). It (the RFC description) lacks a lot of information and implementation details, that are otherwise part of the patch (but not obvious).
 This has made it possible for such details to either be overlooked completely or to not receive the deserved attention for something as critical as Sessions.
@@ -15,57 +15,11 @@ I feel that there's room for improvement in regards to backwards and forward com
 
 ===== Introduction =====
 
-The problems, or missing information on the already accepted solutions are the following:
-
-**read_only**
-
-1. The name itself is highly misleading, especially for the context in which it is used.
-
-What this option does is to cause ''session_start()'' to read the session data, populate the ''$_SESSION'' super-global and close the session immediately afterwards. However, nothing in the following code implies such behavior:
-
-  session_start(['read_only' => TRUE]);
-
-What any programmer would //assume// from the above code with no prior knowledge about it, is the already popular meaning of the term [[http://en.wikipedia.org/wiki/Read-only|"read-only" in computing]], or in this context - start a session for which the data is not allowed to be modified. In fact, it is so natural to assume a read-only //mode//, that I had read the RFC multiple times and yet it took somebody actually telling me that this is a "start-read-and-close" functionality instead.
-
-This could and //will// lead to a lot of confusion, which in turn will result in a lot of malfunctioning userland code. Assume concurrency with the same session ID in the following example:
-
-  // $_SESSION['logged_in'] has been set in a previous request
-  
-  /* Request 1: */
-  session_start(['read_only' => TRUE]);
-  
-  /* Request 2: */
-  session_start();
-  unset($_SESSION['logged_in']);
-  session_write_close();
-  // Delete temporary DB rows, i.e. cart contents
-  
-  /* Request 1 */
-  if ($_SESSION['logged_in']) // evaluates to TRUE
-  {
-	// Do something with cart contents, assuming that they exist
-  }
-
-This is downright dangerous and ext/sessions has always functioned in a way that prevents race conditions, yet it is very easy to fall into this trap.
-
-Furthermore, using the 'read_only' name for 'start-read-and-close' functionality prevents using the same name to implement a [[http://en.wikipedia.org/wiki/Read-only|read-only]] session mode in the future.
-Refer to the [[rfc:session-read_only-lazy_write#future_scope|future scope]] section, for details on a possible future implementation of a read-only mode, for which 'read_only' would be the perfect name.
-
-2. It is implemented as an option and not a stand-alone function.
-
-This is somewhat the same issue as described above, but a different API design problem otherwise.
-
-In general, when an option/parameter/argument/whatever is passed to a function, it should act as a mode of operation for that function.
-As it is currently, passing 'read_only' does not enter some particular mode, but rather makes session_start() to act as an optimized version of the following:
-
-  session_start();
-  session_commit();
-
-//Maybe//, if session_start() didn't accept //mode// parameters, that would've been fine. However, session_start() also accepts all session.* INIs + 'lazy_write' and all of those are modes of operation and not additional actions per se. So that makes it not only strange, but also inconsistent.
+//Note: Previously, here was a description of the issues related to the 'read_only' option, which was later renamed to 'read_and_close', effectively solving the problem.//
 
 **lazy_write**
 
-The issues with this option are non-obvious, more diverse and are mostly related to userland session handlers.
+The issues with this option are non-obvious, diverse and are mostly related to userland session handlers.
 Below is the description of how it works, that was missing from the original RFC, and is only evident by the patch and the author's comments during the discussion of this RFC.
 
 //Note: PS_UPDATE_TIMESTAMP() is updateTimestamp() in userland, but it was previously called PS_UPDATE_FUNC() (or update()). It was changed for a more descriptive name.//
@@ -108,30 +62,9 @@ Also, the whole feature was inspired by a [[https://bugs.php.net/bug.php?id=1786
 
 ===== Proposal =====
 
-==== On 'read_only' ====
-
-Unofficially, the 'read_only' name should be reserved for what it truly means. For an example, please refer to the [[rfc:session-read_only-lazy_write#future_scope|Future scope]] section.
-
-To solve the current problem however, one of the following should be done:
-
-=== Make it a standalone function ===
-
-The feature (start, read and close session) should be available through a stand-alone function, named appropriately to describe what it does.
-In order to be consistent with the new ability for ''session_start()'' to accept options (INI or not) in an array, both ''session_start()'' and the new function should accept/share the same arguments:
-
-  bool function session_start_close(array $options = NULL)
-
-//Note: Feedback on a name better than session_start_close() is welcome.//
-
-=== Rename the option ===
-
-Some people might prefer keeping it as an option instead of a standalone function. If this turns out to be a more popular approach, then the option should be renamed from 'read_only' to either 'read_close' or 'read_and_close'.
-
-==== On 'lazy_write' ====
-
 A combination of multiple (but not all) of the following:
 
-=== Merge updateTimestamp() into write() ===
+==== Merge updateTimestamp() into write() ====
 
 SessionHandler::write() should decide whether all data should be written or just the timestamp updated.
 
@@ -142,7 +75,9 @@ This solves all problems:
   * Enabling userland code to call parent::methodName().
   * No API changes, at all.
 
-=== Add SessionHandler::updateTimestamp(), when available ===
+Another argument in favor of this solution is that currently, this is the only design allowing userland implementations of 'lazy_write' behavior.
+
+==== Add SessionHandler::updateTimestamp(), when available ====
 
 updateTimestamp() can be added to SessionHandler at instantiation time, depending on whether the current session.save_handler supports it. This is of course an alternative to moving its logic to write().
 
@@ -151,7 +86,7 @@ What can be done however, is to not put unnecessary limits because of third-part
 
 And this wouldn't be a precedent, many MySQLi functions only exist if mysqlnd support is present.
 
-=== Add API exposing $_SESSION changes status ===
+==== Add API exposing $_SESSION changes status ====
 
 This is what was originally asked for via feature request [[https://bugs.php.net/bug.php?id=17860|#17860]] and would be useful even without 'lazy_write', allowing users to make the performance improvement on their own.
 
@@ -161,7 +96,7 @@ It can be a property or a method of the SessionHandler class.
 
 Either of the above would be sufficient, it doesn't matter, just as long as the user has a way of accessing that state.
 
-=== Always do "lazy writes" ===
+==== Always do "lazy writes" ====
 
 There's no reason for this feature to be optional, as explained above - it is a performance improvement and the patch already calls write() if updateTimestamp() doesn't exist. If this RFC is accepted, it would make even less sense to keep it optional.
 Worst thing that could happen is to fallback to the old behavior where session data is written at all times.
@@ -174,8 +109,6 @@ None, the aim is to make the already accepted solution even easier to handle in 
 
 PHP 5.6
 
-However, due to Beta 1 approaching, this is subject to change and heavy edits.
-
 ===== Impact to Existing Extensions =====
 
 ext/session and all extensions providing a session handler.
@@ -184,23 +117,9 @@ ext/session and all extensions providing a session handler.
 
 None.
 
-===== Open Issues =====
-
-TBD: Make sure there are no open issues when the vote starts!
-
-===== Future Scope =====
-
-Implement the 'read_only' option for ''session_start()'' as a [[http://en.wikipedia.org/wiki/Read-only|read-only]] //mode// of the session. In other words: don't allow session data to be written if ''session_start(['read_only' => TRUE])'' was called.
-
-This would include the following characteristics (only when in read-only mode):
-
-  * Use shared(reader) instead of exclusive(writer) locks.
-  * Writing is allowed only for creation of new session IDs.
-  * API to detect the mode in userland code.
-
 ===== Proposed Voting Choices =====
 
-Still in dicussion, but will most likely match the sections of [[rfc:session-read_only-lazy_write#proposal]] at 100%.
+Various combinations of the [[rfc:session-read_only-lazy_write#proposal]] sections.
 
 Should require 50% + 1 votes.
 
@@ -225,4 +144,6 @@ After the project is implemented, this section should contain
 
 ===== Rejected Features =====
 
-TBD: Keep this updated with features that were discussed on the mail lists.
+  * Making 'read_only' a separate function.
+
+Almost nobody recognized this as something important and anyway the main issue here was the highly misleading name that 'read_only' is for what it does. Based on discission and an earlier version of this RFC, the patch for [[rfc:session-lock-ini]] has been altered to use the 'read_and_close' name, which is fine.
