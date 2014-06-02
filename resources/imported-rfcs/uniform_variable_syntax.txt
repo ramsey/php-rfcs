@@ -6,6 +6,145 @@
 
 ===== Introduction =====
 
+This RFC proposes the introduction of an internally consistent and complete variable syntax. To achieve this goal the
+semantics of some rarely used variable-variable constructions need to be changed.
+
+TODO
+
+===== Issues with the current syntax =====
+
+==== Root cause ====
+
+The root cause for most issues in PHP's current variable syntax are the semantics of the variable-variable syntax
+''$$foo['bar']''. Namely this expression is intepreted as ''${$foo['bar']}'' (lookup the variable with the name
+''$foo['bar']'') rather than ''${$foo}['bar']'' (take the '''bar''' offset of the ''$$foo'' variable).
+
+Why this choice of semantics is problematic to our parser design is explained in the next section. Before getting to
+that, I will discuss why this choice is also bad from a language design perspective:
+
+Normally variable accesses are interpreted from left to right. ''%%$foo['bar']->baz%%'' will first fetch a variable
+named ''$foo'', then will take the '''baz''' offset of the result and finally access the ''baz'' property. The
+''$$foo['baz']'' syntax goes against that basic principle. Rather than fetching ''$$foo'' and then taking its '''baz'''
+offset, it will first fetch ''$foo'', fetch its ''baz'' offset and then look up a variable with the name of the result.
+
+This combination of an indirect reference and an offset is the **only** case where interpretation is inverted. For
+example the very similar ''%%$$foo->bar%%'' will be interpreted as ''${$foo}->bar'' and not as ''${$foo->bar}''. It
+follows normal left-to-right semantics. Similarly ''$$foo::$bar'' is also interpreted as ''${$foo}::$bar'' and not as
+''${$foo::$bar}''.
+
+To ensure maximum possible inconsistency there exists an exception to this rule. Namely ''%%global $$foo->bar%%''
+**will** be interpreted as ''%%global ${$foo->bar}%%'', even though this is not the case for normal variable accesses.
+
+This issue applies not only to simple indirect references, but also to indirected property and method names. For example
+''Foo::$bar[1][2][3]'' is interpreted as an access to the static property ''Foo::$bar'', followed by fetches of the 1, 2
+and 3 offsets. On the other hand ''Foo::$bar[1][2][3]()'' (notice the parentheses at the end) has an entirely
+different interpretation. This does not call the function stored at ''Foo::$bar[1][2][3]''. Instead it calls the static
+method of class ''Foo'' with name ''$bar[1][2][3]''.
+
+The last issue implies that PHP's variable syntax is non-local. It is not possible to parse a PHP variable access with
+a fixed finite lookahead (most parsers have only one token lookahead), without transplanting the generated syntax tree
+or instructions after the fact.
+
+==== Impact on parser definition ====
+
+In addition to the problems described above the semantics for indirect references also has far-reaching consequences on
+how the variable syntax is defined in our parser. In the following I will outline the kind of issue it causes, for
+readers not familiar with parser construction:
+
+The "standard" approach to defining a variable syntax for a LALR parser is to create a left-recursive ''variable'' rule,
+which could look roughly as follows (somewhat simplified):
+
+<code>
+variable:
+        T_VARIABLE                            /* $foo */
+    |   variable '[' expr ']'                 /* variable['bar'] */
+    |   variable '->' T_STRING                /* variable->baz */
+    |   variable '->' T_STRING '(' params ')' /* variable->oof() */
+    |   variable '::' T_VARIABLE              /* variable::$rab */
+    |   ...
+;
+</code>
+
+This approach ensures that we can arbitrarily nest different access types (in the following called "dereferencing"). For
+example the above definition allows you to write ''%%$foo['bar']->baz->oof()::$rab%%''. This expression is grouped from
+left-to-right, i.e. it is interpreted as ''%%(((($foo)['bar'])->baz)->oof())::$rab%%''.
+
+What happens to this scheme if we add a (right-associative) ''$$foo['bar']'' syntax? One might think that it could be
+defined as follows:
+
+<code>
+reference_variable:
+        T_VARIABLE
+    |   reference_variable '[' expr ']'
+;
+
+variable:
+        T_VARIABLE 
+    |   '$' reference_variable
+    |   variable '[' expr ']'
+    |   variable '->' T_STRING
+    |   ...
+;
+</code>
+
+However, this is not possible because it makes the grammer ambiguous. When the parser encounters ''$$foo['bar']'' it
+could either interpret it using the '''$' reference_variable'' rule (i.e. ''${$foo['bar']}'' semantics) or using the
+''variable '[' expr ']''' rule (i.e. ''${$foo}['bar']'' semantics). This kind of issue is called a "shift/reduce
+conflict".
+
+How can this issue be resolved? By removing the ''variable '[' expr ']''' rule. However, if this rule is removed, you
+can no longer write ''%%$foo->bar['baz']%%'' etc either. As such offset access needs to be implemented anew for all
+other dereferencing types: You need to implement it for ''$foo->bar'', for ''$foo->bar()'' and for ''$foo::$bar''.
+Furthermore you need to ensure that you can continue to nest arbitrary types of dereferences after that.
+
+This is both extremely complicated and fragile. This is the reason why PHP only introduced the ''foo()['bar']'' syntax
+in PHP 5.4 and even then the support is not perfect.
+
+==== Incomplete dereferencing support ====
+
+Because of the implementational hurdles described in the previous section, we do not support all combinations of
+dereferencing operations to an arbitrary death. While PHP 5.4 fixed the most glaring issue (support for
+''%%$foo->bar()['baz']%%''), other problems still exist.
+
+Basically, there are two classes of issues. The first one is that we do not always properly support nesting of different
+dereferencing types. For example, while it is possible to write both ''$foo()['bar']'' and ''$foo['bar']()'', the
+combination ''$foo()['bar']()'' results in a parse error. Another example is that the constant dereferencing syntax
+implemented in PHP 5.5 allows you to write ''[$obj1, $obj2][0]'', but ''%%[$obj1, $obj2][0]->prop%%'' is not possible.
+Yet another example is that the alternative array syntax ''$str{0}'' is not supported on function calls, i.e.
+''getStr(){0}'' is not valid. I think the pattern should be clear by now.
+
+The second class of issues is that some nesting types aren't supported altogether. For example ''::'' only accepts
+simple reference variables on the left hand side. Writing something like ''$info['class']::${$info['property']}'' is not
+possible. Writing ''getFunction()()'' is not possible either. The ''(function() { ... })()'' pattern that is familiar
+from JavaScript is not allowed as well.
+
+Lack of support for dereferencing parenthesis-expressions also prevents you from properly disambiguating some
+expressions. For example, it is a common problem that ''%%$foo->bar()%%'' will always try to call the ''bar()'' method,
+rather than calling the closure stored in ''%%$foo->bar%%''. However writing ''($foo->bar)()'' is not possible and you
+need to use a temporary variable. Another example is the case of ''Foo::$bar[1][2][3]()'' from above (which is
+interpreted as ''Foo::{$bar[1][2][3]}()''). It is currently not possible to force the alternative behavior
+''(Foo::$bar[1][2][3])()''.
+
+==== Miscellaneous other issues ====
+
+=== Behavior in write/isset context ===
+
+The new ''(new Foo)['bar']'' and ''[...]['bar']'' syntaxes introduced in PHP 5.4 and PHP 5.5 were implemented as
+"non-variable expressions". Primarily this means that it is not possible to assign to them under any circumstances, even
+if it would be technically possible. E.g. there is nothing inherently problematic with writing ''(new Foo)['bar'] = 42''
+(it's no different than writing ''foo()['bar'] = 42'', which is possible). However this is not allowed.
+
+Furthermore this causes inconsistent behavior in ''empty()'': The expression ''empty(['bar' => 42]['bar'])'' will
+generate an "Undefined index" notice, even though ''empty()'' normally suppresses these.
+
+=== Superfluous CVs on static property access ===
+
+Upon encountering a static property access ''Foo::$bar'' PHP will currently emit a compiled variable (CV) for ''$bar'',
+even though it is not necessary and never used. This is once again related to the way static member access needs to be
+implemented to support our weird indirect reference semantics.
+
+=== TODO ===
+
 
 ===== Proposal =====
 
