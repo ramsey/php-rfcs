@@ -13,21 +13,27 @@ Both work relatively well, but beyond the maximum integer value on a specific pl
 
 Furthermore, some applications need to deal with very large integers beyond 32-bit or 64-bit. For this they can resort to extensions like gmp. However, dealing with these so-called "big integers" or "bigints" is rather clumsy. You must write all your code to deal with them specifically, and you must create objects for them rather than simply using numeric literals like for the built-in integer and float types.
 
-Hence, this RFC proposes the addition of built-in bigint support to PHP. Now, you can do operations with integers of any size, so long as you have enough memory. While there are now two types internally (long and bigint), userland code will continue to see only "integers", and the two types are indistinguishable. Overflow now is relegated to being an internal issue, as userland code will never have to deal with it.
+Hence, this RFC proposes the addition of built-in bigint support to PHP. Now, you can do operations with integers of any size, so long as you have enough memory. While there are now two types internally (long and bigint), userland code will continue to see only "integers", and the two types will be indistinguishable.
+
+The advantages of doing this are numerous. Now integers will always be consistent across platforms, with programmers not needing to worry about the size of a long – 32-bit, 64-bit or otherwise – on their platform. Operations, too, will always be consistent. This will help the portability of PHP code and mean less time wasted by programmers dealing with platform differences, strengthening PHP's cross-platform guarantees. Dealing with extremely large data sets becomes easier, as you no longer need to anticipate if your IDs will exceed 32 or 64 bits. Integer overflow is largely relegated to being an issue for internals programmers, as userland code will never have to deal with it, and there is no risk of a loss of precision as they will no longer become floats. All this combined is likely to make for more robust, less buggy applications. Finally, being able to deal with large integers "natively" makes PHP more attractive for web developers needing to do large integer math, such as  applications dealing with currency, or perhaps statistical applications.
 
 ===== Proposal =====
 
-Along with the existing IS_LONG and IS_DOUBLE types, a new IS_BIGINT type is introduced. IS_BIGINT is a reference-counted, copy-on-write type which is not garbage collected, much like a string. Behind-the-scenes, the GNU Multiple Precision library (aka GMP) is used to implement support for it, but it is abstracted with a new family of zend_bigint_* functions, meaning that theoretically another arbitrary-precision integer library could be used in its place if we so desired. As stated in the Introduction, no new userland type is added to PHP, and instead "integer" now covers two internal types: IS_LONG and IS_BIGINT. Internally, a new "fake type" is also added, namely IS_BIGINT_OR_LONG. This is used by a few functions dealing with conversions, and is now the "type" that (integer) will cast to. Type specifiers for zend_parse_parameters that previously yielded a long will continue to do so, with bigints being capped at the maximum value for a long. A new type specifier for a bigint will be added, and I also would like to add a type specifier for either a bigint or a long, but I haven't done these parts yet.
+==== New type ====
 
-In order to make integer arithmetic consistent between longs and bigints, certain changes to existing operator behaviour will be made. Firstly, if you left shift a 64-bit integer by a number greater than 64 then it currently "wraps around" on some processors, so << 65 is the same as << 1. This is counter-intuitive and couldn't be emulated with bigints (bigints have no maximum number of bits), so instead the sane thing will be done and << 65 will result in zero. Secondly, the pow (**) operator will now error when an exponent too large is used if it is dealing with an integer. This is because gmp can't handle exponents beyond the size of an unsigned long. This restriction will not occur when using the pow operator when either operand is a float. Finally, right shifts will promote to bigints rather than overflowing.
+To complement the existing internal IS_LONG and IS_DOUBLE types, a new IS_BIGINT type is introduced. IS_BIGINT is a reference-counted, copy-on-write type which is not garbage collected, much like a string. Behind-the-scenes, the GNU Multiple Precision library (aka GMP) is used to implement it, but it is abstracted with a new family of zend_bigint_* functions and the zend_bigint type, meaning that theoretically another arbitrary-precision integer library could be used in its place if we so desired. As stated in the Introduction, no new userland type is added to PHP, and instead "integer" now covers two internal types: IS_LONG and IS_BIGINT. There should be **no visible difference** to userland code between these types. Internally, a new "fake type" is also added, namely IS_BIGINT_OR_LONG. This is used by a few functions dealing with conversions and casts, and is now the "type" that (integer) will cast to. Type specifiers for zend_parse_parameters that previously yielded a long will continue to do so, with bigints being capped at the maximum value for a long. A new type specifier for a bigint will be added, and I also would like to add a type specifier for either a bigint or a long, but I haven't done these parts yet.
 
-The performance penalties //should// be only minor, however I have not yet benchmarked my patch. While left shifts and right shifts now require overflow checks, generally bigints will just take the place of floats in existing overflow checks so I don't expect there to be much performance impact.
+==== Changes to operators for the sake of consistency ====
 
-Unfortunately, certain new failure cases for PHP are introduced. If you do an operation resulting in an extremely large number, you might hit your request memory limit. Also, certain operations with extremely large numbers can cause gmp to error fatally, which sadly can't be recovered from or handled gracefully.
+In order to make integer arithmetic consistent between longs and bigints, certain changes to existing operator behaviour will be made.
 
-As a result of using GMP, it will now be a requirement to build PHP. The existing gmp extension will need to be rewritten so that it just passes on to the built-in operator functions.
+Bitwise operators will now deal with integers of any size (i.e. both longs and bigints) instead of being bounded by the size of a long on a machine.
 
-A problem arising from allowing integers to be arbitrarily large is that array keys using strings for numeric keys beyond the maximum size of a long would probably seem weird. At present, bigints are just dealt with as if they were numeric strings when using them as array keys and indices, but this may not be optimal.
+Currently, if you right shift a long by a number greater than its maximum number of bits, then the number of bits to shift by currently "wraps around" on some processors, e.g. >> 65 is the same as >> 1 on some 64-bit processors. This is counter-intuitive and couldn't be emulated with bigints (bigints have no maximum number of bits), so instead the sane thing will be done and << 65 will result in zero.
+
+Relatedly, left shifts will promote to bigints rather than overflowing.
+
+The pow (**) operator will now error when an exponent too large is used if it is dealing with an integer. This is because gmp can't handle exponents beyond the size of an unsigned long. This restriction will not occur when using the pow operator when either operand is a float.
 
 ===== Backward Incompatible Changes =====
 
@@ -41,7 +47,23 @@ This is proposed for the next PHP X, probably PHP 6. The patch is based off of p
 
 ===== RFC Impact =====
 
-==== To 64-bit RFC ===
+==== Performance ====
+
+The performance penalties //should// be only minor, however I have not yet benchmarked my patch. While left shifts and right shifts now require overflow checks, generally bigints will just take the place of floats in existing overflow checks so I don't expect there to be much performance impact.
+
+Unfortunately, certain new failure cases for PHP are introduced. If you do an operation resulting in an extremely large number, you might hit your request memory limit. Also, certain operations with extremely large numbers can cause gmp to error fatally, which sadly can't be recovered from or handled gracefully.
+
+==== Licensing and dependency issues ====
+
+As a result of using GMP, it will now always be a requirement to build PHP. GMP is widely available, so this shouldn't cause platform issues.
+
+However, it does cause a licensing issue. GMP is licensed under both the GPL and LGPL. As I understand it, using the LGPL with PHP shouldn't cause any problems for the vast majority of users, though I'm not an expert on this. It would confer an obligation to make available the GMP source code on people redistributing PHP, however this is not a terribly onerous requirement. If the fact GMP is LGPL-licensed causes a problem, it could be possible to swap it out for something more favourably licensed if such a library is available, due to the zend_bigint_* abstraction.
+
+==== Arrays ====
+
+A problem arising from allowing integers to be arbitrarily large is that array keys using strings for numeric keys beyond the maximum size of a long would probably seem weird. At present, bigints are just dealt with as if they were numeric strings when using them as array keys and indices, but this may not be optimal.
+
+==== To 64-bit RFC ====
 
 The [[rfc:size_t_and_int64_next|64 bit platform improvements for string length and integer in zval]] RFC would be affected by this. For one thing, there's less need to use 64-bit integers when bigints are supported, and their only benefit would now be performance. For another, GMP only supports the "long" datatype and not "long long". Hence, while Linux etc. which have longs on 64-bit systems be 64-bit would work fine, Windows poses a problem as longs on 64-bit Windows systems are still 32-bit, so some sort of trickery (likely by splitting 64-bit ints into high and low words) would need to be done to convert 64-bit ints to bigints or vice-versa. Of course, while this hurts performance, it would only be needed on Windows, and I don't expect the overhead would be too bad.
 
@@ -51,7 +73,7 @@ This should have no impact on existing SAPIs.
 
 ==== To Existing Extensions ====
 
-Any which request numeric parameters as zvals rather than longs or doubles from zend_parse_parameters will need changes. Those dealing with numerical operations specifically will require deeper changes. Obviously, ext/standard will need some updating. Also, as previously noted, ext/gmp should probably be rewritten.
+Any which request numeric parameters as zvals rather than longs or doubles from zend_parse_parameters will need changes. Those dealing with numerical operations specifically will require deeper changes. Obviously, ext/standard will need some updating. ext/gmp ought to be rewritten so that it just passes on to the built-in operator functions.
 
 ==== To Opcache ====
 
