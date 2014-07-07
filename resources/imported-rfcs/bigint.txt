@@ -1,6 +1,6 @@
 ====== PHP RFC: Big Integer Support ======
-  * Version: 0.9.5
-  * Date: 2014-06-20 (Initial; 2014-07-06 latest)
+  * Version: 0.9.6
+  * Date: 2014-06-20 (Initial; 2014-07-07 latest)
   * Author: Andrea Faulds, ajf@ajf.me
   * Status: Draft
   * First Published at: http://wiki.php.net/rfc/bigint
@@ -21,7 +21,9 @@ The advantages of doing this are numerous. Now integers will always be consisten
 
 ==== New type ====
 
-To complement the existing internal IS_LONG and IS_DOUBLE types, a new IS_BIGINT type is introduced. IS_BIGINT is a reference-counted, copy-on-write type which is not garbage collected, much like a string. Behind-the-scenes, the GNU Multiple Precision library (aka GMP) is used to implement it, but it is abstracted with a new family of zend_bigint_* functions and the zend_bigint type, meaning that theoretically another arbitrary-precision integer library could be used in its place if we so desired. As stated in the Introduction, no new userland type is added to PHP, and instead "integer" now covers two internal types: IS_LONG and IS_BIGINT. There should be **no visible difference** to userland code between these types. Internally, a new "fake type" is also added, namely IS_BIGINT_OR_LONG. This is used by a few functions dealing with conversions and casts, and is now the "type" that ''(integer)'' will cast to. Type specifiers for zend_parse_parameters that previously yielded a long will continue to do so, with bigints being capped at the maximum value for a long. A new type specifier for a bigint will be added, and I also would like to add a type specifier for either a bigint or a long, but I haven't done these parts yet.
+To complement the existing internal IS_LONG and IS_DOUBLE types, a new IS_BIGINT type is introduced. IS_BIGINT is a reference-counted, copy-on-write type which is not garbage collected, much like a string. Behind-the-scenes, the GNU Multiple Precision library (aka GMP) is used to implement it, but it is abstracted with a new family of zend_bigint_* functions and the zend_bigint type, meaning that theoretically another arbitrary-precision integer library could be used in its place if we so desired. As stated in the Introduction, no new userland type is added to PHP, and instead "integer" now covers two internal types: IS_LONG and IS_BIGINT. There should be **no visible difference** to userland code between these types. Internally, a new "fake type" is also added, namely IS_BIGINT_OR_LONG. This is used by a few functions dealing with conversions and casts, and is now the "type" that ''(integer)'' will cast to.
+
+Type specifiers for zend_parse_parameters that previously yielded a long will continue to do so. If a bigint that is outside of the range of a long is passed when the function expects a long, an E_RECOVERABLE_ERROR is raised, which was inspired by Anthony Ferrara's [[rfc:scalar_type_hinting_with_cast|Scalar Type Hinting With Casts]] RFC and Python's ''OverflowError''s. A new type specifier for a bigint will be added, and I also would like to add a type specifier for either a bigint or a long, but I haven't done these parts yet.
 
 ==== Changes to operators for the sake of consistency ====
 
@@ -38,7 +40,7 @@ In order to make integer arithmetic consistent between longs and bigints, certai
 
 As mentioned before, the shift left and shift right operators act differently, as does pow for very large exponents.
 
-Integers will no longer overflow to float, but instead become bigints (which, so far as userland cares, are just integers).
+Integers will no longer overflow to float, but instead become bigints (which, so far as userland cares, are just integers). Code expecting large integer literals to be floats will now end up with bigints instead, which might cause problems. However, if a float is still desired, this can be fixed simply by appending ''.0''.
 
 Some internal APIs, mostly ones dealing with numbers, will necessarily change their signatures or behaviour. For example, is_numeric_string/_ex now takes a ''zend_bigint*''''*'' parameter, and the cast_object object handler now has to deal with IS_BIGINT_OR_LONG and IS_BIGINT. (However, I am wondering if I should remove the latter)
 
@@ -118,14 +120,16 @@ The patch is unfinished. Many tests are still broken, I haven't gotten round to 
 
   * This is purely an internal issue, but should we scrap convert_to_bigint in the current patch? It's not currently used anywhere and we have convert_to_bigint_or_long. Having IS_BIGINT conversion as well as IS_BIGINT_OR_LONG and IS_LONG conversion poses an extra burden on implementers of the cast_object class handler, etc. However, it would make the conversion functions incomplete to not allow converting to this basic type, and we'd be instead shifting the burden to functions needing a bigint exclusively, as they'd have to convert to IS_BIGINT_OR_LONG, then convert to bigint themselves if the result was long. Furthermore, zend_parse_parameters is probably going to have a bigint-only specifier... so we'd probably need to implement this anyway. Worth nothing that the purpose of IS_BIGINT_OR_LONG is efficiency (don't use a bigint if you don't need to), but in many cases you can just make IS_BIGINT_OR_LONG fall-through to IS_LONG or IS_BIGINT (indeed, in many cases the result can never exceed 32 bits in length, so falling through to IS_LONG is the optimal solution), so the burden isn't really that great. Therefore my current thoughts are that we should keep convert_to_bigint and hence compel implementers of cast_object to support both IS_LONG, IS_BIGINT_OR_LONG and IS_BIGINT conversion.
   * How should we handle conversion of a bigint to a long (as a function parameter, say) when the bigint is too large to fit in a long? As implemented at present, we cap the value at LONG_MAX/_MIN, but this means complete loss of information (we now only know the sign and that it was a large number) and is inconsistent with the behaviour of double to long conversion, which merely truncates, leaving the lower bits intact. While I initially thought capping was the right approach, I now think truncating is the right one, and I am going implement this.
-  * Should we throw an E_NOTICE when a bigint is capped at LONG_MAX/_MIN or truncated during a conversion? I'm pretty sure we should and I need to implement this. Perhaps the notice should only happen in implict conversions, just like Anthony Ferrara's [[rfc:scalar_type_hinting_with_cast|Scalar Type Hinting With Casts]] RFC proposed for dealing with type hints.
+  * We currently throw an E_RECOVERABLE_ERROR if a bigint that is too large is passed as a parameter to a function expecting a long.
+    * Is this too harsh an error? Would E_WARNING be more appropriate? Old code might be caught out by this if it passed some really large double value as the value for a long parameter.
+    * We don't currently do this for doubles. Should we? It would mean more consistency.
   * Is GMP using LGPL a problem? (See "Licensing and dependency issues" above)
   * Should we rework array key handling? (See "Arrays" above)
 
 ==== TODO ====
 
   * Possible issue: Currently, when dividing a bigint by something, we check if it's divisible, then do an integer division if that is the case, or else cast to double and then do the division. However, for very large bigints, the double we get might end up being Infinity, so we should probably calculate the double from doing an integer division and using the remainder if possible.
-  * Figure out if we should deal with bigints string indices better. Currently we cast to long, but should we check for it being capped at LONG_MAX/_MIN and, if so, throw the "uninitalized index" error?
+  * Figure out if we should deal with bigints string indices better. Currently we cast to long, but should we check for it being capped at LONG_MAX/_MIN and, if so, throw the "uninitalized index" error? (That would make the most sense)
       * Looks like there's some sort of numeric string offset thing in zend_language_scanner.l, what is that and does it affect this?
   * Truncate instead of capping when converting bigints to long (see Open Questions)
   * Fix the one remaining broken test on 64-bit
