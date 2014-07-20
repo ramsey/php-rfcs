@@ -1,5 +1,5 @@
 ====== Request for Comments: Scalar Type Hinting With Casts ======
-  * Version: 0.1.7
+  * Version: 0.1.8
   * Date: 2012-07-03 (reopened 2014-07-13, latest update 2014-07-20)
   * Author: Anthony Ferrara <ircmaxell@php.net> (original)
   * Contributors: Andrea Faulds <ajf@ajf.me> (current maintainer)
@@ -30,16 +30,17 @@ On the other hand, this RFC tries to strike a balance between strict typing and 
 
 ==== Engine Changes ====
 
-The current implementation introduces four new reserved words: //int//, //float//, //bool// and //string//. These were not previously reserved, because casting is a special case in the lexer.
+The current implementation introduces five new reserved words: //int//, //float//, //bool//, //string// and //numeric//. These were not previously reserved, because casting is a special case in the lexer.
 
 If this causes a problem, it would be possible to revert to the previous implementation, where the parser still detects the type hints as object type hints and the compiler (zend_compile.c) then detects the exact value for the type hint, changing the stored hint from IS_OBJECT to the proper type (freeing the string).
 
 ==== Syntax ====
 
-Four new type hints are introduced with this patch:
+Five new type hints are introduced with this patch:
 
   * //int// - Matching integers only
   * //float// - Matching floating point numbers
+  * //numeric// - Mathing integers and floating point numbers (to allow polymorphic functions dealing with numbers)
   * //bool// - Matching boolean parameters only
   * //string// - Matching strings only
 
@@ -51,30 +52,30 @@ Conversion is allowed only if data-loss does not happen. There are a few excepti
   * //pass// indicates no error and a conversion
   * //notice// indicates an E_NOTICE and a conversion
 
-^ value                   ^ string ^ float  ^ int    ^ boolean‡^ array ^
-^ true (boolean)          | pass   | pass   | pass   | pass    | fail  |
-^ false (boolean)         | pass   | pass   | pass   | pass    | fail  |
-^ 0 (integer)             | pass   | pass   | pass   | fail    | fail  |
-^ 1 (integer)             | pass   | pass   | pass   | fail    | fail  |
-^ 12 (integer)            | pass   | pass   | pass   | fail    | fail  |
-^ 12 (double)             | pass   | pass   | pass   | fail    | fail  |
-^ 12.34 (double)          | pass   | pass   | fail   | fail    | fail  |
-^ 'true' (string)         | pass   | fail   | fail   | fail    | fail  |
-^ 'false' (string)        | pass   | fail   | fail   | fail    | fail  |
-^ '0' (string)            | pass   | pass   | pass   | fail    | fail  |
-^ '1' (string)            | pass   | pass   | pass   | fail    | fail  |
-^ '12' (string)           | pass   | pass   | pass   | fail    | fail  |
-^ '12abc' (string)        | pass   | fail   | fail   | fail    | fail  |
-^ '12.0' (string)         | pass   | pass   | pass   | fail    | fail  |
-^ '12.34' (string)        | pass   | pass   | fail   | fail    | fail  |
-^ 'foo' (string)          | pass   | fail   | fail   | fail    | fail  |
-^ array () (array)        | fail   | fail   | fail   | fail    | pass  |
-^ array (0 => 12) (array) | fail   | fail   | fail   | fail    | pass  |
-^ NULL (NULL)             | fail   | fail   | fail   | fail    | fail  |
-^ %%''%% (string)         | pass   | fail   | fail   | fail    | fail  |
-^ 1 (resource)            | fail   | fail   | fail   | fail    | fail  |
-^ StdClass                | fail   | fail*  | fail*  | fail†   | fail  |
-^ implementing __toString | pass   | fail*  | fail*  | fail†   | fail  |
+^ value                   ^ string ^ float  ^ int    ^ numeric ^ boolean‡^ array ^
+^ true (boolean)          | pass   | pass   | pass   | pass    | pass    | fail  |
+^ false (boolean)         | pass   | pass   | pass   | pass    | pass    | fail  |
+^ 0 (integer)             | pass   | pass   | pass   | pass    | fail    | fail  |
+^ 1 (integer)             | pass   | pass   | pass   | pass    | fail    | fail  |
+^ 12 (integer)            | pass   | pass   | pass   | pass    | fail    | fail  |
+^ 12 (double)             | pass   | pass   | pass   | pass    | fail    | fail  |
+^ 12.34 (double)          | pass   | pass   | fail   | pass    | fail    | fail  |
+^ 'true' (string)         | pass   | fail   | fail   | fail    | fail    | fail  |
+^ 'false' (string)        | pass   | fail   | fail   | fail    | fail    | fail  |
+^ '0' (string)            | pass   | pass   | pass   | pass    | fail    | fail  |
+^ '1' (string)            | pass   | pass   | pass   | pass    | fail    | fail  |
+^ '12' (string)           | pass   | pass   | pass   | pass    | fail    | fail  |
+^ '12abc' (string)        | pass   | fail   | fail   | fail    | fail    | fail  |
+^ '12.0' (string)         | pass   | pass   | pass   | pass    | fail    | fail  |
+^ '12.34' (string)        | pass   | pass   | fail   | pass    | fail    | fail  |
+^ 'foo' (string)          | pass   | fail   | fail   | fail    | fail    | fail  |
+^ array () (array)        | fail   | fail   | fail   | fail    | fail    | pass  |
+^ array (0 => 12) (array) | fail   | fail   | fail   | fail    | fail    | pass  |
+^ NULL (NULL)             | fail   | fail   | fail   | fail    | fail    | fail  |
+^ %%''%% (string)         | pass   | fail   | fail   | fail    | fail    | fail  |
+^ 1 (resource)            | fail   | fail   | fail   | fail    | fail    | fail  |
+^ StdClass                | fail   | fail*  | fail*  | fail*   | fail†   | fail  |
+^ implementing __toString | pass   | fail*  | fail*  | fail*   | fail†   | fail  |
 
 <nowiki>*</nowiki>actually //notice// in patch as it stands due to behaviour of default object casting handler
 
@@ -86,7 +87,7 @@ It's important to note that passing `12.5` as a float or string to a //int// typ
 
 ==== Errors ====
 
-If a provided hint does not match at all ("foo" passed to an //int// hint), an //E_RECOVERABLE_ERROR// is raised. This includes non-well-formed numerics passed to an //int// or //float// hinted parameter, unlike zend_parse_parameters which would simply raise an //E_NOTICE//.
+If a provided hint does not match at all ("foo" passed to an //int// hint), an //E_RECOVERABLE_ERROR// is raised. This includes non-well-formed numerics passed to an //int//, //float// or //numeric// hinted parameter, unlike zend_parse_parameters which would simply raise an //E_NOTICE//.
 
 ==== Defaults ====
 
@@ -109,7 +110,7 @@ This current proposal adds a series of conversion functions to the core:
   * //int convert_to_{type}_safe(zval <nowiki>**</nowiki>ptr)// - Convert the zval to {type}. Return value indicates if conversion was "clean". (FAILURE indicates unclean conversion)
   * //int convert_to_{type}_safe_ex(zval <nowiki>**</nowiki>ptr)// - Separate zval if not a reference, and convert to {type}. Return indicates clean conversion (FAILURE indicates unclean conversion).
 
-These functions pairs exist for //long//, //double//, //string// and //boolean//.
+These functions pairs exist for //long//, //double//, //string//, //boolean// and //numeric//.
 
 ==== New Methods ====
 
@@ -119,6 +120,7 @@ For consistency, the following new methods have been added to //ReflectionParame
   * //isFloat()// - boolean to determine if parameter is type-hinted as a float.
   * //isBool()// - boolean to determine if parameter is type-hinted as a boolean.
   * //isString()// - boolean to determine if parameter is type-hinted as a string.
+  * //isNumeric()// - boolean to determine if parameter is type-hinted as numeric.
 
 ==== Patch ====
 
@@ -155,7 +157,7 @@ Another option is go completely strict and allow only boolean values, failing ev
 The final option this section considers is a limited set of values. TRUE, FALSE and NULL would be accepted, along with the integer and float values 1 and 0 (which are the int/float values TRUE and FALSE cast to, respectively), ‘1’ and the empty string (which are the string values TRUE and FALSE cast to), and ‘0’ (which (string)(int)FALSE would give you), along with objects casting to boolean. This is something of a compromise between the first two proposals.
 
 Both the author of this RFC (Anthony) and the current maintainer (Andrea) are yet to settle on one specific option.
-==== Handling of "123abc" for int and float ====
+==== Handling of "123abc" for int, float and numeric ====
 
 This has been changed to E_RECOVERABLE_ERROR, but should it perhaps be something softer, like E_NOTICE or E_WARNING?
 
@@ -191,6 +193,24 @@ function foo(float $a) {
 }
 foo(1); // float(1)
 foo("1"); // float(1)
+foo(1.0); // float(1)
+foo("1a"); // E_RECOVERABLE_ERROR
+foo("a"); // E_RECOVERABLE_ERROR
+foo(1.5); // float(1.5)
+foo(array()); // E_RECOVERABLE_ERROR
+foo(new StdClass); // E_RECOVERABLE_ERROR
+?>
+</file>
+
+==== Numeric Hints ====
+
+<file php numeric_hint.php>
+<?php
+function foo(numeric $a) {
+    var_dump($a); 
+}
+foo(1); // int(1)
+foo("1"); // int(1)
 foo(1.0); // float(1)
 foo("1a"); // E_RECOVERABLE_ERROR
 foo("a"); // E_RECOVERABLE_ERROR
@@ -259,4 +279,5 @@ foo(null); // E_RECOVERABLE_ERROR
   * 0.1.4 - Removed //resource// typehint
   * 0.1.5 - Note on NULL default values
   * 0.1.6 - Booleans are now strict
-  * 0.1.7 - Types are not nullable by default
+  * 0.1.7 - Types are now not nullable by default
+  * 0.1.8 - Added numeric typehint
