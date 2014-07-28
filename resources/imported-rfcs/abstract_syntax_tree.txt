@@ -1,0 +1,135 @@
+====== PHP RFC: Abstract syntax tree ======
+  * Date: 2014-07-28
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Targeting: PHP.next
+of the goodness that those new features bring."
+
+===== Introduction =====
+
+This RFC proposes the introduction of an Abstract Syntax Tree (AST) as an intermediary structure in our compilation process. This replaces the existing practice of emitting opcodes directly from the parser.
+
+Decoupling the parser and compiler makes the implementation removes a number of hacks and makes the implementation more maintainable and understandable in general. Furthermore it allows implementing syntax that was not with a single-pass compilation process.
+
+The disadvantage of employing an abstract syntax tree is that it requires more memory during compilation.
+
+===== Proposal =====
+
+===== Implementation =====
+
+==== AST API ====
+
+=== AST node structure and creation ===
+
+A standard AST node is defined as follows:
+
+<code c>
+typedef unsigned short zend_ast_kind;
+typedef unsigned short zend_ast_attr;
+
+typdef struct _zend_ast {
+    zend_ast_kind kind;
+    zend_ast_attr attr;
+    zend_uint lineno;
+    struct _zend_ast *child[1];
+} zend_ast;
+</code>
+
+''kind'' is a ''ZEND_AST_*'' enum constant indicating the type of the AST node, e.g. ''ZEND_AST_BINARY_OP'' for a binary operation. ''attr'' is a unsigned short that can be used to store kind-specific flags. ''lineno'' is the start line number of the node.
+
+Child nodes are stored in the ''child'' array. The size of this array is determined during allocation based on the kind. Nodes are created using ''zend_ast_create'' or ''zend_ast_create_ex'', depending on whether you want to make use of ''attr'':
+
+<code c>
+zend_ast *zend_ast_create_ex(zend_ast_kind kind, zend_ast_attr attr, ...);
+zend_ast *zend_ast_create(zend_ast_kind kind, ...);
+</code>
+
+For example:
+
+<code c>
+zend_ast *ast = zend_ast_create_ex(ZEND_AST_BINARY_OP, ZEND_ADD, left_ast, right_ast);
+</code c>
+
+AST nodes created this way have a fixed number of children determined by the AST kind. For cases where the number of children is determined dynamically (e.g. arrays, argument lists, statement lists, etc) the type ``zend_ast_list`` is used instead. It is identical to ordinary AST nodes, but contains an additional children count:
+
+<code c>
+typedef struct _zend_ast_list {
+    zend_ast_kind kind;
+    zend_ast_attr attr;
+    zend_uint lineno;
+    zend_uint children;
+    zend_ast *child[1];
+} zend_ast_list;
+</code>
+
+List nodes are created using ''zend_ast_create_list'' and children are appended using ''zend_ast_list_add''.
+
+<code c>
+zend_ast_list *zend_ast_create_list(zend_uint init_children, zend_ast_kind kind, ...);
+zend_ast_list *zend_ast_list_add(zend_ast_list *list, zend_ast *op);
+</code>
+
+For example, creating and appending to an array AST:
+
+<code c>
+/* Initialize array with two elems */
+zend_ast_list *list = zend_ast_create_list(2, ZEND_AST_ARRAY,
+    zend_ast_create(ZEND_AST_ARRAY_ELEM, value1_ast, key1_ast),
+    zend_ast_create(ZEND_AST_ARRAY_ELEM, value2_ast, key2_ast));
+
+/* Add another element afterwards */
+list = zend_ast_list_add(list,
+    zend_ast_create(ZEND_AST_ARRAY_ELEM(value3_ast, key3_ast));
+</code>
+
+Lastly an AST node can store a ''zval''. For this purpose the ''ZEND_AST_ZVAL'' kind is used in conjunction with the ''zend_ast_zval'' structure:
+
+<code c>
+/* Lineno is stored in val.u2.lineno */
+typedef struct _zend_ast_zval {
+    zend_ast_kind kind;
+    zend_ast_attr attr;
+    zval val;
+} zend_ast_zval;
+</code>
+
+Zval AST nodes are created using ''zend_ast_create_zval'' or ''zend_ast_create_zval_ex'' (in case ''attr'' is used). There are two additional convenience functions which create a zval AST node from a string or a long:
+
+<code c>
+zend_ast *zend_ast_create_zval_ex(zval *zv, zend_ast_attr attr);
+zend_ast *zend_ast_create_zval(zval *zv);
+
+zend_ast *zend_ast_create_zval_from_str(zend_string *str);
+zend_ast *zend_ast_create_zval_from_long(long lval);
+</code>
+
+These functions return the node cast to ''zend_ast*'' for practical purposes. The ''zend_ast_zval'' structure is only used internally and all external code works through ''zend_ast*''.
+
+There is another special node type for class and function declarations, which is not documented here.
+
+=== AST allocation, destruction and copy ===
+
+As the abstract syntax tree is only necessary during compilation and discarded afterwards, AST nodes make use of an arena allocator. The arena is stored in ''CG(ast_arena)''. Before invoking ''zendparse'' this arena must be allocated using ''zend_arena_create''.
+
+Due to the usage of an arena allocator AST nodes do not need to be individually freed, however zvals held by them still need to be destroyed. This is accomplished using ''zend_ast_destroy'', which will recursively walk the AST and dtor all held values. The following code features a sample invocation of the parser, including arena handling:
+
+<code c>
+CG(ast_arena) = zend_arena_create(1024 * 32);
+compiler_result = zendparse(TSRMLS_C);
+if (compiler_result != 0) {
+    zend_bailout();
+}
+zend_compile_top_stmt(CG(ast) TSRMLS_CC);
+zend_ast_destroy(CG(ast));
+zend_arena_destroy(CG(ast_arena));
+</code>
+
+For constant scalar expressions AST nodes need to be preserved after compilation. For this purpose they need to be copied from the arena into ZMM allocated memory. This is accomplished using the ''zend_ast_copy'' function. The heap-allocated AST can then be destroyed using ''zend_ast_destroy_and_free''.
+
+===== Backward Incompatible Changes =====
+
+===== Open Issues =====
+
+
+===== Patch =====
+
