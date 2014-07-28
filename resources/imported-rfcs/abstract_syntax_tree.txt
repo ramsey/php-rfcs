@@ -20,9 +20,9 @@ The disadvantage of employing an abstract syntax tree is that it requires more m
 
 The process for converting a PHP file into opcodes now consists of three phases:
 
- - Lexing: the generation of a token stream from the source code
- - Parsing: the generation of an abstract syntax tree from the token stream.
- - Compilation: the generation of op arrays from the abstract syntax tree.
+  - Lexing: the generation of a token stream from the source code
+  - Parsing: the generation of an abstract syntax tree from the token stream.
+  - Compilation: the generation of op arrays from the abstract syntax tree.
 
 The lexer is defined in ''zend_language_scanner.l'' and generated using re2c. The lexer returns token IDs one at a time and optionally provides a semantic value zval (e.g. containing the name of a variable token).
 
@@ -208,6 +208,46 @@ zend_arena_destroy(CG(ast_arena));
 </code>
 
 For constant scalar expressions AST nodes need to be preserved after compilation. For this purpose they need to be copied from the arena into ZMM allocated memory. This is accomplished using the ''zend_ast_copy'' function. The heap-allocated AST can then be destroyed using ''zend_ast_destroy_and_free''.
+
+==== Compiler implementation ====
+
+=== Emitting oplines ===
+
+The compiler continues to use ''znode''s to store operands during compilation. Oplines are usually created using the ''zend_emit_op'' or ''zend_emit_op_tmp'' functions:
+
+<code c>
+zend_op *zend_emit_op(znode *result, zend_uchar opcode, znode *op1, znode *op2 TSRMLS_DC);
+zend_op *zend_emit_op_tmp(znode *result, zend_uchar opcode, znode *op1, znode *op2 TSRMLS_DC);
+</code>
+
+Both will emit (and return) an opline with the given opcode and operands. ''zend_emit_op_tmp'' will use an ''IS_TMP_VAR'' variable for the result. ''zend_emit_op'' uses an ''IS_VAR'' variable instead. ''zend_emit_op'' also accepts ''NULL'' for the result, in which case the opline will have no result (''IS_UNUSED'').
+
+Both ''op1'' and ''op2'' can also be ''NULL'', in which case they are unused.
+
+There are additional functions for handling jump instructions. ''zend_emit_jump'' and ''zend_emit_cond_jump'' will emit jumps / conditional jumps. In many cases the jump target is not known at the time the opline is emitted. In this case ''0'' should be passed for ''opnum_target'' and the opnum returned by the function backed up. Afterwards the returned opnum can be used to update the jump target using ''zend_update_jump_target'':
+
+<code c>
+zend_uint zend_emit_jump(zend_uint opnum_target TSRMLS_DC);
+zend_uint zend_emit_cond_jump(zend_uchar opcode, znode *cond, zend_uint opnum_target TSRMLS_DC);
+void zend_update_jump_target(zend_uint opnum_jump, zend_uint opnum_target TSRMLS_DC);
+</code>
+
+=== Compiling expressions ===
+
+<code c>
+void zend_compile_binary_op(znode *result, zend_ast *ast TSRMLS_DC) {
+    zend_ast *left_ast = ast->child[0];
+    zend_ast *right_ast = ast->child[1];
+    zend_uint opcode = ast->attr;
+
+    znode left_node, right_node;
+    zend_compile_expr(&left_node, left_ast TSRMLS_CC);
+    zend_compile_expr(&right_node, right_ast TSRMLS_CC);
+
+    zend_emit_op_tmp(result, opcode, &left_node, &right_node TSRMLS_CC);
+}
+</code>
+
 
 ===== Backward Incompatible Changes =====
 
