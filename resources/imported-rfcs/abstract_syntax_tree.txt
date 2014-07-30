@@ -234,6 +234,23 @@ void zend_update_jump_target(zend_uint opnum_jump, zend_uint opnum_target TSRMLS
 
 === Compiling expressions ===
 
+Expressions are compiled using the ''zend_compile_expr'' function, which accepts a ''result'' znode and an ''ast''. This function merely dispatches to a more concrete compilation function based on the AST kind:
+
+<code c>
+switch (ast->kind) {
+    /* ... */
+    case ZEND_AST_ASSIGN_OP:
+        zend_compile_compound_assign(result, ast TSRMLS_CC);
+        return;
+    case ZEND_AST_BINARY_OP:
+        zend_compile_binary_op(result, ast TSRMLS_CC);
+        return;
+    /* ... */
+}
+</code>
+
+The ''zend_compile_binary_op'' function referenced above is defined as follows (compile-time pre-evaluation code has been removed for conciseness):
+
 <code c>
 void zend_compile_binary_op(znode *result, zend_ast *ast TSRMLS_DC) {
     zend_ast *left_ast = ast->child[0];
@@ -248,6 +265,28 @@ void zend_compile_binary_op(znode *result, zend_ast *ast TSRMLS_DC) {
 }
 </code>
 
+By convention, all ''zend_compile_*'' functions start by extracting child nodes into named local variables with an ''_ast'' suffix. Afterwards the function compiles the child nodes into ''znode''s (which have the same name as the corresponding AST nodes, but using a ''_node'' suffix). Finally an opline is emitted, which has a TMP_VAR result and uses the two znodes as operands.
+
+When ''zend_compile_expr'' is passed the AST of a variable expression, it will compile it using the ''BP_VAR_R'' fetch mode. To explicitly specify the fetch mode the function ''zend_compile_var'' can be used instead, which accepts a ''BP_VAR_*'' mode as the last argument:
+
+<code c>
+void zend_compile_pre_incdec(znode *result, zend_ast *ast TSRMLS_DC) {
+	zend_ast *var_ast = ast->child[0];
+	ZEND_ASSERT(ast->kind == ZEND_AST_PRE_INC || ast->kind == ZEND_AST_PRE_DEC);
+
+	if (var_ast->kind == ZEND_AST_PROP) {
+		zend_op *opline = zend_compile_prop_common(result, var_ast, BP_VAR_RW TSRMLS_CC);
+		opline->opcode = ast->kind == ZEND_AST_PRE_INC ? ZEND_PRE_INC_OBJ : ZEND_PRE_DEC_OBJ;
+	} else {
+		znode var_node;
+		zend_compile_var(&var_node, var_ast, BP_VAR_RW TSRMLS_CC);
+		zend_emit_op(result, ast->kind == ZEND_AST_PRE_INC ? ZEND_PRE_INC : ZEND_PRE_DEC,
+			&var_node, NULL TSRMLS_CC);
+	}
+}
+</code>
+
+The preceding code sample also illustrates another pattern that sometimes occurs when dealing with operations on variables: A property increment has the same structure as a property fetch, just using a different opcode. Such situations are handled by providing a ''_common'' variant of variable-compilation functions, which return the generated opline for further adjustments.
 
 ===== Backward Incompatible Changes =====
 
