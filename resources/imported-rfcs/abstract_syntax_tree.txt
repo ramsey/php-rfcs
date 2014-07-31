@@ -141,7 +141,7 @@ $array[$i++] = $i++;
 // NEW: [2 => 1]
 </code>
 
-Note that order of evaluation is *explicitly documented to be undefined* and also not consistent. For example, in the following example both the old implementation and the AST implementation evaluate the right-hand side first:
+Note that order of evaluation is //explicitly documented to be undefined// and also not consistent. For example, in the following example both the old implementation and the AST implementation evaluate the right-hand side first:
 
 <code php>
 $i = 1;
@@ -149,9 +149,54 @@ $array[$i] = $i++;
 // OLD + NEW: [2 => 1]
 </code>
 
+===== Additional possibilities (not implemented) =====
+
+The generated AST can be exposed to userland via an extension, for use by static analysers. This should be relatively easy to implement and we might even want to provide this as a bundled extension (like ext/tokenizer).
+
+More interestingly, we could allow extensions to hook into the compilation process (the current AST implementation does not provide hooks, but they can be added if we want them). This would allow extensions to implement some types of "language features".
+
+As an example, this is roughly how an implementation of the [rfc:ifsetor|ifsetor RFC] //could// look like using an AST hook:
+
+<code c>
+void ext_ifsetor_hook(zend_ast **ast_ptr TSRMLS_DC) {
+    zend_ast *ast = *ast_ptr;
+    
+    if (ast->kind == ZEND_AST_CALL && ast->child[0]->kind == ZEND_AST_ZVAL) {
+        zend_string *name = zval_get_string(zend_ast_get_zval(ast->child[0]));
+        zend_ast_list *args = zend_ast_get_list(ast->child[1]);
+        
+        if (zend_str_equals_literal_ci(name, "ifsetor")
+            && args->children == 2 && !zend_args_contain_unpack(args)
+        ) {
+            if (!zend_is_variable(args->child[0])) {
+                zend_error_noreturn(E_COMPILE_ERROR, "First argument of ifsetor "
+                    "must be a variable");
+            }
+            
+            /* Note: One would need a function for adding refs to args->child[0] here,
+             * as it is used two times - as written here it won't work correctly. */
+            *ast_ptr = zend_ast_create(ZEND_AST_CONDITIONAL,
+                zend_ast_create(ZEND_AST_ISSET, args->child[0]),
+                args->child[0],
+                args->child[1]
+            );
+        }
+        
+        STR_RELEASE(name);
+    }
+}
+</code>
+
+I don't know how useful this is and how many things can be implemented in this way, but I think it's worth considering.
+
 ===== Patch =====
 
-The AST implementation can be found on GitHub: https://github.com/nikic/php-src/tree/ast
+The AST implementation can be found at https://github.com/nikic/php-src/tree/ast. Some quick links to the most important files:
+
+  * ''[[https://github.com/nikic/php-src/blob/ast/Zend/zend_language_parser.y|zend_language_parser.y]]''
+  * ''[[https://github.com/nikic/php-src/blob/ast/Zend/zend_ast.h|zend_ast.h]]''
+  * ''[[https://github.com/nikic/php-src/blob/ast/Zend/zend_ast.c|zend_ast.c]]''
+  * ''[[https://github.com/nikic/php-src/blob/ast/Zend/zend_compile.c|zend_compile.c]]''
 
 The branch already includes the Uniform Variable Syntax RFC, as it was a necessary prerequisite for the implementation.
 
