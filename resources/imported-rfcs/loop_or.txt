@@ -1,0 +1,192 @@
+====== loop + or control structure ======
+  * Version: 1.0
+  * Date: 2014-09-19
+  * Author: Leigh, leight -> gmail
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/loop_or
+
+===== Introduction =====
+
+It is often desirable to perform a set of actions if the conditions to enter a loop are //not// met. This can require a significant amount of boilerplate code if the conditions are complex.
+
+This RFC proposes an optional default control block for loops, that is executed in the event that the loop is not entered.
+
+===== Proposal =====
+
+Pre-condition loops (for, foreach and while) will be allowed to have an optional default block (using the existing ''or'' keyword) after their loop body, which is executed when the body of the loop is not entered (condition failed, empty array, etc.).
+
+Usage:
+
+<code php>
+while ($cond) {
+	// loop body
+}
+or{
+	// did not enter while loop
+}
+
+for ($i = 0, $j = $k; $i < 4 && $j < 65536; $i++, $j <<= 1) {
+	// loop body
+}
+or {
+	// did not enter for loop
+}
+
+foreach (generator() as $k => $v) {
+	// loop body
+}
+or {
+	// did not enter foreach loop
+}
+</code>
+
+In the case of ''for'' and ''foreach'' loops it's immediately obvious that separate tracking variables would be required to monitor whether the loop had been entered. This proposal does away with that necessity and increases performance as a side-effect.
+
+''do {} while();'' loops have been deliberately excluded from this behaviour as they always enter the loop at least once. The only available behaviour for a default block on a do while loop is to have it execute if the loop only iterates once, which feels inconsistent.
+
+Alternate syntax loops also gain this functionality with a ''or:'' clause.
+
+This type of behaviour has been suggested before usually using the ''else'' keyword, originally the idea was to use the ''default'' keyword however this can break ''switch'' when using a semi-colon after the ''default'' keyword (thanks @ Paul Crovella) however using ''else'' especially has several drawbacks that make ''or'' more attractive:
+
+ * Not backwards compatible by default due to dangling ''else''
+<code php>
+if ($something)
+	while ($cond)
+		// loop body
+else
+	// this now belongs to the while loop
+</code>
+
+ * Making it backwards compatible leads to inconsistent behaviour
+<code php>
+if ($something)
+	while ($cond)
+		// loop body
+	else
+		// this still belongs to the if statement
+</code>
+
+ * It breaks familiarity with similar behaviour in other languages
+<code php>
+while ($cond) {
+	// loop body
+}
+else {
+	// In Python this will always execute unless break; is used in the loop body
+}
+</code>
+
+Using ''default'' is problematic in the following scenario
+<code php>
+switch ($x) {
+    case 1:
+        while ($y)
+            // stuff
+    default;
+        // stuff
+}
+</code>
+
+These scenarios could be solved by introducing a new keyword, however to maintain backward compatibility as far as possible it is more sane to borrow an existing keyword with a similar semantic meaning, in this case ''or'', loop ''or'' do otherwise.
+
+The intention is to implement this by duplicating loop prologues to avoid the requirement for tracking variables, and keep performance on-par with pre-patch looping.
+
+As an example here is the opcode dump of a pre-patch basic while loop.
+<code>
+$i = 3;
+while ($i--) {
+    print 'loop';
+}
+
+line     # *  op                           fetch          ext  return  operands
+---------------------------------------------------------------------------------
+   3     0  >   ASSIGN                                                   !0, 3
+   4     1  >   POST_DEC                                         ~1      !0
+         2    > JMPZ                                                     ~1, ->6
+   5     3  >   PRINT                                            ~2      'loop'
+         4      FREE                                                     ~2
+   6     5    > JMP                                                      ->1
+         6  > > RETURN                                                   1
+</code>
+
+And a post-patch basic while loop with default block (labels added to help visualise flow)
+<code>
+$i = 0;
+while ($i--) {
+    print 'loop';
+}
+or {
+    print 'or';
+}
+
+         # *  op                           fetch          ext  return  operands
+---------------------------------------------------------------------------------
+         0  >   ASSIGN                                                   !0, 0
+cond_1:  1  >   POST_DEC                                         ~1      !0
+         2    > JMPZNZ                                   loop            ~1, ->or
+cond_2:  3  >   POST_DEC                                         ~1      !0
+         4    > JMPZ                                                     ~1, ->nxt_op
+loop:    5  >   PRINT                                            ~2      'loop'
+         6      FREE                                                     ~2
+         7    > JMP                                                      ->cond_2
+or:      8  >   PRINT                                            ~3      'or'
+         9      FREE                                                     ~3
+nxt_op: 10  > > RETURN                                                   1
+</code>
+
+The key here is that ''cond_1'' uses JMPZNZ to either jump over ''cond_2'' straight to ''loop'' or to the ''or'' block on the first iteration, but after the loop is entered ''cond_2'' is used for all subsequent iterations and jumps to ''nxt_op'' on failure, skipping the ''or'' block. ''for'' and ''foreach'' loops are handled in a similar manner.
+
+===== Backward Incompatible Changes =====
+Nothing forseen.
+
+===== Proposed PHP Version(s) =====
+PHP.next (whether next is 7.0 or 5.7)
+
+===== RFC Impact =====
+==== To SAPIs ====
+All SAPIs gain the same functionality
+
+==== To Existing Extensions ====
+No standard extensions should be affected, only the parser and compiler are modified.
+
+==== To Opcache ====
+TODO - There may be an impact here, but any patch will review Opcache. This section needs commentary from internals.
+
+===== Open Issues =====
+None
+
+===== Unaffected PHP Functionality =====
+''break'' and ''continue'' both continue to function sanely.
+
+Both require the loop to be entered to have an effect, which means the default block cannot be executed at the point these constructs are used.
+
+Loops without bodies also get to have default blocks
+
+===== Future Scope =====
+There may be an opporunity to support the python style loop+else, but this will require a new keyword to preserve dangling else backward compatibility
+
+===== Proposed Voting Choices =====
+This is a language change and requires a 2/3 majority in favour of the feature.
+
+===== Patches and Tests =====
+A proof of concept is being worked on by Leigh - ''while'' and ''for'' are working - ''foreach'' currently segfaulting
+
+===== Implementation =====
+TODO
+
+===== References =====
+
+Original RFC:
+
+[[http://wiki.php.net/rfc/loop_else|loop_else]] (by Dmitri Ravazin)
+
+Original discussions in bug tracker:
+
+[[https://bugs.php.net/bug.php?id=26411|while {} else {}]] (by php at bellytime dot com)
+
+[[https://bugs.php.net/bug.php?id=46240|Build in foreach else support]] (by kjarli at gmail dot com)
+
+[[https://bugs.php.net/bug.php?id=61222|For... else construct]] (by jeroenvandenenden at gmail dot com)
+
+===== Changelog =====
+2014-09-19 - v1.0 - RFC created
