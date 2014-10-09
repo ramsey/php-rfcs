@@ -1,0 +1,136 @@
+====== PHP RFC: Access to aliases definition by reflection ======
+  * Version: 0.1
+  * Date: 2013-10-09
+  * Author: Miloslav Hůla, <miloslav.hula@gmail.com>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/aliases_by_reflection
+
+
+===== Introduction =====
+PHP 5.3 brought namespaces and aliasing/importing by ''use'' operator. Aliases are expanded to FQN (Fully Qualified Name) in the compile-time phase and user-land code has no access to aliases definition. Today, aliases are often used in annotations and annotations are used by the advanced programming techniques. The need to expand aliases to FQN in user-land code arose. This RFC brings the aliases definition into user-land.
+
+The RFC does not deal with function and constant aliases brought by PHP 5.6.
+
+
+===== Problem to solve =====
+<code php>
+use Library\Http;
+
+class Factory
+{
+	/** @return Http\Client */
+	public function createClient()
+	{
+		return new Http\Client;
+	}
+}
+</code>
+
+It is very difficult to find out, if class name ''Http\Client'' in ''@return'' annotation is already FQN or if it is an alias.
+
+Libraries solve this problem roughly in the same way: "tokenize source code and search for T_USE tokens." It is very expensive, error prone and caching is needed. Example solutions:
+
+  * Nette Framework [[https://github.com/nette/reflection/blob/46c46460302913f42afc16c8307b2388107e33e2/src/Reflection/AnnotationsParser.php#L269|AnnotationsParser]]
+  * Doctrine [[https://github.com/doctrine/annotations/blob/0db097b6c15e2e9547b1098e1caa66aa07598c3b/lib/Doctrine/Common/Annotations/TokenParser.php#L95|TokenParser]]
+
+There are more libraries which more or less solve the problem. Searching for T_USE [[https://github.com/search?l=php&q=T_USE&type=Code|on Github]] makes overview.
+
+
+===== Proposal =====
+Add ''ReflectionClass::getDefinedAliases()'' and ''ReflectionFunctionAbstract::getDefinedAliases()'' methods. Other reflection classes are out of aliases scope. The return value of methods is an array with lowercased alias as a key and imported name as a value.
+
+Defined aliases can be obtained from reflection of class, interface, trait, function, class method or closure. Usage is following:  
+<code php>
+use Library\Http;
+
+class C {}
+
+use Library\Tools as LT;
+
+function f() {}
+
+$rc = new ReflectionClass('c');
+$rf = new ReflectionFunction('f');
+
+var_dump($rc->getDefinedAliases());
+/*
+array(1) {
+  ["http"] => string(12) "Library\Http"
+}
+*/
+
+var_dump($rf->getDefinedAliases());
+/*
+array(2) {
+  ["http"] => string(12) "Library\Http"
+  ["lt"]   => string(13) "Library\Tools"
+}
+*/
+</code> 
+
+
+===== Backward Incompatible Changes =====
+Possible BC break can occur in libraries, which extends ReflectionClass or ReflectionFunctionAbstract. But I didn't find any.
+
+
+===== Proposed PHP Version(s) =====
+RFC is proposed for PHP 7.
+
+
+===== Impact on performance and memory usage =====
+In current PHP version, aliases are parsed and kept only in compile-time. The aliases definition is discarded on the compile-time end. Patch (mentioned below) keeps HashMap with definitions for runtime. Worst performance and higher memory consumption are expected.
+
+Keeping aliases definition will increase memory consumption. Value depends on many factors:
+  * how many aliases are defined
+  * how long are the aliases definitions (string lengths)
+  * how many classes, interfaces, traits, functions and closures definitions exist in one namespace in one file
+
+Following code increases memory consumption for 320 bytes.
+<code php>
+use A as B;
+
+class C {}
+</code>
+
+Adding one more alias, memory consumption increases for next 48 bytes:
+<code php>
+use A as B;
+use C as D;
+
+class C {}
+</code>
+
+Adding next class, memory consumption increases for next 264 bytes:
+<code php>
+use A as B;
+
+class C {}
+class D {}
+</code>
+
+Method ''getDefinedAliases()'' exists on ''ReflectionMethod'' class too due to inheritance. But adding class methods does not increase memory consumption, because aliases definition is internally kept only for class.
+
+Five measurements on real libraries and application follow.
+
+The first two measurements are done on Nette Framework v2.2.3 and Symfony Framework v2.5.5 (including Doctrine v2.4.6) libraries. The measurements are a little bit synthetic, because every file was loaded (require_once) in a test script. It does not happen in real life application, classes are lazy loaded.
+
+The next two measurements are done on clean Wordpress 4 installation. The first one is a homepage with one post request. The second one is a post editing page request.
+
+The last measurement is done on CLI application ApiGen 4.0.0-RC2. The API documentation is generated for mentioned Nette Framework.
+
+For a time performance measurement, every measurement step has been done 1000 times and averaged. Only the ApiGen run only 100 times due to long duration.
+
+|                     ^ Classes ^ Interfaces ^ Traits ^ Functions ^  All ^ Files ^ Memory PHP7 ^ Memory RFC ^ Diff           ^^ Time |
+^ Nette Framework     |     256 |         42 |      0 |         5 |  303 |   265 |      5612kB |     5711kB |   99kB |  1.8%  | 2.3% |
+^ Symfony Framework   |    2422 |        374 |      3 |        56 | 2855 |  2813 |     33744kB |    34796kB | 1053kB |  3.1%  | 1.4% |
+^ Wordpress Homepage  |      67 |          0 |      0 |      1647 | 1714 |    84 |      8900kB |     8964kB |   64kB |  0.7%  | 0.6% |
+^ Wordpress Edit Page |      78 |          0 |      0 |      2038 | 2116 |   109 |     11683kB |    11687kB |    4kB |  0.04% |  N/A |
+^ ApiGen              |     226 |         46 |      0 |        28 |  300 |   284 |     28430kB |    28898kB |  469kB |  1.6%  | 0.5% |
+
+PHP7 means [[https://github.com/milo/php-src/commit/51c90e999fabda0cc10b82e0617e6e45797bf81d|commit 51c90e]]
+
+
+===== Patch =====
+The RFC implementation can be found at https://github.com/milo/php-src/tree/reflectionAliases. Patch is kindly provided by Nikita Popov.
+
+Patch does not contain opcache integration.
