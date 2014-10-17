@@ -1,6 +1,6 @@
 ====== PHP RFC: Big Integer Support ======
-  * Version: 0.1.3
-  * Date: 2014-06-20 (Initial Draft; Put Under Discussion 2014-10-10, Last updated 2014-10-16)
+  * Version: 0.1.4
+  * Date: 2014-06-20 (Initial Draft; Put Under Discussion 2014-10-10, Last updated 2014-10-17)
   * Author: Andrea Faulds, ajf@ajf.me
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/bigint
@@ -114,7 +114,13 @@ Secondly, when trying to calculate a value that would require more memory than s
 
 ==== Licensing and dependency issues ====
 
-As a result of using GMP, it will now always be a requirement to build PHP. GMP is widely available, so this shouldn't cause platform issues.
+While I have not merged this into the main branch yet, I am current porting this to use [[http://www.libtom.org/|LibTomMath]], a dual-licensed Public Domain/WTFPL arbitrary-length integer library written in C, which is available packaged for several platforms, and is battle-tested as it is used by Tcl. As it is available under both Public Domain and the WTFPL, with the latter an extremely liberal license, it doesn't pose any licensing issues.
+
+Before I discovered LibTomMath ([[http://chat.stackoverflow.com/transcript/message/19471745#19471745|thanks to Chris Wright]]), I was going to use GMP, which causes licensing issues, as detailed by the following subsection.
+
+=== GMP and LGPLv3 ===
+
+The patch as it stands is written to use GMP. As a result of using GMP, it will now always be a requirement to build PHP. GMP is widely available, so this shouldn't cause platform issues.
 
 However, it does cause a licensing issue. GMP is licensed under both the GNU General Public License version 2 (GPLv2) and the GNU Lesser General Public License version (LGPLv3). I don't think linking against it as a GPLv2 library is feasible due to the GPL's copyleft requirements, so instead we'll consider using it under the LGPLv3.
 
@@ -124,7 +130,7 @@ I don't feel either of these obligations are particularly onerous. The first obl
 
 The PHP license is a non-copyleft license, i.e. you can modify PHP, compile it, and distribute the binaries, without releasing the source code of your modifications. Including GMP would not change this. All that would change is that, if GMP has been statically linked, people distributing PHP would have an obligation to distribute GMP's source code and an object form that GMP can be linked against.
 
-Therefore, I don't think that requiring GMP will really cause any problems from a license standpoint. If the fact GMP is LGPL-licensed becomes too much a problem, it could be possible to swap it out for something more favourably licensed if such a library is available, due to the zend_bigint_* abstraction. However, I am not aware of a better alternative.
+Therefore, I didn't think that requiring GMP would really cause any problems from a license standpoint. However, I knew it would make some people object who wouldn't otherwise, and there were also certain technical implementation issues with GMP. Because of this, once I found out it existed, I decided to switch to LibTomMath.
 
 See the links in the References section below.
 
@@ -138,7 +144,9 @@ This also presents a further issue: inconsistency between longs, bigints and dou
 
 The [[rfc:size_t_and_int64_next|64 bit platform improvements for string length and integer in zval]] RFC would be affected by this. For one thing, there's less need to use 64-bit integers when bigints are supported, and their only benefit would now be performance. However, that patch has now been merged, so this is no longer a concern.
 
-For another, GMP only supports the "long" datatype and not "long long". Hence, while Linux etc. which have longs on 64-bit systems be 64-bit would work fine, Windows poses a problem as longs on 64-bit Windows systems are still 32-bit, so some sort of trickery (likely by splitting 64-bit ints into high and low words) would need to be done to convert 64-bit ints to bigints or vice-versa. However, MPIR, a GMP fork which we use in our Windows builds, luckily does support 64-bit longs on Windows, meaning this also isn't a problem.
+Unfortunately, the LibTomMath library doesn't have a function for converting from 64-bit integers, only ''unsigned long''s, which are 64-bit on Linux but not Windows. So we'll have to add a workaround for getting converting from 64-bit integers, unfortunately.
+
+If we were to use GMP, this wouldn't be an issue. GMP only supports the "long" datatype and not "long long". Hence, while Linux etc. which have longs on 64-bit systems be 64-bit would work fine, Windows poses a problem as longs on 64-bit Windows systems are still 32-bit, so some sort of trickery (likely by splitting 64-bit ints into high and low words) would need to be done to convert 64-bit ints to bigints or vice-versa. However, MPIR, a GMP fork which we use in our Windows builds, luckily does support 64-bit longs on Windows, meaning this isn't a problem.
 
 ==== To SAPIs ====
 
@@ -146,7 +154,9 @@ This should have no impact on existing SAPIs.
 
 ==== To Existing Extensions ====
 
-Any which request numeric parameters as zvals rather than longs or doubles from zend_parse_parameters will need changes. Those dealing with numerical operations specifically will require deeper changes. Obviously, ext/standard will need some updating. ext/gmp ought to be rewritten so that it just passes on to the built-in operator functions.
+Any which request numeric parameters as zvals rather than longs or doubles from zend_parse_parameters will need changes. Those dealing with numerical operations specifically will require deeper changes. Obviously, ext/standard will need some updating.
+
+If we were to use GMP, it would make sense to rewrite ext/gmp so that it just passes on to the built-in operator functions. However, now that we are switching to LibTomMath, this isn't doable. This has the disadvantage that existing ext/gmp-using code won't benefit from the addition of built-in bigints. On the other hand, such code would keep full compatibility by not having ext/gmp be touched, and it's less effort on my part if I don't need to rewrite it.
 
 Also, extensions dealing with parts of the Zend API that deal with numbers will need to be modified to deal with changes in signatures and behaviour. (See "Backwards Incompatible Changes")
 
@@ -176,25 +186,28 @@ The patch is unfinished. Many tests are still broken, I haven't gotten round to 
 
 ==== TODO ====
 
-  * Now that the int64 patch was merged, handle platforms where ''sizeof(zend_long) != sizeof(long)'' (i.e. Windows x64)
-      * Nikita says we use mpir on Windows which supports 64-bit, so I might not have to do the 64-as-32 smuggling I expected
+  * Finish LibTomMath port
+      * Implement everything not implemented
+      * Handle zend_longs larger than an unsigned long
+      * Allow use of either GMP or LibTomMath with a compile-time option, perhaps? A bunch of ifdefs, or alternately, two different conditionally-compiled files are not difficult to do. Though the extra checks we do to avoid GMP aborting might mean that GMP's actually slower.
+          * Given that we'd have two different files, and given the behaviour is supposed to be the same cross-implementation, should we not move the documentation comments from zend_bigint.c to zend_bigint.h?
   * Figure out if we should deal with bigints string indices better. Currently we cast to long, but should we check for it being capped at LONG_MAX/_MIN and, if so, throw the "uninitalized index" error? (That would make the most sense)
-      * Looks like there's some sort of numeric string offset thing in zend_language_scanner.l, what is that and does it affect this?
+  * Looks like there's some sort of numeric string offset thing in zend_language_scanner.l, what is that and does it affect this?
   * Test coverage:
       * Fix remaining broken tests on 64-bit and 32-bit
       * Write more tests for bigints, especially for areas that aren't covered just now
   * Better extension coverage:
       * Fix ext/standard and other important extensions (ext/json?)
       * Enable more extensions as we're only testing ''--disable-all'' just now
-      * Rewrite ext/gmp
   * Implement bigint option for zend_parse_parameters (consider implementing IS_BIGINT_OR_LONG option)
   * Opcache
       * Bigints are allocated in non-persistent memory, so we'll have to create some sort of persistent storage format
-  * Assembly code optimisations:
+  * Optimisations:
       * Rewrite (or get someone else to rewrite) the assembly routines (currently commented out as they overflowed to double, not bigint)
+          * Given that what we're doing is much simpler now, is this worth it? It doesn't save any branches.
       * That clz/bsr assembly TODO (or just generally use a more efficient check)
   * Other optimisations:
-      * Eventually mark the zend_bigint_* functions as to be inlined and move them to the header
+      * Possibly mark the zend_bigint_* functions as to be inlined and move them to the header
 
 ===== Unaffected PHP Functionality =====
 
@@ -245,11 +258,13 @@ If/when this is implemented, this section would/will contain
 
 ==== General ====
 
+  * http://www.libtom.org/ and https://github.com/libtom/libtommath - LibTomMath
   * https://gmplib.org/ - The GNU Multiple Precision Arithmetic Library
   * Yasuo's [[rfc:gmp_number|gmp_number]] RFC is similar in some respects
 
 ===== Changelog =====
 
+  * v0.1.4 - LibTomMath migration from GMP
   * v0.1.3 - Examples
   * v0.1.2 - Int64 clarifications
   * v0.1.1 - Added stdlib changes
