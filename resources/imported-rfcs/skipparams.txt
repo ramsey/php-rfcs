@@ -22,13 +22,13 @@ The proposal is to allow skipping optional arguments in a call, thus making them
 This means that $join_type and $execute are going to use defaults.
 Of course, if we ever get implementation of named parameters, it may also solve this problem, but until we do, this can be a partial solution. 
 
-Only optional parameters can be skipped this way, skipping non-optional one will produce the same error it does now when function is not given enough parameters.
+Only declared optional parameters can be skipped this way, skipping non-optional one will produce the same error it does now when function is not given enough parameters. Also, for variadic functions, variadic parameters can not be skipped - only parameters that are explicitly declared and marked optional can be skipped. 
 
 ===== Implementation =====
 
-On the engine level, it will be implemented by putting NULL in the place where the parameter is passed. Functions dealing with argument handling will be updated.
+On the engine level, it will be implemented by putting IS_UNDEF value in the place where the parameter is passed. Functions dealing with argument handling will be updated.
 
-See example implementation above. See tests for examples of most common uses cases. 
+See example implementation below. See tests for examples of most common uses cases. 
 
 ===== User functions =====
 
@@ -36,61 +36,34 @@ User functions would have defaults for optional args take place of skipped argum
 
 ===== Internal functions =====
 
-For internal functions, parameter parser will ignore the NULLs, thus leaving the defaults supplied by the caller intact. Again, skipping non-optional parameter is an error. 
+For internal functions, parameter parser will ignore the skipped parameters, thus leaving the defaults supplied by the caller intact. Again, skipping non-optional parameter is an error. For variadic parameters, as per above, skipping is not allowed, unless specifically requested by  function declaration. 
 
-Variadic functions will not return skipped parameters in argc and argv, effectively ignoring them, so:
+Thus, this code is an error:
 
        var_dump(2,default,1);
 
-is the same as:
+but this is not:
 
-       var_dump(2,1);
+       call_user_func('foo', 2, default, 1);
+
+since call_user_func is specifically described as accepting defaults. 
 
 ===== func_get_args() =====
 
-func_get_args() will skip parameters that are not supplied, so it would provide just the parameters that are actually supplied to the function. Thus, this code:
-
-     function test($a=1, $b=2, $c=3) {
-        var_dump(func_get_args());
-     }
-
-     test(1,default,4);
-
-will produce:
-
-      array(2) {
-        [0]=>
-        int(1)
-        [2]=>
-        int(4)
-      }
-
-This means that if you are looping over func_get_args() result, you should use foreach() and not counter-based for().
-func_num_args() will also ignore skipped parameters and give only the number of parameters actually passed. 
-func_get_arg() will return false for parameter that was not passed. 
+func_get_args() will use default values for parameters that are not supplied. Because of how PHP 7 engine works, it is not possible to distinguish skipped parameter from parameter where default value is actually passed. 
 
 ===== call_user_func_array() =====
 
-call_user_func_array() will allow skipping arguments too by skipping them in supplied arguments array, like this:
-
-      call_user_func_array('test', array(42, 2=>43, 4=>44));
-
-call_user_func will allow argument skipping directly:
-
-      call_user_func('test', 42, default, 44);
-
-with the same result.
+Currently, call_user_func_array does not support skipping parameters due to the fact that previously it accepted any array as parameters list, but supporting skipping parameters would mean only sequential indexed numeric array will be accepted. 
 
 ===== Internal API changes =====
-Parameters stored as zval** in the engine. For skipped parameter, the value stored is NULL instead of zval* to specific argument. The opcode putting NULL on the stack is implemented as znode type IS_UNUSED.
+Parameters stored as array of zvals n the engine. For skipped parameter, the zval type is stored as IS_UNDEF. 
 
-zend_parse_parameter() would ignore parameters marked as default - meaning, it will not assign any value to the underlying variable. This is unless the parameter is marked as !, in which case the parameter would be nullified just as if null were passed. This means you can not have variables marked as ! with different behavior between null and 'default', but I did not find any such cases to be required. 
+zend_parse_parameter() would ignore parameters marked as skipped/default - meaning, it will not assign any value to the underlying variable. This is unless the parameter is marked as !, in which case the parameter would be nullified just as if null were passed. This means you can not have variables marked as ! with different behavior between null and 'default', but I did not find any such cases to be required. 
 
-For variadic parameters like + and *, skipped parameters will be ignored and not included in the list as if they were not passed. In other words, + and * will never return NULLs among parameters. 
+If certain function wants to disallow skipping parameters, it should use option ZEND_PARSE_PARAMS_NODEFAULT with zend_parse_parameters_ex(). This may be when internal function has optional arguments but does not have any defaults for them. In this case, skipped parameters will cause a catchable fatal error. 
 
-If certain function wants to disallow skipping parameters, it should use option ZEND_PARSE_PARAMS_NODEFAULT with zend_parse_parameters_ex(). In this case, skipped parameters will cause . For older APIs, zend_get_parameters_array_nodefault() is available which will fail with E_WARNING "Parameter %d missing" if any skipped parameters are passed (i.e. would never return NULLs as parameters).
-
-ZEND_NUM_ARGS() is always the number of parameters in function call, so skipped parameters are counted there. But trying to get a skipped parameter with API functions will produce NULL. 
+ZEND_NUM_ARGS() is always the number of parameters in function call, so skipped parameters are counted there. 
 
 ===== User request examples =====
   * http://stackoverflow.com/q/579331/214196
@@ -104,10 +77,12 @@ ZEND_NUM_ARGS() is always the number of parameters in function call, so skipped 
   * http://stackoverflow.com/q/4435918/214196 (for AS)
   * http://stackoverflow.com/q/812058/214196 (for Ruby)
 ===== Issues raised =====
-    * Support for internal functions doing manual ZEND_NUM_ARGS(). I've looked into all functions in the standard distribution, but PECL extensions that are not using zend_parse_parameters or do weird things with zval-type ones without properly initializing them or checking the output results, may require fixing, otherwise they may crash if "default" is passed to them due to null pointer reference. This crash doesn't seem to be dangerous security-wise, but would of course be unpleasant. 
+   
+* Internal functions that declare parameters as optional but fail to provide proper defaults and rely on ZEND_NUM_ARGS to figure out if to use default or not may be broken. The patch fixes all instances of this in the core extensions, but third-party extensions may need to be fixed too. This applies only to ones that check ZEND_NUM_ARGS() manually in the code instead of using zend_parse_parameters().
 
 ===== Changelog =====
 
   * 2012-04-13 First draft.
   * 2012-07-07 Changed empty parameter to use 'default'
   * 2013-09-01 Added Zend API description
+  * 2015-01-01 Updated for PHPNG
