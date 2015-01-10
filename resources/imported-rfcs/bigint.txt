@@ -1,6 +1,6 @@
 ====== PHP RFC: Big Integer Support ======
-  * Version: 0.1.6
-  * Date: 2014-06-20 (Initial Draft; Put Under Discussion 2014-10-10, Last updated 2014-12-04)
+  * Version: 0.1.7
+  * Date: 2014-06-20 (Initial Draft; Put Under Discussion 2014-10-10, Last updated 2015-01-10)
   * Author: Andrea Faulds, ajf@ajf.me
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/bigint
@@ -36,7 +36,7 @@ In order to make integer arithmetic consistent between longs and bigints, certai
 ==== Standard library changes ====
 
   * All math functions are updated to work with bigints.
-  * ''array_sum'' is now implemented in the patch using ''add_function''. This means that it supports bigints now, but also internal objects with operator overloading (currently only the GMP extension, to the best of my knowledge).
+  * ''array_sum'' and ''array_product'' are now implemented in the patch using ''add_function'' and ''mul_function'', respectively. This means that they support bigints now, but also internal objects with operator overloading (currently only the GMP extension, to the best of my knowledge).
 
 ==== Examples ====
 
@@ -92,7 +92,7 @@ As mentioned before, the shift left and shift right operators act differently, a
 
 Longs will no longer overflow to float, but instead become bigints (which, so far as userland cares, are just integers). Code expecting large integer literals to be floats will now end up with bigints instead, which might cause problems. However, if a float is still desired, this can be fixed simply by appending ''.0''.
 
-Some internal APIs, mostly ones dealing with numbers, will necessarily change their signatures or behaviour. For example, is_numeric_string/_ex now takes a ''zend_bigint*''''*'' parameter, and the cast_object object handler now has to deal with IS_BIGINT_OR_LONG and IS_BIGINT. (However, I am wondering if I should remove the latter)
+Some internal APIs, mostly ones dealing with numbers, will necessarily change their signatures or behaviour. For example, is_numeric_string/_ex now takes a ''zend_bigint*''''*'' parameter, and the cast_object object handler now has to deal with IS_BIGINT_OR_LONG and IS_BIGINT.
 
 ===== Proposed PHP Version(s) =====
 
@@ -102,7 +102,7 @@ This is proposed for the next PHP X, currently PHP 7. The patch is based off of 
 
 ==== Performance ====
 
-The performance penalties //should// be only minor, however I have not yet benchmarked my patch. While left shifts and right shifts now require overflow checks, generally bigints will just take the place of floats in existing overflow checks so I don't expect there to be much performance impact.
+The performance penalties are minor for normal integer and float arithmetic. While left shifts and right shifts now require overflow checks, generally bigints will just take the place of floats in existing overflow checks so the performance impact is minimal.
 
 ==== Fatal errors ====
 
@@ -110,7 +110,7 @@ Unfortunately, bigints would introduce two new ways to cause fatal errors in PHP
 
 Firstly, if you do an operation resulting in an extremely large number, you might hit your request memory limit.
 
-Secondly, when trying to calculate a value that would require more memory than size_t can describe, GMP prints the ''overflow in mpz type'' error to the command line and ''abort()''s. Allowing this to happen and kill the PHP process would be very problematic, so instead, [[https://github.com/TazeTSchnitzel/php-src/commit/360e1b0f3212da8b59266cbdcb0966cda69fc4e0|this commit]] introduces a workaround whereby we try to check ahead-of-time if the operation would fall foul of the overflow error and, if so, throw an E_ERROR with the message "Result of integer operation would be too large to represent". With the move to LibTomMath by default, this check will no longer be necessary (to the best of my knowledge), but it may still be necessary to throw a fatal error on operation failure in this case.
+Secondly, when trying to calculate a value that would require more memory than size_t can describe, GMP prints the ''overflow in mpz type'' error to the command line and ''abort()''s. Allowing this to happen and kill the PHP process would be very problematic, so instead, [[https://github.com/TazeTSchnitzel/php-src/commit/360e1b0f3212da8b59266cbdcb0966cda69fc4e0|this commit]] introduces a workaround whereby we try to check ahead-of-time if the operation would fall foul of the overflow error and, if so, throw an E_ERROR with the message "Result of integer operation would be too large to represent". For LibTomMath we don't need to check this ourselves because the library has sensible error handling, but we still produce E_ERROR in this case.
 
 ==== Licensing and dependency issues ====
 
@@ -124,14 +124,6 @@ A problem arising from allowing integers to be arbitrarily large is that array k
 
 This also presents a further issue: inconsistency between longs, bigints and doubles, which **must** be avoided, as integer consistency cross-platform is a key goal of this RFC. Currently in PHP, doubles used as indexes are simply casted to longs, without any regard for size. This means that they overflow if they are larger than the platform's long size, either 32-bit or 64-bit. However, bigints as implemented, will be treated as strings if they are outside of the bounds of a long on the platform. While bigints are likely to break existing code anyway, this would be a particularly bad breakage, as code relying on very large numbers being floats and wrapping when used as indices would break. Hence some sort of solution must be found. Either we cast bigints to longs and let them overflow (not terribly desirable), we don't change the current behaviour (inconsistent), or we change the handling of doubles. Personally, I don't like what PHP does here and would to go for this last option.
 
-==== To 64-bit RFC ====
-
-The [[rfc:size_t_and_int64_next|64 bit platform improvements for string length and integer in zval]] RFC would be affected by this. For one thing, there's less need to use 64-bit integers when bigints are supported, and their only benefit would now be performance. However, that patch has now been merged, so this is no longer a concern.
-
-Unfortunately, the LibTomMath library doesn't have a function for converting from 64-bit integers, only ''unsigned long''s, which are 64-bit on Linux but not Windows. So we'll have to add a workaround for getting converting from 64-bit integers, unfortunately.
-
-For GMP, this isn't an issue. GMP only supports the "long" datatype and not "long long". Hence, while Linux etc. which have longs on 64-bit systems be 64-bit would work fine, Windows poses a problem as longs on 64-bit Windows systems are still 32-bit, so some sort of trickery (likely by splitting 64-bit ints into high and low words) would need to be done to convert 64-bit ints to bigints or vice-versa. However, MPIR, a GMP fork which we use in our Windows builds, luckily does support 64-bit longs on Windows, meaning this isn't a problem.
-
 ==== To SAPIs ====
 
 This should have no impact on existing SAPIs.
@@ -140,13 +132,13 @@ This should have no impact on existing SAPIs.
 
 Any which request numeric parameters as zvals rather than longs or doubles from zend_parse_parameters will need changes. Those dealing with numerical operations specifically will require deeper changes. Obviously, ext/standard will need some updating.
 
-If GMP were the only backend, it would make sense to rewrite ext/gmp so that it just passes on to the built-in operator functions. However, now that we are also allowing LibTomMath, this isn't doable. This has the disadvantage that existing ext/gmp-using code won't benefit from the addition of built-in bigints. On the other hand, such code would keep full compatibility by not having ext/gmp be touched, and it's less effort on my part if I don't need to rewrite it.
+ext/gmp will be updated to handle bigints. However, due to behavioural and implementation differences between GMP objects and the bigint type, it won't just pass through to the built-in operator functions. With the addition of bigints, ext/gmp would quickly become irrelevant except for backwards-compatibility with existing applications, and might eventually be moved to PECL.
 
-Also, extensions dealing with parts of the Zend API that deal with numbers will need to be modified to deal with changes in signatures and behaviour. (See "Backwards Incompatible Changes")
+Extensions dealing with parts of the Zend API that deal with numbers will need to be modified to deal with changes in signatures and behaviour. (See "Backwards Incompatible Changes")
 
 ==== To Opcache ====
 
-GMP can only have one custom allocator, so I weighed the options and made that be emalloc, not malloc. I expect this would pose a problem for opcache, as any bigints would be destroyed upon the end of a request, so opcache would need to store bigints persistently. Hence, some sort of import/export mechanism could be added to zend_bigint. It is obviously possible to use strings, but gmp also has its own format for serialisation which would be more efficient, so that might be a good way.
+Both GMP and LibTomMath can only have one custom allocator, so I weighed the options and made that be emalloc, not malloc. I expect this would pose a problem for opcache, as any bigints would be destroyed upon the end of a request, so opcache would need to store bigints persistently. Hence, some sort of import/export mechanism could be added to zend_bigint. It is obviously possible to use strings, but gmp also has its own format for serialisation which would be more efficient, so that might be a good way.
 
 I have not yet dealt with opcache implementation-wise, and I might need help when the time comes.
 
@@ -175,6 +167,7 @@ The patch is unfinished. Many tests are still broken, I haven't gotten round to 
       * TODOs
   * Deal with bigints string indices better. Currently we cast to long, but we should check for it being capped at LONG_MAX/_MIN and throw the "uninitalized index" error. Possibly a novel error ("string index too large"?)
   * Looks like there's some sort of numeric string offset thing in zend_language_scanner.l, what is that and does it affect this?
+  * GMP backend needs the segfault fix ext/gmp has (custom allocator switching)
   * Test coverage:
       * Fix remaining broken tests on 64-bit and 32-bit
       * Write more tests for bigints, especially for areas that aren't covered just now
@@ -243,6 +236,7 @@ If/when this is implemented, this section would/will contain
 
 ===== Changelog =====
 
+  * v0.1.7 - Minor changes, removed some outdated information
   * v0.1.6 - LibTomMath built as part of PHP
   * v0.1.5 - Switchable back-ends
   * v0.1.4 - LibTomMath migration from GMP
