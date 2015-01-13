@@ -1,19 +1,24 @@
 ====== PHP RFC: Scalar Type Hints ======
-  * Version: 0.1.2
-  * Date: 2014-12-14 (initial draft; put Under Discussion 2014-12-31)
+  * Version: 0.2
+  * Date: 2014-12-14 (initial draft; put Under Discussion 2014-12-31; version 0.2 created 2015-01-13)
   * Author: Andrea Faulds, ajf@ajf.me
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/scalar_type_hints
 
-===== Introduction =====
+===== Summary =====
 
-This RFC proposes the addition of four type hints for scalar types: ''int'', ''float'', ''string'' and ''bool''. These follow the same casting rules as used for internal functions (i.e. those defined by PHP extensions and written in native code).
+This RFC proposes the addition of four type hints for scalar types: ''int'', ''float'', ''string'' and ''bool''. These type hints would have "weak" type-checking by default, following the same casting rules traditionally used for extension and built-in PHP functions.
+
+This RFC further proposes the addition of a new optional per-file directive, ''declare(strict_typehints=TRUE)'', which makes all function calls within a file have "strict" type-checking for parameters with scalar type hints, including for extension and built-in PHP functions. In addition, calls to extension and built-in PHP functions with this directive produce an ''E_RECOVERABLE_ERROR'' on parameter parsing failure, bringing them into line with userland type hints.
+
+With these two features, it is hoped that more correct and self-documenting PHP programs can be written.
 
 ===== Example =====
 
 Let's say we have a PHP class that represents an [[http://php.net/elephpant.php|ElePHPant]]. We put scalar type hints on our constructor arguments:
 
-<code php>
+<file php ElePHPant.php>
+<?php
 class ElePHPant {
     public $name, $age, $cuteness, $evil;
     public function __construct(string $name, int $age, float $cuteness, bool $evil) {
@@ -23,13 +28,16 @@ class ElePHPant {
         $this->evil = $evil;
     }
 }
-</code>
+</file>
 
-We can then create a new instance like this, and it's valid since the parameter types exactly match:
+In a separate file we might try to make a new instance like so:
 
-<code php>
+<file php main.php>
+<?php
+require "ElePHPant.php";
+
 $sara = new ElePHPant("Sara", 7, 0.99, FALSE);
-var_dump($sara); /* Output:
+var_dump($sara); /*
 object(ElePHPant)#1 (4) {
   ["name"]=>
   string(4) "Sara"
@@ -40,16 +48,21 @@ object(ElePHPant)#1 (4) {
   ["evil"]=>
   bool(false)
 } */
-</code>
+</file>
 
-We could also pass values that are convertible and they'll be converted, just like with extension functions:
+This call succeeds, because the types of the arguments passed exactly match the type hints.
 
-<code php>
-$nelly = new ElePHPant(new Stringable("Nelly"), "7 years", "0.9", "1");
+By default, weak type hints that permit some conversions are used, so we could also pass values that are convertible and they'll be converted, just like with extension and built-in PHP functions:
+
+<file php main2.php>
+<?php
+require "ElePHPant.php";
+
+$nelly = new ElePHPant(12345, "7 years", "0.9", "1");
 var_dump($nelly); /*
 object(ElePHPant)#2 (4) {
   ["name"]=>
-  string(5) "Nelly"
+  string(5) "12345"
   ["age"]=>
   int(7)
   ["cuteness"]=>
@@ -57,75 +70,148 @@ object(ElePHPant)#2 (4) {
   ["evil"]=>
   bool(true)
 }
-PHP Notice:  A non well formed numeric value encountered in Command line code on line 1 */
+Notice: A non well formed numeric value encountered
+*/
+</file>
 
-$evan = new ElePHPant(1234, "9", 0.3, 0);
-var_dump($evan); /*
-object(ElePHPant)#3 (4) {
-  ["name"]=>
-  string(4) "1234"
-  ["age"]=>
-  int(9)
-  ["cuteness"]=>
-  float(0.3)
-  ["evil"]=>
-  bool(false)
-} */
-</code>
+However, it is also possible to turn on strict type checking with an optional directive. In this mode, the same call would fail:
 
-([[https://gist.github.com/TazeTSchnitzel/613b8ec4c629b945f92f|Stringable]] definition)
+<file php main3.php>
+<?php
+require "ElePHPant.php";
 
-Not all values are convertible, however, so the following would error:
+declare(strict_typehints=TRUE);
 
-<code php>
-$foo = new ElePHPant([], new StdClass, fopen("data:text/plain,foobar", "r"), NULL);
-// Catchable fatal error: Argument 1 passed to ElePHPant::__construct() must be of the type string, array given
-</code>
+$nelly = new ElePHPant(12345, "7 years", "0.9", "1");
+// Catchable fatal error: Argument 1 passed to ElePHPant::__construct() must be of the type string, integer given
+</file>
 
-===== Background =====
+The strict type checking mode also affects extension and built-in PHP functions:
+
+<file php main4.php>
+<?php
+
+declare(strict_typehints=TRUE);
+
+$foo = sin(1);
+// Catchable fatal error: sin() expects parameter 1 to be float, integer given
+</file>
+
+===== Background and Rationale =====
 
 ==== History ====
 
-PHP has had parameter type hints for class names since PHP 5.0, arrays since PHP 5.1 and callables since PHP 5.4. Unfortunately, PHP's scalar types haven't been hintable. This has meant that the signatures of functions which take scalar arguments lack type information, requiring workarounds such as docblocks to document the parameter types, and requiring programmers to validate or convert arguments manually.
+PHP has had parameter type hints for class names since PHP 5.0, arrays since PHP 5.1 and callables since PHP 5.4. These type hints allow the PHP runtime to ensure that correctly-typed arguments are passed to functions, and make function signatures more informative. Unfortunately, PHP's scalar types haven't been hintable.
 
-Previous attempts at adding scalar type hints, such as the [[rfc:scalar_type_hinting_with_cast|Scalar Type Hints with Casts]] RFC, have failed. In particular, that specific proposal was inconsistent with the type conversion rules used in other parts of the language. However, this RFC follows exactly the same conversion rules as (and shares the implementation used by) functions defined by native code extensions, with the exception of the handling of ''NULL'' (see the Details section). Thus, it avoids the problem of inconsistency.
+There have been some previous attempts at adding scalar type hints, such as the [[rfc:scalar_type_hinting_with_cast|Scalar Type Hints with Casts]] RFC. From what I can see, that specific RFC failed primarily for three reasons:
 
-==== PHP is and should remain ====
+  * Its type conversion and validation behaviour did not match that of extension and built-in PHP functions
+  * It followed a weak typing approach
+  * Its attempt at "stricter" weak typing failed to placate either strict typing or weak typing fans
 
-To quote [[http://news.php.net/php.internals/71525|Rasmus]]:
+In creating this RFC attempts to learn from these failings.
 
-> PHP is and should remain:
-> 1) a pragmatic web-focused language
-> 2) a loosely typed language
-> 3) a language which caters to the skill-levels and platforms of a wide range of users
+==== Weak typing and strict typing ====
 
-Input coming from the web, such as query string parameters or POST bodies, is likely to be in string form. By performing conversion from strings automatically, just as with existing extension functions, this RFC is in keeping with PHP being a web-focused language. By allowing conversion instead of requiring strict type matches, this RFC is in keeping with PHP being a loosely-typed language. Finally, by not forcing users to worry about type conversions, it keeps the language accessible to beginners, keeping PHP a language catering to all skill-levels. Therefore, I feel that this RFC keeps all three of these principles true.
+There are two major approaches to how to check parameter types or type hints that have been proposed for PHP:
 
-==== The case against strict hints ====
+  * Strict type checking, which is used by many popular programming languages, particularly ones which are statically-typed, such as Java, C#, Haskell, or Facebook's Hack. It is also used for non-scalar parameter type hints in PHP. With this approach, an argument is only accepted if its type is exactly the same as the parameter. So, for example, an integer is accepted for an integer parameter, but a float is not accepted. Such systems often also accept subclasses, so if ''Bar'' inherits from ''Foo'', it might be accepted for a ''Foo'' parameter.
+  * Weak type checking which allows implicit conversion, which is used to a limited extent by C, and is also the approach by PHP's extension and built-in functions for scalar types. With this approach, along with values with exactly matching types, some values that can be converted are accepted. So, for example, an integer is accepted for an integer parameter, but a float or a numeric string might also be accepted, depending on the rules of the language. These convertible values will be converted when they are passed to the function.
 
-Strict scalar type hints, which would only accept exactly matching types, have been previously proposed. However, they have several issues.
+Both approaches have their advantages and disadvantages, and in fact PHP already has a mix of both. We use strict type checking for non-scalars such as arrays, objects and resources, and this applies to both userland type hints, and extension and built-in PHP function parameter types. We use weak type checking for scalar parameter types, but only for extension and built-in PHP functions, as PHP does not currently have scalar type hints.
 
-Firstly, they would be inconsistent with the behaviour of internal and extension functions, which use weak parameter types like this RFC. In the PHP manual we already use the syntax proposed in this RFC to describe the behaviour of extension functions. Yet, if strict hints were added, the syntax used in the manual would do something completely different for userland functions. This would doubtless be very confusing for new users.
+==== Why both? ====
 
-Secondly, they might lead to brittle code. In PHP, types are routinely juggled: for example, the mathematical operators return different types depending on input values. This "weak typing" is not a problem with PHP and is one of the features that makes PHP such a pleasant language to use. However, it does not work well with strict type hints, which will throw errors when the wrong type is passed. A function call like ''foobar($a + 2)'', where ''foobar'' had a strict integer type hint, might succeed on 64-bit systems but throw an error and crash on 32-bit systems, because somewhere earlier during function excution, PHP converted $a to a float (which provides an extra 22 bits of precision) because it exceeded the limits of an integer in an arithmetic operation. This is less likely to cause issues with weak type hints like those proposed by this RFC, if the value could be converted to an integer.
+So far, most advocates of scalar type hints have asked for either strict type checking, or weak type checking. Rather than picking one approach or the other, this RFC instead makes weak type checking the default, and adds an optional directive to use strict type checking within a file. There were several reasons behind this choice.
 
-Third, strict hints prevent the addition of type hints to existing libraries, making scalar type hints useless to maintainers of existing code unless they wish to introduce massive backwards-compatibility breaks. Much existing code takes advantage of PHP's weak typing (even if unintentionally) and would break if the libraries used added strict type hints. On the other hand, weak type hints like those proposed in this RFC could be safely added to existing projects with minimal issues. These hints would not be useless, either: they could still catch errors early, and would make function execution more predictable because the argument would always be the correct type inside the function body.
+By and large the PHP community, myself included, seems to be in favour of strict type checking. However, adding strictly type-checked scalar type hints would cause a few problems:
 
-Finally, strict hints encourage dangerous behaviour, such as using explicit casts (''(int)'', ''(float)'' etc.). In order to make existing (and also new) code work with strict hints, casts would need to be added to convert values to the correct type, such that they fulfil the type hints. The problem here is that the explicit cast operators never throw errors (with the minor exception of object->scalar casts). Almost any PHP value of any type will be accepted and "converted", whether the result is meaningful or not. In some cases this may even defeat the purpose of strict type hints, because type errors cannot be caught when they are explicitly silenced. Implicit casts, on the other hand, are far less dangerous in PHP. Implicit casts can fail and throw an error if the conversion is not meaningful. For example, an empty string would not be accepted for an integer parameter, and a numeric string with trailing characters would produce a notice, whereas an explicit cast would produce no error and simply produce ''0''. In this respect, weak type hints can offer better safety than strict hints.
+  * It creates a glaring inconsistency: extension and built-in PHP functions use weak type checking for scalar typed parameters, yet userland PHP functions would be using //strict// type checking for scalar type hinted parameters.
+  * The significant population who would like weak type checking would not be in favour of such a proposal, and are likely to block it.
+  * Existing code which (perhaps unintentionally) took advantage of PHP's weak typing would break if functions it calls added scalar type hints to parameters. This would complicate the addition of scalar type hints to the parameters of functions in existing codebases, particularly libraries.
 
-==== Specific details ====
+There is also a significant group of people (including, at times, my past self) who are in favour of weak type checking. But, like adding strictly type-checked hints, adding weakly type-checked scalar type hints would also cause problems:
+
+  * The large number of people who would like strict type checking would not be in favour of such a proposal, and are likely to block it.
+  * It would limit opportunities for static analysis.
+
+A third approach has also been suggested, which is to add separate weakly- and strictly-checked type hints with different syntax. It would present its own set of issues:
+
+  * People who do not like weak or strict type checking would be forced to deal with strictly or weakly type-checked libraries, respectively.
+  * Like adding strict hints, this would also be inconsistent with extension and built-in PHP functions, which are uniformly weak.
+
+In order to avoid the issues with these three approaches, this RFC proposes a fourth approach: per-file strict or weak type-checking. This has the following advantages:
+
+  * People can choose the type checking model that suits them best, which means this approach should hopefully place both the strict and weak type checking camps.
+  * APIs do not force a type hinting model upon their users.
+  * Because files use the weak type checking approach by default, functions in existing codebases (including libraries) should be able to have scalar type hints added without breaking code that calls them. This enables codebases to add type hints gradually, or only to portions, which is known as "gradual typing".
+  * There only needs to be a single syntax for scalar type hints.
+  * People who would prefer strict type checking get it not only for userland functions, but also for extension and built-in PHP functions. This means users get one model uniformly, rather than having the inconsistency that introducing strict-only scalar hints would have produced.
+  * In strict type checking mode, the error level produced when type checking fails for extension and built-in PHP functions will finally be consistent, with both producing ''E_RECOVERABLE_ERROR''.
+
+==== Type hint choices ====
 
 No type hint for resources is added, as this would prevent moving from resources to objects for existing extensions, which some have already done (e.g. GMP). 
 
 For the integer typehint, both the ''int'' and ''integer'' syntaxes are allowed, and for the boolean typehint, both ''bool'' and ''boolean'' are allowed. This has been done because PHP uses both throughout the manual and error messages, so there is no clear choice of syntax that wouldn't cause problems. While in an ideal world we would not need to support these aliases, the likelihood of people being caught out by ''integer'' or ''boolean'' not working is very high, so I feel we ought to support both the short and long forms of these type names.
 
-===== Details ====
+===== Details =====
 
-No new reserved words are added. The names ''int'', ''integer'', ''float'', ''string'', ''bool'' and ''boolean'' are recognised and allowed as type hints, and prohibited from use as class/interface/trait names (including with ''use'' and ''class_alias''). When they are used, the validation and conversion functions used by the Fast Parameter Parsing API are called internally. Thus, they exactly match the behaviour of ''zend_parse_parameters''. The only exception to this is the handling of ''NULL'': in order to be consistent with our existing type hints for classes, callables and arrays, ''NULL'' is not accepted by default, unless the parameter is explicitly given a default value of ''NULL''. This would work well with the draft [[rfc:nullable_typehints|Declaring Nullable Types]] RFC.
+==== Type hint names ====
 
-==== Casting and Validation Rules ====
+No new reserved words are added. The names ''int'', ''integer'', ''float'', ''string'', ''bool'' and ''boolean'' are recognised and allowed as type hints, and prohibited from use as class/interface/trait names (including with ''use'' and ''class_alias'').
 
-While this RFC merely follows PHP's existing rules for scalar parameters, used by extension functions, these rules may not be familiar to all readers of this RFC. For that reason, here is a summary of which types are accepted. Note that ''NULL'', arrays and resources are never accepted for scalar type hints, and so are not included in the table. These rules are the same as those used by extension functions, except for the handling of NULL (see above).
+==== strict_typehints declare() directive ====
+
+By default, all PHP files are in weak type-checking mode. A new ''declare()'' directive is added, ''strict_typehints'', which takes a boolean value. If this boolean value is ''TRUE'', strict type-checking mode is used for function calls in the remainder of the file. If this boolean value is ''FALSE'', weak type-checking mode is used.
+
+This directive also supports the ''declare()'' block syntax (e.g. ''declare(strict_typehints=TRUE) { foo(); }''), in which case it will only affect function calls made within the block.
+
+Like the ''encoding'' directive, but unlike the ''ticks'' directive, the ''strict_typehints'' directive only affects the specific file it is used in, and does not affect either other files which include the file, nor other files that are included by the file.
+
+The directive is entirely compile-time and affects any function call, including those within a function or method. For example:
+
+<file php strict_typehints_scope.php>
+<?php
+
+declare(strict_typehinting=TRUE) {
+    foo(); // strictly type-checked function call
+
+    function foobar() {
+        foo(); // strictly type-checked function call
+    }
+
+    class baz {
+        function foobar() {
+            foo(); // strictly type-checked function call
+        }
+    }
+}
+
+foo(); // weakly type-checked function call
+
+function foobar() {
+    foo(); // weakly type-checked function call
+}
+
+class baz {
+    function foobar() {
+        foo(); // weakly type-checked function call
+    }
+}
+</file>
+
+The new userland scalar type hints are implemented internally by calling the Fast Parameter Parsing API functions.
+
+==== Behaviour of weakly type-checked function calls ====
+
+A weakly type-checked call to an extension or built-in PHP function has exactly the same behaviour as it did in previous PHP versions.
+
+The weak type checking rules for the new scalar type hints are mostly the same as those of extension and built-in PHP functions. The only exception to this is the handling of ''NULL'': in order to be consistent with our existing type hints for classes, callables and arrays, ''NULL'' is not accepted by default, unless the parameter is explicitly given a default value of ''NULL''. This would work well with the draft [[rfc:nullable_typehints|Declaring Nullable Types]] RFC.
+
+For the reference of readers who may not be familiar with PHP's existing weak scalar parameter type rules, the following brief summary is provided.
+
+The table shows which types are accepted and converted for scalar type hints. ''NULL'', arrays and resources are never accepted for scalar type hints, and so are not included in the table.
 
 ^ Type hint       ^ integer  ^ float    ^ string   ^ boolean ^ object  ^
 ^ ''integer''     ^ yes      ^ yes*     ^ yes†     ^ yes     ^ no      ^
@@ -138,13 +224,23 @@ While this RFC merely follows PHP's existing rules for scalar parameters, used b
 †Non-numeric strings not accepted. Numeric strings with trailing characters are accepted, but produce a notice.
 
 ‡Only if it has a ''__toString'' method.
- 
+
+==== Behaviour of strictly type-checked function calls ====
+
+A strictly type-checked call to an extension or built-in PHP function changes the behaviour of ''zend_parse_parameters''. In particular, it will produce ''E_RECOVERABLE_ERROR'' rather than ''E_WARNING'' on failure, and it follows strict type checking rules for scalar typed parameters, rather than the traditional weak type checking rules.
+
+The strict type checking rules are quite straightforward: when the type of the passed argument matches that specified by the parameter type hint it is accepted, otherwise it is not.
+
+These strict type checking rules are used for userland scalar type hints, and for extension and built-in PHP functions.
+
 
 ===== Backward Incompatible Changes =====
 
 ''int'', ''integer'', ''float'', ''string'', ''bool'' and ''boolean'' are no longer permitted as class/interface/trait names (including with ''use'' and ''class_alias'').
 
-Because these hints are quite permissive in the values they accept and behave similarly to PHP's type juggling for operators, it should be possible for existing userland libraries to add scalar type hints without breaking compatibility.
+Because the weak type-checking rules for scalar hints are quite permissive in the values they accept and behave similarly to PHP's type juggling for operators, it should be possible for existing userland libraries to add scalar type hints without breaking compatibility.
+
+Since the strict type-checking mode is off by default and must be explicitly used, it does not break backwards-compatibility. 
 
 ===== Proposed PHP Version(s) =====
 
@@ -154,11 +250,13 @@ This is proposed for the next PHP x, currently PHP 7.
 
 ==== To Existing Extensions ====
 
-''ext/reflection'' will need to be updated in order to support type hint reflection for parameters. This hasn't yet been done.
+''ext/reflection'' will need to be updated in order to support scalar type hint reflection for parameters. This hasn't yet been done.
 
 ==== Unaffected PHP Functionality ====
 
 This doesn't affect the behaviour of cast operators.
+
+When the strict type-checking mode isn't in use (which is the default), function calls behave identically to previous PHP versions.
 
 ===== Open Issues =====
 
@@ -169,9 +267,11 @@ There are two open issues related to naming. These might be voted on if consensu
   * Should the scalar type hint names be prohibited from use as class names? The patch currently prohibits this (<php>class int {}</php> is an error), to avoid the situation where you can declare a class with the name of a scalar type hint yet not type hint against it (as the name would be interpreted as a scalar hint). Personally, I think it'd be best to avoid confusion and prevent classes from having the same names as scalar types. However, if this causes significant backwards-compatibility problems, we might have to allow it. I would note that at least some of the existing classes with such names are used as a stand-in for scalar type hints.
      * The patch doesn't currently do this, but it would make sense to also prevent scalar type hint names being used with the <php>use</php> statement.
 
+  * Should the ''strict_typehints'' directive have a shorter name? It may be rather annoying to have to type out the whole ''declare(strict_typehints=TRUE);'' for every single file. 
+
 ===== Future Scope =====
 
-If return types were added, such as with the [[rfc:returntypehinting|Return Type Hinting]] RFC, scalar type hints should be supported. A possible matter of debate would be whether or not to allow conversions in that case, given that some of the reasons cited for parameter type conversion may not be applicable. For consistency, also casting the return value is probably the way to go.
+If return types are added, such as with the [[rfc:returntypehinting|Return Type Hinting]] RFC, scalar type hints should be supported. They should follow exactly the same rules as parameter hints, for consistency's sake. In the case of return types, however, the type-checking mode should depend on where the function is defined, rather than where it is called. This is because returning the wrong type is a problem with the callee, while passing the wrong type is a problem with the caller.
 
 Because scalar type hints guarantee that a passed argument will be of a certain type within a function body (at least initially), this could be used in the Zend Engine for optimisations. For example, if a function takes two ''float''-hinted arguments and does arithmetic with them, there is no need for the arithmetic operators to check the types of their operands. As I understand it, HHVM already does such optimisations, and might benefit from this RFC.
 
@@ -181,11 +281,9 @@ As this is a language change, this RFC requires a 2/3 majority to pass. It will 
 
 ===== Patches and Tests =====
 
-There is a working, but incomplete php-src pull request that has tests here: https://github.com/php/php-src/pull/972
+There is a working, but incomplete php-src patch with limited tests here: https://github.com/TazeTSchnitzel/php-src/compare/scalar_type_hints_2_electric_boogaloo...scalar_type_hints_2_strict_mode
 
-There is an incomplete language specification pull request (lacking tests) here: https://github.com/php/php-langspec/pull/109
-
-Note that the patch for php-src allows these hints for internal/extension functions as well. This might be useful in future to allow bypassing ''zend_parse_parameters'' for new functions. It produces ''E_RECOVERABLE_ERROR'' on failure, so it couldn't be used for existing functions.
+There is no language specification patch.
 
 ===== Implementation =====
 After the project is implemented, this section should contain 
@@ -199,6 +297,7 @@ After the project is implemented, this section should contain
 
 ===== Changelog =====
 
+  * v0.2 - Introduction of optional strict hinting mode
   * v0.1.2 - Noted some downsides of strict hints vs weak hints
   * v0.1.1 - Added table summarising casting and validation rules
   * v0.1 - Initial drafts
