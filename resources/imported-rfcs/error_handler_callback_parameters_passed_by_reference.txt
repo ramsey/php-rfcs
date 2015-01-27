@@ -1,0 +1,270 @@
+====== PHP RFC: Allow error_handler callback parameters to be passed by reference ======
+  * Version: 0.1
+  * Date: 2015-01-26 (initial draft)
+  * Authors: Reeze Xia <reeze@php.net>, Thomas Bley <mails@thomasbley.de>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/error_handler_callback_parameters_passed_by_reference
+
+===== Introduction =====
+
+In userland it is sometimes necessary to extend PHP's notices/warnings with
+additional information (e.g. username from session, request-uri, http-host, stack trace, log-id, etc.).
+This reduces time and effort to analyze and fix bugs in userland code.
+By adding request-uri and log-id to errstr, log aggregation systems can merge the error messages to help monitoring.
+
+===== Proposal =====
+
+We are proposing to enable error_handler callback parameters to be passed by
+reference to be able to append additional data to error messages.
+This includes the first four parameters ($errno, $errstr, $errfile, $errline) OR only $errstr (depending on your vote)
+
+Examples:
+
+1. Add username from $_SESSION to error_log:
+
+<file php test1.php>
+<?php
+ini_set('error_reporting', E_ALL);
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+ini_set('error_log', 'php_error.log');
+
+$_SESSION['username'] = 'john';
+
+function myErrorHandler($errno, &$errstr, $errfile, $errline) {
+  if (!empty($_SESSION['username'])) {
+    $errstr .= ', username: '.$_SESSION['username'];
+  }
+  return false; // continue normal error handler
+}
+
+set_error_handler('myErrorHandler');
+
+echo tests.PHP_EOL; // Use of undefined constant tests
+</file>
+
+gives:
+PHP Notice:  Use of undefined constant tests - assumed 'tests', username: john in /tmp/test1.php on line 18
+
+instead of:
+PHP Notice:  Use of undefined constant tests - assumed 'tests' in /tmp/test1.php on line 18
+
+
+2. Add stack trace to error_log:
+
+<file php test2.php>
+<?php
+ini_set('error_reporting', E_ALL);
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+ini_set('error_log', 'php_error.log');
+
+function myErrorHandler($errno, &$errstr, $errfile, $errline) {
+  $exception = new ErrorException($errstr, $errno, 0, $errfile, $errline);
+  $errstr .= ', '.$exception->__toString();
+  return false; // continue normal error handler
+}
+
+set_error_handler('myErrorHandler');
+
+function test(){
+  test2('bar');
+}
+function test2(){
+  echo tests.PHP_EOL; // Use of undefined constant tests
+}
+test('foo');
+</file>
+
+gives:
+PHP Notice:  exception 'ErrorException' with message 'Use of undefined constant tests - assumed 'tests'' in /tmp/test2.php:19
+Stack trace:
+#0 /tmp/test2.php(19): myErrorHandler(8, 'Use of undefine...', '/tmp/test....', 19, Array)
+#1 /tmp/test2.php(16): test2('bar')
+#2 /tmp/test2.php(21): test('foo')
+#3 {main} in /tmp/test2.php on line 19
+
+instead of:
+PHP Notice:  Use of undefined constant tests - assumed 'tests' in /tmp/test2.php on line 19
+
+
+3. prefix error_log with http-host, suffix error_log with request-uri and $_REQUEST:
+
+<file php test3.php>
+<?php
+ini_set('error_reporting', E_ALL);
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+ini_set('error_log', 'php_error.log');
+
+$_SERVER['HTTP_HOST'] = 'wiki.php.net';
+$_SERVER['REQUEST_URI'] = '/rfc/error_handler_callback_parameters_passed_by_reference';
+$_REQUEST = array('do' => 'edit');
+
+function myErrorHandler($errno, &$errstr, $errfile, $errline) {
+  if (!empty($_SERVER['HTTP_HOST'])) {
+    $errstr = '['.$_SERVER['HTTP_HOST'].'] '.$errstr;
+  }
+  if (!empty($_SERVER['REQUEST_URI'])) {
+    $errstr .= PHP_EOL.'  Request-Uri: '.$_SERVER['REQUEST_URI'];
+  }
+  $errstr .= PHP_EOL.'  Request-Params: '.json_encode($_REQUEST);
+  $errstr .= PHP_EOL.' ';
+  return false; // continue normal error handler
+}
+
+set_error_handler('myErrorHandler');
+
+echo tests.PHP_EOL; // Use of undefined constant tests
+</file>
+
+gives:
+PHP Notice:  [wiki.php.net] Use of undefined constant tests - assumed 'tests'
+  Request-Uri: /rfc/error_handler_callback_parameters_passed_by_reference
+  Request-Params: {"do":"edit"}
+  in /tmp/test3.php on line 25
+
+instead of:
+PHP Notice:  Use of undefined constant tests - assumed 'tests' in /tmp/test3.php on line 25
+
+
+
+===== Backward Incompatible Changes =====
+
+Current versions of php.net allow passing parameters for a custom error handler by reference (without warnings), but they don't have any effect.
+Therefore, framework maintainers can use error handler callback parameters by reference without any problems in older php versions. This change is fully backward compatible.
+
+===== Proposed PHP Version(s) =====
+
+This is proposed for the next PHP x, currently PHP 7.
+
+===== RFC Impact =====
+==== To SAPIs ====
+
+No impact
+
+==== To Existing Extensions ====
+
+No impact
+
+==== To Opcache ====
+
+No impact
+
+==== New Constants ====
+
+None
+
+==== Performance ====
+
+TODO
+
+===== Open Issues =====
+
+1. Callback parameters passed by reference are currently not binary safe, example:
+
+<file php test_binary_safe.php>
+<?php
+ini_set('error_reporting', E_ALL);
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+ini_set('error_log', 'php_error.log');
+
+function myErrorHandler($errno, &$errstr, $errfile, $errline) {
+  $errstr .= "foo\0bar";
+  return false; // continue normal error handler
+}
+set_error_handler('myErrorHandler');
+
+echo tests.PHP_EOL; // Use of undefined constant tests
+</file>
+
+gives:
+PHP Notice:  Use of undefined constant tests - assumed 'tests'foo in /tmp/test_binary_safe.php on line 13
+
+instead of:
+PHP Notice:  Use of undefined constant tests - assumed 'tests'foobar in /tmp/test_binary_safe.php on line 13
+
+
+2. Callback parameter errstr can be changed to an empty string, example:
+
+<file php test_empty_errstr.php>
+<?php
+ini_set('error_reporting', E_ALL);
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+ini_set('error_log', 'php_error.log');
+
+function myErrorHandler($errno, &$errstr, $errfile, $errline) {
+  $errstr = '';
+  return false; // continue normal error handler
+}
+set_error_handler('myErrorHandler');
+
+echo tests.PHP_EOL; // Use of undefined constant tests
+</file>
+
+gives:
+PHP Notice:   in /tmp/test_empty_errstr.php on line 13
+
+
+3. Shall we allow $errno, $errstr, $errfile, $errline or only $errstr to be passed by reference?
+
+laruence: why only one parameter can be reference, but others not?
+reeze: I am afraid that modify the lineno and file seems a not good practice
+yohgaki: we certainly change line/file for appropriate one. e.g. Actual cause may be in other file/line.
+  Setting proper file/line may not be trivial, but it would be useful. However, one may get proper line/file by debug_backtrace() in most cases.
+smalyshev: I personally think passing a bunch of params by-ref to change engine internal things like line number is not a good idea.
+  With message, it could work as some kind of a stretch since message is not really an engine thing but with other params I think it's just a bad API.
+yohgaki: I suggest to have options in the RFC.
+  1 Make parameter reference
+  For people voted for YES, choose
+  1. Make message a reference
+  2. Make all parameters references
+NicolasGrekas: This would allow mapping "compiled" source to real source code and have meaningful error file+line information.
+  By "compiled", I mean e.g. inlined classes (like the bootstrap.cache.php file in Symfony), or preprocessed sources, etc.
+
+
+4. Shall we target the rfc on PHP 5.5 / 5.6 ?
+
+Possible, but may not come into major distributions if they stick to special minor releases
+(e.g. Ubuntu 14.04: 5.5.9, Ubuntu 14.10: 5.5.12, latest: 5.5.21)
+
+===== Future Scope =====
+
+set_error_handler() callback might be able to handle E_ERROR to be able to append additional information to memory_limit exhaustions (or others).
+For example try to analyze and fix: [13-Jan-2015 09:24:37 Europe/Berlin] PHP Fatal error:  Allowed memory size of 209715200 bytes exhausted (tried to allocate 262144 bytes) in /var/www/cake/libs/model/datasources/dbo_source.php on line 419
+
+===== Proposed Voting Choices =====
+
+This RFC requires a 50%+1 majority. 
+
+===== Patches and Tests =====
+
+Currently implemented on https://github.com/php/php-src/pull/1018
+PR is against master and includes the first four callback parameters to be passed by reference.
+
+I've used to build on Ubuntu 14.04:
+<file php build.sh>
+apt-get install build-essential re2c bison
+git clone -b master https://github.com/php/php-src.git
+cd php-src
+curl https://github.com/php/php-src/pull/1018.patch | git am
+./buildconf
+./configure
+make
+sapi/cli/php ...
+</file>
+
+===== References =====
+
+Discussion on php-internals: http://marc.info/?t=142181539200002&r=1&w=2
+Discussion on github: https://github.com/php/php-src/pull/1018
+
+===== Rejected Features =====
+
+None so far. 
+
+===== Changelog =====
+
+v0.1 - Initial draft (thbley)
