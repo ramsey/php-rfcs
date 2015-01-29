@@ -88,7 +88,47 @@ TODO
 
 ==== Implementation Details ====
 
-TODO
+The existing FE_RESET/FE_FETCH opcodes are split into separate FE_RESET_R/FE_FETCH_R opcodes used to implement **foreach by value** and FE_RESET_RW/FE_FETCH_RW to implement **foreach by reference**. The suffix **_R** means that we use array (or object) only for reading, and suffix **_RW** that we also may indirectly modify it. A new FE_FREE opcode is introduced. It's used at the end of **foreach by reference** loops, instead of FREE opcode.
+
+Iteration by value don't use or modify internal array (or object) pointer. The value of the pointer is kept in reserved space of temporary variable used for iteration. It's acceptable through Z_FE_POS() macro.
+
+Iteration by reference implemented using special **HashTableIterator** structures.
+
+<code>
+typedef struct _HashTableIterator {
+	HashTable    *ht;
+	HashPosition  pos;
+} HashTableIterator;
+</code>
+
+On entrance into **foreach by reference** FE_RESET_RW opcode creates and initializes a new iterator, increments the counter of such iterators for given HachTable and store its index in reserved space of temporary variable used for iteration. On exit, FE_FREE opcode removes corresponding iterator and decrements the iterators counter of corresponding hash table.
+
+Iterators are actually allocated in a buffer - EG(ht_iterators), represented by plain array. The more nested **foreach by reference** iterators the bigger buffer we will need. We start with small preallocated buffer - EG(ht_iterators_slots), and then extend it if necessary in heap. EG(ht_iterators_count) keeps the number of available slots for iterators, EG(ht_iterators_used) - the number of used slots.
+
+<code>
+struct _zend_executor_globals {
+	...
+	uint32_t           ht_iterators_count;     /* number of allocatd slots */
+	uint32_t           ht_iterators_used;      /* number of used slots */
+	HashTableIterator *ht_iterators;
+	HashTableIterator  ht_iterators_slots[16];
+	...
+}
+</code>
+
+Creation, deletion and accessing iterators position is implemented through special API.
+
+<code>
+ZEND_API uint32_t     zend_hash_iterator_add(HashTable *ht);
+ZEND_API HashPosition zend_hash_iterator_pos(uint32_t idx, HashTable *ht);
+ZEND_API void         zend_hash_iterator_del(uint32_t idx);
+</code>
+
+Indirect modification of iterators position implemented through zend_hash_iterators_update().
+
+<code>
+ZEND_API void         zend_hash_iterators_update(HashTable *ht, HashPosition pos);
+</code>
 
 ===== Backward Incompatible Changes =====
 Some rare cases where the **foreach** statement behavior was undefined may be changed. The implementation changes few such PHPT tests.
