@@ -74,10 +74,6 @@ $ php -r '$a = [1,2,3]; $b = &$a; foreach($a as $v) {echo "$v\n"; unset($a[1]);}
 3
 </code>
 
-==== foreach() by value over plain objects ====
-
-TODO
-
 ==== foreach() by reference over arrays ====
 
 In most cases it repeats the PHP5 behavior.
@@ -166,17 +162,21 @@ $ php -r '$a=[1,2,3,4]; foreach($a as &$v) { echo "$v\n"; array_pop($a);}'
 2
 </code>
 
+==== foreach() by value over plain objects ====
+
+It beahves in the same way as **foreach by reference over array**, but using object value instead of reference. As result the object can be modified, but can't be replaced.
+
 ==== foreach() by reference over plain objects ====
 
 It beahves in the same way as **foreach by reference over array**.
 
 ==== Implementation Details ====
 
-The existing FE_RESET/FE_FETCH opcodes are split into separate FE_RESET_R/FE_FETCH_R opcodes used to implement **foreach by value** and FE_RESET_RW/FE_FETCH_RW to implement **foreach by reference**. The suffix **_R** means that we use array (or object) only for reading, and suffix **_RW** that we also may indirectly modify it. A new FE_FREE opcode is introduced. It's used at the end of **foreach by reference** loops, instead of FREE opcode.
+The existing FE_RESET/FE_FETCH opcodes are split into separate FE_RESET_R/FE_FETCH_R opcodes used to implement **foreach by value** and FE_RESET_RW/FE_FETCH_RW to implement **foreach by reference**. The suffix **_R** means that we use array (or object) only for reading, and suffix **_RW** that we also may indirectly modify it. A new FE_FREE opcode is introduced. It's used at the end of **foreach** loops, instead of FREE opcode.
 
-Iteration by value don't use or modify internal array (or object) pointer. The value of the pointer is kept in reserved space of temporary variable used for iteration. It's acceptable through Z_FE_POS() macro.
+Iteration by value over array doesn't use or modify internal array pointer. The value of the pointer is kept in reserved space of temporary variable used for iteration. It's acceptable through Z_FE_POS() macro.
 
-Iteration by reference implemented using special **HashTableIterator** structures.
+Iteration by reference or by value over plain object implemented using special **HashTableIterator** structures.
 
 <code>
 typedef struct _HashTableIterator {
@@ -185,7 +185,7 @@ typedef struct _HashTableIterator {
 } HashTableIterator;
 </code>
 
-On entrance into **foreach by reference** FE_RESET_RW opcode creates and initializes a new iterator, increments the counter of such iterators for given HachTable and store its index in reserved space of temporary variable used for iteration. On exit, FE_FREE opcode removes corresponding iterator and decrements the iterators counter of corresponding hash table.
+On entrance into **foreach** loop FE_RESET_R/RW opcode creates and initializes a new iterator and stores its index in reserved space of temporary variable used for iteration. On exit, FE_FREE opcode removes corresponding iterator.
 
 Iterators are actually allocated in a buffer - EG(ht_iterators), represented by plain array. The more nested **foreach by reference** iterators the bigger buffer we will need. We start with small preallocated buffer - EG(ht_iterators_slots), and then extend it if necessary in heap. EG(ht_iterators_count) keeps the number of available slots for iterators, EG(ht_iterators_used) - the number of used slots.
 
@@ -211,7 +211,7 @@ ZEND_API void         zend_hash_iterator_del(uint32_t idx);
 Indirect modification of iterators positions implemented through zend_hash_iterators_update(). It's called when HashTable modification may affects iterator position. For example when element referred by iterator is inserted, or when iterator is set at the end of the array and new element is inserted.
 
 <code>
-ZEND_API void         zend_hash_iterators_update(HashTable *ht, HashPosition pos);
+ZEND_API void         zend_hash_iterators_update(HashTable *ht, HashPosition from, HashPosition to);
 </code>
 
 Foe more details see zend_hash_iterators_*() functions implementation in zend_hash.c
@@ -230,11 +230,6 @@ Some rare cases where the **foreach** statement behavior was undefined may be ch
   * tests/lang/foreachLoop.015.phpt - modification of array in foreach by reference through internal functions
   * tests/lang/foreachLoopObjects.006.phpt - replacement of array in foreach by value doesn't have effect
 
-
-
-
-
-
 ===== Proposed PHP Version(s) =====
 
 PHP7
@@ -247,9 +242,7 @@ New behavior allows elimination of array duplication and this should lead to bet
 OPCache has to support new opcodes. All necessary OPCache changes are provided with the proposed implementation
 
 ===== Open Issues =====
-  * complete RFC
-  * complete implementation
-  * performance optimization 
+  * implementation optimization for size & speed
 
 ===== Future Scope =====
 This sections details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
