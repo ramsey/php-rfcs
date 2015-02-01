@@ -1,5 +1,5 @@
 ====== PHP RFC: Scalar Type Hints ======
-  * Version: 0.2.3
+  * Version: 0.3
   * Date: 2014-12-14 (initial draft; put Under Discussion 2014-12-31; version 0.2 created 2015-01-13)
   * Author: Andrea Faulds, ajf@ajf.me
   * Status: Under Discussion
@@ -97,6 +97,33 @@ $foo = sin(1);
 // Catchable fatal error: sin() expects parameter 1 to be float, integer given
 </file>
 
+Scalar type hints would also work for return values:
+
+<file php returns.php>
+<?php
+
+function foobar(): int {
+    return 1.0;
+}
+
+var_dump(foobar()); // int(1)
+</file>
+
+And strict type checking mode works for return values, too:
+
+<file php returns2.php>
+<?php
+
+declare(strict_types=1);
+
+function foobar(): int {
+    return 1.0;
+}
+
+var_dump(foobar());
+// Catchable fatal error: Return value of foobar() must be of the type integer, float returned
+</file>
+
 ===== Background and Rationale =====
 
 ==== History ====
@@ -113,7 +140,7 @@ In creating this RFC, I have attempted to learn from these failings.
 
 ==== Weak typing and strict typing ====
 
-There are two major approaches to how to check parameter types or type hints that have been proposed for PHP:
+There are two major approaches to how to check parameter and return type hints that have been proposed for PHP:
 
   * Strict type checking, which is used by many popular programming languages, particularly ones which are statically-typed, such as Java, C#, Haskell, or Facebook's Hack. It is also used for non-scalar parameter type hints in PHP. With this approach, an argument is only accepted if its type is exactly the same as the parameter. So, for example, an integer is accepted for an integer parameter, but a float is not accepted. Such systems often also accept subclasses, so if ''Bar'' inherits from ''Foo'', it might be accepted for a ''Foo'' parameter.
   * Weak type checking (which implicitly converts arguments, where possible, to the correct type), which is used to a limited extent by C, and is also the approach by PHP's extension and built-in functions for scalar types. With this approach, along with values with exactly matching types, some values that can be converted are accepted. So, for example, an integer is accepted for an integer parameter, but a float or a numeric string might also be accepted, depending on the rules of the language. These convertible values will be converted when they are passed to the function. So, even though the float value ''1.0'' might have been passed, the value the function actually gets is an integer ''1''.
@@ -127,6 +154,17 @@ function foobar(int $i) {
     if (!is_int($i)) {
         throw new Exception("Not an integer."); // this will never happen
     }
+}
+</code>
+
+Similarly, in both approaches, a function will always return exactly the return type it claims to:
+
+<code php>
+function barfoo(): int {
+   /* ... */
+}
+if (!is_int(barfoo())) {
+    throw new Exception("Not an integer."); // this will also never happen
 }
 </code>
 
@@ -181,7 +219,11 @@ This directive also supports the ''declare()'' block syntax (e.g. ''declare(stri
 
 Like the ''encoding'' directive, but unlike the ''ticks'' directive, the ''strict_types'' directive only affects the specific file it is used in, and does not affect either other files which include the file, nor other files that are included by the file.
 
-The directive is entirely compile-time and affects any function call, including those within a function or method. For example:
+The directive is entirely compile-time and cannot be controlled at runtime. It works by setting a flag on function call (for parameter type hint) and function return type check (for return type hint) opcodes.
+
+=== Parameter type hints ===
+
+The directive affects any function call, including those within a function or method. For example:
 
 <file php strict_types_scope.php>
 <?php
@@ -215,11 +257,43 @@ class baz {
 
 Whether or not the function being called was declared in a file that uses strict or weak type checking is entirely irrelevant. The type checking mode depends on the file where the function is called.
 
-==== Behaviour of weakly type-checked function calls ====
+=== Return type hints ===
+
+The directive affects any return statement in any function or method within a file. For example:
+
+<file php strict_types_scope.php>
+<?php
+
+declare(strict_types=1) {
+    function foobar(): int {
+        return 1.0; // strictly type-checked return
+    }
+
+    class baz {
+        function foobar(): int {
+            return 1.0; // strictly type-checked return
+        }
+    }
+}
+
+function foobar(): int {
+    return 1.0; // weakly type-checked return
+}
+
+class baz {
+    function foobar() {
+        return 1.0; // weakly type-checked return
+    }
+}
+</file>
+
+Unlike parameter type hints, the type checking mode used for return types depends on the file where the function is defined, not where the function is called. This is because returning the wrong type is a problem with the callee, while passing the wrong type is a problem with the caller.
+
+==== Behaviour of weak type checks ====
 
 A weakly type-checked call to an extension or built-in PHP function has exactly the same behaviour as it did in previous PHP versions.
 
-The weak type checking rules for the new scalar type hints are mostly the same as those of extension and built-in PHP functions. The only exception to this is the handling of ''NULL'': in order to be consistent with our existing type hints for classes, callables and arrays, ''NULL'' is not accepted by default, unless the parameter is explicitly given a default value of ''NULL''. This would work well with the draft [[rfc:nullable_typehints|Declaring Nullable Types]] RFC.
+The weak type checking rules for the new scalar type hints are mostly the same as those of extension and built-in PHP functions. The only exception to this is the handling of ''NULL'': in order to be consistent with our existing type hints for classes, callables and arrays, ''NULL'' is not accepted by default, unless it is a parameter and is explicitly given a default value of ''NULL''. This would work well with the draft [[rfc:nullable_typehints|Declaring Nullable Types]] RFC. If that RFC were to pass, it would be possible to mark return types as nullable, and so they would accept ''NULL''.
 
 For the reference of readers who may not be familiar with PHP's existing weak scalar parameter type rules, the following brief summary is provided.
 
@@ -237,14 +311,13 @@ The table shows which types are accepted and converted for scalar type hints. ''
 
 ‡Only if it has a ''__toString'' method.
 
-==== Behaviour of strictly type-checked function calls ====
+==== Behaviour of strict type checks ====
 
 A strictly type-checked call to an extension or built-in PHP function changes the behaviour of ''zend_parse_parameters''. In particular, it will produce ''E_RECOVERABLE_ERROR'' rather than ''E_WARNING'' on failure, and it follows strict type checking rules for scalar typed parameters, rather than the traditional weak type checking rules.
 
-The strict type checking rules are quite straightforward: when the type of the passed argument matches that specified by the parameter type hint it is accepted, otherwise it is not.
+The strict type checking rules are quite straightforward: when the type of the value matches that specified by the type hint it is accepted, otherwise it is not.
 
 These strict type checking rules are used for userland scalar type hints, and for extension and built-in PHP functions.
-
 
 ===== Backward Incompatible Changes =====
 
@@ -272,20 +345,16 @@ When the strict type-checking mode isn't in use (which is the default), function
 
 ===== Open Issues =====
 
-There are two open issues related to naming. These might be voted on if consensus isn't reached.
+There is currently an open issue related to naming, described below. This will probably go to a vote.
 
-  * Currently, this RFC and patch allows the aliases ''integer'' and ''boolean'' in addition to ''int'' and ''bool''. Should we only allow ''int'' and ''bool''? It is probably not a good idea to add too many new reserved class names. On the other hand, we use ''integer'' and ''boolean'' in many places in the manual, and programmers would be forgiven for expecting ''integer'' and ''boolean'' to work. We could opt to reserve them but prevent their use, telling people to use ''int'' and ''bool'' instead. That wouldn't reduce the number of prohibited class names, but it would prevent confusion and ensure consistency.
-
-  * Should the scalar type hint names be prohibited from use as class names? The patch currently prohibits this (<php>class int {}</php> is an error), to avoid the situation where you can declare a class with the name of a scalar type hint yet not type hint against it (as the name would be interpreted as a scalar hint). Personally, I think it'd be best to avoid confusion and prevent classes from having the same names as scalar types. However, if this causes significant backwards-compatibility problems, we might have to allow it. I would note that at least some of the existing classes with such names are used as a stand-in for scalar type hints.
-     * The patch doesn't currently do this, but it would make sense to also prevent scalar type hint names being used with the <php>use</php> statement.
+This RFC and patch allows the aliases ''integer'' and ''boolean'' in addition to ''int'' and ''bool''. Should we only allow ''int'' and ''bool''? It is probably not a good idea to add too many new reserved class names. On the other hand, we use ''integer'' and ''boolean'' in many places in the manual, and programmers would be forgiven for expecting ''integer'' and ''boolean'' to work. We could opt to reserve them but prevent their use, telling people to use ''int'' and ''bool'' instead. That wouldn't reduce the number of prohibited class names, but it would prevent confusion and ensure consistency.
 
 ==== TODO ====
 
   * Produce a different error message on strict type hint failure vs. on weak type hint failure, lest debugging be a pain. For practical reasons we may not be able to change the weak one, as it is an existing message (should we?).
+  * Return types need tests.
 
 ===== Future Scope =====
-
-If return types are added, such as with the [[rfc:returntypehinting|Return Type Hinting]] RFC, scalar type hints should be supported. Unlike parameter types, it would probably not make sense to allow weak type-checking for return types. Allowing weak type-checking for parameter types, but only strict type-checking for return types, would be consistent with [[https://en.wikipedia.org/wiki/Robustness_principle|the principle of "be conservative in what you send, be liberal in what you accept"]]. If we are to reject this principle and allow weak type-checking for return types, then the type-checking mode should depend on where the function is defined, rather than where it is called. This is because returning the wrong type is a problem with the callee, while passing the wrong type is a problem with the caller.
 
 Because scalar type hints guarantee that a passed argument will be of a certain type within a function body (at least initially), this could be used in the Zend Engine for optimisations. For example, if a function takes two ''float''-hinted arguments and does arithmetic with them, there is no need for the arithmetic operators to check the types of their operands. As I understand it, HHVM already does such optimisations, and might benefit from this RFC.
 
@@ -295,7 +364,7 @@ As this is a language change, this RFC requires a 2/3 majority to pass. It will 
 
 ===== Patches and Tests =====
 
-There is a working, but incomplete php-src pull request with tests here: https://github.com/php/php-src/pull/998
+There is a working, but incomplete php-src pull request with tests for parameter type hints (but not yet return type hints) here: https://github.com/php/php-src/pull/998 
 
 There is no language specification patch.
 
@@ -311,6 +380,7 @@ After the project is implemented, this section should contain
 
 ===== Changelog =====
 
+  * v0.3 - Return types support
   * v0.2.3 - ''strict_types=1'' rather than ''strict_typehints=TRUE''
   * v0.2.2 - Follow robustness principle for return types under Future Scope
   * v0.2.1 - Weak typing clarification
