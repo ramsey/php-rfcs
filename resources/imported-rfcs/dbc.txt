@@ -1,95 +1,318 @@
 ====== PHP RFC: Native Design by Contract support ======
   * Version: 0.1
-  * Date: 2015-02-05 
-  * Author: Yasuo Ohgaki <yohgaki@ohgaki.net>, 
-  * Status: Draft (or Under Discussion or Accepted or Declined)
+  * Date: 2015-02-04
+  * Author: Yasuo Ohgaki <yohgaki@ohgaki.net>, François Laupretre <francois@php.net>
+  * Status: Draft
   * First Published at: http://wiki.php.net/rfc/dbc
 
-This is a suggested template for PHP Request for Comments (RFCs). Change this template to suit your RFC.  Not all RFCs need to be tightly specified.  Not all RFCs need all the sections below.
-Read https://wiki.php.net/rfc/howto carefully!
-
-
-Quoting [[http://news.php.net/php.internals/71525|Rasmus]]:
-
-> PHP is and should remain:
-> 1) a pragmatic web-focused language
-> 2) a loosely typed language
-> 3) a language which caters to the skill-levels and platforms of a wide range of users
-
-Your RFC should move PHP forward following his vision. As [[http://news.php.net/php.internals/66065|said by Zeev Suraski]] "Consider only features which have significant traction to a
-large chunk of our userbase, and not something that could be useful in some
-extremely specialized edge cases [...] Make sure you think about the full context, the huge audience out there, the consequences of  making the learning curve steeper with
-every new feature, and the scope of the goodness that those new features bring."
-
 ===== Introduction =====
-The elevator pitch for the RFC. The first paragraph in this section will be slightly larger to give it emphasis; please write a good introduction.
+
+For more than 10 years (roughly since PHP 5 was released), the PHP core community has
+seen a lot of discussions about strict vs loose typing, type hinting and
+related features.
+
+To summarize years of flame wars, developers argue that strict typing and type hinting
+will make their source code cleaner and easier to debug. On the other side, these
+features must remain optional and compatible with 'basic' loose-typed PHP syntax.
+And the debate generally dies in endless discussions about the concept of
+'number', 'int', 'float'... :).
+
+With this RFC, we propose an alternative approach, already present in several
+languages, named 'design by contract' (reduced to 'DbC' in the rest of the document).
+
+We won't detail the concept of DbC here, as we provide links in
+the reference section below. Just note that DbC is a way to define constraints on
+function arguments, return values, and class properties. The key
+point is that DbC checks are performed during the development/validation
+phase only. In production phase, DbC checks are turned off.
+
+So, the most important points are :
+
+  * DbC constraints can be extremely detailed as performance is not a problem.
+  * DbC checks cannot handle checks that must always run, even in production. Validating user input, for instance, must remain out of DbC constraints.
+  * The DbC and 'Test Driven Development' concepts are closely related, as DbC heavily relies on the quality of test coverage.
+
+===== Example =====
+
+First, an example of a function defining input, inline and output constraints :
+
+<code php>
+/**
+* Compute area of a triangle
+*
+* This function computes the area of a triangle using Heron's formula.
+*
+* @param float([0:) $a Length of 1st side
+* @param float([0:) $b Length of 2nd side
+* @param float([0:) $c Length of 3rd side
+* @assert.in ($a <= ($b+$c))
+* @assert.in ($b <= ($a+$c))
+* @assert.in ($c <= ($a+$b))
+*
+* @return float The triangle area
+* @assert.out ($> >= 0)
+*/
+
+function triangleArea($a, $b, $c)
+{
+$halfPerimeter = ($a + $b + $c) / 2;
+
+// @assert ($halfPerimeter >= 0)
+
+return sqrt($halfPerimeter
+	* ($halfPerimeter - $a)
+	* ($halfPerimeter - $b)
+	* ($halfPerimeter - $c));
+}
+</code>
+
+Notes:
+
+  * '$>' means 'return value'.
+  * 'float([0:)' means 'a floating point number in the range from 0 (included) to infinite', which means 'a positive or null floating point number'.
+  * I added an '@assert.out' explicit constraint for the example but it would have been easier to change the return type to 'float([0:)'.
+
+You may also note that this code is fully backwards compatible.
+
+Another example with a clone of str_replace() :
+
+<code php>
+/**
+* Replace all occurrences of the search string with the replacement string
+*
+* ...
+*
+* @param array(string)|string $search The value being searched for (aka needle)
+* @param array(string)|string $replace The replacement value that replaces found search values
+* @param array(string)|string $subject The string or array being searched and replaced on
+* @param.out int([0:) $count The number of replacements performed
+* @return array(string)|string
+* @assert.out (is_array($subject)===is_array($>))
+*/
+
+function str_replace($search, $replace, $subject, &$count=null)
+{
+...
+</code>
+
+Note that, while it would be supported, we didn't provide any constraint on $count input, as this
+parameter is used for output only.
 
 ===== Proposal =====
-All the features and examples of the proposal.
 
-To [[http://news.php.net/php.internals/66051|paraphrase Zeev Suraski]], explain hows the proposal brings substantial value to be considered
-for inclusion in one of the world's most popular programming languages.
+DbC typically defines three basic constraint types :
 
-Remember that the RFC contents should be easily reusable in the PHP Documentation.
+* pre-conditions: checked when entering a function/method. Generally check that
+passed arguments are valid.
+
+* post-conditions: checked when a function/method exits. Used to check the
+return type/value and the returned type/value of arguments passed by reference.
+
+* class inveriants: Constraints on class properties. In PHP, two subtypes exist : constraints on static properties and constraint on
+dynamic (instance) properties.
+
+==== Syntax ====
+
+We propose to include the DbC directives in PHP comments. The function/method/class-related
+constraints will be included in phpdoc blocks (extending the phpdoc syntax), while
+inline assertions will be included in plain comments.
+
+The benefits are :
+
+- As directives are exclusively contained in comments, the source code remains
+fully compatible with every past and future PHP interpreter (NO BC break).
+
+- phpdoc blocks already contain arguments and return types. As DbC uses this
+information, unchanged code will automatically benefit of DbC.
+
+- phpDocumentor will easily take advantage of the extensions DbC is bringing
+to the phpdoc syntax and will easily generate a more detailed documentation.
+There is no BC break here as, even using the current version of phpDocumentor,
+DbC-specific keywords are ignored and the documentation is correctly generated.
+
+- PHP IDEs already use phpdoc blocks. So, it will be easier for them to
+exploit DbC constraints.
+
+==== Pre-conditions ====
+
+=== Argument types ===
+
+== Syntax ==
+
+<code>
+line = "*", "@param", compound-type, name [, free-text]
+
+compound-type = type, { "|", type }
+
+type = array-type
+	| numeric-type
+	| string-type
+	| object-type
+	| resource-type
+	| scalar-type
+	| simple-type
+
+simple-type = "null" | "scalar" | "mixed" | "bool"
+
+array-type = "array" [ "(" [ key-type "=>" ] compound-type ")" ]
+
+<TODO>
+</code>
+
+== DbC types vs zval types ==
+
+
+
+=== Optional arguments ===
+
+When an optional argument is not set by the caller, its input/output types are not
+checked. This allows to set a default value which does not match the argument's
+declared input type.
+
+Example :
+
+<code php>
+/**
+* ...
+* @param int $flag ...
+* ...
+*/
+
+function myFunc(..., $flag=null)
+{
+if (is_null($flag)) {
+	// Here, we are sure that the parameter was not set by the caller, as
+	// a null value sent by the caller would be refused by DbC input check.
+	...
+</code>
+
+=== Input assertions ===
+
+<code>
+line = "*", "@assert.in", php-condition
+</code>
+
+=== Inheritance ===
+
+==== Post-conditions ====
+
+=== Returned type ===
+
+line = "*", "@return", compound-type [, free-text]
+
+=== Argument return type ===
+
+This is the return type & value of the arguments passed by reference.
+
+@param.out <compound-type> <name> <free-text>
+
+=== Output assertions ===
+
+@assert.out
+
+=== Inheritance ===
+
+==== Class-wide constraints ====
+
+=== Static constraints ===
+
+== Syntax ==
+
+@assert.static
+
+== Execution ==
+
+== Scope ==
+
+== Inheritance ==
+
+=== Instance constraints ===
+
+@assert.instance
+
+== Execution ==
+
+== Scope ==
+
+== Inheritance ==
+
+==== Inline assertions ====
+
+=== Syntax ===
+
+<code>
+// @assert <condition>
+</code>
+
+=== Scope ===
+
+==== Exception thrown ====
+
+ContractException
 
 ===== Backward Incompatible Changes =====
-What breaks, and what is the justification for it?
+
+None
 
 ===== Proposed PHP Version(s) =====
-List the proposed PHP versions that the feature will be included in.  Use relative versions such as "next PHP 5.x" or "next PHP 5.x.y".
+
+PHP 7
 
 ===== RFC Impact =====
 ==== To SAPIs ====
-Describe the impact to CLI, Development web server, embedded PHP etc.
+
+None
 
 ==== To Existing Extensions ====
-Will existing extensions be affected?
+
+Compatibility with Xdebug ? <TODO>
 
 ==== To Opcache ====
-It is necessary to develop RFC's with opcache in mind, since opcache is a core extension distributed with PHP.
 
-Please explain how you have verified your RFC's compatibility with opcache.
+<TODO>
 
 ==== New Constants ====
-Describe any new constants so they can be accurately and comprehensively explained in the PHP documentation.
+
+None
 
 ==== php.ini Defaults ====
-If there are any php.ini settings then list:
-  * hardcoded default values
-  * php.ini-development values
-  * php.ini-production values
+
+dbc.enforce : boolean
+
+  * php.ini-development value: true
+  * php.ini-production value: false
 
 ===== Open Issues =====
-Make sure there are no open issues when the vote starts!
 
 ===== Unaffected PHP Functionality =====
-List existing areas/features of PHP that will not be changed by the RFC.
 
-This helps avoid any ambiguity, shows that you have thought deeply about the RFC's impact, and helps reduces mail list noise.
+When DbC is off, there's no change in PHP behavior.
 
 ===== Future Scope =====
-This sections details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
+
+  * Exceptions: Using the '@throws' keyword, we can raise an error if the function throws an exception of an undeclared class.
+  * Enforce phpdoc's @var property types
+
 
 ===== Proposed Voting Choices =====
-Include these so readers know where you are heading and can discuss the proposed voting options.
 
-State whether this project requires a 2/3 or 50%+1 majority (see [[voting]])
+Required majority ?
 
 ===== Patches and Tests =====
-Links to any external patches and tests go here.
 
-If there is no patch, make it clear who will create a patch, or whether a volunteer to help with implementation is needed.
-
-Make it clear if the patch is intended to be the final patch, or is just a prototype.
+Dmitry Stogov volunteered for implementation.
 
 ===== Implementation =====
-After the project is implemented, this section should contain 
-  - the version(s) it was merged to
-  - a link to the git commit(s)
-  - a link to the PHP manual entry for the feature
+
+<TODO>
 
 ===== References =====
-Links to external references, discussions or RFCs
+
+[[http://en.wikipedia.org/wiki/Design_by_contract|'Design by contract' on Wikipedia]]
+
+[[https://www.eiffel.com/values/design-by-contract/introduction/|DbC in Eiffel]]
+
+[[http://ddili.org/ders/d.en/contracts.html|Contracts Programming in the D language]]
 
 ===== Rejected Features =====
-Keep this updated with features that were discussed on the mail lists.
+
