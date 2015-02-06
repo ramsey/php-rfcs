@@ -1,0 +1,209 @@
+====== PHP RFC: Scalar Type Hints (Version 0.1) ======
+  * Version: 0.1.2
+  * Date: 2014-12-14 (initial draft; put Under Discussion 2014-12-31)
+  * Author: Andrea Faulds, ajf@ajf.me, Dmitry Stogov dmitry@zend.com
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/scalar_type_hints_v_0_1
+
+**NOTE: This is a fork of an early version of Andrea's proposal published at http://wiki.php.net/rfc/scalar_type_hints.
+It doesn't include optional strict type hinting and declare() switch.
+Both may be added on top of this, but these are two different questions that must be voted separately.**
+
+> **Do we like type hinting with standard PHP rules?**
+
+> **Do we like strict type hinting with declare() switch in addition?**
+
+**NOTE: Few minor voring questions were added.**
+
+===== Introduction =====
+
+This RFC proposes the addition of four type hints for scalar types: ''int'', ''float'', ''string'' and ''bool''. These follow the same casting rules as used for internal functions (i.e. those defined by PHP extensions and written in native code).
+
+===== Example =====
+
+Let's say we have a PHP class that represents an [[http://php.net/elephpant.php|ElePHPant]]. We put scalar type hints on our constructor arguments:
+
+<code php>
+class ElePHPant {
+    public $name, $age, $cuteness, $evil;
+    public function __construct(string $name, int $age, float $cuteness, bool $evil) {
+        $this->name = $name;
+        $this->age = $age;
+        $this->cuteness = $cuteness;
+        $this->evil = $evil;
+    }
+}
+</code>
+
+We can then create a new instance like this, and it's valid since the parameter types exactly match:
+
+<code php>
+$sara = new ElePHPant("Sara", 7, 0.99, FALSE);
+var_dump($sara); /* Output:
+object(ElePHPant)#1 (4) {
+  ["name"]=>
+  string(4) "Sara"
+  ["age"]=>
+  int(7)
+  ["cuteness"]=>
+  float(0.99)
+  ["evil"]=>
+  bool(false)
+} */
+</code>
+
+We could also pass values that are convertible and they'll be converted, just like with extension functions:
+
+<code php>
+$nelly = new ElePHPant(new Stringable("Nelly"), "7 years", "0.9", "1");
+var_dump($nelly); /*
+object(ElePHPant)#2 (4) {
+  ["name"]=>
+  string(5) "Nelly"
+  ["age"]=>
+  int(7)
+  ["cuteness"]=>
+  float(0.9)
+  ["evil"]=>
+  bool(true)
+}
+PHP Notice:  A non well formed numeric value encountered in Command line code on line 1 */
+
+$evan = new ElePHPant(1234, "9", 0.3, 0);
+var_dump($evan); /*
+object(ElePHPant)#3 (4) {
+  ["name"]=>
+  string(4) "1234"
+  ["age"]=>
+  int(9)
+  ["cuteness"]=>
+  float(0.3)
+  ["evil"]=>
+  bool(false)
+} */
+</code>
+
+([[https://gist.github.com/TazeTSchnitzel/613b8ec4c629b945f92f|Stringable]] definition)
+
+Not all values are convertible, however, so the following would error:
+
+<code php>
+$foo = new ElePHPant([], new StdClass, fopen("data:text/plain,foobar", "r"), NULL);
+// Catchable fatal error: Argument 1 passed to ElePHPant::__construct() must be of the type string, array given
+</code>
+
+===== Background =====
+
+PHP has had parameter type hints for class names since PHP 5.0, arrays since PHP 5.1 and callables since PHP 5.4. Unfortunately, PHP's scalar types haven't been hintable. This has meant that the signatures of functions which take scalar arguments lack type information, requiring workarounds such as docblocks to document the parameter types, and requiring programmers to validate or convert arguments manually.
+
+Previous attempts at adding scalar type hints, such as the [[rfc:scalar_type_hinting_with_cast|Scalar Type Hints with Casts]] RFC, have failed. In particular, that specific proposal was inconsistent with the type conversion rules used in other parts of the language. However, this RFC follows exactly the same conversion rules as (and shares the implementation used by) functions defined by native code extensions, with the exception of the handling of ''NULL'' (see the Details section). Thus, it avoids the problem of inconsistency.
+
+To quote [[http://news.php.net/php.internals/71525|Rasmus]]:
+
+> PHP is and should remain:
+> 1) a pragmatic web-focused language
+> 2) a loosely typed language
+> 3) a language which caters to the skill-levels and platforms of a wide range of users
+
+Input coming from the web, such as query string parameters or POST bodies, is likely to be in string form. By performing conversion from strings automatically, just as with existing extension functions, this RFC is in keeping with PHP being a web-focused language. By allowing conversion instead of requiring strict type matches, this RFC is in keeping with PHP being a loosely-typed language. Finally, by not forcing users to worry about type conversions, it keeps the language accessible to beginners, keeping PHP a language catering to all skill-levels. Therefore, I feel that this RFC keeps all three of these principles true. 
+
+No type hint for resources is added, as this would prevent moving from resources to objects for existing extensions, which some have already done (e.g. GMP). 
+
+For the integer typehint, both the ''int'' and ''integer'' syntaxes are allowed, and for the boolean typehint, both ''bool'' and ''boolean'' are allowed. This has been done because PHP uses both throughout the manual and error messages, so there is no clear choice of syntax that wouldn't cause problems. While in an ideal world we would not need to support these aliases, the likelihood of people being caught out by ''integer'' or ''boolean'' not working is very high, so I feel we ought to support both the short and long forms of these type names.
+
+===== Details ====
+
+No new reserved words are added. The names ''int'', ''integer'', ''float'', ''string'', ''bool'' and ''boolean'' are recognised and allowed as type hints, and prohibited from use as class/interface/trait names. When they are used, the validation and conversion functions used by the Fast Parameter Parsing API are called internally. Thus, they exactly match the behaviour of ''zend_parse_parameters''. The only exception to this is the handling of ''NULL'': in order to be consistent with our existing type hints for classes, callables and arrays, ''NULL'' is not accepted by default, unless the parameter is explicitly given a default value of ''NULL''. This would work well with the draft [[rfc:nullable_typehints|Declaring Nullable Types]] RFC.
+
+==== Casting and Validation Rules ====
+
+While this RFC merely follows PHP's existing rules for scalar parameters, used by extension functions, these rules may not be familiar to all readers of this RFC. For that reason, here is a summary of which types are accepted. Note that ''NULL'', arrays and resources are never accepted for scalar type hints, and so are not included. These rules are the same as those used by extension functions, except for the handling of NULL. (See above)
+
+^ Type hint       ^ integer  ^ float    ^ string   ^ boolean ^ object  ^
+^ ''int''         ^ yes      ^ yes*     ^ yes†     ^ yes     ^ no      ^
+^ ''float''       ^ yes      ^ yes      ^ yes†     ^ yes     ^ no      ^
+^ ''string''      ^ yes      ^ yes      ^ yes      ^ yes     ^ yes‡    ^
+^ ''boolean''     ^ yes      ^ yes      ^ yes      ^ yes     ^ no      ^
+
+<nowiki>*</nowiki>Only non-NaN floats between ''PHP_INT_MIN'' and ''PHP_INT_MAX'' accepted.
+
+†Non-numeric strings not accepted. Numeric strings with trailing characters produce a notice.
+
+‡Only if it has ''__toString''.
+ 
+
+===== Backward Incompatible Changes =====
+
+''int'', ''integer'', ''float'', ''string'', ''bool'' and ''boolean'' are no longer permitted as class/interface/trait names.
+
+===== Proposed PHP Version(s) =====
+
+This is proposed for the next PHP x, currently PHP 7.
+
+===== RFC Impact =====
+
+==== To Existing Extensions ====
+
+''ext/reflection'' will need to be updated in order to support type hint reflection for parameters. This hasn't yet been done.
+
+==== Unaffected PHP Functionality ====
+
+This doesn't affect the behaviour of cast operators.
+
+===== Open Issues =====
+
+There are two open issues related to naming. These might be voted on if consensus isn't reached.
+
+  * Currently, this RFC and patch allows the aliases ''integer'' and ''boolean'' in addition to ''int'' and ''bool''. Should we only allow ''int'' and ''bool''? It is probably not a good idea to add too many new reserved class names. On the other hand, we use ''integer'' and ''boolean'' in many places in the manual, and programmers would be forgiven for expecting ''integer'' and ''boolean'' to work. We could opt to reserve them but prevent their use, telling people to use ''int'' and ''bool'' instead. That wouldn't reduce the number of prohibited class names, but it would prevent confusion and ensure consistency.
+
+  * Should the scalar type hint names be prohibited from use as class names? The patch currently prohibits this (<php>class int {}</php> is an error), to avoid the situation where you can declare a class with the name of a scalar type hint yet not type hint against it (as the name would be interpreted as a scalar hint). Personally, I think it'd be best to avoid confusion and prevent classes from having the same names as scalar types. However, if this causes significant backwards-compatibility problems, we might have to allow it. I would note that at least some of the existing classes with such names are used as a stand-in for scalar type hints.
+
+===== Future Scope =====
+
+If return types were added, such as with the [[rfc:returntypehinting|Return Type Hinting]] RFC, scalar type hints should be supported. A possible matter of debate would be whether or not to allow conversions in that case, given that some of the reasons cited for parameter type conversion may not be applicable.
+
+===== Proposed Voting Choices =====
+
+As this is a language change, this RFC requires a 2/3 majority to pass. It will be a Yes/No vote.
+
+<doodle title="Allow scalar type hinting with standard conversion rules?" auth="dmitry" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+Few additional minor questions require 50%+1 majority
+
+<doodle title="Allow integer and boolean aliases in type hints (in addition to int and bool)?" auth="dmitry" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+<doodle title="Prohibit classes with conflicting names Int, Integer, Bool, etc?" auth="dmitry" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+<doodle title="Allow resource type hint?" auth="dmitry" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+===== Patches and Tests =====
+
+https://github.com/php/php-src/pull/1044
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+
+  * Previous discussions on the internals mailing list about scalar type hinting: [[http://marc.info/?l=php-internals&w=2&r=1&s=scalar+type+hinting&q=t|one]], [[http://marc.info/?w=2&r=1&s=scalar+type+hint&q=t|two]], [[http://marc.info/?t=133056746300001&r=1&w=2|three]], [[http://marc.info/?w=2&r=1&s=scalar+type&q=t|four]]
+
+===== Changelog =====
+
+  * v0.1.2 - fork of v0.1.1. Added minor voting questions.
+  * v0.1.1 - Added table summarising casting and validation rules
+  * v0.1 - Initial drafts
