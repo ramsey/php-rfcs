@@ -1,21 +1,21 @@
-====== PHP RFC: Native Design by Contract support ======
-  * Version: 0.1
-  * Date: 2015-02-04
-  * Author: Yasuo Ohgaki <yohgaki@ohgaki.net>, François Laupretre <francois@php.net>
+====== PHP RFC: Implementing Design by Contract ======
+  * Version: 0.2
+  * Date: 2015-02-07
+  * Author: François Laupretre <francois@php.net>, Yasuo Ohgaki <yohgaki@ohgaki.net>, 
   * Status: Draft
   * First Published at: http://wiki.php.net/rfc/dbc
 
 ===== Introduction =====
 
-For more than 10 years (roughly since PHP 5 was released), the PHP core community has
+For more than 10 years (since PHP 5 was released), the PHP core community has
 seen a lot of discussions about strict vs loose typing, type hinting and
 related features.
 
 To summarize years of flame wars, developers argue that strict typing and type hinting
 will make their source code cleaner and easier to debug. On the other side, these
 features must remain optional and compatible with 'basic' loose-typed PHP syntax.
-And the debate generally dies in endless discussions about the concept of
-'number', 'int', 'float'... :).
+The debate generally dies in endless discussions about the concept of
+'number', 'int', 'float'...
 
 With this RFC, we propose an alternative approach, already present in several
 languages, named 'design by contract' (reduced to 'DbC' in the rest of the document).
@@ -29,13 +29,13 @@ phase only. In production phase, DbC checks are turned off.
 So, the most important points are :
 
   * DbC constraints can be extremely detailed as performance is not a problem.
-  * DbC checks cannot handle checks that must always run, even in production. Validating user input, for instance, must remain out of DbC constraints.
+  * DbC checks must not handle checks that must always run, even in production. Validating user input, for instance, must remain out of DbC constraints.
   * The DbC and 'Test Driven Development' concepts are closely related, as DbC heavily relies on the quality of test coverage.
 
-===== Example =====
+===== Examples =====
 
 First, an example of a function defining input, inline and output constraints
-('$>' means 'return value'):
+('$>' means 'return value'). This example is adapted from the [[http://ddili.org/ders/d.en/invariant.html|D language]].
 
 <code php>
 //===========================================================================
@@ -45,17 +45,17 @@ First, an example of a function defining input, inline and output constraints
 * This function computes the area of a triangle using Heron's formula.
 *
 * @param float $a Length of 1st side
-* @assert.in ($a >= 0)
+* @requires ($a >= 0)
 * @param float $b Length of 2nd side
-* @assert.in ($b >= 0)
+* @requires ($b >= 0)
 * @param float $c Length of 3rd side
-* @assert.in ($c >= 0)
-* @assert.in ($a <= ($b+$c))
-* @assert.in ($b <= ($a+$c))
-* @assert.in ($c <= ($a+$b))
+* @requires ($c >= 0)
+* @requires ($a <= ($b+$c))
+* @requires ($b <= ($a+$c))
+* @requires ($c <= ($a+$b))
 *
 * @return float The triangle area
-* @assert.out ($> >= 0)
+* @ensures ($> >= 0)
 */
 
 function triangleArea($a, $b, $c)
@@ -85,11 +85,11 @@ Another example with a clone of str_replace() :
 * @param string|array(string) $replace The replacement value that replaces found search values
 * @param string|array(string) $subject The string or array being searched and replaced on
 * @param.out int $count The number of replacements performed
-* @assert.out ($count >= 0)
+* @ensures ($count >= 0)
 * @return string|array(string) A string or an array with the replaced values
 *
 * Ensure that returned value is the same type as input subject :
-* @assert.out (is_array($>)===is_array($subject))
+* @ensures (is_array($>)===is_array($subject))
 */
 
 function str_replace($search, $replace, $subject, &$count=null)
@@ -108,6 +108,8 @@ DbC typically defines three constraint types :
   * post-conditions: checked when a function/method exits. Used to check the return type/value and the returned type/value of arguments passed by reference.
   * class invariants: Constraints on class properties. In PHP, two subtypes exist : constraints on static properties and constraint on dynamic (instance) properties.
 
+In this document, we propose a mechanism to implement these constraints in the PHP world.
+
 ==== Syntax ====
 
 We propose to include the DbC directives in PHP comments. The function/method/class-related
@@ -117,16 +119,24 @@ inline assertions will be included in plain comments.
 The benefits are :
 
   * As directives are exclusively contained in PHP comments, the source code remains executable on every past and future PHP interpreter (no compatibility break).
-  * phpdoc blocks already contain arguments and return types. DbC will use this information. So, unchanged code will already benefit from DbC.
-  * phpDocumentor will easily take advantage of the extensions DbC is bringing to the phpdoc syntax and will easily generate a more detailed documentation. There is no BC break here as, even using the current version of phpDocumentor, DbC-specific keywords are ignored and the documentation is correctly generated.
-  * PHP IDEs already use phpdoc blocks. So, it will be easier for them to understand DbC constraints.
+  * A lot of PHP code is already documented using phpdoc. So, unchanged code will already benefit from DbC.
+  * phpDocumentor will easily take advantage of the extensions DbC is bringing to phpdoc syntax and will easily generate a more detailed documentation from this information. No BC break here as phpDocumentor ignores unknown keywords.
+  * PHP IDEs already use phpdoc blocks. So, it will be easy for them to understand DbC constraints.
+
+==== Side effects ====
+
+As DbC, by nature, can be turned on and off, DbC checks must not modify
+anything in the environment.
+
+While enforcing this is partially possible in theory, this implementation will leave it to
+the developer's responsibility, as most languages do.
 
 ==== Pre-conditions ====
 
 These conditions are checked at the beginning of a function or method, after
 arguments have been received, but before starting executing the function body.
 
-The pre-conditions are expressed in two forms : argument types, and explicit assertions.
+Pre-conditions are expressed in two forms : argument types, and explicit assertions.
 Argument types are used first and explicit assertions supplement argument types
 with additional conditions (like conditions between arguments).
 
@@ -151,6 +161,7 @@ Argument types are used to check :
   * arguments sent to a function
   * arguments passed by ref returned by the function
   * the function's return value
+  * the type of class properties
 
 == Syntax ==
 
@@ -208,10 +219,10 @@ types and DbC types:
 
 (1) IS_TRUE/IS_FALSE in PHP 7\\
 (2) only if decimal part is null\\
-(3) only is_numeric(string) returns true and decimal part is null\\
-(4) only is_numeric(string) returns true\\
-(5) See below for conditions to match 'callable'\\
-(6) only if class defines a \_\_toString() method
+(3) only if is_numeric(string) returns true and decimal part is null\\
+(4) only if is_numeric(string) returns true\\
+(5) only if is_callable(arg,true) returns true\\
+(6) only if class defines a %%__%%toString() method
 
 You may note that this much more restrictive that PHP native type juggling.
 
@@ -230,18 +241,16 @@ Any value that returns true through is_numeric().
 
 Equivalent to 'is_numeric($arg)'.
 
-Synonyms: 'numeric', 'num'
+Synonyms: 'numeric', 'number'
 
 == string ==
 
 An entity that can be represented by a string. Numeric values are accepted as strings,
-like objects whose class defines a __toString() method.
+as well as objects whose class defines a __toString() method.
 
 == array ==
 
 A PHP array.
-
-Synonyms: 'arr'
 
 Complements: Can be followed by a 'compound-type', enclosed in parentheses.
 This defines the acceptable types of the array values. This definition can be nested.
@@ -256,10 +265,9 @@ Examples:
 
 == callable ==
 
-A string or array considered as 'callable'. For more information, refer to the
-documentation of the 'is_callable() PHP function.
+A string or array returning true through 'is_callable($arg,true)'.
 
-Equivalent to 'is_callable($arg,true)'.
+Please consult the [[http://php.net/manual/en/function.is-callable.php|is_callable() documentation]] for more details.
 
 == object ==
 
@@ -325,11 +333,9 @@ Examples:
 
 == mixed ==
 
-Accepts every zval type & value (catch-all).
+Accepts any zval type & value (catch-all).
 
 Synonyms: 'any'
-
-Complements: None
 
 == boolean ==
 
@@ -341,11 +347,9 @@ Equivalent to 'is_bool($arg)'.
 
 Synonyms: 'bool'
 
-Complements: None
-
 === Optional arguments ===
 
-When an optional argument is not set by the caller, its input/output types are not
+When an optional argument is not set by the caller, its input (and possibly output) types are not
 checked. This allows to set a default value which does not match the argument's
 declared input type.
 
@@ -368,57 +372,164 @@ if (is_null($flag)) {
 
 === Input assertions ===
 
+These conditions supplement argument types for more complex conditions. They
+are executed in the function scope before executing the function's body.
+
+Syntax :
+
 <code>
-line = "*", "@assert.in", php-condition
+/**
+* ...
+* @requires <php-condition>
+* ...
 </code>
+
+where <php-condition> is a PHP expression whose evaluation returns true or false.
+
+These assertions can appear anywhere in the phpdoc block. They are executed in
+the same order as they appear in the doc block.
 
 === Inheritance ===
 
+The DbC theory, in accordance with the [[http://en.wikipedia.org/wiki/Liskov_substitution_principle|LSP]],
+states that a subclass can override pre-conditions only if it loosens them.
+
+The logic we implement is in the spirit of the way we manage class constructors/destructors :
+
+  * Function pre-conditions are checked. If the function does not define any pre-condition, no check is performed, even if a parent's method defines some.
+  * A special pre-condition is introduced. The '@parent' pre-condition causes the engine to check the parent method's pre-conditions. No existing parent method or parent method not defining any pre-condition is not considered as an error. In this case, we just have nothing to check.
+  * The special '@parent' pre-condition can appear anywhere in the list.
+
 ==== Post-conditions ====
+
+Post-conditions are checked at function's exit. Like pre-conditions, they are
+executed in the function scope.
+
+They are generally used to check the returned type and value, and arguments
+returned by ref.
+
+When a function exits because an exception was thrown,
+the function's post-conditions are not checked, but class constraints are
+checked.
 
 === Returned type ===
 
-line = "*", "@return", compound-type [, free-text]
+Syntax:
+
+<code>
+* @return <compound-type> [free-text]
+</code>
+
+The syntax of <compound-type> is the same as argument types.
+
+Examples:
+
+<code>
+* @return resource|null
+
+// For a factory:
+
+* @return object(MyClass)
+</code>
 
 === Argument return type ===
 
 This is the return type & value of the arguments passed by reference.
 
-@param.out <compound-type> <name> <free-text>
+Syntax:
+
+<code>
+* @param.out <compound-type> $<arg-name> [free-text]
+</code>
+
+Note that an argument passed by reference can have a '@param' line to define
+its input type, a '@param.out' line to define its output type, none of them, or both.
+In the str_replace() example above, we don't define an input type for $count
+because it is undefined.
 
 === Output assertions ===
 
-@assert.out
+Syntax:
+
+<code>
+* @ensures <condition>
+</code>
+
+As with input assertions, <condition> is a PHP condition that will be executed
+in the function scope. The only addition is that the '$>' string will be
+replaced with the function's return value before evaluation.
+
+As with pre-conditions, output types are checked before output assertions.
 
 === Inheritance ===
 
-==== Class-wide constraints ====
+The inheritance rules are the same as the ones for pre-conditions.
 
-=== Static constraints ===
+Unlike the Eiffel or D implementations, parent post-conditions will be checked
+only if the child requires it using a '@ensures @parent' directive.
 
-== Syntax ==
+==== Class constraints ====
 
-@assert.static
+These constraints are called 'invariants' in the DbC litterature. The idea is
+that properties must always verify a set of 'invariant' conditions.
+
+Class constraints take two forms : property types and class assertions.
+
+Each property type is defined in its own docblock, just before the definition of its property and
+class assertions are defined in the class docblock (the block just before the class
+definition).
+
+Note that we don't define a specific constraint type for static properties. They
+will be checked using the same syntax as dynamic properties.
+
+=== Property types ===
+
+Syntax:
+
+<code>
+/** @var <compound-type> [free-text] */
+</code>
+
+where <compound-type> follows the same syntax as argument types.
+
+=== Class assertions ===
+
+These are defined in class docblocks.
+
+Syntax:
+
+<code>
+* @invariant <condition>
+</code>
+
+<condition> must use '$this->' to access dynamic properties and 'self::' to access static properties.
 
 == Execution ==
 
+Property types are checked before class assertions.
+
+This set of constraints is checked :
+
+  * after the execution of the constructor, if it exists.
+  * before destroying the object, even if no destructor exists.
+  * before and after execution of a public dynamic method.
+
+Class constraints are executed before pre-conditions and/or after post-conditions.
+
 == Scope ==
+
+These constraints are executed in the class scope ('$this' and 'self' can be used).
 
 == Inheritance ==
 
-=== Instance constraints ===
-
-@assert.instance
-
-== Execution ==
-
-== Scope ==
-
-== Inheritance ==
+The same mechanism is used as with pre/post-conditions. Parent constraints are
+checked only if explicitely called using '@invariant @parent'.
 
 ==== Inline assertions ====
 
 === Syntax ===
+
+These assertions can appear anywhere PHP code is valid.
 
 <code>
 // @assert <condition>
@@ -426,9 +537,16 @@ This is the return type & value of the arguments passed by reference.
 
 === Scope ===
 
-==== Exception thrown ====
+<condition> is executed where the assertion appears.
 
-ContractException
+==== Nested calls ====
+
+When a function or method is called from a DbC condition, its constraints are
+not checked.
+
+==== Constraint violations ====
+
+When a DbC condition fails, an E_ERROR is raised, containing the file and line number of the failing condition.
 
 ===== Backward Incompatible Changes =====
 
@@ -436,7 +554,7 @@ None
 
 ===== Proposed PHP Version(s) =====
 
-PHP 7
+PHP 7. Backporting to PHP 5 is possible if implemented as a separate extension.
 
 ===== RFC Impact =====
 ==== To SAPIs ====
@@ -445,11 +563,11 @@ None
 
 ==== To Existing Extensions ====
 
-Compatibility with Xdebug ? <TODO>
+<TODO> Compatibility with Xdebug and other debugging tools ?
 
 ==== To Opcache ====
 
-<TODO>
+None
 
 ==== New Constants ====
 
@@ -466,17 +584,19 @@ dbc.enforce : boolean
 
 ===== Unaffected PHP Functionality =====
 
-When DbC is off, there's no change in PHP behavior.
+When DbC is turned off, there's no change in PHP behavior.
 
 ===== Future Scope =====
 
-  * Exceptions: Using the '@throws' keyword, we can raise an error if the function throws an exception of an undeclared class.
-  * Enforce phpdoc's @var property types. Static and dynamic propertiy checks would be added to invariant checks.
+  * Implement static-only class constraints (to be called before and after executing a static or dynamic public method)
+  * Checking exceptions: Using the '@throws' keyword, check that thrown exceptions correspond to declared types.
   * Extend type syntax (define a syntax for ranges, enums, etc)
+  * Extend DbC to internal functions
+  * Extend DbC to interfaces (internal and userland)
 
 ===== Proposed Voting Choices =====
 
-Required majority ?
+Required majority ? To be defined.
 
 ===== Patches and Tests =====
 
@@ -487,16 +607,14 @@ if possible. An additional benefit, in this case, would be to add the feature to
 
 We only need 3 hooks :
 
-  * When a script file is read, before any parsing starts
+  * When a script file is read, before any parsing starts (contents won't be modified)
   * When a function/method starts, after arguments are received, but before executing the function's body.
-  * When a function returns, before the function scope is deleted. And we need access to the return value.
+  * When a function returns, before the function scope is deleted (we need access to the function's variables, to the arguments, and to the return value).
 
-I don't know yet if these hooks are available in the current engine. If implementation does not require
-any change in the PHP engine, this RFC is useless but getting people's opinion is always valuable.
+I don't know yet if these hooks are available in the current PHP engine.
+If this is the case, this RFC is useless but getting people's opinion is always valuable.
 
 ===== Implementation =====
-
-<TODO>
 
 ===== References =====
 
