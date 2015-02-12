@@ -1,6 +1,6 @@
 ====== PHP RFC: Implementing Design by Contract ======
-  * Version: 0.3
-  * Date: 2015-02-08
+  * Version: 0.4
+  * Date: 2015-02-09
   * Author: François Laupretre <francois@php.net>
   * Status: Draft
   * First Published at: http://wiki.php.net/rfc/dbc
@@ -13,54 +13,45 @@ The original idea of introducing DbC in PHP comes from Yasuo Ohgaki
 Then, I offered to write an RFC where I propose to include DbC constraints in
 doc comments. This is the present document.
 
-Unfortunately, we now disagree on the syntax to propose, as Yasuo would
-prefer a a D-like syntax with new specific blocks in the function body.
-I disagree with this choice for various reasons, the main one being that
-it would make DbC-enabled PHP code
-incompatible with PHP 5 interpreters. This would, IMO, make it a no-go for a lot of developers
-before several years.
-
-So, I am publishing this RFC under my single name, with due credits for the
-original idea. I hope the discussion will bring a consensus.
+While we agree on the concept, Yasuo is preferring a D-like syntax, which he's proposing in [another RFC|https://wiki.php.net/rfc/dbc2].
+IMO, adopting the D syntax would be fine if we designed the language from scratch, but is not the
+best way to include the concept in PHP (more details below).
 
 ===== Introduction =====
 
 For more than 10 years (since PHP 5 was released), the PHP core community has
 seen a lot of discussions about strict vs loose typing, type hinting and
-related features.
+related features. Through these discussions, developers are acutally searching for a way to help reduce coding errors by detecting
+them as early as possible. Strictifying types is an approach but, unfortunately, it does not fit
+so well with PHP as a loose-typed language.
 
-To summarize years of flame wars, developers argue that strict typing and type hinting
-will make their source code cleaner and easier to debug. On the other side, these
-features must remain optional and compatible with 'basic' loose-typed PHP syntax.
-The debate generally dies in endless discussions about the concept of
-'number', 'int', 'float' (just kidding, but it's not entirely false).
+This RFC proposes an alternative approach, already present in several
+languages, named 'Design by Contract' (reduced to 'DbC' in the rest of the document).
 
-With this RFC, we propose an alternative approach, already present in several
-languages, named 'design by contract' (reduced to 'DbC' in the rest of the document).
+Here is the definition of a contract, according to the D language documentation :
 
-Note: This is NOT a replacement for strict typing, while subjects are closely related.
-This is just another approach to the same need: reduce coding errors.
-You may see it as a replacement or as a supplement to strict/weak typing and type
-hinting, depending on your own position on the subject.
+  The idea of a contract is simple - it's just an expression that must evaluate
+  to true. If it does not, the contract is broken, and by definition, the program
+  has a bug in it. Contracts form part of the specification for a program, moving
+  it from the documentation to the code itself. And as every programmer knows,
+  documentation tends to be incomplete, out of date, wrong, or non-existent.
+  Moving the contracts into the code makes them verifiable against the program.
 
-We won't detail the concept of DbC here, as links are provided in
-the reference section below. To make it very short, DbC is a way to define constraints on
-function arguments, return values, and class properties. The key
-point is that DbC checks are performed during the development/validation
-phase only. In production phase, DbC checks are turned off.
+For more info on the DbC theory, use the links in the 'reference' section below.
 
-Note: Depending on languages, DbC can go well beyond, but these are the only
-concepts we support in this RFC.
+An important point in DbC theory is that contracts are checked during the development/debugging phase only.
+A global switch allows to turn DbC checks off when the software goes to production.
 
-So, the most important points are :
+So, what we need to retain :
 
-  * DbC constraints can be extremely detailed as performance is not a problem.
+  * DbC constraints can be highly sophisticated as we don't care about performance.
+  * As they are checked at runtime, DbC constraints can check types AND values.
   * DbC checks must not handle checks that must always run, even in production. Validating user input, for instance, must remain out of DbC constraints.
-  * The DbC and 'Test Driven Development' concepts are closely related, as DbC heavily relies on the quality of test coverage.
+  * DbC and 'Test Driven Development' concepts are closely related, as DbC heavily relies on the quality of test coverage.
 
 ===== Examples =====
 
-First, an example of a function defining input, inline and output constraints
+First, an example of a function defining input and output constraints
 ('$>' means 'return value'). This example is adapted from the [[http://ddili.org/ders/d.en/invariant.html|D language]].
 
 <code php>
@@ -88,8 +79,6 @@ function triangleArea($a, $b, $c)
 {
 $halfPerimeter = ($a + $b + $c) / 2;
 
-// @assert ($halfPerimeter >= 0)
-
 return sqrt($halfPerimeter
 	* ($halfPerimeter - $a)
 	* ($halfPerimeter - $b)
@@ -97,16 +86,17 @@ return sqrt($halfPerimeter
 }
 </code>
 
-With such a definition, this line:
+Then :
 
 <code php>
+$area=triangleArea(4,2,3);
+	-> OK
+
+$area=triangleArea('foo',2,3);
+	-> PHP Fatal error: triangleArea: DbC input type mismatch - $a should match 'float' (string(3) "foo") in xxx on line nn
+
 $area=triangleArea(10,2,3);
-</code>
-
-will raise:
-
-<code>
-PHP Fatal error: triangleArea: DbC pre-condition violation ($a <= ($b+$c)) in xxx on line nn
+	-> PHP Fatal error: triangleArea: DbC pre-condition violation ($a <= ($b+$c)) in xxx on line nn
 </code>
 
 Another example with a PHP clone of str_replace() :
@@ -138,29 +128,100 @@ function str_replace($search, $replace, $subject, &$count=null)
 Note that we didn't provide any constraint on $count input, as this
 parameter is used for output only.
 
+Finally, we rewrite the first example as a class :
+
+<code php>
+<?php
+/**
+* @invariant ($this->a >= 0) && ($this->a <= ($this->b+$this->c))
+* @invariant ($this->b >= 0) && ($this->b <= ($this->a+$this->c))
+* @invariant ($this->c >= 0) && ($this->c <= ($this->b+$this->a))
+*/
+
+class triangle
+{
+/*-- Properties */
+
+/** @var float $a,$b,$c Side lengths */
+
+private $a,$b,$c;
+
+//---------
+/**
+* @param float $a Length of 1st side
+* @param float $b Length of 2nd side
+* @param float $c Length of 3rd side
+*
+* No need to repeat constraints on values as they are checked by class invariants.
+*/
+
+public function __construct($a,$b,$c)
+{
+$this->a=$a;
+$this->b=$b;
+$this->c=$c;
+}
+
+//---------
+/**
+* Compute area of a triangle
+*
+* This function computes the area of a triangle using Heron's formula.
+*
+* @return float The triangle area
+* @ensures ($> >= 0)
+*/
+
+public function area()
+{
+$halfPerimeter = ($this->a + $this->b + $this->c) / 2;
+
+return sqrt($halfPerimeter
+	* ($halfPerimeter - $this->a)
+	* ($halfPerimeter - $this->b)
+	* ($halfPerimeter - $this->c));
+}
+</code>
+
+and check DbC constraints :
+
+<code php>
+$t= new triangle(4,2,3);
+	-> OK
+
+$t=new triangle('foo',2,3);
+	-> PHP Fatal error: triangle::__construct: DbC input type mismatch - $a should match 'float' (string(3) "foo") in xxx on line nn
+
+$area=triangleArea(10,2,3);
+	-> PHP Fatal error: triangle: DbC invariant violation (($this->a >= 0) && ($this->a <= ($this->b+$this->c)) in xxx on line nn
+</code>
+
 ===== Proposal =====
 
-DbC typically defines three constraint types :
+DbC defines three constraint types :
 
   * pre-conditions: checked when entering a function/method. Generally check that passed arguments are valid.
   * post-conditions: checked when a function/method exits. Used to check the return type/value and the returned type/value of arguments passed by reference.
-  * class invariants: Constraints on class properties. In PHP, two subtypes exist : constraints on static properties and constraint on dynamic (instance) properties.
+  * class invariants: Constraints on class properties.
 
 In this document, we propose a mechanism to implement these constraints in the PHP world.
 
 ==== Syntax ====
 
-We propose to include the DbC directives in PHP comments. The function/method/class-related
-constraints will be included in phpdoc blocks (extending the phpdoc syntax), while
-inline assertions will be included in plain comments.
+We propose to include the DbC directives in phpdoc blocks. Here are the
+main reasons, that make it, in my opinion, a better choice than every other syntaxes
+proposed so far :
 
-The benefits are :
+  * it allows to keep the source code executable on previous PHP interpreters.
+  * Phpdoc comments, while not perfect, have always played the role of annotations in PHP. 'Real' annotations would be probably better but the don't exist yet. And they won't be approved in the near future. That's why everyone needing annotations so far has extended the phpdoc syntax.
+  * DbC can use part of already-written phpdoc information (@param and @return types, @throws information too). So, unchanged code could already benefit of DbC.
 
-  * As directives are exclusively contained in PHP comments, the source code remains executable on every past and future PHP interpreter (no compatibility break).
-  * A lot of PHP code is already documented using phpdoc. So, unchanged code will already benefit from DbC.
-  * phpDocumentor will easily take advantage of the extensions DbC is bringing to phpdoc syntax and will easily generate a more detailed documentation from this information. No BC break here as phpDocumentor ignores unknown keywords.
-  * PHP IDEs already use phpdoc blocks. So, it will be easy for them to understand DbC constraints.
-
+Note: Some people on the mailing list are religiously opposed to including information
+in phpdoc blocks, despite the fact that thousands of people already use them
+for this purpose. The reason is that the parser cannot handle that. I agree, but
+that's not a task for the parser, that's a task for an external tool. We just need
+the hooks.
+ 
 ==== Side effects ====
 
 As DbC, by nature, can be turned on and off, DbC checks must not modify
@@ -169,46 +230,36 @@ anything in the environment.
 While enforcing this is partially possible in theory, this implementation will leave it to
 the developer's responsibility, as most languages do.
 
-==== Pre-conditions ====
+==== DbC types ====
 
-These conditions are checked at the beginning of a function or method, after
-arguments have been received, but before starting executing the function body.
+DbC types are an extension and formalization of the pre-existing phpdoc
+argument/return types.
 
-Pre-conditions are expressed in two forms : argument types, and explicit assertions.
-Argument types are used first and explicit assertions supplement argument types
-with additional conditions (like conditions between arguments).
+DbC types are not present in original DbC syntax (like Eiffel or D implementation), which are based on conditions only.
+This is a PHP-specific addition to enhance simplicity and readability. DbC types can be
+seen as built-in conditions.
 
-Argument types are checked before explicit assertions, meaning that
-explicit assertions can assume correct types.
+Here are the main benefits of defining s set of DbC types :
 
-=== Argument types ===
+  * PHP is_xxx() functions are not as intuitive as they may seem, as they are based on zval types (an equivalent of strict type checks). They are not appropriate for people who just want to accept a limited set of type juggling (accepting a numeric string from a DB, for instance). Unfortunately, checking that a given value is an integer or a string containing an integer is a common need, but is quite complex to write in PHP.
+  * As it was already said, tons of source code already contains argument return/types in phpdoc. DbC types are designed to match as much as possible of this pre-existing information.
+  * Readability is a key point too: just compare a type like 'string|array(string|integer)' with the PHP code to check the same !
 
-Argument type syntax is an extension and formalization of pre-existing phpdoc
-argument types. phpdoc accepts almost any string as argument type. DbC applies
-a real meaning on these types, reusing the types commonly used in phpdoc blocks.
-
-Argument types are not present in original DbC syntax (like Eiffel or D implementation).
-This is a PHP-specific addition to enhance simplicity and readability. Argument types
-are just shortcuts as they could be replaced by explicit assertions.
-
-Readability is the key point here: just compare a type like 'string|array(string|integer)' with
-the PHP code to check the same !
-
-Argument types are used to check :
+DbC types are used to check :
 
   * arguments sent to a function
-  * arguments passed by ref returned by the function
+  * arguments passed by ref returned by a function
   * the function's return value
   * the type of class properties
 
-== Syntax ==
+=== Syntax ===
 
-Argument types cannot contain whitespaces.
+DbC types don't contain whitespaces.
 
-Here is a pseudo-grammar of argument types :
+Here is a pseudo-grammar of DbC types :
 
 <code>
-phpdoc-line = "*", "@param", compound-type, $<argument-name> [, free-text]
+dbc-type = compound-type
 
 compound-type = type, { "|", type }
 
@@ -234,27 +285,26 @@ resource-type = "resource"
 	| "resource(", resource-name ")"
 </code>
 
-Every types are detailed below.
-
-== DbC types vs zval types ==
+=== DbC types vs zval types ===
 
 DbC types have specific rules to match PHP zvals. These rules are less permissive than
-PHP API type juggling, but more than previously-proposed strict typing. Actually,
+PHP API type juggling and previously-proposed scalar 'weak' typing, but more than previously-proposed strict typing. Actually,
 these types try to be a more intuitive compromise between both.
 
-As everything related to intuition, the choices made here are sometimes subjective and can be discussed.
+Strict typing is sometimes required. That's why DbC types also include a set of
+strict types.
 
 Note that the benefit of DbC, here, is that we can match depending on zval values, as
 we don't care about performance.
 
-Here is the table of possible matches between zval types/values, and DbC
-types :
-
 ^            ^  Zval type  ^^^^^^^^
 ^  DbC type  ^ IS_NULL ^ IS_LONG ^ IS_DOUBLE ^ IS_BOOL(1) ^ IS_ARRAY ^ IS_OBJECT ^ IS_STRING ^ IS_RESOURCE ^
 ^ integer    |  No     |  Yes    |  (2)      |  No        |  No      |  No       |  (3)      |  No         |
+^ integer!   |  No     |  Yes    |  No       |  No        |  No      |  No       |  No       |  No         |
 ^ float      |  No     |  Yes    |  Yes      |  No        |  No      |  No       |  (4)      |  No         |
+^ float!     |  No     |  No     |  Yes      |  No        |  No      |  No       |  No       |  No         |
 ^ string     |  No     |  Yes    |  Yes      |  No        |  No      |  (6)      |  Yes      |  No         |
+^ string!    |  No     |  No     |  No       |  No        |  No      |  (6)      |  Yes      |  No         |
 ^ array      |  No     |  No     |  No       |  No        |  Yes     |  No       |  No       |  No         |
 ^ callable   |  No     |  No     |  No       |  No        |  (5)     |  No       |  (5)      |  No         |
 ^ object     |  No     |  No     |  No       |  No        |  No      |  Yes      |  No       |  No         |
@@ -263,6 +313,7 @@ types :
 ^ null       |  Yes    |  No     |  No       |  No        |  No      |  No       |  No       |  No         |
 ^ mixed      |  Yes    |  Yes    |  Yes      |  Yes       |  Yes     |  Yes      |  Yes      |  Yes        |
 ^ boolean    |  No     |  (7)    |  (7)      |  Yes       |  No      |  No       |  No       |  No         |
+^ boolean!   |  No     |  No     |  No       |  Yes       |  No      |  No       |  No       |  No         |
 
   * (1) IS_TRUE/IS_FALSE in PHP 7\\
   * (2) only if decimal part is null\\
@@ -270,9 +321,11 @@ types :
   * (4) only if is_numeric(string) returns true\\
   * (5) only if is_callable(arg,true) returns true\\
   * (6) only if class defines a %%__%%toString() method\\
-  * (7) O is false, 1 is true. Other values don't match (not sure we shouldn't refuse int -> bool conversion, to be discussed)
+  * (7) O is false, 1 is true. Other values don't match (to be discussed)
 
 You may note that this is much more restrictive that PHP native type juggling.
+
+=== DbC types ===
 
 == integer ==
 
@@ -283,6 +336,14 @@ accepts the IS_LONG zval type.
 
 Synonyms: 'int'
 
+== integer! ==
+
+A zval-type-based integer value, positive or negative.
+
+Note: This type is equivalent to is_int($arg).
+
+Synonyms: 'int!'
+
 == float ==
 
 Any value that returns true through is_numeric().
@@ -291,10 +352,20 @@ Equivalent to 'is_numeric($arg)'.
 
 Synonyms: 'numeric', 'number'
 
+== float! ==
+
+A zval-type-based float value.
+
+Note: This type is equivalent to is_float($arg).
+
 == string ==
 
 An entity that can be represented by a string. Numeric values are accepted as strings,
 as well as objects whose class defines a __toString() method.
+
+== string! ==
+
+Accepts IS_STRING zvals and objects whose class defines a __toString() method.
 
 == array ==
 
@@ -357,7 +428,7 @@ Examples:
 
 == scalar ==
 
-Shortcut for 'integer|float|boolean|string'.
+Shortcut for 'numeric|boolean|string'.
 
 Equivalent to 'is_scalar()'.
 
@@ -394,6 +465,24 @@ In PHP 7, IS_BOOL is replaced with IS_TRUE and IS_FALSE.
 Equivalent to 'is_bool($arg)'.
 
 Synonyms: 'bool'
+
+== boolean! ==
+
+Accepts IS_BOOL zvals only (IS_TRUE/IS_FALSE on PHP 7).
+
+Synonyms: 'bool!'
+
+==== Pre-conditions ====
+
+These conditions are checked at the beginning of a function or method, after
+arguments have been received, but before starting executing the function body.
+
+Pre-conditions are expressed in two forms : argument types, and explicit assertions.
+Argument types are used first and explicit assertions supplement argument types
+with additional conditions (like conditions between arguments).
+
+Argument types are checked before explicit assertions, meaning that
+explicit assertions can assume correct types.
 
 === Optional arguments ===
 
@@ -442,7 +531,7 @@ the same order as they appear in the doc block.
 The DbC theory, in accordance with the [[http://en.wikipedia.org/wiki/Liskov_substitution_principle|LSP]],
 states that a subclass can override pre-conditions only if it loosens them.
 
-The logic we implement is in the spirit of the way we manage class constructors/destructors :
+The logic we implement is in the spirit of the way PHP handles class constructors/destructors :
 
   * Function pre-conditions are checked. If the function does not define any pre-condition, no check is performed, even if a parent's method defines some.
   * A special pre-condition is introduced. The '@parent' pre-condition causes the engine to check the parent method's pre-conditions. No existing parent method or parent method not defining any pre-condition is not considered as an error. In this case, we just have nothing to check.
@@ -491,7 +580,7 @@ Syntax:
 </code>
 
 Note that an argument passed by reference can have a '@param' line to define
-its input type, a '@param.out' line to define its output type, none of them, or both.
+its input type and/or a '@param.out' line to define its output type.
 In the str_replace() example above, we don't define an input type for $count
 because it is undefined.
 
@@ -573,26 +662,6 @@ These constraints are executed in the class scope ('$this' and 'self' can be use
 The same mechanism is used as with pre/post-conditions. Parent constraints are
 checked only if explicitely called using '@invariant @parent'.
 
-==== Inline assertions ====
-
-As inline assertions dont't strictly belong to the DbC, it is not sure that they
-will be included.
-
-Another reason is that they may require changes at the engine level (which other
-features shouldn't require).
-
-=== Syntax ===
-
-These assertions can appear anywhere PHP code is valid.
-
-<code>
-// @assert <condition>
-</code>
-
-=== Scope ===
-
-<condition> is executed where the assertion appears.
-
 ==== Nested calls ====
 
 When a function or method is called from a DbC condition, its constraints are
@@ -617,7 +686,7 @@ None
 
 ==== To Existing Extensions ====
 
-<TODO> Compatibility with Xdebug and other debugging tools ?
+None
 
 ==== To Opcache ====
 
@@ -629,7 +698,7 @@ None
 
 ==== php.ini Defaults ====
 
-dbc.enforce : boolean
+A boolean whose name is still undefined.
 
   * php.ini-development value: true
   * php.ini-production value: false
@@ -646,7 +715,7 @@ When DbC is turned off, there's no change in PHP behavior.
   - Add exception checks (using '@throws')
   - Extend type syntax (define a syntax for ranges, enums, etc)
   - Implement static-only class constraints (to be called before and after executing a static or dynamic public method)
-  - Extend DbC to interfaces (internal and userland)
+  - Extend DbC to interfaces and traits
 
 ===== Proposed Voting Choices =====
 
@@ -654,10 +723,7 @@ Required majority ? To be defined.
 
 ===== Patches and Tests =====
 
-Not sure this should be implemented in the PHP core. A Zend extension would be probably better,
-if possible. An additional benefit, in this case, would be to add the feature to PHP 7 and PHP 5.
-
-That's why I asked Derick if we could implement this as an addtional feature to xdebug.
+This should be implemented in a Zend extension, not in the core. This would be a perfect addition for XDebug.
 
 ===== References =====
 
@@ -666,3 +732,5 @@ That's why I asked Derick if we could implement this as an addtional feature to 
 [[https://www.eiffel.com/values/design-by-contract/introduction/|DbC in Eiffel]]
 
 [[http://ddili.org/ders/d.en/contracts.html|Contracts Programming in the D language]]
+
+[[https://wiki.php.net/rfc/dbc2|Alternative RFC]]
