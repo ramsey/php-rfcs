@@ -1,0 +1,179 @@
+====== PHP RFC: Context Sensitive Lexer ======
+  * Version: 0.1
+  * Date: 2015-02-15
+  * Author: Márcio Almada
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/context_sensitive_lexer
+
+===== Introduction =====
+
+PHP currently has around **64** globally reserved words.
+Not infrequently, these reserved words end up clashing with legit alternatives to userland API declarations.
+This RFC proposes a partial solution to this growing problem by proposing minimal changes to have a **context sensitive lexer**
+with support for **semi-reserved** words.
+
+For instance, if the RFC gets accepted, the following code would now be valid code:
+
+<code php>
+class Collection {
+    public function list() { /* */ }
+}
+</code>
+
+Notice that it's now possible to have the ''list'' method delcared without having a syntax error:
+
+<code>
+PHP Parse error: Syntax error, unexpected T_LIST, expecting T_STRING on line 2
+</code>
+
+===== Proposal =====
+
+This RFC revisits the topic of [[https://wiki.php.net/rfc/keywords_as_identifiers|Keywords as Identifiers]] RFC. But this time
+presenting a minimal and maintainable [[https://github.com/marcioAlmada/php-src/commit/d9d6f0c7e325dcd0d0ff3c3f2dc73c2364c3ad5f|patch]],
+restricted to OO scope only, consistently comprehending:
+
+  * Properties, constants and methods defined on classes, interfaces and traits
+  * Access of properties, constants and methods from objects and classes
+
+The proposed changes could be especially useful to:
+
+  - Reduce the surface of BC breaks whenever new keywords are introduced
+  - Avoid restricting userland APIs, dispensing the need for hacks like magic method calls or a [[http://en.wikipedia.org/wiki/Thesaurus|thesaurus]] to avoid naming conflicts.
+
+This is a list of currently **globally** reserved words that will become **semi-reserved** in case proposed change gets approved:
+
+  callable  class  trait  extends  implements  static  abstract  final  public  protected  private  const
+  enddeclare  endfor  endforeach  endif  endwhile  and  global  goto  instanceof  insteadof  interface
+  namespace  new  or  xor  try  use  var  exit  list  clone  include  include_once  throw  array
+  print  echo  require  require_once  return  else  elseif  default  break  continue  switch  yield
+  function  if  endswitch  finally  for  foreach  declare  case  do  while  as  catch  die  self
+
+===== Practical Examples =====
+
+Some practical examples related to the impact this RFC could have on user space code: 
+
+<code php>
+// the following example works with the patch
+// but currently fails because 'foreach', 'list' and 'new' are reserved words:
+
+class Collection extends \ArrayAccess, \Countable, \IteratorAggregate {
+
+    public function forEach(callable $callback) {
+        //...
+    }
+
+    public function list() {
+        //...
+    }
+
+    public static function new(array $itens) {
+        return new self($itens);
+    }
+}
+
+Collection::new(['foo', 'bar'])->forEach(function($index, $item){
+  /* callback */
+})->list();
+</code>
+
+Globally reserved words limit userland implementations on being the most expressive and semantic as possible:
+
+<code php>
+// the following example works with the patch, but currently fails because 'extends' is a reserved word:
+
+class View {
+    public function include(View $view) {
+        //...
+    }
+}
+
+$viewA = new View('a.view');
+$viewA->include(new View('b.view'));
+</code>
+
+Sometimes there is simply no better name for a class constant. One might want to define an HTTP agent class and would like to have some HTTP status constants:
+
+<code php>
+class HTTP {
+    const CONTINUE = 100; // works with patch, but currently fails because 'continue' is a reserved word
+    const SWITCHING_PROTOCOLS = 101;
+    //...
+}
+</code>
+
+The proposed change, if approved, also gives more freedom to userland fluent interfaces or DSL like APIs.
+
+<code php>
+// following example works with patch
+// but currently fails because 'for', 'and', 'or', 'list' are reserved words:
+
+$projects =
+    Finder::for('project')
+        ->where('name')->like('%secret%')
+        ->and('priority', '>', 9)
+        ->or('code')->in(['4', '5', '7'])
+        ->and()->not('created_at')->between([$time1, $time2])
+        ->list($limit, $offset);
+</code>
+
+===== Implementation Details =====
+
+The lexer now keeps track of the context needed to have unreserved words on OO scope and makes use of a minimal amount of RE2C lookahead capabilities when disambiguation becomes inevitable.
+
+For instance, the lexing rules to disambiguate ''::class'' (class name resolution operator) from a ''class constant'', ''static variable'' or ''static method'' access is:
+
+<code c++>
+<ST_IN_SCRIPTING>"::"/{OPTIONAL_WHITESPACE}"class" {
+  return T_PAAMAYIM_NEKUDOTAYIM;
+}
+
+<ST_IN_SCRIPTING>"::"/{OPTIONAL_WHITESPACE}("$"|{LABEL}){OPTIONAL_WHITESPACE}"("? {
+  yy_push_state(ST_LOOKING_FOR_SEMI_RESERVED_NAME);
+  return T_PAAMAYIM_NEKUDOTAYIM;
+}
+</code>
+
+Current proposed patch:
+
+  * Keeps ext tokenizer functional
+  * Introduces no maintenance issues 
+
+No performance loss was noticed but maybe the patch requires a better benchmark.
+
+=> Many experiments with parsing were done before the current proposed patch which involves only lexing changes. But turns out the patches involving parsing had too many disadvantages.
+
+==== Limitations ====
+
+It's still forbidden to define a class constant named 'class' because of the class name resolution operator ''::class'':
+
+<code php>
+class Foo {
+  const class = 'Foo'; // throws a fatal error
+}
+
+Fatal error: Cannot redefine Foo::class, ::class is reserved in %s on line 2
+</code>
+
+===== Impact on performance =====
+
+-- Add benchmark here if asked on discussion phase. --
+
+===== Proposed PHP Version(s) =====
+
+This is proposed for the next PHP x, which at the time of this writing would be PHP 7.
+
+===== Patch =====
+
+  - Pull request with tests and regenerated ext tokenizer is at [[https://github.com/php/php-src/pull/1054/files]]
+  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/d9d6f0c7e325dcd0d0ff3c3f2dc73c2364c3ad5f|d9d6f0]], in case you would like to focus only on lexing changes.
+
+===== References =====
+
+This is the previous rejected RFC that attempted to remove reserved words on all contexts and was rejected: https://wiki.php.net/rfc/keywords_as_identifiers.
+
+===== Rejected Features =====
+
+None so far.
+
+===== Changelog =====
+  * 0.1: Initial draft
