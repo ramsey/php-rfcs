@@ -1,0 +1,221 @@
+====== PHP RFC: Generator Return Expressions ======
+  * Version: n/a
+  * Date: 2015-02-18
+  * Author: Daniel Lowrey, rdlowrey@php.net
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/generator-return-expressions
+
+====== Abstract ======
+
+
+PHP's generators are unequivocally useful both for iteration and cooperative multi-tasking. However, the inability of generator functions to specify return values artificially limits their usefulness for multitasking in coroutine contexts. This RFC proposes the ability to both specify and access Generator return values while laying the groundwork for future sub-generator returns.
+
+
+====== Status Quo ======
+
+
+Generators as currently implemented trigger a fatal error if a return statement specifies an associated expression:
+
+<code php>
+<?php
+function foo() {
+    yield 0;
+    yield 1;
+
+    // Fatal error: Generators cannot return values using "return" in %s on line %d
+    return 42;
+}
+</code>
+
+====== Proposal ======
+
+
+1. Modify generator functions to allow ''return'' expressions. As in PHP's existing implementation ''return'' statements remain equivalent to ''yield'' with the caveat that they also end Generator iteration.
+
+2. Expose ''Generator::getReturn()'' to differentiate between expressions "yielded" via ''return'' statement.
+
+3. Calling ''Generator::getReturn()'' while a generator is still valid will throw. This is consistent with the behavior seen when calling ''Generator::rewind()'' after iteration has already started. The logic behind throwing when the generator remains valid is that we should prevent calling code from mistaking a yet-to-be-computed return value (''null'') for the actual return value. Invoking ''Generator::getReturn()'' on a valid generator generally represents a logic error and is treated as such.
+
+
+===== Code Examples Using Proposed Behavior =====
+
+
+Calling ''Generator::getReturn()'' to retrieve the return value after iteration:
+
+<code php>
+<?php
+function foo() {
+    yield 1;
+    yield 2;
+    return 42;
+}
+
+$bar = foo();
+do {
+    echo $bar->current(), "\n";
+    $bar->next();
+} while ($bar->valid());
+
+var_dump($bar->getReturn());
+
+// 1
+// 2
+// 42
+// int(42)
+</code>
+
+Calling ''Generator::getReturn()'' while the generator is still valid:
+
+<code php>
+<?php
+function foo() {
+    yield 1;
+    yield 2;
+    return 42;
+}
+
+$bar = foo();
+$bar->current();
+$bar->next();
+
+assert($bar->valid());
+
+// Throws an exception because the generator is still valid
+$returnValue = $bar->getReturn();
+</code>
+
+Calling ''Generator::getReturn()'' in the absence of a return statement:
+
+<code php>
+<?php
+function foo() {
+    yield 1;
+    yield 2;
+    yield 3;
+}
+
+$bar = foo();
+while($bar->valid()) {
+    $bar->next();
+}
+
+assert($bar->getReturn() === null);
+</code>
+
+
+===== Use-Case: Coroutine Return Values =====
+
+Generators are particularly useful for their ability to pause execution and resume at a later time. This capacity allows applications to cooperatively multitask discrete units of processing work. However, the inability to explicitly return values leaves coroutines in a situation where they're able to process background tasks but have no standard way to access the results of those computations. Consider:
+
+<code php>
+<?php
+$gen = function {
+    $foo = yield myAsyncFoo(); // resume here when promised result returns
+    $bar = yield myAsyncBar($foo); // resume here when promised result returns
+
+    // Relying on the final yield as the "return" value here is ambiguous
+    yield $bar + 42;
+};
+</code>
+
+In the above code we can assume the final yield is the "return" value but this is difficult to read and further it may not be the actual intent of the generator author. Userland code can currently work around this limitation to make such "returns" more explicit using the key => value yield form:
+
+<code php>
+<?php
+$gen = function {
+    $foo = yield myAsyncFoo();
+    $bar = yield myAsyncBar($foo);
+    yield "return" => $bar + 42;
+};
+</code>
+
+The above example takes advantage of "meta data" about the yielded value in the form of the yielded key. While this approach can work to indicate intent and make code more readable it suffers from the failing that it is non-standard and concurrency frameworks are forced to fractal out their own domain-specific conventions for representing asynchronous coroutine execution results.
+
+Generator return expressions as proposed here alleviate this problem as ''return'' statements have applicable semantics, known characteristics and low cognitive overhead:
+
+<code php>
+<?php
+$gen = function {
+    $foo = yield myAsyncFoo();
+    $bar = yield myAsyncBar($foo);
+    return $bar + 42; // unambiguous execution "result"
+};
+</code>
+
+
+===== Other Languages =====
+
+Other popular dynamic languages currently support generator return expressions ...
+
+**Generator Returns in Python**
+
+Python 3.3 added the ability to return expressions in sub-generators and have these results returned
+to the parent generator.
+
+<code python>
+def foo():
+    return 1
+    yield 2 # never reached
+
+def bar():
+    x = yield from foo()
+    print(x)
+
+bar() # outputs 1
+</code>
+
+**Generator Returns in Javascript**
+
+
+Javascript ES6 generators yield objects with a ''value'' property enumerating the yielded value and a boolean ''done'' property to indicate when iteration has completed:
+
+<code javascript>
+function *foo(x) {
+    var y = 2 * (yield (x + 1));
+    var z = yield (y / 3);
+    return (x + y + z);
+}
+</code>
+
+
+===== Backward Incompatible Changes =====
+
+None
+
+===== Proposed PHP Version(s) =====
+
+PHP7
+
+
+===== Unaffected PHP Functionality =====
+
+Existing generator semantics remain unmodified. Only new functionality is added to allow generators to return expressions via ''return'' and differentiate such expressions from standard yields via ''Generator::getReturn()''.
+
+
+===== Future Scope =====
+
+The proposed behavior lays the groundwork for future sub-generator functionality using ''yield from'' or ''yield *'' to break apart functional units into multiple generators. In such cases a sub-generator's return value is sent to the parent generator upon completed iteration.
+
+
+===== Proposed Voting Choices =====
+Two voting choices are proposed:
+
+1. **YES**, allow Generator return expressions and ''expose Generator::getReturn()'' to access returned values in PHP 7
+
+2. **NO**, do not modify existing Generator behavior
+
+A 2/3 "Yes" vote is required to implement this proposal.
+
+===== Patches and Tests =====
+There is as yet no patch for the proposed functionality. Nikita Popov has offered to make the necessary changes and a link to the relevant patch will be added here once available.
+
+
+===== Implementation =====
+TBD
+
+===== References =====
+
+[[https://docs.python.org/3/whatsnew/3.3.html#pep-380|New in Python 3.3: yield from]]
+
+===== Rejected Features =====
+TBD
