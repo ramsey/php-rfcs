@@ -1,45 +1,164 @@
+====== PHP RFC: Type parsing restrictions ======
+  * Version: 0.1
+  * Date: 2015-02-19
+  * Author: François Laupretre, francois@tekwire.net
+  * Status: Draft
+  * First Published at: https://wiki.php.net/rfc/zpp-conversion-rules
 
-Current :
+
+===== Introduction =====
+
+This RFC proposes to implement a new set of rules to be used when parsing
+function arguments.
+
+This changes are based on concerns that arose during the discussion about
+[[https://wiki.php.net/rfc/scalar_type_hints|scalar type hints]].
+
+While the discussion focused on a dual-mode approach, with people opposing use cases
+about so-called 'weak' and 'strict' typing, some of us decided to search for
+a compromise that would satisfy both camps.
+
+It was soon clear that the biggest argument of strict-type proponents was that
+'weak' mode was way too permissive,
+allowing, for instance, ((bool)true) or '7 years' as integer value.
+
+As the proposed argument type hinting mechanism is aligned on the ZPP behavior,
+and as everyone agreed it should remain so, it was decided to propose a new more
+restrictive ruleset to be implemented in ZPP and zend_parse_parameters().
+
+So, this RFC presents a new ruleset for parameter parsing and implicit conversions.
+
+Note: In the rest of the document, 'ZPP' means 'Z_PARAM macros and zend_parse_parameters()'
+as, whatever the final implementation, both mechanisms must remain in sync.
+
+===== Proposal =====
+
+==== Current ruleset ====
+
+The ZPP ruleset does not authorizes implicit conversions for the IS_NULL, IS_FALSE,
+IS_TRUE, IS_LONG, IS_DOUBLE, and IS_STRING zval types only.
+
+Actually, it also implement a mechanism for (object -> string) but, as this mechanism
+will remain unchanged, it will be ignored here.
+
+This table shows the current rules to accept and convert an input zval through
+the ZPP layer. It also shows the resulting values when fixed :
 
 ^            ^  Zval type  ^^^^^^^^
-^  ZPP type  ^ IS_NULL         ^ IS_FALSE      ^ IS_TRUE       ^ IS_LONG   ^ IS_DOUBLE ^  IS_STRING ^
-^ bool       |  Yes (-> false) |  Native       |  Native       | Yes (1)   |  Yes (1)   |  Yes (2)  |
-^ long       |  Yes (-> 0)     |  Yes (-> 0)   |  Yes (-> 1)   | Native    |  Yes       |  (3)      |
-^ double     |  Yes (-> 0.0)   |  Yes (-> 0.0) |  Yes (-> 1.0) | Yes       |  Native    |  (4)      |
-^ string     |  Yes (-> "")    |  Yes (-> "")  |  Yes (-> "1") | Yes       |  Yes       |  Native   |
+^  ZPP type  ^ IS_NULL        ^ IS_FALSE     ^ IS_TRUE      ^ IS_LONG   ^ IS_DOUBLE ^ IS_STRING ^
+^ bool       | Yes (-> false) | <native>     | <native>     | Yes (1)   | Yes (1)   | Yes (2)   |
+^ long       | Yes (-> 0)     | Yes (-> 0)   | Yes (-> 1)   | <native>  | Yes       | (3)       |
+^ double     | Yes (-> 0.0)   | Yes (-> 0.0) | Yes (-> 1.0) | Yes       | <native>  | (4)       |
+^ string     | Yes (-> "")    | Yes (-> "")  | Yes (-> "1") | Yes       | Yes       | <native>  |
 
   * (1) false if null, true if non null
   * (2) "" and "0" -> false, other values -> true
   * (3) Run string through is_numeric_str_function() and detect error. If double returned, convert it to long
   * (4) Run string through is_numeric_str_function() and detect error. If int returned, convert it to double
 
-is_numeric_str_function() behavior :
+The conversion of IS_STRING to int/float is doing so though _is_numeric_string_ex().
+Among others, this function has the following behavior :
 
-  * Skip leading spaces
   * Stop conversion at first non digit character with no error
 
+Note: this is what authorizes '7 years' as integer.
 
-Future :
+==== Proposed changes ====
+
+  * Disable IS_FALSE/IS_NULL to anything but bool (native).
+  * Disable (IS_STRING -> bool)
+  * Disable IS_NULL conversion to every ZPP type. It causes IS_NULL to be systematically rejected by every Z_PARAM macro except Z_PARAM_ZVAL.
+  * Disable (IS_DOUBLE -> long) if the fractional part of the input value is non null.
+  * When converting from IS_STRING to long, reject conversion if string contains the representation of a number with a non null fractional part.
+
+In is_numeric_str_function() :
+
+  * Add a check for trailing characters : trailing blanks are accepted, the first non-blank character encountered raises an error (note that blanks are supported as leading or trailing chars only).
+  
+==== Future ruleset ====
+
+This table shows a synthetic view of the resulting ruleset ('-' means 'Disabled'):
 
 ^            ^  Zval type  ^^^^^^^^
-^  ZPP type     ^ IS_NULL ^ IS_FALSE ^ IS_TRUE ^ IS_LONG   ^ IS_DOUBLE ^  IS_STRING ^
-^ null          |  Yes    |  No      |  No     | No        |  No        |  No       |
-^ bool          |  No     |  Native  |  Native | Yes (1)   |  Yes (1)   |  No       |
-^ strict_bool   |  No     |  Native  |  Native | No        |  No        |  No       |
-^ long          |  No     |  No      |  No     | Native    |  (2)       |  (3)      |
-^ strict_long   |  No     |  No      |  No     | Native    |  No        |  No       |
-^ double        |  No     |  No      |  No     | Yes       |  Native    |  (4)      |
-^ strict_double |  No     |  No      |  No     | No        |  Native    |  No       |
-^ string        |  No     |  No      |  No     | Yes       |  Yes       |  Native   |
-^ strict_string |  No     |  No      |  No     | No        |  No        |  Native   |
+^  ZPP type     ^ IS_NULL ^ IS_FALSE ^ IS_TRUE  ^ IS_LONG   ^ IS_DOUBLE ^  IS_STRING ^
+^ bool          |  -      | <native> | <native> | Yes (1)   |  Yes (1)   |  -        |
+^ long          |  -      |  -       |  -       | <native>  |  (2)       |  (3)      |
+^ double        |  -      |  -       |  -       | Yes       | <native>   |  (4)      |
+^ string        |  -      |  -       |  -       | Yes       |  Yes       | <native>  |
 
   * (1) false if null, true if non null
   * (2) error if fractional part is non null
   * (3) Run string through is_numeric_str_function() and detect error. If double with null fractional part returned, convert to long, else error
   * (4) Run string through is_numeric_str_function() and detect error. If int returned, convert to double
 
-is_numeric_str_function() behavior :
+and the new behavior of _is_numeric_string_ex() :
 
-  * Skip leading spaces
-  * Ignore trailing spaces
-  * Error on non-blank trailing chars
+  * Ignore trailing blanks
+  * Error on any non-blank trailing char
+
+===== Backward Incompatible Changes =====
+
+Every restriction of the ruleset cause a BC break.
+
+===== Proposed PHP Version(s) =====
+
+Because of BC breaks, requires a major version.
+
+===== RFC Impact =====
+
+Every internal functions are potentially impacted.
+
+Any code converting a string to a number is potentially impacted. If this cause
+an unacceptable BC break, we'll create a private copy of this function specific
+for argument parsing. As long as it is not needed, it is better if every string to
+numeric conversion uses the same code.
+
+==== To Opcache ====
+
+None
+
+==== New Constants ====
+
+None
+
+==== php.ini Defaults ====
+
+None
+
+===== Open Issues =====
+
+Coming soon...
+
+===== Unaffected PHP Functionality =====
+
+===== Future Scope =====
+
+The set of supported numeric strings can be extended.
+
+String to numeric conversion can be made smarter and accept more.
+
+===== Proposed Voting Choices =====
+
+Requires a 2/3 majority.
+
+Vote will be a single-choice yes/no vote.
+
+Voting date is not planned yet.
+
+===== Patches and Tests =====
+
+Work in progress.
+
+As soon as patch is available, extensive testing must be performed to evaluate
+overall BC breaks.
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
