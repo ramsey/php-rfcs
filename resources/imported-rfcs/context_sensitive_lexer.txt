@@ -1,5 +1,5 @@
 ====== PHP RFC: Context Sensitive Lexer ======
-  * Version: 0.2
+  * Version: 0.3
   * Date: 2015-02-15
   * Author: Márcio Almada
   * Status: Draft
@@ -16,11 +16,11 @@ For instance, if the RFC gets accepted, code like the following would become pos
 
 <code php>
 class Collection {
-    public function foreach() { /* */ }
+    public function forEach(callable $callback) { /* */ }
 }
 
 class List {
-    public function append() { /* */ }
+    public function append(List $list) { /* */ }
 }
 </code>
 
@@ -35,6 +35,7 @@ This RFC revisits the topic of [[https://wiki.php.net/rfc/keywords_as_identifier
 presenting a minimal and maintainable [[https://github.com/marcioAlmada/php-src/commit/d9d6f0c7e325dcd0d0ff3c3f2dc73c2364c3ad5f|patch]],
 restricted to OO scope only, consistently comprehending:
 
+  * Namespace, class, trait and interface names
   * Properties, constants and methods defined on classes, interfaces and traits
   * Access of properties, constants and methods from objects and classes
 
@@ -53,18 +54,27 @@ This is a list of currently **globally** reserved words that will become **semi-
 
 ==== Limitations ====
 
-On purporse, it's still forbidden to define a **namespace**, **class**, **interface** or **trait** named as ''namespace'', ''self'', ''static'' or ''parent'':
+On purporse, it's still forbidden to define a **namespace**, **class**, **interface** or **trait** named as:
+
+  * ''namespace''
+  * ''self''
+  * ''static''
+  * ''parent''
+  * ''array''
+  * ''callable''
 
 <code php>
 namespace|class|interface|trait Namespace {}  // Fatal error
 namespace|class|interface|trait Self {}       // Fatal error
 namespace|class|interface|trait Static {}     // Fatal error
 namespace|class|interface|trait Parent {}     // Fatal error
+namespace|class|interface|trait Array {}      // Fatal error
+namespace|class|interface|trait Callable {}   // Fatal error
 
 // Fatal error: Cannot use %s as %s name as it is reserved in %s on line %d
 </code>
 
-On purporse, it's still forbidden to define a class constant named ''class'' because of the class name resolution operator ''::class'':
+On purporse, it's still forbidden to define a **class constant** named as ''class'' because of the class name resolution operator ''::class'':
 
 <code php>
 class Foo {
@@ -161,6 +171,29 @@ For instance, the lexing rules to disambiguate ''::class'' (class name resolutio
 }
 </code>
 
+One additional compile time check was created:
+
+<code c>
+if (zend_string_equals_literal_ci(name, "class")) {
+  zend_error_noreturn(E_COMPILE_ERROR, "Cannot redefine %s::%s as ::%s is reserved",
+    ce->name->val, name->val, name->val);
+}
+</code>
+
+Others were just adapted because, surprisingly, most of the necessary compile time checks were already in place and just needed
+adjustments to restrict ''namespace'', ''array'' and ''callable'' as names. For instance the trait name validation:
+
+<code c>
+// before
+if(ZEND_FETCH_CLASS_DEFAULT != zend_get_class_fetch_type(name)) {
+  zend_error_noreturn(E_COMPILE_ERROR, "Cannot use '%s' as trait name as it is reserved", name->val);
+}
+// after
+if(ZEND_FETCH_CLASS_DEFAULT != zend_check_reserved_name(name)) {
+  zend_error_noreturn(E_COMPILE_ERROR, "Cannot use '%s' as trait name as it is reserved", name->val);
+}
+</code>
+
 Current proposed patch:
 
   * Doesn't require ''lexical feedback'' (passing information from parser to lexer)
@@ -182,9 +215,19 @@ No loss noticed.
 
 This is proposed for the next PHP x, which at the time of this writing would be PHP 7.
 
+===== Open Issues =====
+
+The patch may still contain small bugs related to the topics below, but this can be addressed during discussion phase:
+
+  * I still have to add more tests involving traits and trait conflict resolution syntax
+  * I still have to add more tests involving ''use X as Y'' syntax and entities with semi-reserved names
+
+The patch is 98% implemented and complexity around it will not grow. We could even vote the RFC before
+finishing these small details without impact on end quality.
+
 ===== Patch =====
 
-  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/77225b8f5d60146c6575e95ebfca2196bf3953a1|77225b8]], in case you would like to focus only on the important changes and skip the long tests.
+  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/c01014f9cca2eaf148ccc2e2e05f2b41d571b424|c01014f]], in case you would like to focus only on the important changes and skip the long tests.
   - Pull request with all the tests and regenerated ext tokenizer is at [[https://github.com/php/php-src/pull/1054/files]]
 
 ===== References =====
@@ -198,4 +241,4 @@ None so far.
 ===== Changelog =====
   * 0.1: Initial draft with support for class, interfaces and trait members
   * 0.2: Additional support to namespaces, classes, interafces and traits names
-
+  * 0.3: Oops. Add forgotten support for typehints
