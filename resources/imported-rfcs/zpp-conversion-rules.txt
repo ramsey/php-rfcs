@@ -1,7 +1,7 @@
 ====== PHP RFC: Type parsing modifications ======
-  * Version: 0.2
-  * Date: 2015-02-19
-  * Author: François Laupretre <francois@php.net>, Zeev Suraski <zeev@php.net>
+  * Version: 0.3
+  * Date: 2015-02-21
+  * Author: François Laupretre, francois@php.net
   * Status: Draft
   * First Published at: https://wiki.php.net/rfc/zpp-conversion-rules
 
@@ -20,23 +20,19 @@ Then, minor additions to be used by the userland type hinting system are propose
 The changes proposed here are based on concerns that arose during the discussion about
 [[https://wiki.php.net/rfc/scalar_type_hints|scalar type hints]].
 
-While the discussion turned to an opposition between 'weak' and 'strict' mode proponents,
-each camp showing use cases to prove it was right, we decided to explore another
-way : find a single-mode compromise that would satisfy both camps. 
+While the discussion mostly opposed 'weak' and 'strict' mode proponents,
+each camp showing use cases to prove it was right, we decided to gather all these use cases
+and go exploring another way : search a single-mode compromise that would satisfy both camps. 
 
 It was soon clear that the strongest argument of strict-typing proponents was that
-'weak' mode was way too permissive,
-allowing, for instance, true or '7 years' as integer value.
+'weak' mode was way too permissive, allowing, for instance, true or '7 years' as integer value.
 
-As the 'weak' mode of the proposed type hinting mechanism is aligned on the behavior of the
-ZPP layer,
-and as everyone seemed to agree it should remain so, we decide to propose a new more
-restrictive ruleset to be implemented in ZPP and zend_parse_parameters().
+As the 'weak' mode of the proposed type hinting mechanism was based on the ZPP layer,
+and as everyone agreed any single-mode mechanism should keep using it,
+we decided to propose a new more restrictive ruleset to be implemented in ZPP.
 
-So, this RFC presents a new ruleset for parameter parsing and implicit conversions.
-
-Note: In the rest of the document, 'ZPP' means 'Z_PARAM macros and zend_parse_parameters()'
-as, whatever the final implementation, both mechanisms must remain in sync.
+Note: In the whole document, we use the 'ZPP' term as a union set including Z_PARAM macros, zend_parse_arg_xxx() functions, and zend_parse_parameters()
+as, whatever the ruleset, these mechanisms must keep implementing the same logic.
 
 ===== Proposal =====
 
@@ -49,12 +45,12 @@ Actually, it also implement a mechanism for (object -> string) but, as this one
 will remain unchanged, it will be ignored here.
 
 The following table shows the current rules used to accept and convert an input zval through
-the ZPP layer :
+ZPP :
 
 ^            ^  Zval type  ^^^^^^^^
 ^  ZPP type  ^ IS_NULL        ^ IS_FALSE     ^ IS_TRUE      ^ IS_LONG   ^ IS_DOUBLE ^ IS_STRING ^
 ^ bool       | Yes (-> false) | <native>     | <native>     | Yes (1)   | Yes (1)   | Yes (2)   |
-^ long       | Yes (-> 0)     | Yes (-> 0)   | Yes (-> 1)   | <native>  | Yes       | (3)       |
+^ long       | Yes (-> 0)     | Yes (-> 0)   | Yes (-> 1)   | <native>  | Yes (5)   | (3)       |
 ^ double     | Yes (-> 0.0)   | Yes (-> 0.0) | Yes (-> 1.0) | Yes       | <native>  | (4)       |
 ^ string     | Yes (-> "")    | Yes (-> "")  | Yes (-> "1") | Yes       | Yes       | <native>  |
 
@@ -62,19 +58,21 @@ the ZPP layer :
   * (2) "" and "0" -> false, other values -> true
   * (3) Run string through is_numeric_str_function() and detect error. If double returned, convert it to long
   * (4) Run string through is_numeric_str_function() and detect error. If int returned, convert it to double
+  * (5) Discard fractional part, if any
 
 The conversion of IS_STRING to int/float is done through _is_numeric_string_ex().
 Among others, this function has the following behavior :
 
-  * Stop conversion at first non digit character with no error (this is what authorizes '7 years' as integer).
+  * Stop conversion at first non digit character with no error (ignore every trailing char).
 
 ==== Proposed changes ====
 
-  * Disable IS_FALSE/IS_NULL to anything but bool (native).
-  * IS_STRING -> bool: Convert every string that would be converted to 0 or 0.0 to false, instead of just "0".
-  * Disable IS_NULL conversion to every ZPP type. It causes IS_NULL to be systematically rejected by every Z_PARAM macro except Z_PARAM_ZVAL.
+  * Disable IS_FALSE/IS_NULL to anything except bool.
+  * Disable any conversion to bool except from IS_FALSE/IS_TRUE.
+  * Disable IS_NULL to be accepted for any ZPP type except the new 'null'.
   * Disable (IS_DOUBLE -> long) if the fractional part of the input value is non null.
   * When converting from IS_STRING to long, reject conversion if string contains the representation of a number with a non null fractional part.
+  * Add a 'null' ZPP type. This type accepts IS_NULL only. While quite useless for input arguments, it is used as return type and as element of union types.
 
 In _is_numeric_string_ex() :
 
@@ -85,36 +83,43 @@ In _is_numeric_string_ex() :
 This table shows a synthetic view of the resulting ruleset ('-' means 'Disabled'):
 
 ^            ^  Zval type  ^^^^^^^^
-^  ZPP type     ^ IS_NULL ^ IS_FALSE ^ IS_TRUE  ^ IS_LONG   ^ IS_DOUBLE ^  IS_STRING ^
-^ bool          |  -      | <native> | <native> | Yes (1)   |  Yes (1)   |  Yes (5)  |
-^ long          |  -      |  -       |  -       | <native>  |  (2)       |  (3)      |
-^ double        |  -      |  -       |  -       | Yes       | <native>   |  (4)      |
-^ string        |  -      |  -       |  -       | Yes       |  Yes       | <native>  |
+^  ZPP type     ^ IS_NULL  ^ IS_FALSE ^ IS_TRUE  ^ IS_LONG   ^ IS_DOUBLE ^  IS_STRING ^
+^ null          | <native> |  -       | -        | -         |  -         |  -        |
+^ bool          |  -       | <native> | <native> | -         |  -         |  -        |
+^ long          |  -       |  -       |  -       | <native>  |  (1)       |  (2)      |
+^ double        |  -       |  -       |  -       | Yes       | <native>   |  (3)      |
+^ string        |  -       |  -       |  -       | Yes       |  Yes       | <native>  |
 
-  * (1) false if null, true if non null
-  * (2) error if fractional part is non null
-  * (3) Run string through is_numeric_str_function() and detect error. If double with null fractional part returned, convert to long, else error
-  * (4) Run string through is_numeric_str_function() and detect error. If int returned, convert to double
-  * (5) If string is numeric and contains a representation of a null number (anything that would convert to 0 or 0.0), or if string is empty, -> false, otherwise -> true.
+  * (1) error if fractional part is non null
+  * (2) Run string through is_numeric_str_function() and detect error. If double with null fractional part returned, convert to long, else error
+  * (3) Run string through is_numeric_str_function() and detect error. If int returned, convert to double
 
 and the new behavior of _is_numeric_string_ex() :
 
   * Ignore trailing blanks
   * Error on any non-blank trailing char
 
+As you will note, the only remaining potential conversions are between long, double, and string. All other types have been made 100% strict (from/to native type only)
+
+This ruleset is a pure restriction of the cases supported by the previous ruleset.
+This means that every conversion that succeeds with the new ruleset produces exactly
+the same result as it would have with the previous ruleset.
+
+Example:
+
+String to numeric conversion is less permissive as we don't support non-blank trailing
+chars anymore. So, it will fail more often. But, when it succeeds,
+it produces exactly the same value as it would have in PHP 5.
+
 ==== Other changes ====
 
-==== Add a check-only mode in ZPP ====
-
-TODO
-
-==== Implement PHP 5 optional compatibility ====
+==== Implement a PHP 5 optional compatibility layer ====
 
 TODO
 
 ===== Backward Incompatible Changes =====
 
-Every restriction of the ruleset causes a BC break, except in PHP 5 compatibility mode.
+Every change we propose here is a BC break.
 
 ===== Proposed PHP Version(s) =====
 
@@ -125,9 +130,9 @@ Every restriction of the ruleset causes a BC break, except in PHP 5 compatibilit
 Every internal functions are potentially impacted.
 
 Any code converting a string to a number is potentially impacted. If this cause
-an unacceptable BC break, we'll create a private copy of this function specific
-for argument parsing. As long as it is not needed, it is better if every string to
-numeric conversion uses the same code.
+an unacceptable BC break, we'll create a private copy of the function implemeneting
+(string -> int/float) and will reserve it for ZPP. As long as it is not clearly needed,
+we'll keep a common code for every string to number conversions in PHP.
 
 ==== To Opcache ====
 
@@ -139,22 +144,18 @@ None
 
 ==== php.ini Defaults ====
 
-Name-to-define : Allows to raise newly-introduced restrictions as E_DEPRECATED
-instead of E_RECOVERABLE_ERROR.
+<name-to-define> : Enables PHP 5 compatibility mode. When turned on, causes
+newly-introduced errors to be raised as E_DEPRECATED instead of E_RECOVERABLE_ERROR.
 
 Default value: Off
 
 ===== Open Issues =====
 
-Coming soon...
-
 ===== Unaffected PHP Functionality =====
 
 ===== Future Scope =====
 
-The set of supported numeric strings can be extended.
-
-String to numeric conversion can be made smarter and accept more.
+String to numeric conversion can be made smarter and accept a richer syntax.
 
 ===== Proposed Voting Choices =====
 
