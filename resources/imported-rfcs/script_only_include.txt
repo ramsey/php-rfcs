@@ -8,21 +8,49 @@
   * Renamed to: http://wiki.php.net/rfc/script_only_include
 
 ===== Introduction =====
-include()/require() is source of file/script inclusion for a long time. **File inclusion is extremely severe security breach** and **PHP is too weak against file inclusion attacks.** 
+include()/require() is source of file/script inclusion for a long time. **File inclusion is extremely severe security breach** and **PHP is too weak against file inclusion attacks with respect to other languages.** 
+
+  * [[http://www.exploit-db.com/search/?action=search&filter_page=1&filter_description=PHP&filter_author=&filter_platform=0&filter_type=0&filter_lang_id=0&filter_exploit_text=inclusion&filter_port=0&filter_osvdb=&filter_cve=
+|PHP]] (many and these are _only_ few of them in the wild)
+  * [[http://www.exploit-db.com/search/?action=search&filter_page=1&filter_description=&filter_exploit_text=PERL&filter_author=inclusion&filter_platform=0&filter_type=0&filter_lang_id=0&filter_port=&filter_osvdb=&filter_cve=|PERL]] (0 result)
+  * [[http://www.exploit-db.com/search/?action=search&filter_page=1&filter_description=Rails&filter_exploit_text=inclusion&filter_author=&filter_platform=0&filter_type=0&filter_lang_id=0&filter_port=&filter_osvdb=&filter_cve=
+|Rails]] (0 result)
+  * [[http://www.exploit-db.com/search/?action=search&filter_page=1&filter_description=Python&filter_exploit_text=inclusion&filter_author=&filter_platform=0&filter_type=0&filter_lang_id=0&filter_port=&filter_osvdb=&filter_cve=|Python]] (0 result)
+  * [[http://www.exploit-db.com/search/?action=search&filter_page=1&filter_description=JSP&filter_exploit_text=inclusion&filter_author=&filter_platform=0&filter_type=0&filter_lang_id=0&filter_port=&filter_osvdb=&filter_cve=
+|JSP]] (1 result - This is famous)
 
 
-**IMPORTANT NOTE:** This proposal has defect. It turned out old proposal that limits script filename extension(s) is better. 
-This RFC will be rewritten with proper mitigation.
+==== The Root of This Difference ====
+
+The root cause of the difference is how scripts are loaded.
+
+Python loads script like
+<code python>
+import foo
+</code>
+where foo is **foo.py**.
+
+Ruby loads script like
+<code ruby>
+require 'foo'
+</code>
+where foo is **foo.rb**.
+
+PHP loads script like
+<code php>
+require 'foo.php'
+</code>
+where **foo.php** is the script loaded.
+
+=== Other Languages ===
+
+Other languages provides loading script without file extension. This prevents "script inclusion" attacks effectively. Above number of vulnerabilities is the proof.
 
 
 ====Solution====
 Solution for this issue is simple. Introduce **script only include/require** and modify **move_uploaded_file()**  function not to move PHP script embedded files. With this RFC, PHP becomes as secure as other languages against file inclusion attacks.
 
-====In the wild attacks/vulnerabilities====
-
-File inclusion attacks are too common in PHP, not like other languages.
-
-http://www.exploit-db.com/search/?action=search&filter_page=1&filter_description=PHP&filter_exploit_text=inclusion&filter_author=&filter_platform=0&filter_type=0&filter_lang_id=0&filter_port=&filter_osvdb=&filter_cve=
+===== Discussions =====
 
 ====OS protection is **NOT** perfect protection====
 
@@ -34,59 +62,35 @@ open_basedir restrict file reads, but it's not helpful. Attackers use uploaded f
 
 ====Uploaded Files====
 
-Users are supposed to use move_uploaded_file() function to move uploaded files to destination directory. move_uploaded_files() is modified to detect PHP code and refuse to move it. 
+Users are supposed to use move_uploaded_file() function to move uploaded files to destination directory. move_uploaded_files() is modified to prevent/refuse to move it without user setting. 
 
 ===== Proposal =====
 
-Introduce **script_embed** INI (Default: script_embed=Off) that specify script embedding in a script file is allowed. Modify **move_upload_file()** to detect and to refuse script embedded files with when script_embed=On.
+Introduce php script extensions configuration:
 
-include()/include_once()/require()/require_once()/move_uploaded_file() are affected by **script_embed** INI.
+Web SAPI
+  php_scripts = ".php .phar" ; Allow only *.php and *.phar. User may add/change this INI setting.
 
-**Current:**
+CLI SAPI
+  php_scripts = "*" ; Allow any file for CLI by default.
 
-Allows embedded PHP script always.
+Introduce $allow_script flag to move_uploaded_file():
 <code php>
-require('/path/to/docroot/upload/file'); // Read any file if it contains PHP code, execute.
-require('/etc/passwd'); // Read any file if it contains PHP code, execute.
-
-move_uploaded_file($source, $destination); // Success if it has PHP code
+  bool move_uploaded_file(string $filename , string $destination [, $allow_script=FALSE ] )
 </code>
 
-**New:**
+With current PHP, move_uploaded_file() has no real protection. Add new flag and make it useful again.
 
-script_embed=Off
-<code php>
-require('/path/to/php_script'); // Read & execute 
-require('/path/to/other_file'); // E_RECOVERBLE_ERROR - Not a PHP script
-include('/etc/passwd'); // E_RECOVERBLE_ERROR - Not a PHP script
+==== Old proposals ====
 
-move_uploaded_file($source, $destination); // Fails if it has PHP code
-</code>
-
-move_uploaded_file() searches "start tag" token if it is located as the first token.
-
-==== Pros and Cons ====
-
-When script_embed=On, nothing changes.
-
-When script_embed=Off,
-
-Pros
-  * Only PHP script files are executed as PHP script. (Files usually started with <?php, but it's not limited)
-  * move_uploaded_file() prevents uploading PHP scripts.
-  * Attacker tries to exploit LFI, cannot read and execute if file is not a PHP script.
-
-Cons
-  * move_uploaded_file() cannot be used for PHP script uploading. (User must use compression/encryption for PHP scripts)
-  * Attacker may have access to any accessible PHP script. (Use open_basedir, OS protection)
-
-
+  * Detect "<?php" at the top of file and disallow "?>": This still allows to load PHP script like 'require "image.png";'/etc.
+  * Introduce script()/script_once(): The same issue as above.
+  * Introduce embed_mode INI: The save issue as above.
 
 ===== Backward Incompatible Changes =====
 
-No BC when script_embed=On.
-
-move_uploaded_file() cannot move PHP script when script_embed=Off.
+  * If users have different extensions other than de facto standard, they have to modify "php_scripts" INI.
+  * move_uploaded_file() cannot move PHP scripts unless $allow_script=TRUE.
 
 ===== Proposed PHP Version(s) =====
 
@@ -95,11 +99,15 @@ PHP 7
 ===== RFC Impact =====
 ==== To SAPIs ====
 
-None
+Web SAPI
+  * New "php_scripts" INI
+
+CLI SAPI
+  * New "php_scripts" INI - No BC impact since it allows any file as PHP script.
 
 ==== To Existing Extensions ====
 
-None including extensions that have custom script loader.
+Extensions that have custom script loader with custom extension.
 
 ==== To Opcache ====
 
@@ -111,18 +119,22 @@ None
 
 ==== php.ini Defaults ====
 
-script_embed=On/Off (INI_ALL, Default: Off for all)
+php_script
 
   * hardcoded default values
+    * Web SAPI: ".php .phps"
+    * CLI SAPI: "*"
   * php.ini-development values
+    * "" (Empty. Use the default)
   * php.ini-production values
+    * "" (Empty. Use the default)
 
 ===== Open Issues =====
 
 
 ===== Unaffected PHP Functionality =====
 
-require/include/move_uploaded_file remains the same when it is not enabled.
+All of require/require_once/include/include_once are affected by this.
 
 ===== Future Scope =====
 
@@ -138,6 +150,7 @@ State whether this project requires a 2/3 or 50%+1 majority (see [[voting]])
 
 ===== Patches and Tests =====
 
+Will be prepared before vote.
 
 ===== Implementation =====
 
