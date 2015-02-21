@@ -1,0 +1,178 @@
+====== PHP RFC: Strict Argument Count On Function Calls ======
+  * Version: 0.1
+  * Date: 2015-02-20
+  * Author: Márcio Almada
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/strict_argcount
+
+===== Introduction =====
+
+This RFC proposes to sensibly add a **strict argument count** check for function **calls** on PHP7, **without
+impairing** existing implementations already depending on **variable-length** argument lists.
+
+Strict checks on argument counts are good to catch bugs on user space code. Even PHP internal functions have this:
+
+<code php>
+strlen("foo", "bar");
+// PHP warning:  strlen() expects exactly 1 parameter, 2 given on line 1
+</code>
+
+===== Proposal =====
+
+This RFC proposes that the engine should emit a ''Warning'' when a function is called with exceeding number of arguments:
+
+<code php>
+/**
+ * fn expects only one argument
+ * @param  $arg
+ */
+function fn($arg) {}
+
+fn(1); // Ok
+fn(1, 2); // Warning
+call_user_func_array("fn", [1, 2, 3]); // Warning
+
+// Warning: fn() expects at most 1 parameters, 2 given, defined in %s on line %u and called in %s on line %u
+// Warning: fn() expects at most 1 parameters, 3 given, defined in %s on line %u and called in %s on line %u
+</code>
+
+The proposal is **sensible** to **functions** and **methods** implemented to handle arguments dynamically using:
+
+  * ''func_get_arg()''
+  * ''func_get_args()''
+  * ''func_num_args()''
+
+The following examples **WON'T** break:
+
+<code php>
+/** fn expects a variable-length argument lists */
+function fn($arg) {
+    $arg = func_get_arg();
+    $args = func_get_args();
+    $argcount = func_num_args();
+}
+
+fn(1); // Ok
+fn(...[1, 2, 3, 4, 5]); // Ok
+call_user_func_array("fn", [1, 2, 3, 4, 5, 6, 7]); // Ok
+</code>
+
+The implementation also supports **dynamic resolution** of function names. So **aliased** calls to dynamic arguments API is also covered:
+
+<code php>
+namespace some\namespace;
+
+use function func_get_arg  as foo;
+use function func_get_args as bar;
+use function func_num_args as baz;
+
+/** fn expects a variable-length argument lists */
+function fn($arg) {
+    $arg = foo(0);
+    $args = bar();
+    $argcount = baz();
+}
+
+fn(1);
+fn(1, 2); // Ok
+call_user_func("fn", 1, 2, 3); // Ok
+</code>
+
+===== Details =====
+
+During compilation the function implementations will be verified as sensible to dynamic argument calls.
+In other words, all the functions and methods implemented with ''func_get_arg()'', ''func_get_args()'', ''func_num_args()''
+will be marked with a ''ZEND_ACC_DYNAMIC_ARGCOUNT'' flag:
+
+<code c>
+CG(active_op_array)->fn_flags |= ZEND_ACC_DYNAMIC_ARGCOUNT;
+</code>
+
+During script execution, when the **function** or **method** finally gets invoked with an exceeding argument count,
+the engine will check for the flag and emit a warning in case current ''execute_data'' is **not variadic**
+and was not marked as sensible to dynamic argument count:
+
+<code>
+Warning: %s() expects at most %u parameters, %u given, defined in %s on line %u and called in %s on line %u
+</code>
+
+=> It's worth to mention that, currently, PHP implementation already checks for exceeding arguments on every function call,
+the proposal only adds a warning sensible to each function implementation. The performance impact is **negligible**.
+
+==== About Dead Code ====
+
+Functions will be marked as sensible to variable-length argument list even if the implementation contains dead code such as:
+
+<code php>
+function fn($arg) {
+    if(false){
+        func_get_args();
+    }
+}
+fn(1, 2, 3); // Ok
+</code>
+
+Maybe when other levels of optimizations get added to PHP and dead code gets wiped before execution this little limitation will vanish. But, right now, there is no advantages into checking for dead code and perhaps some might prefer the implementation this way.
+
+==== About @ Operator ====
+
+The implementation is aware of the ''@''.
+
+==== About Magic Methods ====
+
+The patch won't affect magic method calls. Magic methods have no signature thus there is no way to validate argument count.
+
+==== About Variadic Functions ====
+
+Variadic functions are explicitly implemented to handle variable-length argument lists, and won't be affect by the patch.
+
+===== Open Issues =====
+
+Current patch is not sensible to "obfuscated" calls to ''func_get_arg()'', ''func_get_args()'' and ''func_num_args()'':
+
+<code php>
+function fn($arg) {
+    $fn = "func_get_args"
+    $fn();
+}
+
+fn(1, 2, 3);
+// Warning: fn() expects at most 1 parameters, 3 given, defined in %s on line %d and called...
+</code>
+
+This is **not** a **common** use case, and there is no legit reason to use variable-length argument API like that.
+Therefore, this RFC also proposes to **block** ''func_get_arg()'', ''func_get_args()'' and ''func_num_args()''
+from being called dynamically by emitting a fatal error:
+
+  Fatal Error: function_get_arg() should not be called dynamically...
+  Fatal Error: function_get_args() should not be called dynamically...
+  Fatal Error: function_num_args() should not be called dynamically...
+
+=> This bit shaw be addressed on discussion phase and was not implemented on the patch yet. It will be implemented after the voting phase if the RFC passes.
+
+===== Backward Incompatible Changes =====
+
+  * Code running functions not implemented to manage variable-length argument lists and with function calls with an exceeding
+amount of arguments according to function signatures will emit a warning.
+
+ => This is a good BC break.
+
+===== Proposed PHP Version(s) =====
+
+This is proposed for the next PHP x, which at the time of this writing would be PHP 7.
+
+===== Vote =====
+
+===== Patch =====
+
+  - Pull request is at[[https://github.com/php/php-src/pull/1108]]
+  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/a6064982a69b1dd87ee19229f32b34f29c451f4e|a606498]].
+
+=> Some unrelated tests are broken because the new emitted warning evidenced bugs on them. These tests will be fixed before merge, if RFC passes.
+
+===== Rejected Features =====
+
+None so far.
+
+===== Changelog =====
+  * 0.1: Initial patch and RFC
