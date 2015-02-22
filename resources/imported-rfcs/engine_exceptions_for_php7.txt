@@ -211,7 +211,28 @@ Additionally the following policy changes are made:
   * Existing errors of type ''E_ERROR'', ''E_RECOVERABLE_ERROR'', ''E_PARSE'' or ''E_COMPILE_ERROR'' can be converted to exceptions.
   * It is discouraged to introduce new errors of type ''E_ERROR'' or ''E_RECOVERABLE_ERROR''. Within limits of technical feasibility the use of exceptions is preferred.
 
-The patch attached to this RFC already converts a large number of fatal and recoverable fatal errors to exceptions. It also converts parse errors to exceptions (there's only one of those).
+In order to avoid updating many tests the current error messages will be retained if the engine/parse exception is not caught. This may be changed in the future.
+
+The patch attached to this RFC already converts a large number of fatal and recoverable fatal errors to exceptions. It also converts parse errors to exceptions.
+
+==== Hierarchy ====
+
+There is some concern that by extending ''EngineException'' directly from ''Exception'', previously fatal errors may be accidentally caught by existing ''catch(Exception $e)'' blocks (aka Pokemon exception handling). To alleviate this concern it is possible to introduce a new ''BaseException'' type with the following inheritance hierarchy:
+
+<code>
+BaseExtension (abstract)
+ +- EngineException
+ +- ParseException
+ +- Exception
+     +- ErrorException
+     +- RuntimeException
+         +- ...
+     +- ...
+</code>
+
+As such engine/parse exceptions will not be caught by existing ''catch(Exception $e)'' blocks.
+
+Whether such a hierarchy (with a new ''BaseException'' type) should be adopted will be subject to a secondary vote.
 
 ===== Potential issues =====
 
@@ -253,49 +274,6 @@ try {
 }
 </code>
 
-==== catch-all blocks in existing code ====
-
-As ''EngineException'' extends ''Exception'' it will be caught by catch-blocks of type ''catch (Exception)''. This may cause existing code to inadvertently catch engine exceptions.
-
-==== Cluttered error messages ====
-
-Going back to the code-sample from the introduction, this is the fatal error that is currently thrown:
-
-<code>
-Fatal error: Call to a member function method() on a non-object in /path/file.php on line 4
-</code>
-
-With this RFC the error changes into an uncaught exception:
-
-<code>
-Fatal error: Uncaught exception 'EngineException' with message 'Call to a member function method() on a non-object' in /path/file.php:4
-Stack trace:
-#0 /path/file.php(7): call_method(NULL)
-#1 {main}
-  thrown in /path/file.php on line 4
-</code>
-
-The uncaught exception message provides more information, e.g. it includes a stack-trace which is helpful when debugging the error, but it is also rather cluttered. Especially when working on the terminal the long ''Fatal error: Uncaught exception 'EngineException' with message'' prefix pushes the actual message so far to the right that it has to wrap. Things also become quite confusing when the exception message contains quotes itself.
-
-I think it would be nice to make those messages a bit cleaner (for all exceptions). The following adjustment is simple to do and seems more readable to me:
-
-<code>
-Fatal error: Uncaught EngineException: Call to a member function method() on a non-object in /path/file.php on line 4
-Stack trace:
-#0 /path/file.php(7): call_method(NULL)
-#1 {main}
-  thrown in /path/file.php on line 4
-</code>
-
-Additional improvement (like removing the ''Fatal error:'' prefix and the duplicate file/line information) would require special handling (not sure if this is feasible):
-
-<code>
-Uncaught EngineException: Call to a member function method() on a non-object in /path/file.php on line 4
-Stack trace:
-#0 /path/file.php(7): call_method(NULL)
-#1 {main}
-</code>
-
 ==== Not all errors converted ====
 
 The Zend Engine currently (master on 2014-09-30) contains the following number of fatal-y errors:
@@ -326,10 +304,21 @@ The ''E_PARSE'' part of the proposal may introduce a minor BC break, because ''E
 
 ===== Patch =====
 
-A preliminary patch for this RFC is available at https://github.com/nikic/php-src/compare/engineExceptions7.
+A patch for this RFC is available at https://github.com/php/php-src/pull/1095.
 
 The patch introduces basic infrastructure for this change, replaces ''E_PARSE'' with ''ParseException'' and a number of ''E_ERROR'' and ''E_RECOVERABLE_ERROR'' with ''EngineException''.
 
-The patch does not yet contain all necessary test updates and is also not yet thoroughly tested.
+To simplify porting to exceptions it is possible to throw engine exceptions by passing an additional ''E_EXCEPTION'' flag to ''zend_error'' (instead of using ''zend_throw_exception''). To free unfetched operands in the VM the ''FREE_UNFETCHED_OPn'' pseudo-macros are introduced. An example of the necessary change to port a fatal error to an exception:
+
+<code>
+- zend_error_noreturn(E_ERROR, "Cannot pass parameter %d by reference", opline->op2.num);
++ zend_error(E_EXCEPTION | E_ERROR, "Cannot pass parameter %d by reference", opline->op2.num);
++ FREE_UNFETCHED_OP1();
++ HANDLE_EXCEPTION();
+</code>
 
 ===== Vote =====
+
+Vote 1: Allow exceptions in the engine and conversion of existing fatals? Requires 2/3 majority.
+
+Vote 2: Introduce BaseException? Option with more votes wins.
