@@ -7,8 +7,7 @@
 
 ===== Introduction =====
 
-This RFC proposes to sensibly add a **strict argument count** check for function **calls** on PHP7, **without
-impairing** existing implementations already depending on **variable-length** argument lists.
+This RFC proposes to conditionally add a **strict argument count** check for function **calls** on PHP7, being sensitive towards existing implementations already depending on **variable-length** argument lists.
 
 Strict checks on argument counts are good to catch bugs on user space code. Even PHP internal functions have this:
 
@@ -19,7 +18,7 @@ strlen("foo", "bar");
 
 ===== Proposal =====
 
-This RFC proposes that the engine should emit a ''Warning'' when a function is called with exceeding number of arguments:
+This RFC proposes that the engine should emit a ''Warning'' when a function is called with an exceeding number of arguments:
 
 <code php>
 /**
@@ -32,11 +31,11 @@ fn(1); // Ok
 fn(1, 2); // Warning
 call_user_func_array("fn", [1, 2, 3]); // Warning
 
-// Warning: fn() expects at most 1 parameters, 2 given, defined in %s on line %u and called in %s on line %u
-// Warning: fn() expects at most 1 parameters, 3 given, defined in %s on line %u and called in %s on line %u
+// Warning: fn() expects at most 1 parameter, 2 given, defined in %s on line %u and called in %s on line %u
+// Warning: fn() expects at most 1 parameter, 3 given, defined in %s on line %u and called in %s on line %u
 </code>
 
-The proposal is **sensible** to **functions** and **methods** implemented to handle arguments dynamically using:
+The proposal is **aware** of **functions** and **methods** implemented to handle arguments dynamically using:
 
   * ''func_get_arg()''
   * ''func_get_args()''
@@ -80,7 +79,7 @@ call_user_func("fn", 1, 2, 3); // Ok
 
 ===== Details =====
 
-During compilation the function implementations will be verified as sensible to dynamic argument calls.
+During compilation the function implementations will be verified as sensitive to dynamic argument calls.
 In other words, all the functions and methods implemented with ''func_get_arg()'', ''func_get_args()'', ''func_num_args()''
 will be marked with a ''ZEND_ACC_DYNAMIC_ARGCOUNT'' flag:
 
@@ -93,7 +92,7 @@ the engine will check for the flag and emit a warning in case current ''execute_
 and was not marked as sensible to dynamic argument count:
 
 <code>
-Warning: %s() expects at most %u parameters, %u given, defined in %s on line %u and called in %s on line %u
+Warning: %s() expects at most %u parameter|parameters, %u given, defined in %s on line %u and called in %s on line %u
 </code>
 
 => It's worth to mention that, currently, PHP implementation already checks for exceeding arguments on every function call,
@@ -131,22 +130,27 @@ Variadic functions are explicitly implemented to handle variable-length argument
 Current patch is not sensible to "obfuscated" calls to ''func_get_arg()'', ''func_get_args()'' and ''func_num_args()'':
 
 <code php>
-function fn($arg) {
+function fn() {
     $fn = "func_get_args"
     $fn();
 }
 
 fn(1, 2, 3);
-// Warning: fn() expects at most 1 parameters, 3 given, defined in %s on line %d and called...
+// Warning: fn() expects at most 1 parameter, 3 given, defined in %s on line %d and called...
 </code>
 
-This is **not** a **common** use case, and there is no legit reason to use the variable-length argument API like that.
+This is **not** a **common** use case. A github search for the term "func_get_args" haven't revealed a single result of the API being used in this way. Besides that, there is no legit reason to use the variable-length argument API like that.
+
 Therefore, this RFC also proposes to **block** ''func_get_arg()'', ''func_get_args()'' and ''func_num_args()''
 from being called dynamically by emitting a fatal error:
+  
+<code php>
+$fn = "func_get_args"
+$fn();
+Fatal Error: function_num_args() should not be called dynamically...
+</code>
 
-  Fatal Error: function_get_arg() should not be called dynamically...
-  Fatal Error: function_get_args() should not be called dynamically...
-  Fatal Error: function_num_args() should not be called dynamically...
+At first sight a fatal error might look too harsh. But the break would be extremally localized. Even **if** a single person become affected by this particular change, fixing the the obfuscated dynamic call with a direct call is no sacrifice at all.
 
 => This bit shaw be addressed on discussion phase and was not implemented on the patch yet. It will be implemented if we reach consensus on that or maybe after the voting phase if the RFC passes.
 
@@ -154,7 +158,9 @@ from being called dynamically by emitting a fatal error:
 
   * Code with functions not implemented to manage variable-length argument lists being called with an exceeding amount of arguments, according to function signatures, will emit a warning.
 
- => This is a good BC break.
+ => This is a good BC break. In a staggering majority of use cases passing extra args is or will become a bug at some point. 
+
+ => I made a blog post aiming to clarify possible misunderstandings of this RFC on community media, it contains an anedoctal user story you might find worth reading: [[https://medium.com/@marcioalmada/why-strict-arg-count-on-function-calls-will-make-php-better-saner-easier-cc360bf7c7da|Why strict argument count on function calls will make PHP better, saner, easier…]]
 
 ===== Proposed PHP Version(s) =====
 
@@ -162,14 +168,12 @@ This is proposed for the next PHP x, which at the time of this writing would be 
 
 ===== Vote =====
 
-Simple voting yes/no requiring a 50% + 1 majority.
-
-TODO: check if it requires 2/3 majority before put into discussion.
+Two weeks yes/no voting requiring 2/3 majority.
 
 ===== Patch =====
 
   - Pull request is at[[https://github.com/php/php-src/pull/1108]]
-  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/7f90dd0ed4a24c4ebdd57309c54d7adc27658e21|7f90dd0]].
+  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/a4e35e309aa573c0d6e1dae20ad488d54eaf0c6c|a4e35e3]].
 
 => Some unrelated tests are broken because the new emitted warning evidenced bugs on them. These tests will be fixed before the voting phase as it's a trivial task.
 
