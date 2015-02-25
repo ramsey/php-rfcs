@@ -1,247 +1,185 @@
-====== PHP RFC: Context Sensitive Lexer ======
-  * Version: 0.4
-  * Date: 2015-02-15
+====== PHP RFC: Strict Argument Count On Function Calls ======
+  * Version: 0.2
+  * Date: 2015-02-20
   * Author: Márcio Almada
   * Status: Draft
-  * First Published at: http://wiki.php.net/rfc/context_sensitive_lexer
+  * First Published at: http://wiki.php.net/rfc/strict_argcount
 
 ===== Introduction =====
 
-PHP currently has around **64** globally reserved words.
-Not infrequently, these reserved words end up clashing with legit alternatives to userland API declarations.
-This RFC proposes a partial solution to this by adding minimal changes to have a **context sensitive lexer**
-with support for **semi-reserved** words.
+This RFC proposes to conditionally add a **strict argument count** check for function **calls** on PHP7, being sensitive towards implementations already depending on the **variable-length** argument lists API.
 
-For instance, if the RFC gets accepted, code like the following would become possible:
+Strict checks on argument counts are good to catch bugs on user space code. Even PHP internal functions have this:
 
 <code php>
-class Collection {
-    public function forEach(callable $callback) { /* */ }
-    public function list() { /* */ }
-}
-
+strlen("foo", "bar");
+// PHP warning:  strlen() expects exactly 1 parameter, 2 given on line 1
 </code>
-
-Notice that it's currently **not** possible to have the ''foreach'' and ''list'' method delcared without having a syntax error:
-
-  PHP Parse error: Syntax error, unexpected T_FOREACH, expecting T_STRING on line 2
-  PHP Parse error: Syntax error, unexpected T_LIST, expecting T_STRING on line 3
 
 ===== Proposal =====
 
-This RFC revisits the topic of [[https://wiki.php.net/rfc/keywords_as_identifiers|Keywords as Identifiers]] RFC. But this time
-presenting a minimal and maintainable [[https://github.com/marcioAlmada/php-src/commit/d9d6f0c7e325dcd0d0ff3c3f2dc73c2364c3ad5f|patch]],
-restricted to OO scope only, consistently comprehending:
-
-  * Properties, constants and methods defined on classes, interfaces and traits
-  * Access of properties, constants and methods from objects and classes
-
-The proposed changes could be especially useful to:
-
-  - Reduce the surface of BC breaks whenever new keywords are introduced
-  - Avoid restricting userland APIs. Dispensing the need for hacks like unecessary magic method calls, prefixed identifiers or the usage of a [[http://en.wikipedia.org/wiki/Thesaurus|thesaurus]] to avoid naming conflicts.
-
-This is a list of currently **globally** reserved words that will become **semi-reserved** in case proposed change gets approved:
-
-  callable  class  trait  extends  implements  static  abstract  final  public  protected  private  const
-  enddeclare  endfor  endforeach  endif  endwhile  and  global  goto  instanceof  insteadof  interface
-  namespace  new  or  xor  try  use  var  exit  list  clone  include  include_once  throw  array
-  print  echo  require  require_once  return  else  elseif  default  break  continue  switch  yield
-  function  if  endswitch  finally  for  foreach  declare  case  do  while  as  catch  die  self
-
-==== Limitations ====
-
-On purporse, it's still forbidden to define ''class|object'' constants and methods named as:
-
-  * ''public''
-  * ''protected''
-  * ''private''
-  * ''abstract''
-  * ''final''
-  * ''static''
-
-So the following code would still be invalid:
+This RFC proposes that the engine should emit a ''Warning'' when a function is called with an exceeding number of arguments:
 
 <code php>
-class Foo {
-  const public|protected|private|static|abstract|final|class = 'foo'; // Fatal error
-  function public|protected|private|static|abstract|final(){} // Fatal error
-}
+/**
+ * fn expects only one argument
+ * @param  $arg
+ */
+function fn($arg) {}
 
-// Fatal error: Cannot decalre a class const named as %d as it is reserved in %s on line %d
-// Fatal error: Cannot declare a class method named as %d as it is reserved in %s on line %d
+fn(1); // Ok
+fn(1, 2); // Warning
+call_user_func_array("fn", [1, 2, 3]); // Warning
+
+// Warning: fn() expects at most 1 parameter, 2 given, defined in %s on line %u and called in %s on line %u
+// Warning: fn() expects at most 1 parameter, 3 given, defined in %s on line %u and called in %s on line %u
 </code>
 
-On purporse, it's still forbidden to define a **class constant** named as ''class'' because of the class name resolution operator ''::class'':
+The implementation is aware of the native ''variable-lengh argument list API'' and won't emit any warning if the called function or method is explicitly variadic or implemented with:
+
+  * ''func_get_arg();''
+  * ''func_get_args();''
+
+The following examples **WON'T** break:
 
 <code php>
-class Foo {
-  const class = 'Foo'; // Fatal error
+/** fn expects a variable-length argument lists */
+function fn($arg) {
+    $arg = func_get_arg();
+    $args = func_get_args();
 }
 
-// Fatal error: Cannot redefine class constant Foo::CLASS as it is reserved in %s on line %d
+fn(1); // Ok
+fn(...[1, 2, 3, 4, 5]); // Ok
+call_user_func_array("fn", [1, 2, 3, 4, 5, 6, 7]); // Ok
 </code>
 
-''class|object'' properties **can** have any name because PHP has sigils and code like the followiing has always been allowed:
+The implementation also supports **dynamic resolution** of function names. So **aliased** calls to dynamic arguments API is also covered:
 
 <code php>
-class Foo {
-  public $list = 'list';
+namespace some\namespace;
+
+use function func_get_arg  as foo;
+use function func_get_args as bar;
+
+/** fn expects a variable-length argument lists */
+function fn($arg) {
+    $arg = foo(0);
+    $args = bar();
 }
 
-(new Foo)->list;
+fn(1);
+fn(1, 2); // Ok
+call_user_func("fn", 1, 2, 3); // Ok
 </code>
 
-In practice, it means that we would drop from **64** to only **6** **globally** reserved words.
+===== Details =====
 
-===== Practical Examples =====
-
-Some practical examples related to the impact this RFC could have on user space code: 
-
-The proposed change, if approved, gives more freedom to userland fluent interfaces or DSL like APIs.
-
-<code php>
-// the following example works with patch
-// but currently fails because 'for', 'and', 'or', 'list' are globally reserved words:
-
-$projects =
-    Finder::for('project')
-        ->where('name')->like('%secret%')
-        ->and('priority', '>', 9)
-        ->or('code')->in(['4', '5', '7'])
-        ->and()->not('created_at')->between([$time1, $time2])
-        ->list($limit, $offset);
-</code>
-
-<code php>
-// the following example works with the patch
-// but currently fails because 'foreach', 'list' and 'new' are globally reserved words:
-
-class Collection extends \ArrayAccess, \Countable, \IteratorAggregate {
-
-    public function forEach(callable $callback) {
-        //...
-    }
-
-    public function list() {
-        //...
-    }
-
-    public static function new(array $itens) {
-        return new self($itens);
-    }
-}
-
-Collection::new(['foo', 'bar'])->forEach(function($index, $item){
-  /* callback */
-})->list();
-</code>
-
-Globally reserved words end up limiting userland implementations on being the most expressive and semantic as possible:
-
-<code php>
-// the following example works with the patch
-// but currently fails because 'include' is a globally reserved word:
-
-class View {
-    public function include(View $view) {
-        //...
-    }
-}
-
-$viewA = new View('a.view');
-$viewA->include(new View('b.view'));
-</code>
-
-Sometimes there is simply no better name for a class constant. One might want to define an HTTP agent class and would like to have some HTTP status constants:
-
-<code php>
-class HTTP {
-    const CONTINUE = 100; // works with patch
-                          // but currently fails because 'continue' is a globally reserved word
-    const SWITCHING_PROTOCOLS = 101;
-    /* ... */
-}
-</code>
-
-===== Impact On Other RFCs =====
-
-Some RFCs are proposing to reserve new keywords in order to add features or reserve typehints names:
-
-  * https://wiki.php.net/rfc/in_operator
-  * https://wiki.php.net/rfc/reserve_more_types_in_php_7
-  * https://wiki.php.net/rfc/reserve_even_more_types_in_php_7
-
-With the approval of the current RFC, BC breaks surface would be much smaller in such cases.
-
-One notable example is the **in** operator RFC. Without a context sensitive lexer, proposed here, the new operator would create a BC break on **Doctrine** library and pretty much many other SQL writers or ORMs out there:
-
-https://github.com/doctrine/doctrine2/blob/master/lib/Doctrine/ORM/Query/Expr.php#L443
-
-===== Implementation Details =====
-
-The lexer now keeps track of the context needed to have unreserved words on OO scope and makes use of a minimal amount of RE2C lookahead capabilities when disambiguation becomes inevitable.
-
-For instance, the lexing rules to disambiguate ''::class'' (class name resolution operator) from a ''class constant'' or ''static method'' access is:
-
-<code c++>
-<ST_IN_SCRIPTING>"::"/{OPTIONAL_WHITESPACE}"class" {
-  return T_PAAMAYIM_NEKUDOTAYIM;
-}
-
-<ST_IN_SCRIPTING>"::"/{OPTIONAL_WHITESPACE}("$"|{LABEL}){OPTIONAL_WHITESPACE}"("? {
-  yy_push_state(ST_LOOKING_FOR_SEMI_RESERVED_NAME);
-  return T_PAAMAYIM_NEKUDOTAYIM;
-}
-</code>
-
-A few additional compile time check were created:
+During compilation the function implementations will be verified as sensitive to dynamic argument calls.
+In other words, all the functions and methods implemented with ''func_get_arg()'' and ''func_get_args()''
+will be marked with a ''ZEND_ACC_DYNAMIC_ARGCOUNT'' flag:
 
 <code c>
-if(ZEND_NOT_RESERVED != zend_check_reserved_method_name(decl->name)) {
-  zend_error_noreturn(E_COMPILE_ERROR,
-    "Cannot use '%s' as class method name as it is reserved", decl->name->val);
-}
+CG(active_op_array)->fn_flags |= ZEND_ACC_DYNAMIC_ARGCOUNT;
 </code>
 
-Current proposed patch:
+During script execution, when the **function** or **method** finally gets invoked with an exceeding argument count,
+the engine will check for the flag and emit a warning in case current ''execute_data'' is **not variadic**
+and was not marked as sensitive to dynamic argument count:
 
-  * Doesn't require ''lexical feedback'' (passing information from parser to lexer)
-  * Keeps ext tokenizer functional
-  * Introduces no maintenance issues
-  * Has no performance impact
-  * Introduces a minimal amount of changes on lexer
+<code>
+Warning: %s() expects at most %u parameters, %u given, defined in %s on line %u and called in %s on line %u
+</code>
 
-=> Many experiments with parsing were done before the current proposed patch which involves only lexing changes. But turns out the patches involving parsing had too many disadvantages and maintence issues.\\
+=> It's worth to mention that, currently, PHP implementation already checks for exceeding arguments on every function call,
+the proposal only adds a warning according to each function implementation. The performance impact is **negligible**.
+
+==== About Dead Code ====
+
+Functions will be marked as sensitive to variable-length argument list even if the implementation contains dead code such as:
+
+<code php>
+function fn($arg) {
+    if(false){
+        func_get_args();
+    }
+}
+fn(1, 2, 3); // Ok
+</code>
+
+Maybe when other levels of optimizations get added to PHP and dead code gets wiped before execution this little limitation will vanish. But, right now, there is no advantages into checking for dead code and perhaps some might prefer the implementation this way.
+
+==== About @ Operator ====
+
+The implementation is aware of the ''@'' operator.
+
+==== About Magic Methods ====
+
+The patch won't affect magic method calls. Magic methods have no signature thus there is no way to validate argument count.
+
+==== About Variadic Functions ====
+
+Variadic functions are explicitly implemented to handle variable-length argument lists, and won't be affect by the patch.
+
+===== Open Issues =====
+
+Current patch is not aware of "obfuscated" calls to ''func_get_arg()'' and ''func_get_args()'':
+
+<code php>
+function fn() {
+    $fn = "func_get_args"
+    $fn();
+}
+
+fn(1, 2, 3);
+// Warning: fn() expects at most 1 parameter, 3 given, defined in %s on line %d and called...
+</code>
+
+This is **not** a **common** use case. A github search for the term "func_get_args" haven't revealed a single result of the API being used in this way. Besides that, there is no legit reason to use the variable-length argument API like that.
+
+Therefore, this RFC also proposes to **block** ''func_get_arg()'', ''func_get_args()'' from being called dynamically by emitting a fatal error:
+  
+<code php>
+$fn = "func_get_args"
+$fn();
+Fatal Error: func_get_args() should not be called dynamically...
+</code>
+
+At first sight a fatal error might look too harsh. But the break would be extremally localized. Even **if** a single person become affected by this particular change, fixing the the obfuscated dynamic call with a direct call is no sacrifice at all.
+
+=> This bit shaw be addressed on discussion phase and was not implemented on the patch yet. It will be implemented if we reach consensus on that or maybe after the voting phase if the RFC passes.
+
+===== Backward Incompatible Changes =====
+
+  * Code with functions not implemented to manage variable-length argument lists being called with an exceeding amount of arguments, according to function signatures, will emit a warning.
+
+ => This is a good BC break. In a staggering majority of use cases, passing extra args is or will become a bug at some point. 
+
+ => I made a blog post to clarify possible misunderstandings of this RFC on community media, it contains an anedoctal user story you may find worth reading: [[https://medium.com/@marcioalmada/why-strict-arg-count-on-function-calls-will-make-php-better-saner-easier-cc360bf7c7da|Why strict argument count on function calls will make PHP better, saner, easier…]]
+
+  * People using ''debug_backtrace()[0]["args"];'' as a **substitute** ''for func_get_args()'' are candidates to be affected, but this is not guaranteed.
+
+=> Again, a very localized BC break. Besides that, ''debug_backtrace()'' should not be **abused** this way in the first place, we have a dedicated API for that.
 
 ===== Proposed PHP Version(s) =====
 
 This is proposed for the next PHP x, which at the time of this writing would be PHP 7.
 
+===== Vote =====
+
+Two weeks yes/no voting requiring 2/3 majority.
+
 ===== Patch =====
 
-  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/5405e69b7c33885bb13231c60146d6ba95103afb|5405e69]], in case you would like to focus only on the important changes and skip the long tests.
-  - Pull request with all the tests and regenerated ext tokenizer is at [[https://github.com/php/php-src/pull/1054/files]]
+  - Pull request is at[[https://github.com/php/php-src/pull/1108]]
+  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/c081fff92557997ad088338752d73e97256f03b6|c081fff]].
 
-===== References =====
-
-This is the previous rejected RFC that attempted to remove reserved words on all contexts: https://wiki.php.net/rfc/keywords_as_identifiers.
+=> Some unrelated tests broke because the new emitted warning evidenced bugs on them. These tests were fixed without prejudice to the test suite.
 
 ===== Rejected Features =====
 
 None so far.
 
 ===== Changelog =====
-  * 0.1: Initial draft with support for class, interfaces and trait members
-  * 0.2: Additional support to namespaces, classes, interafces and traits names
-  * 0.3: Oops. Add forgotten support for typehints
-  * 0.4: Reverts to 0.1 feature set because class name support created undesired situations regarding the future addition of a future short lambda syntax and possibly block other language changes.
-
-===== Acknowledgements =====
-
-Thanks to:
-
-  * Bob Weinand, author of the last [[https://wiki.php.net/rfc/keywords_as_identifiers|rejected]] RFC on the same topic, for giving honest feedback and being cooperative all the time.
-  * Nikita Popov for providing accurate information about the PHP implementation and constructive criticism.
-  * Anthony Ferrara, Joe Watkins and Daniel Ackroyd for the quick reviews.
-  * All people on http://chat.stackoverflow.com/rooms/11/php
+  * 0.1: Initial patch and RFC
+  * 0.2: Remove compile check for ''func_num_args()'' as it's is not directly associated with variadic behaviors
