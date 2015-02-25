@@ -2,7 +2,7 @@
   * Version: 0.3
   * Date: 2015-02-15
   * Author: Márcio Almada
-  * Status: Discussion
+  * Status: Draft
   * First Published at: http://wiki.php.net/rfc/context_sensitive_lexer
 
 ===== Introduction =====
@@ -17,17 +17,15 @@ For instance, if the RFC gets accepted, code like the following would become pos
 <code php>
 class Collection {
     public function forEach(callable $callback) { /* */ }
-}
-
-class List {
     public function append(List $list) { /* */ }
 }
+
 </code>
 
-Notice that it's currently **not** possible to have the ''foreach'' method and ''List'' class delcared without having a syntax error:
+Notice that it's currently **not** possible to have the ''foreach'' and ''list'' method delcared without having a syntax error:
 
   PHP Parse error: Syntax error, unexpected T_FOREACH, expecting T_STRING on line 2
-  PHP Parse error: Syntax error, unexpected T_LIST, expecting T_STRING on line 5
+  PHP Parse error: Syntax error, unexpected T_LIST, expecting T_STRING on line 3
 
 ===== Proposal =====
 
@@ -35,7 +33,6 @@ This RFC revisits the topic of [[https://wiki.php.net/rfc/keywords_as_identifier
 presenting a minimal and maintainable [[https://github.com/marcioAlmada/php-src/commit/d9d6f0c7e325dcd0d0ff3c3f2dc73c2364c3ad5f|patch]],
 restricted to OO scope only, consistently comprehending:
 
-  * Namespace, class, trait and interface names
   * Properties, constants and methods defined on classes, interfaces and traits
   * Access of properties, constants and methods from objects and classes
 
@@ -54,24 +51,24 @@ This is a list of currently **globally** reserved words that will become **semi-
 
 ==== Limitations ====
 
-On purporse, it's still forbidden to define a **namespace**, **class**, **interface** or **trait** named as:
+On purporse, it's still forbidden to define ''class|object'' constants and methods named as:
 
-  * ''namespace''
-  * ''self''
+  * ''public''
+  * ''protected''
+  * ''private''
+  * ''abstract''
+  * ''final''
   * ''static''
-  * ''parent''
-  * ''array''
-  * ''callable''
+
+So the following code would still be invalid:
 
 <code php>
-namespace|class|interface|trait Namespace {}  // Fatal error
-namespace|class|interface|trait Self {}       // Fatal error
-namespace|class|interface|trait Static {}     // Fatal error
-namespace|class|interface|trait Parent {}     // Fatal error
-namespace|class|interface|trait Array {}      // Fatal error
-namespace|class|interface|trait Callable {}   // Fatal error
+class Foo {
+  const public|protected|private|static|abstract|final|class = 'foo'; // Fatal error
+  public function public|protected|private|static|abstract|final(){} // Fatal error
+}
 
-// Fatal error: Cannot use %s as %s name as it is reserved in %s on line %d
+// Fatal error: Cannot use %s as class member name as it is reserved in %s on line %d
 </code>
 
 On purporse, it's still forbidden to define a **class constant** named as ''class'' because of the class name resolution operator ''::class'':
@@ -81,8 +78,20 @@ class Foo {
   const class = 'Foo'; // Fatal error
 }
 
-// Fatal error: Cannot redefine Foo::class, ::class is reserved in %s on line 2
+// Fatal error: Cannot redefine class constant Foo::CLASS as it is reserved in %s on line %d
 </code>
+
+''class|object'' properties **can** have any name because PHP has sigils and code like the followiing has always been allowed:
+
+<code php>
+class Foo {
+  public $list = 'list';
+}
+
+(new Foo)->list;
+</code>
+
+In practice, it means that we would drop from **64** to only **6** **globally** reserved words.
 
 ===== Practical Examples =====
 
@@ -154,6 +163,20 @@ class HTTP {
 }
 </code>
 
+===== Impact On Other RFCs =====
+
+Some RFCs are proposing to reserve new keywords in order to add features or reserve typehints names:
+
+  * https://wiki.php.net/rfc/in_operator
+  * https://wiki.php.net/rfc/reserve_more_types_in_php_7
+  * https://wiki.php.net/rfc/reserve_even_more_types_in_php_7
+
+With the approval of the current RFC, BC breaks surface would be much smaller in such cases.
+
+One notable example is the **in** operator RFC. Without a context sensitive lexer, proposed here, the new operator would create a BC break on **Doctrine** library and pretty much many other SQL writers or ORMS out there:
+
+https://github.com/doctrine/doctrine2/blob/master/lib/Doctrine/ORM/Query/Expr.php#L443
+
 ===== Implementation Details =====
 
 The lexer now keeps track of the context needed to have unreserved words on OO scope and makes use of a minimal amount of RE2C lookahead capabilities when disambiguation becomes inevitable.
@@ -171,26 +194,12 @@ For instance, the lexing rules to disambiguate ''::class'' (class name resolutio
 }
 </code>
 
-One additional compile time check was created:
+A few additional compile time check were created:
 
 <code c>
-if (zend_string_equals_literal_ci(name, "class")) {
-  zend_error_noreturn(E_COMPILE_ERROR, "Cannot redefine %s::%s as ::%s is reserved",
-    ce->name->val, name->val, name->val);
-}
-</code>
-
-Others were just adapted because, surprisingly, most of the necessary compile time checks were already in place and just needed
-adjustments to restrict ''namespace'', ''array'' and ''callable'' as names. For instance the trait name validation:
-
-<code c>
-// before
-if(ZEND_FETCH_CLASS_DEFAULT != zend_get_class_fetch_type(name)) {
-  zend_error_noreturn(E_COMPILE_ERROR, "Cannot use '%s' as trait name as it is reserved", name->val);
-}
-// after
-if(ZEND_FETCH_CLASS_DEFAULT != zend_check_reserved_name(name)) {
-  zend_error_noreturn(E_COMPILE_ERROR, "Cannot use '%s' as trait name as it is reserved", name->val);
+if(ZEND_NOT_RESERVED != zend_check_reserved_method_name(decl->name)) {
+  zend_error_noreturn(E_COMPILE_ERROR,
+    "Cannot use '%s' as class method name as it is reserved", decl->name->val);
 }
 </code>
 
@@ -203,31 +212,14 @@ Current proposed patch:
   * Introduces a minimal amount of changes on lexer
 
 => Many experiments with parsing were done before the current proposed patch which involves only lexing changes. But turns out the patches involving parsing had too many disadvantages and maintence issues.\\
-=> No performance loss was noticed but maybe the patch requires a better benchmark.
-
-===== Impact on performance =====
-
-No loss noticed.
-
--- Add benchmark here if asked on discussion phase. --
 
 ===== Proposed PHP Version(s) =====
 
 This is proposed for the next PHP x, which at the time of this writing would be PHP 7.
 
-===== Open Issues =====
-
-The patch may still contain small bugs related to the topics below, but this can be addressed during discussion phase:
-
-  * I still have to add more tests involving traits and trait conflict resolution syntax
-  * I still have to add more tests involving ''use X as Y'' syntax and entities with semi-reserved names
-
-The patch is 98% implemented and complexity around it will not grow. We could even vote the RFC before
-finishing these small details without impact on end quality.
-
 ===== Patch =====
 
-  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/c01014f9cca2eaf148ccc2e2e05f2b41d571b424|c01014f]], in case you would like to focus only on the important changes and skip the long tests.
+  - Most relevant commit is [[https://github.com/marcioAlmada/php-src/commit/2e11444cce5c14ea82c80cf344f1a48955fa182e|2e11444]], in case you would like to focus only on the important changes and skip the long tests.
   - Pull request with all the tests and regenerated ext tokenizer is at [[https://github.com/php/php-src/pull/1054/files]]
 
 ===== References =====
@@ -242,6 +234,7 @@ None so far.
   * 0.1: Initial draft with support for class, interfaces and trait members
   * 0.2: Additional support to namespaces, classes, interafces and traits names
   * 0.3: Oops. Add forgotten support for typehints
+  * 0.4: Reverts to 0.1 feature set because class name support created undesired situations regarding the future addition of a future short lambda syntax and possibly block other language changes.
 
 ===== Acknowledgements =====
 
