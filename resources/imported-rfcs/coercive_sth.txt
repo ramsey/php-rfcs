@@ -1,5 +1,5 @@
 ====== PHP RFC: Coercive Types for Function Arguments ======
-  * Version: 0.30
+  * Version: 0.40
   * Date: 2015-02-26
   * Authors: Zeev Suraski <zeev@php.net>, Franois Laupretre <francois@php.net>, Dmitry Stogov <dmitry@php.net>
   * Status: Under discussion
@@ -40,58 +40,31 @@ The following table lists the proposed coercion rules, that will apply to both u
   - In all other cases - reject.
 
 
-^        ^  Value Type  ^^^^^^^^
+^        ^  Value Type  ^^^^
 ^ Hint   ^ boolean  ^ int            ^ float          ^  string                      ^
 ^ bool   | Yes      | Yes*           | Reject         | Reject                       |
 ^ int    | Reject   | Yes            | Only if no DL† | Numeric integer string only‡ |
 ^ float  | Reject   | Only if no DL† | Yes            | Numeric string only‡         |
 ^ string | Reject   | Yes            | Yes            | Yes                          |
 
+* Coercion from int to bool is done using the same rules that apply in the rest of PHP;  0 coerces to false;  Any other value coerces to true.
+
+† Float to int coercion will be accepted only if there are no significant digits after the decimal point.  E.g. 7.0 will be coerced to 7, but 7.3 will be rejected.  Int to float coercion will be accepted only if the integer value can be represented without loss of accuracy using a floating point number.  Extremely large integers (with absolute value larger than 2^52) will be rejected.
+
+‡ Numeric strings may be converted to int or float types, only in case there is no loss in data or accuracy.  Leading whitespace or any non-numeric trailing data will not be accepted.  For int hints, numeric strings with significant digits after the decimal point will be rejected.  For floating point hints, integer values that cannot be represented without loss of accuracy (exceed 2^52 in absolute value) will be rejected as well.
+
+==== Handling of non-scalar values ====
+
+Generally speaking, coercion from non-scalar values into scalar type hints is not supported and will be rejected, with few exceptions.
+
+**Arrays** and **resources** will always be rejected as valid inputs for scalar type hinted arguments .
+**Objects** will always be rejected as valid inputs for scalar type hinted arguments, with one exception - an object with a __toString() method will be accepted for string type hint.
+**Nulls** will be rejected as valid inputs for scalar type hinted arguments when using user-land type hints, but presently accepted for internal functions.  See the 'Changes to Internal Functions' section for more information.
+
 
 ==== User-land Additions ====
 
-This RFC proposes to introduce four new type hints into PHP – int, float, string and bool.  These new hints will adhere to the new coercion rules detailed below.
-
-
-
-==== Changes to Internal Functions ====
-
-This RFC proposes to bring the rule-set described in the last section to internal functions as well, through updates to the zend_parse_parameters() function.
-
-However, given that unlike the introduction of STH - which is a new, previously unused feature that will (for the most part) not affect existing code - changes to what internal functions would be willing to accept could have substantial compatibility implications.
-
-It is therefore proposed to employ a two-staged migration.
-
-In PHP 7, conversions that were permitted in the 5.x and that are now no longer permitted will emit E_DEPRECATED.
-In PHP 8, these conversions will be changed to emit E_RECOVERABLE_ERROR.
-
-The two-staged would provide users ample time to update their code as needed to fit the new, more restrictive rule-set.
-Arguments hinted with one of these STHs will accept values that are either already of that expected type (‘native’), or that can be coerced into the requested type without any data loss on one hand, and without creating ‘garbage’ data that wasn’t there on the other.
-
-The exact behavior of each type hint is detailed in the following tables.
-  * DL stands for 'Data Loss'.
-  * Accept means either accept the value as-is (if it's already of the requested type), or convert it to the requested type.
-  * Reject means triggering an E_RECOVERABLE_ERROR.
-
-=== Integer STH (int) ===
-^ Passed Value Type  ^ int    ^ float                                                  ^ string                                                                                                             ^ bool   ^ null   ^ array  ^ object  ^ resource ^
-^ Behavior           ^ Accept ^ Accept only if no DL\\ ''7.0 accepted\\ 7.1 rejected'' ^ Accept numeric strings, only if no DL\\ ''"32", "42.0" accepted\\ "Apple", "100 dogs", "  123", "123  " rejected'' ^ Reject ^ Reject ^ Reject ^ Reject  ^ Reject   ^
-
-=== Floating Point STH (float) ===
-^ Passed Value Type  ^ int                   ^ float    ^ string                                                                                                                     ^ bool   ^ null   ^ array  ^ object  ^ resource ^
-^ Behavior           ^ Accept only if no DL† ^ Accept   ^ Accept numeric strings, only if no DL\\ ''"32", "42.0", "1E07" accepted\\ "Apple", "100 dogs", "  123", "123  " rejected'' ^ Reject ^ Reject ^ Reject ^ Reject  ^ Reject   ^
-
-† Integers that can be safely converted into a floating point number without losing accuracy, will be coerced successfully.  However, integers that are too big to fit into a floating point variable (double) - will be rejected.
-
-=== String STH (string) ===
-^ Passed Value Type  ^ int     ^ float    ^ string  ^ bool   ^ null   ^ array  ^ object                                               ^ resource ^
-^ Behavior           ^ Accept  ^ Accept   ^ Accept  ^ Reject ^ Reject ^ Reject ^ Accept\\ ''Only if object has __toString() method''  ^ Reject   ^
-
-=== Boolean STH (bool) ===
-^ Passed Value Type  ^ int      ^ float     ^ string   ^ bool   ^ null   ^ array  ^ object  ^ resource ^
-^ Behavior           ^ Accept‡  ^ Accept‡   ^ Accept‡  ^ Accept ^ Reject ^ Reject ^ Reject  ^ Reject   ^
-
-‡ Booleans are one of the interesting open questions in this RFC.  This RFC takes the position that booleans cannot be safely converted to any other type, and thus, int, float and string STHs reject them.  However, whether other types should successfully coerce into boolean in the case of a boolean type hint - as integers, floats and strings do across the language is open for debate, and perhaps a secondary vote.
+This RFC proposes to introduce four new type hints into PHP – int, float, string and bool.  These new hints will adhere to the new coercion rules detailed above.  Values that cannot be accepted per the coercion rules above, will result in E_RECOVERABLE_ERROR being triggered.  Note that if the [[https://wiki.php.net/rfc/engine_exceptions_for_php7|Exceptions in the Engine]] RFC is accepted, this will throw an exception instead, making recovery simpler and more straightforward.
 
 
 ==== Changes to Internal Functions ====
@@ -100,6 +73,7 @@ This RFC proposes to bring the rule-set described in the last section to interna
 
 However, given that unlike the introduction of STH - which is a new, previously unused feature that will (for the most part) not affect existing code - changes to what internal functions would be willing to accept could have substantial compatibility implications.
 
+To mitigate that risk, the RFC proposes two differences between the way 
 It is therefore proposed to employ a two-staged migration.
 
 In PHP 7, conversions that were permitted in the 5.x and that are now no longer permitted will emit E_DEPRECATED.
@@ -108,7 +82,33 @@ In PHP 8, these conversions will be changed to emit E_RECOVERABLE_ERROR.
 The two-staged would provide users ample time to update their code as needed to fit the new, more restrictive rule-set.
 
 
-==== Future Changes to Implicit Casting Rules ====
+==== Changes to Internal Functions ====
+
+This RFC proposes to bring the rule-set described in the last section to internal functions as well, through updates to the zend_parse_parameters() function.
+
+However, given that unlike the introduction of STH - which is a new, previously unused feature that will (for the most part) not affect existing code - changes to what internal functions would be willing to accept could have substantial compatibility implications.
+
+To mitigate the risk of compatibility breakage being introduced between PHP 5.6 and 7.0, two mitigation steps are proposed:
+
+  - Unlike user-land scalar type hints, internal functions will accept nulls as valid scalars.  Based on preliminary testing, this is an extremely common use case, and disallowing it - language-wide for all internal functions - may be too big of a shift.  However, new modifiers will be introduced to zend_parse_parameters(), allowing internal function developers to explicitly change the behavior of their functions to selectively disallow null values for scalar arguments, where such cases are deemed unsafe.
+  - To allow developers time to adhere to the updated rules, a two-staged migration strategy will be used.  At the first stage - in PHP 7, conversions which were supported in the past and are no longer allowed due to the new rules, will emit E_DEPRECATED warnings.  In PHP 8, the E_DEPRECATED warnings will be upgraded to E_RECOVERABLE_ERROR errors (or exceptions, depending on the engine standards).  The two-staged would provide users ample time to update their code as needed to fit the new, more restrictive rule-set.
+
+=== Examples for conversions no longer allowed for Internal Functions ===
+Here are examples of conversions which, while still providing the same results as in PHP 5, now also raise an E_DEPRECATED error :
+
+  * false -> int        # No more conversion from bool
+  * true -> string      # No more conversion from bool
+  * 7.5 -> int          # 7.5 cannot be converted to an integer without data loss
+  * "8.2" -> int        # "8.2" cannot be converted to an integer without data loss
+  * 4.3 -> bool         # No more conversion from float to bool
+  * "foo" -> bool       # No more conversion from string to bool
+  * "7 dogs" -> int     # Trailing characters no longer supported
+  * "  0" -> int        # Leading spaces no longer supported
+  * "12 " -> int        # Trailing spaces no longer supported
+
+
+
+==== Potential Future Changes to Implicit Casting Rules ====
 
 While outside the scope of this RFC, the introduction of the new coercive-yet-more-restrictive rule-set may be considered for additional areas in PHP, most notably implicit casting.
 For example, today, the result of "Apples" + "Oranges" is 0, because the + operator implicitly casts anything into a number.  It could be imagined that in the future, the + operator will accept only values that would fit into an int or float STH, and reject others.  Users would still be able to use explicit casting ($foo = (int) "Apples"; would still assign 0 into $foo), but the risk sometimes associated with implicit casting will be eliminated.
