@@ -1,6 +1,6 @@
 ====== PHP RFC: Coercive Types for Function Arguments ======
-  * Version: 0.40
-  * Date: 2015-02-26
+  * Version: 0.41
+  * Date: 2015-02-27
   * Authors: Zeev Suraski <zeev@php.net>, Francois Laupretre <francois@php.net>, Dmitry Stogov <dmitry@php.net>
   * Status: Under discussion
   * First Published at: http://wiki.php.net/rfc/coercive_sth
@@ -33,12 +33,35 @@ Finally, the RFC outlines a potential future evolution of employing the new rule
 
 ==== Coercion Rules ====
 
-The following table lists the proposed coercion rules, that will apply to both user-land type hints as well as internal type hints.  The guiding principals behind the rules are:
+A new set of coercion rules will apply to both user-land type hints and internal type hints.  The guiding principals behind these new rules are:
 
   - If the type of the value is an exact match to the type requested by the hint - allow.
   - If the value can be coerced to the type requested by the hint without data loss and without creation of likely unintended data - allow.
   - In all other cases - reject.
 
+=== Changes in coercion rules ===
+
+We first present the changes we introduce compared to the PHP 5 behavior.
+
+^        ^  Value Type  ^^^^
+^ Hint   ^ boolean   ^ int       ^ float        ^  string       ^
+^ bool   | No change | No change | Disable      | Disable       |
+^ int    | Disable   | No change | Restrict (1) | Restrict (1)  |
+^ float  | Disable   | No change | No change    | No change     |
+^ string | Disable   | No change | No change    | No change     |
+
+  * (1) The input value is now rejected if it contains significant digits after the decimal points (accept null fractional part only).
+
+And the changes in the way numeric strings are handled :
+
+  * Trailing blanks are supported as before,
+  * but non-blank trailing characters now cause the data to be rejected ("7 dogs" case)
+
+Please note this key point: Compared to PHP 5 rules, we restrict the number of accepted cases but we never change the way data is converted. In other words, when a value is accepted, it is handled exactly the same way it would have been in PHP 5.
+
+=== Final ruleset ===
+
+Here are the rules we get when applying these changes to the rules currently used in PHP 5 :
 
 ^        ^  Value Type  ^^^^
 ^ Hint   ^ boolean  ^ int            ^ float          ^  string                      ^
@@ -51,7 +74,7 @@ The following table lists the proposed coercion rules, that will apply to both u
 
 † Float to int coercion will be accepted only if there are no significant digits after the decimal point.  E.g. 7.0 will be coerced to 7, but 7.3 will be rejected.  Int to float coercion will be accepted only if the integer value can be represented without loss of accuracy using a floating point number.  Extremely large integers (with absolute value larger than 2^52) will be rejected.
 
-‡ Numeric strings may be converted to int or float types, only in case there is no loss in data or accuracy.  Leading whitespace or any non-numeric trailing data will not be accepted.  For int hints, numeric strings with significant digits after the decimal point will be rejected.  For floating point hints, integer values that cannot be represented without loss of accuracy (exceed 2^52 in absolute value) will be rejected as well.
+‡ Numeric strings may be converted to int or float types, only in case there is no loss in data or accuracy. Leading zeroes, as well as leading and trailing whitespaces are accepted. Other non-numeric trailing data will be rejected. For int hints, numeric strings with significant digits after the decimal point will be rejected.  For floating point hints, integer values that cannot be represented without loss of accuracy (exceed 2^52 in absolute value) will be rejected as well.
 
 ==== Handling of non-scalar values ====
 
@@ -66,6 +89,8 @@ Generally speaking, coercion from non-scalar values into scalar type hints is no
 
 This RFC proposes to introduce four new type hints into PHP – int, float, string and bool.  These new hints will adhere to the new coercion rules detailed above.  Values that cannot be accepted per the coercion rules above, will result in E_RECOVERABLE_ERROR being triggered.  Note that if the [[https://wiki.php.net/rfc/engine_exceptions_for_php7|Exceptions in the Engine]] RFC is accepted, this will throw an exception instead, making recovery simpler and more straightforward.
 
+These type hints can be used for function arguments, as well as for return values, as described in the [[https://wiki.php.net/rfc/return_types|Return Type Declarations]] RFC. In both cases, they are handled exactly the same way.
+
 No type declaration for resources is added, as this would prevent moving from resources to objects for existing extensions which some have already done (e.g. GMP).
 
 ==== Changes to Internal Functions ====
@@ -76,23 +101,23 @@ However, given that unlike the introduction of STH - which is a new, previously 
 
 To mitigate the risk of compatibility breakage being introduced between PHP 5.6 and 7.0, two mitigation steps are proposed:
 
-  - To allow developers time to adhere to the updated rules, a two-staged migration strategy will be used.  At the first stage - in PHP 7, conversions which were supported in the past and are no longer allowed due to the new rules, will emit E_DEPRECATED warnings, but will still allow the values in and convert them using the same rules as PHP 5.  In PHP 8, the E_DEPRECATED warnings will be upgraded to E_RECOVERABLE_ERROR errors (or exceptions, depending on the engine standards).  The two-staged would provide users ample time to update their code as needed to fit the new, more restrictive rule-set.
+  - To allow developers time to adhere to the updated rules, a two-staged migration strategy will be used.  At the first stage - in PHP 7, conversions which were supported in the past and are no longer allowed due to the new rules, will emit E_DEPRECATED warnings, but will still allow the values in and convert them using the same rules as PHP 5.  When it is considered safe (PHP 8 or later), the E_DEPRECATED warnings will be upgraded to E_RECOVERABLE_ERROR errors (or exceptions, depending on the engine standards).  The two-staged would provide users ample time to update their code as needed to fit the new, more restrictive rule-set.
   - Unlike user-land scalar type hints, internal functions will accept nulls as valid scalars.  Based on preliminary testing, this is an extremely common use case, most often used in conjunction with uninitialized values. Disallowing it - language-wide for all internal functions - may be too big of a shift.  Therefore, internal functions receiving a NULL (non-)value for a scalar will accept it, and convert it to 0 or an empty string in the same way PHP 5 does.
+  - As we don't clearly define a date for switching E_DEPRECATE to fatal errors, the RFC states that such decision cannot, in any cases, be made before a delay of 5 years after the first public release of a PHP distribution containing the STH features described here. This statement is voted upon as the rest of the RFC. So, it cannot be violated without a new vote on this specific subject. This statement is provided as a guarantee to the developers that they will have ample time to fix their code.
 
 === Examples for conversions now deprecated for Internal Functions ===
+
 Here are examples of conversions which, while still providing the same results as in PHP 5, now also raise an E_DEPRECATED error :
 
-  * false -> int        # No more conversion from bool
-  * true -> string      # No more conversion from bool
-  * 7.5 -> int          # 7.5 cannot be converted to an integer without data loss
-  * "8.2" -> int        # "8.2" cannot be converted to an integer without data loss
-  * 4.3 -> bool         # No more conversion from float to bool
-  * "foo" -> bool       # No more conversion from string to bool
-  * "7 dogs" -> int     # Trailing characters no longer supported
-  * "  0" -> int        # Leading spaces no longer supported
-  * "12 " -> int        # Trailing spaces no longer supported
-
-
+  false -> int        # No more conversion from bool
+  true -> string      # No more conversion from bool
+  5 -> int            # 7.5 cannot be converted to an integer without data loss
+  "8.2" -> int        # "8.2" cannot be converted to an integer without data loss
+  4.3 -> bool         # No more conversion from float to bool
+  "foo" -> bool       # No more conversion from string to bool
+  "7 dogs" -> int     # Trailing characters no longer supported
+  "  0" -> int        # Leading spaces no longer supported
+  "12 " -> int        # Trailing spaces no longer supported
 
 ==== Potential Future Changes to Implicit Casting Rules ====
 
