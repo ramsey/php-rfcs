@@ -1,159 +1,303 @@
-====== PHP RFC: Coercive Types for Function Arguments ======
-  * Version: 0.40
-  * Date: 2015-02-26
-  * Authors: Zeev Suraski <zeev@php.net>, Francois Laupretre <francois@php.net>, Dmitry Stogov <dmitry@php.net>
-  * Status: Under discussion
-  * First Published at: http://wiki.php.net/rfc/coercive_sth
 
-===== Preamble =====
+====== PHP RFC: Return Type Declarations ======
+  * Version: 2.0
+  * Date: 2014-03-20 
+  * Author: Levi Morrison <levim@php.net>
+  * Status: Implemented (PHP 7.0)
+  * First Published at: https://wiki.php.net/rfc/returntypehinting
+  * Migrated to: https://wiki.php.net/rfc/return_types
 
-This version is published as 'near-final', and with the exception of potential minor modifications, is what will be proposed for a vote.
+===== Introduction =====
+Many developers would like to be able to declare the return type of a function. The basic idea of declaring a return type has been included in at least three RFCs and has been discussed in a few other places (see [[#references]]). This RFC proposes a different approach from previous RFC's to accomplish this goal in a simple way.
 
-===== Background & Summary =====
-
-Scalar Type Hints have been a top requested feature for PHP for a very, very long time.  There have been numerous attempts at introducing them to the language, all of which failed to make it into the language thus far.
-
-While there seems to be consensus regarding the viability and usefulness of adding Scalar Type Hints (STH), theres been a long standing debate regarding what is the correct way to implement them.  The two key schools of thoughts around STH that emerged over the years are:
-
-  - **Strict STH**.  In essence, this approach conducts a very simple zval.type check on the value being passed from the caller to the callee;  If theres a match  the argument is accepted, otherwise rejected.  Coercion is (almost) never performed, so, for instance, a callee that expects an integer argument and is passed a 32 (string) will reject it.
-  - **Dynamic (weak) STH**.  Unlike strict STH, dynamic STH automatically converts values which are not already of the type that is expected by the callee into that type, according to the same ruleset presently used by internal functions.  That means that a callee expecting an integer that will be passed 32 (string), will successfully receive the argument, and it will be automatically converted to 32 (int). Note that existing dynamic STH rules (as they already exist for internal functions) are stricter than explicit casts. Example: a non-numeric string, like "oranges" is rejected when expecting an integer, while explicitly casting "oranges" into (int) will succeed without a notice, and result in 0.
-
-Its important to note that in terms of the code *inside* the callee, theres absolutely no difference between the two schools of thought.  In both cases, the callee can rely with absolute confidence that if it type hinted a certain argument as an int, this argument will always be an int when function execution begins.  The difference is localized to the behavior surrounding the invocation of the callee by the caller, with Strict STH rejecting a lot more potential inputs, compared to Dynamic STH.
-
-Proponents of Strict STH cite numerous advantages, primarily around code safety/security.  In their view, the conversion rules proposed by Dynamic STH can easily allow garbage input to be silently converted into arguments that the callee will accept  but that may, in many cases, hide difficult-to-find bugs or otherwise result in unexpected behavior.
-
-Proponents of Dynamic STH bring up consistency with the rest of the language, including some fundamental type-juggling aspects that have been key tenets of PHP since its inception.  Strict STH, in their view, is inconsistent with these tenets.
-
-This RFC proposes a composite solution, which attempts to address the main goals of both camps, dubbed **Coercive STH**.  Coercive STH is less restrictive than simple zval.type checks, but a lot more restrictive than the conversion rules presently employed by internal functions.  It attempts to strike a balance between rejecting erroneous input, and allowing valid-but-wrongly-typed input, and outlines a gradual roadmap for transitioning internal functions to this new rule-set.
-
-Finally, the RFC outlines a potential future evolution of employing the new rule-set into additional parts of PHP, most notably implicit type conversions (outside the scope of this specific RFC).
-
+Declaring return types has several motivators and use-cases:
+  * Prevent sub-types from breaking the expected return type of the super-type((See [[#variance_and_signature_validation|Variance and Signature Validation]] and [[#examples]] for more details on how this works)), especially in interfaces
+  * Prevent unintended return values
+  * Document return type information in a way that is not easily invalidated (unlike comments)
 
 ===== Proposal =====
+This proposal adds an optional return type declaration to function declarations including closures, functions, generators,  and methods. This RFC does not change the existing type declarations nor does it add new ones (see [[#differences_from_past_rfcs|differences from past RFCs]]).
 
-==== Coercion Rules ====
+Here is a brief example of the syntax in action:
+<PHP>
+function foo(): array {
+    return [];
+}
+</PHP>
+More examples can be found in the [[#examples|Examples]] section.
 
-A new set of coercion rules will appli to both user-land type hints as well as internal type hints.  The guiding principals behind this new rulesete rules are:
+//Code which does not declare a return type will continue to work// exactly as it currently does. This RFC requires a return type to be declared only when a method inherits from a parent method that declares a return type; in all other cases it may be omitted.
 
-  - If the type of the value is an exact match to the type requested by the hint - allow.
-  - If the value can be coerced to the type requested by the hint without data loss and without creation of likely unintended data - allow.
-  - In all other cases - reject.
+==== Variance and Signature Validation ====
+The enforcement of the declared return type during inheritance is invariant; this means that when a sub-type overrides a parent method then the return type of the child must exactly match the parent and may not be omitted. If the parent does not declare a return type then the child is allowed to declare one.
 
-=== Changes in coercion rules ===
+If a mismatch is detected during compile time (e.g. a class improperly overriding a return type) then ''E_COMPILE_ERROR'' will be issued. If a type mismatch is detected when the function returns then ''E_RECOVERABLE_ERROR'' will be issued.
 
-We first present only the changes we introduce compared to the PHP 5 behavior.
+Covariant return types are considered to be type sound and are used in many other languages((C++, Java and others use covariant return types.)). This RFC originally proposed covariant return types but was changed to invariant because of a few issues. It is possible to add covariant return types at some point in the future.
 
-^        ^  Value Type  ^^^^
-^ Hint   ^ boolean   ^ int       ^ float          ^  string        ^
-^ bool   | No change | No change | Disabled       | Disabled       |
-^ int    | Disabled  | No change | Restricted (1) | Restricted (1) |
-^ float  | Disabled  | No change | No change      | No change      |
-^ string | Disabled  | No change | No change      | No change      |
+Note that this topic of variance is about the declared return type of the function; this means that the following would be valid for either invariant or covariant return types:
 
-  * (1) Significant digits after the decimal points are now rejected when converting to int.
+<PHP>
+interface A {
+    static function make(): A;
+}
+class B implements A {
+    static function make(): A {
+        return new B();
+    }
+}
+</PHP>
 
-And the changes in the way numeric strings are handled :
+The class ''B'' implements ''A'' so it is therefore valid. Variance is about the allowed types when overriding the declared types:
 
-  * Trailing blanks are supported as before,
-  * but non-blank trailing characters now cause the data to be rejected ("7 dogs" case)
+<PHP>
+interface A {
+    static function make(): A;
+}
+class B implements A {
+    static function make(): B { // must exactly match parent; this will error
+        return new B();
+    }
+}
+</PHP>
 
-=== Final ruleset ===
+The above sample does not work because this RFC proposes only invariant return types; this could be extended in the future to be allowed.
 
-Here are the rules we get when applying these changes to the rules currently used in PHP 5 :
+==== Position of Type Declaration ====
+The two major conventions in other programming languages for placing return type information are:
 
-^        ^  Value Type  ^^^^
-^ Hint   ^ boolean  ^ int            ^ float          ^  string                      ^
-^ bool   | Yes      | Yes*           | Reject         | Reject                       |
-^ int    | Reject   | Yes            | Only if no DL† | Numeric integer string only‡ |
-^ float  | Reject   | Only if no DL† | Yes            | Numeric string only‡         |
-^ string | Reject   | Yes            | Yes            | Yes                          |
+  * Before the function name
+  * After the parameter list's closing parenthesis
 
-* Coercion from int to bool is done using the same rules that apply in the rest of PHP;  0 coerces to false;  Any other value coerces to true.
+The former position has been proposed in the past and the RFCs were either declined or withdrawn. One cited issue is that many developers wanted to preserve the ability to search for <php>function foo</php> to be able to find the definition for ''foo''. A recent discussion about [[http://marc.info/?t=141235344900003&r=1&w=2|removing the function keyword]] has several comments that re-emphasized the value in preserving this.
 
-† Float to int coercion will be accepted only if there are no significant digits after the decimal point.  E.g. 7.0 will be coerced to 7, but 7.3 will be rejected.  Int to float coercion will be accepted only if the integer value can be represented without loss of accuracy using a floating point number.  Extremely large integers (with absolute value larger than 2^52) will be rejected.
+The latter position is used in several languages(([[http://hacklang.org/|Hack]],  [[http://www.haskell.org|Haskell]], [[https://golang.org/|Go]], [[http://www.erlang.org/|Erlang]], [[http://www.adobe.com/devnet/actionscript.html|ActionScript]], [[http://www.typescriptlang.org/|TypeScript]] and more all put the return type after the parameter list)); notably C++11 also places the return type after the parameter lists for certain constructs such as lambdas and auto-deducing return types.
 
-‡ Numeric strings may be converted to int or float types, only in case there is no loss in data or accuracy. Leading zeroes, as well as leading and trailing whitespaces are accepted. Other non-numeric trailing data will be rejected. For int hints, numeric strings with significant digits after the decimal point will be rejected.  For floating point hints, integer values that cannot be represented without loss of accuracy (exceed 2^52 in absolute value) will be rejected as well.
+Declaring the return type after the parameter list had no shift/reduce conflicts in the parser.
 
-==== Handling of non-scalar values ====
+==== Returning by Reference ====
 
-Generally speaking, coercion from non-scalar values into scalar type hints is not supported and will be rejected, with few exceptions.
+This RFC does not change the location of ''&'' when returning by reference. The following examples are valid:
+<PHP>
+function &array_sort(array &$data) {
+    return $data;
+}
 
-**Arrays** and **resources** will always be rejected as valid inputs for scalar type hinted arguments .
-**Objects** will always be rejected as valid inputs for scalar type hinted arguments, with one exception - an object with a __toString() method will be accepted for string type hint.
-**Nulls** will be rejected as valid inputs for scalar type hinted arguments when using user-land type hints, but presently accepted for internal functions.  See the 'Changes to Internal Functions' section for more information.
+function &array_sort(array &$data): array {
+    return $data;
+}
+</PHP>
+
+==== Disallowing NULL on Return Types ====
+Consider the following function: 
+
+<PHP>
+function foo(): DateTime { 
+    return null; // invalid
+}
+</PHP>
+
+It declares that it will return ''DateTime'' but returns ''null''; this type of situation is common in many languages including PHP. By design this RFC does not allow ''null'' to be returned in this situation for two reasons:
+
+  - This aligns with current parameter type behavior. When parameters have a type declared, a value of ''null'' is not allowed ((Except when the parameter has a ''null'' default)).
+  - Allowing ''null'' by default works against the purpose of type declarations. Type declarations make it easier to reason about the surrounding code. If ''null'' was allowed the programmer would always have to worry about the ''null'' case.
+
+The [[rfc:nullable_types|Nullable Types RFC]] addresses this shortcoming and more.
+
+==== Methods which cannot declare return types ====
+
+Class constructors, destructors and clone methods may not declare return types. Their respective error messages are:
+
+  * ''<nowiki>Fatal error: Constructor %s::%s() cannot declare a return type in %s on line %s</nowiki>''
+  * ''<nowiki>Fatal error: Destructor %s::__destruct() cannot declare a return type in %s on line %s</nowiki>''
+  * ''<nowiki>Fatal error: %s::__clone() cannot declare a return type in %s on line %s</nowiki>''
+
+==== Examples ====
+Here are some snippets of both valid and invalid usage.
+
+=== Examples of Valid Use ===
+<PHP>
+// Overriding a method that did not have a return type:
+interface Comment {}
+interface CommentsIterator extends Iterator {
+    function current(): Comment;
+}
+</PHP>
+<PHP>
+// Using a generator:
+
+interface Collection extends IteratorAggregate {
+    function getIterator(): Iterator;
+}
+
+class SomeCollection implements Collection {
+    function getIterator(): Iterator {
+        foreach ($this->data as $key => $value) {
+            yield $key => $value;
+        }
+    }
+}
+</PHP>
+
+=== Examples of Invalid Use ===
+
+The error messages are taken from the current patch.
+----
+
+<PHP>
+// Covariant return-type:
+
+interface Collection {
+    function map(callable $fn): Collection;
+}
+
+interface Set extends Collection {
+    function map(callable $fn): Set;
+}
+</PHP>
+''Fatal error: Declaration of Set::map() must be compatible with Collection::map(callable $fn): Collection in %s on line %d''
+----
+<PHP>
+// Returned type does not match the type declaration
+
+function get_config(): array {
+    return 42;
+}
+get_config();
+</PHP>
+''Catchable fatal error: Return value of get_config() must be of the type array, integer returned in %s on line %d''
+
+----
+
+<PHP>
+// Int is not a valid type declaration
+
+function answer(): int {
+    return 42;
+}
+answer();
+</PHP>
+''Catchable fatal error: Return value of answer() must be an instance of int, integer returned in %s on line %d''
+
+----
+
+<PHP>
+// Cannot return null with a return type declaration
+
+function foo(): DateTime {
+    return null;
+}
+foo();
+</PHP>
+''Catchable fatal error: Return value of foo() must be an instance of DateTime, null returned in %s on line %d''
+
+----
+
+<PHP>
+// Missing return type on override
+
+class User {}
+
+interface UserGateway {
+    function find($id): User; 
+}
+
+class UserGateway_MySql implements UserGateway {
+    // must return User or subtype of User
+    function find($id) {
+        return new User();
+    }
+}
+</PHP>
+''Fatal error: Declaration of UserGateway_MySql::find() must be compatible with UserGateway::find($id): User in %s on line %d''
+
+----
+
+<PHP>
+// Generator return types can only be declared as Generator, Iterator or Traversable (compile time check)
+
+function foo(): array {
+    yield [];
+}
+</PHP>
+''Fatal error: Generators may only declare a return type of Generator, Iterator or Traversable, %s is not permitted in %s on line %d''
 
 
-==== User-land Additions ====
+==== Multiple Return Types ====
+This proposal specifically does not allow declaring multiple return types; this is out of the scope of this RFC and would require a separate RFC if desired.
 
-This RFC proposes to introduce four new type hints into PHP – int, float, string and bool.  These new hints will adhere to the new coercion rules detailed above.  Values that cannot be accepted per the coercion rules above, will result in E_RECOVERABLE_ERROR being triggered.  Note that if the [[https://wiki.php.net/rfc/engine_exceptions_for_php7|Exceptions in the Engine]] RFC is accepted, this will throw an exception instead, making recovery simpler and more straightforward.
+If you want to use multiple return types in the meantime, simply omit a return type declaration and rely on PHP's excellent dynamic nature.
 
-These type hints can be used for function arguments, as well as for return values, as described in the [[https://wiki.php.net/rfc/return_types|Return Type Declarations]] RFC. In both cases, they are handled exactly the same way.
+==== Reflection ====
 
-No type declaration for resources is added, as this would prevent moving from resources to objects for existing extensions which some have already done (e.g. GMP).
+This RFC purposefully omits reflection support as there is an open RFC about improving type information in reflection: https://wiki.php.net/rfc/reflectionparameter.typehint 
 
-==== Changes to Internal Functions ====
+==== Differences from Past RFCs ====
+This proposal differs from past RFCs in several key ways:
 
-This RFC proposes to bring the rule-set described in the last section to internal functions as well, through updates to the zend_parse_parameters() function.
+  * **The return type is positioned after the parameter list.** See [[#position_of_type_declaration|Position of Type Declaration]] for more information about this decision.
+  * **We keep the current type options.** Past proposals have suggested new types such as ''void'', ''int'', ''string'' or ''scalar''; this RFC does not include any new types. Note that it does allow ''self'' and ''parent'' to be used as return types.
+  * **We keep the current search patterns.** You can still search for <php>function foo</php> to find <php>foo</php>'s definition; all previous RFCs broke this common workflow.
+  * **We allow return type declarations on all function types**. Will Fitch's proposal suggested that we allow it for methods only.
+  * **We do not modify or add keywords.** Past RFCs have proposed new keywords such as ''nullable'' and more. We still require the <php>function</php> keyword.
 
-However, given that unlike the introduction of STH - which is a new, previously unused feature that will (for the most part) not affect existing code - changes to what internal functions would be willing to accept could have substantial compatibility implications.
+===== Other Impact =====
 
-To mitigate the risk of compatibility breakage being introduced between PHP 5.6 and 7.0, two mitigation steps are proposed:
+==== On Backward Compatiblity ====
+This RFC is backwards compatible with previous PHP releases.
 
-  - To allow developers time to adhere to the updated rules, a two-staged migration strategy will be used.  At the first stage - in PHP 7, conversions which were supported in the past and are no longer allowed due to the new rules, will emit E_DEPRECATED warnings, but will still allow the values in and convert them using the same rules as PHP 5.  When it is considered safe (PHP 8 or later), the E_DEPRECATED warnings will be upgraded to E_RECOVERABLE_ERROR errors (or exceptions, depending on the engine standards).  The two-staged would provide users ample time to update their code as needed to fit the new, more restrictive rule-set.
-  - Unlike user-land scalar type hints, internal functions will accept nulls as valid scalars.  Based on preliminary testing, this is an extremely common use case, most often used in conjunction with uninitialized values. Disallowing it - language-wide for all internal functions - may be too big of a shift.  Therefore, internal functions receiving a NULL (non-)value for a scalar will accept it, and convert it to 0 or an empty string in the same way PHP 5 does.
-  - As we don't clearly define a date for switching E_DEPRECATE to fatal errors, the RFC states that such decision cannot, in any cases, be made before a delay of 5 years after the first public release of a PHP distribution containing the STH features described here. This statement is voted upon as the rest of the RFC. So, it cannot be violated without a new vote on this specific subject. This statement is provided as a guarantee to the developers that they will have ample time to fix their code.
+==== On SAPIs ====
+There is no impact on any SAPI.
 
-=== Examples for conversions now deprecated for Internal Functions ===
+==== On Existing Extensions =====
+The structs ''zend_function'' and ''zend_op_array'' have been changed; extensions that work directly with these structs may be impacted.
 
-Here are examples of conversions which, while still providing the same results as in PHP 5, now also raise an E_DEPRECATED error :
-
-  false -> int        # No more conversion from bool
-  true -> string      # No more conversion from bool
-  5 -> int            # 7.5 cannot be converted to an integer without data loss
-  "8.2" -> int        # "8.2" cannot be converted to an integer without data loss
-  4.3 -> bool         # No more conversion from float to bool
-  "foo" -> bool       # No more conversion from string to bool
-  "7 dogs" -> int     # Trailing characters no longer supported
-  "  0" -> int        # Leading spaces no longer supported
-  "12 " -> int        # Trailing spaces no longer supported
-
-==== Potential Future Changes to Implicit Casting Rules ====
-
-While outside the scope of this RFC, the introduction of the new coercive-yet-more-restrictive rule-set may be considered for additional areas in PHP, most notably implicit casting.
-For example, today, the result of "Apples" + "Oranges" is 0, because the + operator implicitly casts anything into a number.  It could be imagined that in the future, the + operator will accept only values that would fit into an int or float STH, and reject others.  Users would still be able to use permissive explicit casting ($foo = (int) "Apples"; would still assign 0 into $foo), but the risk sometimes associated with implicit casting will be eliminated.
-
-
-===== Comparison to the other RFC =====
-
-Numerous community members have invested substantial effort into creating another comprehensive RFC, that proposes to introduce STH into PHP [[https://wiki.php.net/rfc/scalar_type_hints_v5|Scalar Type Hints RFC v0.5 ("Dual Mode RFC")]].  However, we believe the proposal in this RFC is better, for several different reasons:
-
-  - **Single Mode.**  Even though the Dual Mode RFC presents a novel idea about how to allow developers to choose which mode they'd like to use, and use different modes in different parts of the app, it still introduces the burden of two different modes.  Two different rule-sets that need to be learned, may increase the language's complexity.  Further, the two sets can cause the same functions to behave differently depending on where they're being called, and potentially a new class of bugs stemming from developers not realizing which mode they're in in a particular file.  This RFC is unaffected by these issues, as it presents a single, composite rule set.
-  - **Too strict may lead to too lax.** In the Dual Mode RFC, when in Strict mode, in many cases, functions would reject values that, semantically, are acceptable.  For example, a "32" (string) value coming back from an integer column in a database table, would not be accepted as valid input for a function expecting an integer.  Since semantically the developer is interested in this argument-passing succeeding, they would have the choice of either removing the integer STH altogether, or, more likely, explicitly casting the value into an integer.  This would have the opposite of the desired outcome of strict STHs - as explicit casts ($foo = (int) $foo;) always succeed, and would happily convert "100 dogs", "Apples" and even arrays and booleans into an integer.  Further, since already today, internal functions employ coercion rules that are more restrictive than PHP's explicit casting, pushing people towards explicit casting will actually make things **worse** in case developers opt for explicit casting as they pass values in an internal function call. 
-  - **Smooth integration with Data Sources**.  PHP uses strings extensively across the language, and in most cases, data sources always feed data into PHP as strings.  PHP applications rely extensively on internal type juggling to convert that string-based data according to the needed context.  Strict zval.type based STH effectively eliminates this behavior, moving the burden of worrying about type conversion to the user.  The solution proposed in this RFC allows code that relies on type coercion to Just Work when the values are sensible, but fail (and appropriately warn the developer) otherwise.
-
-
-In addition, there appear to be numerous misconception about benefits of strict type hinting, that to the best of our (deep) understanding of the associated technologies, aren't really there:
-
-  - **Performance.**  There's complete consensus that there are no tangible performance differences between the strict and coercive typing.  The difference is that strict typing would block scenarios that coercive typing would allow;  But that's a difference in behavior, not performance.
-  - **AOT/JIT implications.**  It is our position that there is no difference at all between strict and coercive typing in terms of potential future AOT/JIT development - none at all.  In both the case of strict and coercive STH, we can have full confidence that the value inside the callee is of the requested type;  And in both the case of strict and coercive STH, we can't make any assumptions about what is the type of value that the caller is passing as an argument.  Again, the difference is only that strict typing may reject values that coercive typing may accept;  But the very same checks need to be conducted in both cases;  The very same type inference can be used in both cases to potentially optimize these checks away;  Etc.
-  - **Static Analysis**.  It is the position of several Strict STH proponents that Strict STH can help static analysis in certain cases.  For the same reasons mentioned above about JIT, we don't believe that is the case - although it's possible that Strict Typing may be able to help static analysis in certain edge cases.  However, it is our belief that even if that is true, Static Analyzers need to be designed for Languages, rather than Languages being designed for Static Analyzers.
-
-
-===== Backward Incompatible Changes =====
-Given the change to the acceptable values into a wide range of internal functions, this RFC is likely to result in a substantial number of newly introduced E_DEPRECATED warnings in internal function invocations, although those can be easily suppressed.  When E_DEPRECATED is replaced with E_RECOVERABLE_ERROR in a future PHP version, users will be forced to update their code and 'clean it up' before they can upgrade.
-Also, the newly-introduced type hints (int, float, string and bool) will no longer permitted as class/interface/trait names (including with use and class_alias)
+==== On Performance ====
+An informal test indicates that performance has not seriously degraded. More formal performance testing can be done before voting phase.
 
 ===== Proposed PHP Version(s) =====
-7.0
+This RFC targets PHP 7.
 
-===== Glossary =====
+===== Vote =====
+This RFC modifies the PHP language syntax and therefore requires a two-third majority of votes.
 
-  * **STH** - Scalar Type Hints.  Code structures designed to provide information to PHP regarding the nature of an argument that a function expects.
-  * **JIT** - Just In Time (Compilation). In the context of PHP - selective translation of PHP opcodes into machine code while the code is already running, while potentially taking advantage of information known only at runtime.
-  * **AOT** - Ahead Of Time (Compilation).  Compiling PHP opcodes into machine code before it executes it.
-  * **Static Analysis** - Analyzing code without running it, attempting to derive conclusions about security, performance, etc.
+Should return types as outlined in this RFC be added to the PHP language? Voting will end on January 23, 2015.
+<doodle title="Typed Returns" auth="levim" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
 
-===== Proposed Voting Choices =====
-The voting choices would be yes/no.
-The RFC proposes a very substantial change to PHP's coercion rules, which may evolve to affect implicit typing in the future.
-It absolutely requires a 2/3 majority, with the hope of reaching as close as possible to consensus.
+===== Patches and Tests =====
+
+Dmitry and I have updated the implementation to a more current master branch here: https://github.com/php/php-src/pull/997
+
+This RFC was merged into the master branch (PHP 7) in commit [[https://git.php.net/?p=php-src.git;a=commit;h=638d0cb7531525201e00577d5a77f1da3f84811e|638d0cb7531525201e00577d5a77f1da3f84811e]].
+
+===== Future Work =====
+Ideas for future work which are out of the scope of this RFC include:
+
+  * Allow functions to declare that they do not return anything at all (''void'' in Java and C)
+  * Allow nullable types (such as <php>?DateTime</php>). This is discussed in the [[rfc:nullable_types|Nullable Types]] RFC.
+  * Improve parameter variance. Currently parameter types are invariant while they could be contravariant. Change the E_STRICT on mismatching parameter types to E_COMPILE_ERROR.
+  * Improve runtime performance by doing type analysis.
+  * Update documentation to use the new return type syntax.
+
+===== References =====
+  * [[rfc:returntypehint2|Method Return Type-hints]] by Will Fitch; 2011. [[http://marc.info/?t=132443368800001&r=1&w=2|Mail Archive]].
+  * [[rfc:returntypehint|Return Type-hint]] by Felipe; 2010. [[http://marc.info/?l=php-internals&m=128036818909738&w=2|Mail Archive]]
+  * [[rfc:typehint|Return value and parameter type hint]] by Felipe; 2008. [[http://marc.info/?l=php-internals&m=120753976214848&w=2|Mail Archive]].
+  * [[http://derickrethans.nl/files/meeting-notes.html#type-hinted-properties-and-return-values|Type-hinted properties and return values]] from meeting notes in Paris; Nov 2005.
+
+In the meeting in Paris on November 2005 it was decided that PHP should have return type declarations and some suggestions were made for syntax. Suggestion 5 is nearly compatible with this RFC; however, it requires the addition of a new token ''T_RETURNS''. This RFC opted for a syntax that does not require additional tokens so ''returns'' was replaced by a colon.
+
+The following (tiny) patch would allow the syntax in suggestion 5 to be used alongside the current syntax. This RFC does not propose that both versions of syntax should be used; the patch just shows how similar this RFC is to that suggestion from 2005.
+
+https://gist.github.com/krakjoe/f54f6ba37e3eeab5f705
+
+===== Changelog =====
+
+  * v1.1: Target PHP 7 instead of PHP 5.7
+  * v1.2: Disallow return types for constructors, destructors and clone methods.
+  * v1.3: Rework Reflection support to use new ''ReflectionType'' class
+  * v1.3.1: Rename ''ReflectionType::IS_''* constants to ''TYPE_''*, rename ''->getKind()'' to ''->getTypeConstant()''
+  * v2.0: Change to invariant return types and omit reflection support
