@@ -1,0 +1,295 @@
+====== PHP RFC: Generator Delegation ======
+  * Version: 0.1
+  * Date: 2015-03-01
+  * Authors: Daniel Lowrey <rdlowrey@php.net>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/generator-delegation
+
+====== Abstract ======
+
+This RFC proposes new ''yield * <expr>'' syntax allowing ''Generator'' functions to delegate operation to ''Iterator'' instances. The proposed syntax allows the factoring of ''yield'' statements into smaller conceptual units in the same way that discrete class methods simplify object-oriented code. The proposal is conceptually related to and requires functionality proposed by the forerunner [[rfc:generator-return-expressions|Generator Return Expressions RFC]].
+
+====== Proposal ======
+
+The following new syntax is allowed in the body of generator functions:
+
+<code php>
+    yield * <expr>
+</code>
+
+In the above code ''<expr>'' is any expression that evaluates to an ''Iterator'' instance. This
+iterator is advanced until no longer valid, during which time it sends/receives values directly
+to/from the delegating generator's caller. If the ''<expr>'' iterator is a ''Generator'' it is
+considered a subgenerator whose eventual return value is returned to the delegating generator as the
+result of the origin ''yield *'' expression.
+
+=== Prosaically ===
+
+  * Each value yielded by the iterator is passed directly to the delegating generator's caller.
+
+  * Each value sent to the delegating generator's ''send()'' method is passed to the subgenerator's ''send()'' method. If the delegate iterator is not a generator any sent values are ignored as non-generator iterators have no capacity to receive such values.
+
+  * Exceptions thrown by iterator/subgenerator advancement are propagated up the chain to the delegating generator.
+
+  * Upon iterator completion ''null'' is returned to the delegating generator if the iterator is NOT a generator. If the iterator is a generator instance then the subgenerator's return value is returned to the delegating generator as the value of the ''yield *'' expression.
+
+=== Formally ===
+
+The proposed syntax
+
+<code php>
+$g = function() {
+    return yield* <expr>;
+};
+</code>
+
+is equivalent to
+
+<code php>
+$g = function() {
+    $iter = <expr>;
+    $isSubgenerator = $iter instanceof Generator;
+    $received = null;
+    $send = true;
+
+    while ($iter->valid()) {
+        if ($isSubgenerator) {
+            $next = $send ? $iter->send($received) : $iter->throw($received);
+        } else {
+            $next = $iter->current();
+            $iter->next();
+        }
+        try {
+            $received = yield $next;
+            $send = true;
+        } catch (Exception $e) {
+            if ($isSubgenerator) {
+                $received = $e;
+                $send = false;
+            } else {
+                $throw $e;
+            }
+        }
+    }
+
+    return $isSubgenerator ? $iter->getReturn() : null;
+};
+</code>
+
+=== Terminology ===
+
+  * A "delegating generator" is a ''Generator'' in which the ''yield * <expr>'' syntax appears.
+
+  * A "subgenerator" is a ''Generator'' used in the ''<expr>'' portion of the ''yield * <expr>'' syntax.
+
+
+===== Examples =====
+
+Delegating to another generator (subgenerator)
+
+<code php>
+<?php
+
+function g1() {
+  yield 2;
+  yield 3;
+  yield 4;
+}
+
+function g2() {
+  yield 1;
+  yield * g1();
+  yield 5;
+}
+
+$g = g2();
+foreach ($g as $yielded) {
+    var_dump($yielded);
+}
+
+/*
+int(1)
+int(2)
+int(3)
+int(4)
+int(5)
+*/
+</code>
+
+Delegating to non-generator iterators
+
+<code php>
+<?php
+
+function g() {
+  yield 1;
+  yield * new ArrayIterator([2, 3, 4]);
+  yield 5;
+}
+
+$g = g();
+foreach ($g as $yielded) {
+    var_dump($yielded);
+}
+
+/*
+int(1)
+int(2)
+int(3)
+int(4)
+int(5)
+*/
+</code>
+
+The yield* expression value
+
+<code php>
+<?php
+
+function g1() {
+  yield 2;
+  yield 3;
+  return 42;
+}
+
+function g2() {
+  yield 1;
+  $g1result = yield * g1();
+  yield 4;
+  return $g1result;
+}
+
+$g = g2();
+foreach ($g as $yielded) {
+    var_dump($yielded);
+}
+var_dump($g->getReturn());
+
+/*
+int(1)
+int(2)
+int(3)
+int(4)
+int(42)
+*/
+</code>
+
+===== Rationale =====
+
+@TODO: Refactoring and readability
+
+@TODO: Generators as lightweight threads
+
+===== Other Languages =====
+
+Other popular dynamic languages currently support variants of the proposed syntax ...
+
+**Python**
+
+Python 3.3 generators support ''yield from'':
+
+<code python>
+>>> def g(x):
+...     yield from range(x, 0, -1)
+...     yield from range(x)
+...
+>>> list(g(5))
+[5, 4, 3, 2, 1, 0, 1, 2, 3, 4]
+</code>
+
+**JavaScript**
+
+Javascript ES6 generators support the ''yield *'' syntax:
+
+<code javascript>
+function* g1() {
+  yield 2;
+  yield 3;
+  yield 4;
+}
+
+function* g2() {
+  yield 1;
+  yield* g1();
+  yield 5;
+}
+
+var iterator = g2();
+
+console.log(iterator.next()); // { value: 1, done: false }
+console.log(iterator.next()); // { value: 2, done: false }
+console.log(iterator.next()); // { value: 3, done: false }
+console.log(iterator.next()); // { value: 4, done: false }
+console.log(iterator.next()); // { value: 5, done: false }
+console.log(iterator.next()); // { value: undefined, done: true }
+</code>
+
+===== Open Issues =====
+
+  * Should sending a value to the delegating generator via ''Generator::send()'' result in an exception if the delegate iterator is not a generator (and therefore cannot receive values)?
+
+  * Can ''array'' expressions be allowed in ''yield * <expr>'' as they are not internally considered ''Traversable''?
+
+  * Should manually advancing a subgenerator outside the context of the delegating generator result in an error? Because PHP generators are actually stateful object instances the potential exists for manual iteration of a subgenerator already in-use via ''yield *''. It is the opinion of this author that manual subgenerator advancement serves no valid use-case and disallowing such behavior greatly simplifies the requisite implementation.
+
+  * Should a "shared" subgenerator that is already complete return its completed return value to the delegating generator? i.e. should the following code result in ''null'' or ''42''?
+
+<code php>
+function sub() {
+    yield 1;
+    return 42;
+}
+function delegator(Generator $shared) {
+    return yield * $shared;
+}
+
+$shared = sub();
+while($shared->valid()) { $shared->next(); }
+$delegator = delegator($shared);
+while($delegator->valid()) { $delegator->next(); }
+
+// null or 42?
+$result = $delegator->getReturn();
+</code>
+
+===== Backward Incompatible Changes =====
+
+None
+
+===== Proposed PHP Version(s) =====
+
+PHP7
+
+===== Unaffected PHP Functionality =====
+
+Existing generator semantics are unaffected.
+
+
+===== Proposed Voting Choices =====
+
+Two voting choices are proposed:
+
+1. **YES**, implement the ''yield *'' syntax allowing generator delegation in PHP 7
+
+2. **NO**, do not modify existing Generator behavior
+
+A 2/3 "Yes" vote is required to implement this proposal.
+
+===== Patches and Tests =====
+
+There is no patch at this time. This section will be updated in the coming days once a "final" implementation is ready.
+
+===== Implementation =====
+
+TBD
+
+===== References =====
+
+  * [[rfc:generator-return-expressions|Generator Return Expressions RFC]]
+
+  * [[https://docs.python.org/3/whatsnew/3.3.html#pep-380|New in Python 3.3: yield from]]
+
+  * [[https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/yield*|JavaScript yield* Syntax]]
+
+===== Rejected Features =====
+TBD
