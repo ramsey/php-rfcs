@@ -1,5 +1,5 @@
 ====== PHP RFC: Parser Extension API ======
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2015-02-17
   * Author: Nikita Popov <nikic@php.net>, Alexander Lisachenko <lisachenko.it@gmail.com>
   * Status: In Discussion
@@ -8,10 +8,6 @@
 
 ===== Introduction =====
 This RFC proposes an introduction of userland parser extensions API for providing an access to the low-level Abstract Syntax Tree (AST) parser.
-
-RFC consists of two parts: 
-  * parsing API that provides an AST for a given string of source code
-  * extension API that allows to register custom PHP hooks from userland to modify an Abstract Syntax Tree before transforming it into concrete opcodes.
 
 ===== Parsing API proposal =====
 As you know, all previous versions of PHP do not provide an API for accessing an information about Abstract Syntax Tree for specified code. This limitation was due to the absence of AST on the engine level. There is only tokenizer PHP extension with token_get_all() function that provides an information about lexical tokens. However, this stream of tokens can not be easily used because of complex grammar of PHP which requires a development of grammar on PHP side.
@@ -44,6 +40,7 @@ class Node
 
     /**
      * Returns the text representation of current node
+     * Recursively applied to all children 
      *
      * @return string
      */
@@ -67,6 +64,7 @@ The `kind` property specified the type of the node. It is an integral value, whi
 
 The `flags` property contains node specific flags. It is always defined, but for most nodes it is always zero. isUsingFlags() method for node can be used to determine whether a node has a meaningful flags value.
 
+The `value` property contains a value only from zval AST nodes.
 The `lineNumber` property specified the starting line number of the node.
 The `children` property contains an array of child-nodes.
 
@@ -79,7 +77,9 @@ namespace Php\Parser;
 final class Engine
 {
      /**
-      * Parses given code and returns an AST for it
+      * Parses the given code and returns an AST for it
+      *
+      * @param string $phpCode Source code to analyse
       *
       * @return Node
       */
@@ -87,7 +87,7 @@ final class Engine
 }
 </code>
 
-The static Engine::parse() method accepts a source code string (which is parsed in INITIAL mode, i.e. it should generally include an opening PHP tag) and returns an abstract syntax tree consisting of Node objects.
+The static Engine::parse() method accepts a source code string (which is parsed in INITIAL mode, i.e. it should generally include an opening PHP tag) and returns an abstract syntax tree consisting of Node objects. An abstract syntax tree can be compiled/pretty-printed later into a Php code.
 
 Here is an example of getting an AST for simple code:
 
@@ -116,115 +116,8 @@ AST_STMT_LIST @ 1 {
 
 This information about AST can be used later for custom Parser Extensions, QA static analysis tools, source code rewriting tools and much more.
  
-I want to notice, that this part was originally implemented and described by Nikita Popov as an experimental php-ast extension https://github.com/nikic/php-ast, so it can be used as a starting point for this RFC.
+I want to notice, that this part was originally implemented and described by Nikita Popov as an experimental php-ast extension https://github.com/nikic/php-ast, so it can be used as base implementation.
 
-==== Parser Extension API ====
-
-Second part of this RFC proposes to add an API for building userland parser extensions. We could allow userland extensions to hook into the compilation process. This would allow extensions to implement some types of language features, for example, Design-by-Contract verifying, Aspect-Oriented programming, analysis of annotation metadata and much more.
-
-Userland parser extension is described by the extension interface with single `process` method that accepts only one argument - top-level AST node and can modify it.
-
-<code php>
-<?php
-namespace Php\Parser;
-
-interface ExtensionInterface {
-
-    /**
-     * Receives a top-level node of AST and can transform it
-     */
-    public static function process(Node $node);
-}
-</code>
-
-Each extension can be registered or unregistered in the parser engine class by calling appropriate methods:
-
-<code php>
-<?php
-namespace Php\Parser;
-
-class Engine {
-
-    /** 
-     * @var array|string[] List of parser extension classes
-     */
-    private static $extensions;
-    
-    /**
-     * Register an extension class in the parser
-     * @param string $extensionClassName Name of the extension class
-     */
-    public static function registerExtension($extensionClassName)
-    
-    /**
-     * Unregister an extension class from the parser
-     * @param string $extensionClassName Name of the extension class
-     */
-    public static function unregisterExtension($extensionClassName)
-    
-    /**
-     * Returns a list of currently registered extensions
-     * @return string[]|array List of registered extensions
-     */
-    public static function getRegisteredExtensions()
-} 
-</code>
-
-Here is an example with pseudo-code of possible usage for implementing Design-By-Contract paradigm:
-
-<code php>
-<?php
-
-use Php\Parser\Node;
-use Php\Parser\Engine as ParserEngine;
-use Php\Parser\ExtensionInterface;
-
-class DbcParserExtension implements ExtensionInterface
-{
-    public static function process(Node $node)
-    {
-        // prepare an AST to insert, this can be annotation or anything else
-        $astToInsert = ParserEngine::parse('<?php assert("$this->value > 0")');
-        
-        // node visitor, that will traverse the AST for specific nodes
-        $methodNodeVisitor = new NodeVisitor($node, Node::AST_METHOD);
-        $methodNodeVisitor->visit(function (Node $node) use ($astToInsert) {
-            // Insert our AST code before original method statements
-            $node->children = array_merge($astToInsert->children, $node->children);
-        });
-    }
-} 
-
-// Registration of extension
-ParserEngine::registerExtension(DbcParserExtension::class);
-
-// Now every include/eval/create_function/etc will trigger our hook
-include 'SomeClass.php';
-
-// We can alos parse a code directly with parser, hook will be called too:
-ParserEngine::parse(file_get_contents('SomeClass.php'));
-</code>
-
-==== General flow of compiling the source code and limitations ====
-
-Current flow (as of PHP7) of running PHP code can be represented as following:
-
-''Source Code > Tokenizer > AST > Opcodes > Execution''
-
-Fist step is lexing (or tokenization) of source code into separate tokens. After that Abstract Syntax Tree is generated by the parser, based on token stream and PHP Grammar. This AST is used for producing concrete opcodes for each node. More details available at [[rfc::abstract_syntax_tree#Overview|Abstract Syntax Tree RFC]]
-
-After implementation of this RFC, general flow will be changed in the following way:
-
-''Source Code > Tokenizer > AST > Parser Extension > Opcodes > Execution''
-
-Note, that Parser Extension hooks are executing before generating of opcodes, so hooks will be typically called only once per each file, because of opcode cachers. This is considered as limitation of parser extensions, they can receive an AST for file only once, so no dynamic AST transformations are allowed, because all opcodes are fetched directly by file name:
-
-''Source Code > Opcodes > Execution''
-
-
-==== Impact on performance ====
-
-Without registered parser extensions there is no impact on runtime performance, because no extra steps are required to compile a source code into the opcodes. Each registered parser extension will have a little impact on runtime performance, because userland hooks should be invoked after parsing of each file or executing `eval` constructions. However, with enabled opcode cacher, this operation is performed only once for each file and then cached version of opcodes is used without future calls to the userland extensions, as such any difference does not have a practical impact. 
 
 ===== Backward Incompatible Changes =====
 No changes.
@@ -240,25 +133,35 @@ No impact to SAPI.
 Existing extensions are not affected.
 
 ==== To Opcache ====
-This RFC doesn't affect an opcache logic, because it provides an API for AST-manipulation which is earlier step of execution of source code. However, presence of opcache is highly required for usage of parser extensions to avoid unnecessary call of extensions for not modified files.
+This RFC doesn't affect an opcache logic, because it provides an API only for accessing the AST information. 
 
 ==== New Constants ====
 `Php\Parser\Node` class will contain several constans for describing different kind of nodes, their names and flags.
 
 ==== php.ini Defaults ====
-Currently no
+No
 
 ===== Open Issues =====
-  - Need to clarify/choose the right way of registration of parser extensions (http://news.php.net/php.internals/82951, http://news.php.net/php.internals/82958)
-  - Inclusion of `NodeVisitor` class into the parser RFC?
-  - Should voting include 2/3 majority or simple 50%+1 vote?
+  - Should each node type be represented as personal class?
+  - Where metadata should be stored (flags, names of kind nodes, relation between node types)? This information will be needed later for validation of AST
 
 ===== Future Scope =====
-This implementation of RFC can be used later for building an API for annotations (metadata) to return values as AST nodes, as well, as Design-By-Contract handler, that operates on AST.
+This implementation of RFC can be used later for building userland parser extensions (based on zend_ast_process() hook). We could allow userland extensions to hook into the compilation process. This would allow extensions to implement some types of language features, for example, Design-by-Contract verifying, Aspect-Oriented programming, analysis of annotation metadata and much more.
 
 ===== Proposed Voting Choices =====
-Not decided yet.
+Target version:
+  - 7.0
+  - 7.x
+  - Do not include this API into core
 
+Implementation paradigm:
+  - Object-oriented: Php\Parser\Engine
+  - Functional: ast_xxx() functions
+
+Namespace:
+  - None (top-level)
+  - Php\Parser\
+  - Ast\
 
 ===== Patches and Tests =====
 No patch is available at the moment.
@@ -269,9 +172,11 @@ No information yet.
 ===== References =====
   - PHP RFC: Abstract syntax tree https://wiki.php.net/rfc/abstract_syntax_tree
   - PHP-AST Extension https://github.com/nikic/php-ast
+  - Compiler hook for altering the AST pre-compilation https://github.com/php/php-src/commit/1010b0ea4f4b9f96ae744f04c1191ac228580e48
   - Userland PHP Parser https://github.com/nikic/PHP-Parser
   - Userland PHP-Token-Reflection https://github.com/Andrewsville/PHP-Token-Reflection
+  - Abstract Syntax Trees API in Python Language https://docs.python.org/2/library/ast.html
 
 
 ===== Rejected Features =====
-None
+  - Userland parser extensions - need more time to clarify details, possible targets are 7.x or 8.0
