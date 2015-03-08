@@ -1,27 +1,34 @@
 ====== PHP RFC: Generator Delegation ======
-  * Version: 0.1
+  * Version: 0.2.0
   * Date: 2015-03-01
   * Authors: Daniel Lowrey <rdlowrey@php.net>
+  * Contributors: Bob Weinand <bwoebi@php.net>
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/generator-delegation
 
 ====== Abstract ======
 
-This RFC proposes new ''yield * <expr>'' syntax allowing ''Generator'' functions to delegate operation to ''Traversable'' objects and arrays. The proposed syntax allows the factoring of ''yield'' statements into smaller conceptual units in the same way that discrete class methods simplify object-oriented code. The proposal is conceptually related to and requires functionality proposed by the forerunning [[rfc:generator-return-expressions|Generator Return Expressions RFC]].
+This RFC proposes new ''yield from <expr>'' syntax allowing ''Generator'' functions to delegate operation to ''Traversable'' objects and arrays. The proposed syntax allows the factoring of ''yield'' statements into smaller conceptual units in the same way that discrete class methods simplify object-oriented code. The proposal is conceptually related to and requires functionality proposed by the forerunning [[rfc:generator-return-expressions|Generator Return Expressions RFC]].
 
 ====== Proposal ======
 
 The following new syntax is allowed in the body of generator functions:
 
 <code php>
-    yield * <expr>
+    yield from <expr>
 </code>
 
-In the above code ''<expr>'' is any expression that evaluates to a ''Traversable'' object (or array). This
+In the above code ''<expr>'' is any expression that evaluates to a ''Traversable'' object or array. This
 traversable is advanced until no longer valid, during which time it sends/receives values directly
 to/from the delegating generator's caller. If the ''<expr>'' traversable is a ''Generator'' it is
 considered a subgenerator whose eventual return value is returned to the delegating generator as the
-result of the origin ''yield *'' expression.
+result of the originating ''yield from'' expression.
+
+==== Terminology ====
+
+  * A "delegating generator" is a ''Generator'' in which the ''yield from <expr>'' syntax appears.
+
+  * A "subgenerator" is a ''Generator'' used in the ''<expr>'' portion of the ''yield from <expr>'' syntax.
 
 ==== Prosaically ====
 
@@ -31,7 +38,7 @@ result of the origin ''yield *'' expression.
 
   * Exceptions thrown by traversable/subgenerator advancement are propagated up the chain to the delegating generator.
 
-  * Upon traversable completion ''null'' is returned to the delegating generator if the traversable is NOT a generator. If the traversable is a generator (subgenerator) then the its return value is sent to the delegating generator as the value of the ''yield *'' expression.
+  * Upon traversable completion ''null'' is returned to the delegating generator if the traversable is NOT a generator. If the traversable is a generator (subgenerator) its return value is sent to the delegating generator as the value of the ''yield from'' expression.
 
 ==== Formally ====
 
@@ -39,7 +46,7 @@ The proposed syntax
 
 <code php>
 $g = function() {
-    return yield * <expr>;
+    return yield from <expr>;
 };
 </code>
 
@@ -76,14 +83,93 @@ $g = function() {
 };
 </code>
 
-==== Terminology ====
 
-  * A "delegating generator" is a ''Generator'' in which the ''yield * <expr>'' syntax appears.
+===== Rationale =====
 
-  * A "subgenerator" is a ''Generator'' used in the ''<expr>'' portion of the ''yield * <expr>'' syntax.
+A major impetus for generator delegation is refactoring and readability. At its core, this is
+the same guiding principle employed when returning values from discrete class methods. Imagine a
+class method from which no return value is possible. In such a scenario we //could// store the result
+in an instance property and subsequently retrieve it from the context of the calling code. However,
+this kind of superfluous state quickly becomes difficult to reason about.
+
+Additionally, we recognize that functional contexts lack the additional stateful context in which
+to store results. In the absence of the standard input-output paradigm there's no way to access the
+eventual result of a generator's pausable computations. Of course, it //is// possible to work around this
+suboptimal situation with references and closure ''use'' binding but these indirect approaches are
+instantly eliminated when Generator functions are allowed to return expressions. Return values minimize
+cognitive overhead in such cases by allowing programmers to directly associate an individual operation with
+its eventual result.
+
+''yield from'' -- at its heart -- is nothing more than the application of standard factoring practices
+to allow the decomposition of complex operations into smaller cohesive units.
+
+==== Use-Case: Factored Generator Computations ====
+
+In this simple example we demonstrate the use of ''yield from'' to factor out a more complex operation
+into multiple discrete generators. Callers of ''myGeneratorFunction'' do not care from whence the
+individual yielded values came (nor should they). Instead, they simply iterate over the yielded values
+awaiting the generator function's eventual return.
+
+<code php>
+    function myGeneratorFunction($foo) {
+        // ... do some stuff with $foo ...
+        $bar = yield * factoredComputation1($foo);
+        // ... do some stuff with $bar ...
+        $baz = yield * factoredComputation2($bar);
+
+        return $baz;
+    }
+    function factoredComputation1($foo) {
+        yield ...; // pseudo-code (something we factored out)
+        yield ...; // pseudo-code (something we factored out)
+        return 'zanzibar';
+    }
+    function factoredComputation2($bar) {
+        yield ...; // pseudo-code (something we factored out)
+        yield ...; // pseudo-code (something we factored out)
+        return 42;
+    }
+</code>
 
 
-===== Examples =====
+==== Use-Case: Generators as Lightweight Threads ===
+
+Perhaps the most powerful feature of Generator functions is their support for pausing execution
+with the capacity for later resumption. This capability gives applications a mechanism to
+implement asynchronous and concurrent architectures even in a traditionally single-threaded language
+like PHP. With simple userland task scheduling systems interleaved generators become lightweight
+threads of execution for concurrent processing tasks.
+
+In the absence of generator return values, though, applications face an environment where "background"
+tasks can be offloaded without a standardized way to return the eventual results the result.
+This is one reason why this proposal depends on the acceptance of the Generator Return Expressions RFC.
+The other reason return values are required stems from the previously discussed refactoring principle.
+Specifically: code using generators for threaded execution can benefit from subgenerators behaving
+like ordinary functions which accept values and return results.
+
+Using the proposed syntax an ordinary function ''foo''
+
+''$baz = foo($bar);''
+
+can be transformed into a subgenerator delegation of the form
+
+''$baz = yield from foo($bar);''
+
+where ''foo'' is a pausable generator. In this manner applications can create powerful userland concurrency
+abstractions without the cognitive overhead often associated with threaded multitasking. In the
+above example generator delegation allows the language to do the heavy lifting while the programmer
+need only concern herself with the input, ''$bar'', and the eventual output, ''$baz''.
+
+In short: generator delegation allows programmers to reason about the behaviour of the concurrent code
+simply by thinking of ''foo()'' as an ordinary function which can be suspended using a ''yield'' statement.
+
+**NB:** The actual implementation of single-threaded concurrency schedulers is outside the scope of
+this document. This RFC focuses only on the language-level machinery needed to make such tools more
+feasible in userland. It should be obvious that simply moving code into a generator function will
+not instantly make it massively concurrent.
+
+
+===== Basic Examples =====
 
 Delegating to another generator (subgenerator)
 
@@ -98,11 +184,36 @@ function g1() {
 
 function g2() {
   yield 1;
-  yield * g1();
+  yield from g1();
   yield 5;
 }
 
 $g = g2();
+foreach ($g as $yielded) {
+    var_dump($yielded);
+}
+
+/*
+int(1)
+int(2)
+int(3)
+int(4)
+int(5)
+*/
+</code>
+
+Delegating to an array
+
+<code php>
+<?php
+
+function g() {
+  yield 1;
+  yield from [2, 3, 4];
+  yield 5;
+}
+
+$g = g();
 foreach ($g as $yielded) {
     var_dump($yielded);
 }
@@ -123,7 +234,7 @@ Delegating to non-generator traversables
 
 function g() {
   yield 1;
-  yield * [2, 3, 4];
+  yield from new ArrayIterator([2, 3, 4]);
   yield 5;
 }
 
@@ -141,7 +252,7 @@ int(5)
 */
 </code>
 
-The yield* expression value
+The ''yield from'' expression value
 
 <code php>
 <?php
@@ -154,7 +265,7 @@ function g1() {
 
 function g2() {
   yield 1;
-  $g1result = yield * g1();
+  $g1result = yield from g1();
   yield 4;
   return $g1result;
 }
@@ -174,41 +285,119 @@ int(42)
 */
 </code>
 
-===== Rationale =====
 
-@TODO: Refactoring and readability
 
-@TODO: Generators as lightweight threads
+===== Selected Implementation Details =====
 
-===== Open Issues =====
+The delegation implementation builds on the patch submitted as part of the Generator Return Expressions RFC.
+This implementation adds the following new parsing token:
 
-  * Is an alternative syntax (e.g. ''yield from'' or ''yield use'') preferable?
+''%token T_YIELD_FROM   "yield from (T_YIELD_FROM)"''
 
-  * Should sending a value to the delegating generator via ''Generator::send()'' result in an exception if the delegate traversable is not a generator (and therefore cannot receive values)?
+The primary advantage of this approach is the addition of a readable and semantically meaningful syntax
+without reserving a new ''from'' keyword.
 
-  * Can ''array'' expressions be allowed in ''yield * <expr>'' as they are not internally considered ''Traversable''?
 
-  * Should manually advancing a subgenerator outside the context of the delegating generator result in an error? Because PHP generators are stateful object instances the potential exists for manual iteration of a subgenerator currently in-use via ''yield *''. Manual subgenerator advancement may not serve any valid use-case and disallowing this behavior might simplify the implementation.
+==== Subgenerator Keys ====
 
-  * Should a "shared" subgenerator that is already complete return its completed return value to the delegating generator? i.e. should the following code result in ''null'' or ''42''?
+As Generator iteration is always associated with an accompanying key there exists the potential that
+a given delegation may return the same key multiple times from separate individual generators. This
+was deemed unproblematic for three primary reasons.
+
+  * Multiple occurrences of the same key can easily occur in the existing generator implementation should a function ''yield'' the same key more than once.
+
+  * If a caller derives semantic meaning from yielded keys the burden is placed on generator value producers to yield keys sensible for problem domain in which they exist. The burden here is not on the language to avoid duplicate keys.
+
+  * The ''Traversable'' interface represents neither a hash map nor a traditional contiguously indexed array and its implementations have no special requirement to expose data access to API consumers via index keys. As such, key recurrence exposes no risk for overwriting existing internal generator data.
+
+
+==== Shared Subgenerator Behavior ====
+
+PHP generator functions are implemented as stateful object instances. Although "sharing" valid generator
+instances does not present any immediately obvious use-cases, such behavior is still supported. Here
+we note some of the characteristics of shared generator functions.
+
+If a "shared" subgenerator that has previously iterated to completion is passed in a ''yield from''
+expression its completed return value is immediately returned to the delegating generator. In code:
 
 <code php>
-function sub() {
+function subgenerator() {
     yield 1;
     return 42;
 }
 function delegator(Generator $shared) {
-    return yield * $shared;
+    return yield from $shared;
 }
 
-$shared = sub();
+$shared = subgenerator();
 while($shared->valid()) { $shared->next(); }
 $delegator = delegator($shared);
 while($delegator->valid()) { $delegator->next(); }
-
-// null or 42?
-$result = $delegator->getReturn();
+var_dump($delegator->getReturn()); // int(42)
 </code>
+
+
+Manually advancing a shared subgenerator outside the context of the delegating generator will not
+result in an error. In code:
+
+<code php>
+function subgenerator() {
+    yield 1;
+    yield 2;
+    yield 3;
+    yield 4;
+    return 42;
+}
+function delegator(Generator $shared) {
+    return yield from $shared;
+}
+
+$shared = subgenerator();
+$shared->next();
+$delegator = delegator($shared);
+var_dump($delegator->current());
+$shared->next();
+while($delegator->valid()) {
+    var_dump($delegator->current());
+    $delegator->next();
+}
+var_dump($delegator->getReturn());
+
+/*
+int(2);
+int(4);
+int(42)
+*/
+</code>
+
+==== Error States ====
+
+There are two scenarios in which ''yield from'' usage can result in a fatal error or uncaught exception:
+
+  * Using ''yield from <expr>'' where <expr> evaluates to a generator which previously terminated with an uncaught exception results in ''E_RECOVERABLE_ERROR'' (will convert to ''EngineException'' pending the outcome of the [[rfc:engine_exceptions_for_php7|Engine Exceptions RFC]]).
+
+  * Using ''yield from <expr>'' where <expr> evaluates to something that is neither ''Traversable'' nor an array throws an ''Exception'' (will convert to ''EngineException'' pending the outcome of the [[rfc:engine_exceptions_for_php7|Engine Exceptions RFC]])
+
+  
+===== Rejected Ideas =====
+
+The original version of this RFC proposed a ''yield *'' syntax. This was rejected in favor of
+''yield from'' on the basis that it would break backwards compatibility. Additionally, the ''yield *''
+form was considered a less readable option that the current proposal.
+
+
+===== Criticisms =====
+
+It has been suggested during the discussion phase that a mechanism other than ''return'' be used in
+subgenerators to establish the value returned to delegating generators by ''yield from'' expressions.
+The following counter-arguments are provided to this criticism:
+
+  * Forms other than ''return'' would undermine the proposal's stated goal of conceptualizing subgenerators as suspendable functions. Implementing a different syntax would inhibit this understanding by fostering the idea of generators as being something other than "real" functions.
+
+  * ''return'' expressions have applicable semantics, known characteristics and low cognitive overhead.
+
+  * Other popular dynamic languages inhabiting a similar space to PHP implement generator delegation value resolution using the ''return'' syntax proposed here. Sharing common vernacular for similar features lowers cognitive barriers for developers coming to PHP from diverse backgrounds.
+
 
 ===== Other Languages =====
 
@@ -229,7 +418,7 @@ Python 3.3 generators support ''yield from'':
 
 **JavaScript**
 
-Javascript ES6 generators support the ''yield *'' syntax:
+Javascript ES6 generators support the ''yield from'' syntax:
 
 <code javascript>
 function* g1() {
@@ -269,17 +458,27 @@ Existing generator semantics are unaffected.
 
 ===== Proposed Voting Choices =====
 
-Two voting choices are proposed:
+Two voting choices are proposed†:
 
-1. **YES**, implement the ''yield *'' syntax allowing generator delegation in PHP 7
+  * **YES**, implement the ''yield from'' syntax allowing generator delegation in PHP 7*
 
-2. **NO**, do not modify existing Generator behavior
+  * **NO**, do not modify existing Generator behavior
 
 A 2/3 "Yes" vote is required to implement this proposal.
 
+†: The success of this vote depends on the success of the accompanying [[rfc:generator-return-expressions|Generator Return Expressions]] RFC.
+Should Generator Return Expressions be rejected the voting outcome of this RFC will be rendered moot.
+
 ===== Patches and Tests =====
 
-There is no patch at this time. This section will be updated in the coming days once a "final" implementation is ready.
+The current patch is approaching "final" status and can be found here:
+
+https://github.com/bwoebi/php-src/commits/coroutineDelegation
+
+The patch was written by Bob Weinand and is based upon the implementation branch written by Nikita Popov
+for the [[rfc:generator-return-expressions|Generator Return Expressions]] RFC. Extensive .phpt tests
+exist in the implementation branch and readers are encouraged both to compile with the proposed
+implementation and read the test cases to ascertain the full nature of the proposal.
 
 ===== Implementation =====
 
@@ -293,5 +492,8 @@ TBD
 
   * [[https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/yield*|JavaScript yield* Syntax]]
 
-===== Rejected Features =====
-TBD
+
+===== Changelog =====
+
+  * v0.2.0 Moved to ''yield from'' instead of ''yield *''+ massive textual additions
+  * v0.1.0 Initial proposal
