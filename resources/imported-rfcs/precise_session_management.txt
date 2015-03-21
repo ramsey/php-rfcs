@@ -1,0 +1,226 @@
+
+====== PHP RFC: Precise Session Management ======
+  * Version: 1.0
+  * Date Created: 2013-10-30
+  * Date Updatead: 2015-03-21
+  * Author: Yasuo Ohgaki <yohgaki@php.net>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/session_regenerate_id
+  * Renamed: https://wiki.php.net/rfc/precise_session_management
+
+===== Introduction =====
+
+This proposal is session management design issue fix/improvement.
+
+==== session_regenerate_id() ====
+
+Keeping HTTP session as secure as possible is what the session manager's task. **Session manager can improve HTTP session security without user code modification while keeping compatibility with existing applications.** Please note that this RFC is for session manager behavior.
+
+session_regenerate_id() is used to generate new session ID. It's better to delete old session data to reduce risk of session hijack. However, session_regenerate_id() leave old session data by default currently. (i.e. session_regenerate_id(FALSE) is the default) Old session data is active and usable until GC. 
+
+Old session is left active for reliable session ID regeneration. There are many reasons why old session is left. Examples are:
+  * Browsers connect to web server with multiple connections. 
+  * Mobile network may loose radio, may have hand over, etc. 
+  * Large network providers have multiple gateways for off loading traffic and packets may arrive out of order. 
+For reliable session ID regeneration, only short periods (few seconds for wired connections, few minutes for mobile connection) is enough. 
+
+
+**Leaving old session opens window to attacker widely:**
+  - Old session lives long term and never expires if there is access to it. i.e. Attacker may abuse stolen session forever.
+  - There is no mechanism to detect possibles attack even if session manager may detect attacks.
+
+**Counter measure for session hijack:** Requirement - Session ID regeneration must be reliable.
+  - Make sure old session is deactivated/deleted after certain period.
+  - Raise error/exception for invalid access. (Raise error for should be deleted session access)
+
+**Problem of immediate old session deletion:**
+  - Make session ID regeneration unreliable. (Unacceptable)
+  - Remove alarm for possible attacks. (No detection = Insecure)
+
+**"Make sure old session is deleted certain period"** and **"Raise error/exception for invalid access"** provides much better security than current way or immediate deletion.
+
+Errors may be raised for either legitimate user or attacker. If error is raised for legitimate user, legitimate user could know they are under attack. (Possibly network is dangerous or app has vulnerability) If error is raised for attacker, attacker could know they might be caught by illegal access.
+
+===== Session Expiration =====
+
+Current session expiration is not precise as it depends on probability for deletion. This is similar to session_regenerate_id() issue currently exists. Session expiration should be more precise.
+
+
+==== Risk of stolen session ====
+
+Stealing session ID is easy regardless of HTTPS. Attacker can set up fake router by ARP spoofing. Most networks do not have ARP spoofing prevention, even detection. For HTTP, attacker can view session ID simply. For HTTPS, attacker can set up transparent HTTPS stripping proxy and steal session ID. Most users do not care much if they are connecting via HTTPS or not.
+
+Above attack can be done by existing tools. i.e. Script kiddies' task.
+
+If you are curious, search [[https://www.youtube.com/results?search_query=arp%20spoofing%20tutorial&sm=3|YouTube]] or net.
+
+==== This is known design issue for a long time ====
+
+Even if there is only recent bug report for this, this bug is known more than 10 years since when session_regenerate_id() is introduced.
+
+https://bugs.php.net/bug.php?id=69127
+
+
+
+===== Proposal =====
+
+  * Add transparent <nowiki>__SESSION_TTL__</nowiki> timestamp to session data 
+  * Add session.ttl INI and deprecate session.gc_maxlifetime
+  * Add session.destroy_ttl INI
+  * Add session.ttl_freq INI
+  * Add session_gc() function
+  * Add $immediate_destroy flag for session_destroy([$immediate_destroy=FALSE]) (Be consistent with session_regenerate_id())
+
+==== How session_regenerate_id() will work ====
+
+**Add 'session.destory_ttl' INI directive**(INI_ALL, default 300 seconds) and **"make sure old session is deleted certain period"**.
+
+This can be achieved by time stamp in session data. When session_regenerate_id()/session_destroy() is called without parameter, session manager sets
+
+<code php>
+  $_SESSION['__SESSION_TTL__'] = time() + ini_get('session.destroy_ttl');
+</code>
+
+for old session data. This is pseudocode. User will never see $_SESSION['__SESSION_TTL__'] as it is removed/added upon session data serialization internally in session module. 
+
+$_SESSION['<nowiki>__SESSION_TTL__</nowiki>'] also stores new session ID when TTL is set by session_regenerate_id(). 
+
+   string_timestamp\0string_session_id
+
+If browser accesses to be deleted session (old session), session module uses new session ID rather than old and try to set correct new ID. i.e. Send new session ID cookie to browser. This prevents lost session under unstable network.
+
+If session module finds $_SESSION['<nowiki>__SESSION_TTL__</nowiki>'] and timestamp is old, delete old session data and create new session with new session ID. E_WARNING error is raised for this because it means either too short TTL or user is under attack.
+
+When session_regenerate_id(true)/session_destroy(true) is called, session module destroy session data immediately.
+
+Users may add $_SESSION['<nowiki>__SESSION_TTL__</nowiki>']. When this is happen, session module raise E_WARNING for this.
+
+
+=== Why session.destroy_ttl default is 300 seconds and configurable ===
+
+Session data may be lost when network connection is unstable. For example, when user ender elevator or subway connection can be lost in a way that session data is lost. 300 seconds would be enough for most elevators. However, it may not be enough for subways. PHP developer may require longer TTL for better stability.
+
+Some PHP developers may want to be more strict and need shorter TTL even if it could result in lost session on occasions. They may set 30 seconds TTL
+which would be long enough for stable connection in most cases.
+
+=== Why this is secure than now ===
+
+Currently, users must call session_regenerate_id() without destroy flag to have stable session. Therefore, old session data is valid as long as it is accessed even if it should be discarded as invalid session. Attackers can take advantage of this behavior to keep stolen session forever.
+
+
+===== How session expiration will work =====
+
+Session expiration has similar issue. Session module does not control expiration precisely. Timestamp can be used to expire session data precisely. Session module has lazy write that omit write for the same session data to achieve better performance. If session data is updated too frequently, it spoils the feature, therefore session.expire_freq(Default: 300 seconds, INI_ALL) INI is added.
+
+Pseudo code  
+
+<code php>
+  if ($_SESSION['__SESSION_TTL__'] < time() - ini_get('session.ttl')) {
+     session_destroy();
+  } 
+  else if ($_SESSION['__SESSION_TTL__'] < time() + ini_get('session.ttl_freq')) {
+     $_SESSION['__SESSION_TTL__'] = time() + ini_get('session.ttl');
+  }
+</code>
+
+===== Precise __SESSION_TTL__ data definition =====
+
+  "TTL Type"+"Expiration Timestamp"+"\0"+"New Session ID"
+
+where
+  * TTL Type: TTL type. "E" for expiration and "D" for destroy.
+  * Expiration Timestamp: String timestamp
+  * \0: Data separator
+  * New session ID: Newly generated session ID by session_regenerate_id()
+
+Examples:
+
+  E1426899951 // Expire timestamp
+  D1426899963 // Destroy timestamp
+  D1426898950\089278606aa639bf1c4cabd6d975fe6d950738702 // Destroy timestamp and new session id
+  
+===== session_gc() =====
+
+Timestamp eliminates need of probability based expiration. There should be API for GC.
+
+
+===== session.ttl =====
+
+session.gc_maxlifetime is no longer proper INI for expiration control. There should be proper INI for TTL.
+
+
+
+===== Backward Incompatible Changes =====
+
+  * If user script has <nowiki>__SESSION_TTL__</nowiki> key in $_SESSION, it may break application.
+  * Raised error may break application.
+  * Session data may have <nowiki>__SESSION_TTL__</nowiki> key and reading/decoding data directly will see the data.
+
+===== Proposed PHP Version(s) =====
+
+PHP 7.x
+
+===== SAPIs Impacted =====
+
+  * None
+
+===== Impact to Existing Extensions =====
+
+  * Session
+
+===== New Constants =====
+
+  * None
+
+===== php.ini Defaults =====
+
+If there are any php.ini settings then list:
+  * hardcoded default values
+  * php.ini-development values
+  * php.ini-production values
+
+New
+
+  * "session.ttl = 3900" for all. (3900 seconds = 1 hour + session.ttl_freq, INI_ALL. Replaces session.gc_maxlifetime)
+  * "session.destroy_ttl = 300" for all. (300 seconds, INI_ALL)
+  * "session.ttt_freq = 300" for all. (300 seconds, INI_ALL)
+
+Existing
+  * "session.gc_divisor = 10000" for all. Currently, 100 hardcoded, 1000 for development/production.
+
+Deprecated
+  * "session.gc_maxlifetime" "session.ttl" should be used instead. It is supported until PHP 7.3.
+
+===== Open Issues =====
+
+Make sure there are no open issues when the vote starts!
+
+===== Unaffected PHP Functionality =====
+
+Other than session management, there is no affected functionality.
+
+===== Future Scope =====
+
+===== Vote =====
+
+  * Add <nowiki>__SESSION_DESTORY_TTL__</nowiki> time stamp Yes/No
+
+
+===== Patches and Tests =====
+
+TBD
+
+===== References =====
+
+  * http://us3.php.net/session_regenerate_id
+  * https://bugs.php.net/bug.php?id=69127 (Bug report)
+  * https://wiki.php.net/rfc/session-lock-ini#proposal_4_-_lazy_destroy (Previous attempt)
+
+===== ChangeLog =====
+
+  * 2015/03/21 - Added new session ID handling.
+  * 2015/03/20 - Change INI directive name.
+  * 2014/03/19 - Add exception option as Stas suggested.
+  * 2014/03/18 - Change RFC to propose time stamping.
+  * 2013/10/30 - Added details and message option.
+  * 2013/10/29 - Created RFC
