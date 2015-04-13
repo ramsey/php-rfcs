@@ -1,0 +1,413 @@
+====== PHP RFC: Static Class Constructor ======
+  * Version: 0.1
+  * Date: 2015-04-13
+  * Author: Johannes Ott <mail@deroetzi.de>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/static_class_constructor
+
+===== Introduction =====
+
+Objects are stateful by the state of all of their non-static and static properties. The same is for classes themselve for being stateful by the state of all of their static properties. Everytime you have a state, there may be the need to initialize this state before usage. While there is already a language method for object state to be initialised with the object constructor, there is no such method for the state of a class.
+
+While the creation of a instance is explicitly done from outside or inside the class by calling the public constructor, the creation of a class itself is implicitly done by the language on loading time. That's why the initialization of the state of a class, which is needed by the class to work correctly, should be in the responsibility of the class itself, called by the language not by any user-code.
+
+As there a several implementations in user-land, which load all classes not on demand but at the beginning of run, the loading time itself of each class is not the correct moment to do the initialization, because of very much unnecessary calculation and resources usage maybe done for never used classes in current run. To avoid such unnecessary things, the right moment to initialize is directly before the first call to a class.
+
+As I will show next, there are several user-land patterns, which more or less meet all of these requirements, but in my opinions they could be done a nicer way by introducing a static class constructor (cctor) to PHP as known by other OOP-languages as well:
+
+**Example 1**
+
+Fullfills all requirements, but can be done with less user-code and a little bit better performance by moving the "be initialized" checks to the interpreter:
+
+<code php>
+<?php
+    class Example {
+        private static $bInitialized = false;
+
+        ...
+
+        private static function init() {
+            //Do initialization
+            self::$bInitialized = true; 
+        }
+
+        public function __construct() {
+            if (!self::$bInitialized) {
+                self::init();
+            }
+
+            ...
+        }
+
+        public static function callStatic() {
+            if (!self::$bInitialized) {
+                self::init();
+            }
+
+            ...
+        }
+
+        public function call() {
+            ...
+        }
+
+        ...
+    }
+?>
+
+//Or for better code coverage at testing a little bit modified
+
+<?php
+    class Example {
+        private static $bInitialized = false;
+
+        ...
+
+        private static function init() {
+            if (self::$bInitialized) {
+                return;
+            }
+            //Do initialization
+            self::$bInitialized = true; 
+        }
+
+        public function __construct() {
+            self::init();
+            
+            ...
+        }
+
+        public static function callStatic() {
+            self::init();
+            
+            ...
+        }
+
+        public function call() {
+            ...
+        }
+
+        ...
+    }
+?>
+</code>   
+
+**Example 2** 
+
+Fullfills the requirements except that the responsibility of needed initialization is outside of the class and only works in applications using autoloader
+
+<code php>
+
+//Autoloader
+
+<?php
+    function __autoload($class) {
+        //Load class-file
+
+        if (method_exists($class, 'init')) {
+            $class::init();
+        }
+    }
+?>
+
+//Classfile
+
+<?php
+    public class Example() {
+        ...
+
+        public static function init() {
+            //Do initialization
+        }
+
+        public function __construct() {
+            ...
+        }
+
+        public static function callStatic() {
+            ...
+        }
+
+        public function call() {
+            ...
+        }
+
+        ...
+    }
+
+?>
+</code>
+
+**Example 3**
+
+Gives again the responsibility of initialization to outside of the class and does not avoid unnecessary calls to never used classes for application with no autoloader.
+
+<code php>
+//Classfile
+<?php
+    public class Example() {
+        ...
+
+        public static function init() {
+            //Do initialization
+        }
+
+        public function __construct() {
+            ...
+        }
+
+        public static function callStatic() {
+            ...
+        }
+
+        public function call() {
+            ...
+        }
+
+        ...
+    }
+
+    Example::init();
+?>
+</code>
+
+**Discussions**
+
+For already having a huge amount of discussion points on this proposal on the internal mailing list I decided to make a seperated discussion section below. There I will try to list all already discussed points and my opinion to them.
+
+===== Proposal =====
+
+The proposal is to introduce a new magic method to classes implementing the above defined requirements for a static class constructor.
+
+Code example of the method:
+
+<code php>
+<?php
+    class Example {
+        ...
+
+	/**
+         * Static class constructor is called on first call to either 
+         * object constructor or any public or protected static method 
+         * or property of this class.
+         *
+         * @param void
+         * @return void
+         * @throws Exception 
+         */
+        private static function __static() {
+            //Initialize static properties.
+        }
+
+        ...
+    }
+?>
+</code>
+
+Method details and explanation for decisions:
+
+- Name: %%__static%%
+I have looked to several other oop-languages already having this class constructor. For example C# calls it "cctor" and Java calls it just "static" some call it initStatic. I prefer the "static of Java because I think that explains better then "cctor" for what purpose it should be used and is shorter to write then "initStatic"
+
+- Accesibility: private
+To keep the responsibility encapsulated into the class
+
+- Context: static
+For being inside class context
+
+- Parameters: void
+Because the language calling it, does not know any parameters
+
+- Return-Type: void
+
+- Throws: Exception in case of an error
+
+- Trigger for "magic" method call: First call to class, either first call to %%__construct(...)%% or first call to any public or protected static method or property of the class
+
+===== Proposed PHP Version(s) =====
+
+ - PHP 7.X
+
+===== RFC Impact =====
+
+There should be no impact to any libraries or frameworks that follows the userland coding conventions.
+
+===== Open Issues =====
+
+At pre-rfc-discussion there was the question whether following code is valid:
+
+<code php>
+
+class Foo {
+    private static function __static() {
+        throw new Exception("boom");
+    }
+}
+
+while(true) {
+    try {
+        $foo = new Foo;
+    } catch (Exception ex) {}
+}
+
+</code>
+
+What is sure for me that the static class constructor should be able to throw a catchable Exception for user error handling, if it is not possible to initialize. The open issue for me is, what the behavior on recalling the static class constructor afterward is. There are two possible behaviors I do not know which one I really would prefer so far.
+
+Two possible behaviors:
+
+1. On recall of the static class constructor a fatal error is raised to ensure it is only called once and initialized before exception was thrown properties will not be reinitialized. This will prohibit programmers to repair
+the situation and afterwards to retry.
+
+2. The static class constructor is recalled as long as it ends normally, without throwing a exception. This could lead to deadlock situations in user-code.
+
+As long as behavior two gives more opportunties to the programmer I slightly prefer that one, but there may be enough arguments for behavior one as well. If we cannot clearify this in pre-vote discussion, I will do a seperated vote on this implementation detail.
+
+===== Unaffected PHP Functionality =====
+
+Global functions and non-static class methods beside the %%__construct(...)%%  
+
+===== Future Scope =====
+
+- As you can see in discussion section, may be there is the need of a class destructor as well, but at the moment this is not part of this proposal.
+
+- Maybe it can be useful to make a classloading ini-file, which is evaluated directly by the interpreter, for example for factory-classes, giving back different types of instances on such configuration. Or past some configuration from the php.ini to some libraries or extensions. For this purpose it may be useful in future to have input parameters.
+
+===== Proposed Voting Choices =====
+
+1. Proposal requires 2/3 majority for being a language change.
+
+(2. Optional see open issues) For being a implementation detail of the proposal 50%+1 majority   
+
+===== Discussions =====
+
+In this section I will try to summarize all discussion points and will try to figure out how in my personal opinion they really touch the proposal or not.
+
+1. A argument I read several times is that within being inside the static context there could be some "crucial" things be done, for example opening and storing some resource handles to static properties, which means they couldn't be done explicit closed.
+
+- First of all I used words like "crucial" or "horrific" during discussion as well, this was just to polarize inside the discussion. In my opinion there is no crucial code at all, beside the code which is not doing what programmer expected to do. There is only code, which is not as suitable for a special use case as another one would be for different reasons (less dependencies, performance, better readable code, side-effects, etc.). But this mainly depends on the special use case and should always be inside the decision of each programmer or a software architect analyzing the special use case.
+
+- Second the simple fact that anyone could use a language method to do some unsuitable things, while it is helpful for others, who fully understand the usage and especially the side-effects of a feature, is in my opinion absolutely no contra argument for a RFC.
+
+- But as I am an instructor for beginners for several years I agree to the fact that the concept of static-context is one of the concepts in oop-programming which seems to be really hard to understand with all its side-effects to beginners. A suggestion, which may help is to create an extra documentation page about static context with a DOs and DONTs list on it to help everyone to get familiar with this concept. But as being a common problem of static-context I think that should not be part of this proposal. The documentation of the static class constructor can then although refer to this page.
+
+2. Possibility of inheritance of the class constructor.
+
+A class should have as less dependencies to another as possible. To give the possibility to inherit the class constructor will produce a huge amount of relationships not only between the superclass and it's subclasses but although between each subclass. For that reason this is no suitable feature of a static class constructor in my point of view. 
+
+For a simple example:
+
+<code php>
+<?php
+    abstract class A {
+        protected static $value;
+
+        protected static function __static() {
+            switch (get_called_class()) {
+               case 'B':
+                   self::$value = 1;
+                   break;
+               case 'C':
+                   self::$value = 2;
+                   break;
+               default:
+                   self::$value = 3;
+           }
+       }
+   }
+
+   class B extends A {
+       public static function isOne() {
+           return self::$value == 1;
+       }
+   }
+
+   class C extends A {
+       public static function isTwo() {
+           return self::$value == 2;
+       }
+   }
+?>
+</code>
+
+3. How the error and exception handling should work?
+
+See open issues section for this topic.
+
+4. Need of a class destructor as well to handle unload order dependencies between classes.
+
+- The only order dependency between class A and class B should be an usage dependency either class B extends A or A is used static or non-static inside class B. In both cases as I can see for now, the language itself should do already everything correct by not unloading class A before class B, for doing unload by reverse creation time.
+
+- All other use cases I can imagine now, you should consider about using a instance instead of a direct static usage, which will trigger the object-destructor on unset the static property.
+
+- If someone can give me a suitable other example, I will think about this again. Until then this is just a possible future scope feature for me.
+
+5. Using explicit close feature on an example ResourcesPool class to close all opened resources (like ExamplePool::cleanupResources()) will break lazy-unloading, if class was not used before by calling the static constructor as well.
+
+- That is partly true, if called on a never used before Pool it will make an "unnecessary" call to static constructor. But on the one hand that is why I would use this feature only on pool-classes I surely know that they are used mostly on each page for example DatabaseConnectionPool. On the other hand it may be even necessary to call the static constructor to initialize some static properties necessary for the unload.
+
+- And for still being inside the user-code phase and not in the shutdown phase of the run nothing will break, by this "unnecessary" call.
+
+6. Everywhere you have to store a state of something you should use an instance instead of a class, by using for example a singleton pattern.
+
+- As I already tried to explain in introduction section the static properties are the state of the class. If the explained pattern always would be true the static context would be obsolete.
+
+- Even suggested singleton pattern depends on the static state intialized or not initialized state of the class. 
+
+- Singleton pattern is indeed a nice one but it doesnt make any sense to double each method to a private non-static and a public static method just for using an instance.
+
+For an example as suggested on mailing list:
+
+<code php>
+<?php
+    abstract class Config {
+        private static $instance;
+
+        private $arIni;
+
+        private function __construct() {
+            $this->$arIni = parse_ini_file('config.ini');
+        }
+
+        private static function getInstance() {
+            if (self::$instance == null) {
+                self::$instance = new Config();
+            }
+
+            return self::$instance;
+        }
+
+        private function _getHostname() {
+            return $this->arIni['hostname'];
+        }
+
+        public static function getHostname() {
+            return self::getInstance()->_getHostname();
+        }
+
+        ...
+    }
+?>
+</code>
+
+For config.ini content is already a kind of "static" data it is in my opinion much more suitable to do like this:
+
+<code php>
+<?php
+    abstract class Config {
+        private static $arIni;
+
+        private static function __static() {
+            $self::$arIni = parse_ini_file('config.ini');
+        }
+
+        public static function getHostname() {
+            return self::arIni['hostname'];
+        }
+
+        ...
+    }
+?>
+</code>
+
+To be continued...
