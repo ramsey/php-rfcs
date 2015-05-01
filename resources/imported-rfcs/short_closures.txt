@@ -1,17 +1,58 @@
 ====== PHP RFC: Short Closures ======
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2015-05-01
   * Author: Bob Weinand, bobwei9@hotmail.com
   * Status: Draft
   * First Published at: http://wiki.php.net/rfc/short_closures
 
 ===== Introduction =====
-When writing partial functions, quick Closures to be applied to an array, or just a minimal lambda to do nothing, we always have to do this tedious work and write //function () use ($thousand, $vars) { return $thousand * $vars; }// — This whole boilerplate. It just doesn't read nor write nicely inlined in a line. Therefore this RFC to make code more legible and writeable.
+Anonymous functions, also known as closures, allow the creation of functions which have no specified name. They are most useful as the value of callback parameters, but they have many other uses.
+
+The current implementation of anonymous functions in PHP is quite verbose compared to other languages. That makes using anonymous functions be more difficult than it could be, as there is both more to type, and more importantly the current implementation makes it hard to read (and so maintain) code that uses anonymous functions.
+
+A better syntax encourages functional code and partial applications (see the examples), which are a powerful tools people writing PHP code should be able to use as easily as they can be used elsewhere.
 
 ===== Proposal =====
-This RFC proposes the introduction of the ~> operator.
+This RFC proposes the introduction of the ~> operator to allow shorthand creation of anonymous functions to reduce the amount of 'boilerplate' needed to use them.
 
-The ~> operator defines a shorthand Closure which automatically use()'s all the used compiled variables (means: variable variables, compact() etc. won't be imported from defining call frame, only normally defined $variables).
+Current code:  
+<code php>
+function ($x) {
+    return $x * 2;
+}
+</code>
+
+would be equivalent to the new syntax:
+<code php>
+$x ~> $x * 2
+</code>
+
+Anonymous functions defined in this way will automatically use() all of the compiled variables in the local scope. See the 'Variable binding' section for more details.
+
+==== Syntax ====
+The syntax used to define a short hand anonymous function would be:
+
+  * Parameters. When the function has a single parameter the surrounding parentheses (aka round brackets) may be omitted. For functions with multiple parameters the parentheses are required.
+  * The new short closure operator ~>
+  * The body of the anonymous function. When the body of the function is a single expression the surrounding curly brackets and return keyword may be omitted. When the body of the function is not a single expression, the braces (and eventual return statement) are required.
+
+I.e. all of the following would be equivalent:
+<code php>
+$x ~> $x * 2
+$x ~> { return $x * 2;}
+($x) ~> $x * 2
+($x) ~> { return $x * 2; }
+</code>
+
+Omitting the parentheses when the function has multiple parameters will result in a parse error:
+<code php>
+$x, $y ~> {$x + y}  // Unexpected ','
+</code>
+
+Using the return keyword when braces have been omitted, will similarly give a parse error:
+<code php>
+($x, $y) ~> return $x + y; // Unexpected T_RETURN
+</code>
 
 Concrete syntax is (~> is right associative with highest possible associativity):
 <code>
@@ -24,74 +65,114 @@ Concrete syntax is (~> is right associative with highest possible associativity)
 | $variable ~> expression
 | $variable ~> { statements }
 </code>
+
 When a bare expression is used as second parameter, its result will be the return value of the Closure.
 
-===== Examples =====
-==== Simple ====
+==== Variable binding ====
+The position of this RFC is that the shorthand syntax is to allow anonymous functions to be used as easily as possible. Therefore, rather than requiring individual variables be bound to the closure through the ''use ($x)'' syntax, instead all variables in the scope where the anonymous function is defined will automatically be bound to the anonymous function closure.
+
+For example:
+
 <code php>
-$number = 5;
-$func = $a ~> $number * $a; /* $number is implicitly imported into the Closure */
-var_dump($func(10)); // int 15
+$a = 1;
 
-/* Compared to */
-$func = function($a) use ($number) {
-    return $number + $a;
-};
-</code>
+function foo(array $input, $b) {
+    $c = rand(0, 4);
 
-==== Quick applications to arrays ====
-<code php>
-/* Get a range from 2 to 10 with increment 2 */
-$array = array_map($x ~> $x * 2, range(1, 5));
-
-/* Compared to */
-foreach (range(1, 5) as $x) {
-    $array[] = $x * 2;
+    return array_map($x ~> ($x * 2) + $b + $c, $input);
 }
-/* or */
-$array = array_map(function($x) { return $x * 2; }, range(1, 5));
 </code>
 
+Variables $b and $c would be bound automatically to the anonymous function, and so be usable inside it. Variable $a is not in the scope of the function, and so is not bound, and so cannot be used inside the closure. e.g. this code will give an error:
 <code php>
-/* Let $array be an array filled with objects having property val. Sort them in reverse by that property. */
-usort($array, ($a, $b) ~> -($a->val <=> $b->val));
+$a = 1;
 
-/* Compared to */
-usort($array, function($a, $b) { return -($a->val <=> $b->val); });
-/* ... which will be probably multilined in a lot of places... */
-usort($array, function($a, $b) {
-    return -($a->val <=> $b->val);
-});
+function foo(array $input, $b) {
+    // Notice: Undefined variable: a in %s on line %d
+    return array_map($x ~> ($x * 2) + $b + $a, $input);
+}
+</code>
+
+If a user wants to avoid binding all variables automatically they can use the current syntax to define the anonymous function.
+
+===== Examples =====
+These examples cover some simple operations and show how the short-hand syntax is easier to read compared to the existing long-hand syntax.
+
+==== Array sort with user function ====
+Sort ''$array'' which contains objects which have a property named ''val'' in reverse.
+
+Current syntax:
+<code php>
+usort($array, 
+	function($a, $b) {
+		return -($a->val <=> $b->val); 
+	}
+);
+</code>
+
+New syntax:
+<code php>
+usort($array, ($a, $b) ~> -($a->val <=> $b->val));
+</code>
+
+==== Extracting data from an array and summing it ====
+Current syntax:
+<code php>
+function sumEventScores($events, $scores) {
+    $types = array_map(
+        function ($event) {
+            return $event['type'];
+        },
+        $events
+    );
+
+    return array_reduce(
+        $types,
+        function ($sum, $type) use ($scores) {
+            return $sum + $scores[$type];
+        }
+    );
+}
+</code>
+
+New syntax:
+<code php>
+function sumEventScores($events, $scores) {
+    $types = array_map($event ~> $event['type'], $events);
+    return array_reduce($types, ($sum, $type) ~> $sum + $scores[$type]);
+}
+</code>
+
+The calling code for this function would be:
+
+<code php>
+$events = array(
+    array(
+        'type' =>'CreateEvent',
+        'date' => '2015-05-01T16:19:33+00:00'
+    ),
+    array(
+        'type' =>'PushEvent',
+        'date' => '2015-05-01T16:19:54+00:00'
+    ),
+    //...
+);
+
+$scores = [
+    'PushEvent'          => 5,
+    'CreateEvent'        => 4,
+    'IssuesEvent'        => 3,
+    'CommitCommentEvent' => 2
+];
+
+sumEventScores($events, $scores);
 </code>
 
 ==== Partial application ====
-<code php>
-function partialAdd() {
-    return $left ~> $right ~> $left + $right;
-}
+The short hand syntax makes it easier to write functional code like a reducer by using the ability of shorthand anonymous functions to be chained together easily.
 
-/* Just to compare to the old equivalent */
-function partialAdd() {
-    return function($left) {
-        return function($right) use ($left) {
-            return $left + $right;
-        }
-    }
-}
-</code>
+Current syntax:
 <code php>
-/* Thanks to Levi Morrison for that example */
-function reduce(callable $fn) {
-    return $initial ~> $input ~> {
-        $accumulator = $initial;
-        foreach ($input as $value) {
-            $accumulator = $fn($accumulator, $value);
-        }
-        return $accumulator;
-    };
-}
-
-/* Compared to */
 function reduce(callable $fn) {
     return function($initial) use ($fn) {
         return function ($input) use ($fn, $initial) {
@@ -105,20 +186,34 @@ function reduce(callable $fn) {
 }
 </code>
 
-===== General thoughts =====
-==== Do we really need this? ====
-Ultimately, it does not add any additional possibilities which weren't already possible.
+New syntax:
+<code php>
+function reduce(callable $fn) {
+    return $initial ~> $input ~> {
+        $accumulator = $initial;
+        foreach ($input as $value) {
+            $accumulator = $fn($accumulator, $value);
+        }
+        return $accumulator;
+    };
+}
+</code>
 
-But it prevents us from having to write too much boilerplate, always write //use ($shit, $load, $of, $variables)//. In addition it saves the function and return keywords, which are not always helpful in circumstances where we just want a quick one liner to manipulate a structure or value.
+===== Symbol choice =====
 
-Aside from that, it encourages (or makes it at least much tedious task) functional code and partial applications (see the examples), which may be a powerful tool the language shouldn't prevent.
+The symbol ''~>'' was chosen as it is a mnemonic device to help programmers understand that the variable is being brought to a function. It is also unambiguous as it has not been used elsewhere in PHP.
 
-==== Why ~> ? ====
-Hack has %%==>%%, so, why then ~>?
+Currently Hack has implemented shorthand anonymous functions using the ''%%==>%%'' symbol to define them. The position of this RFC is that the ''%%==>%%'' symbol is too similar to the ''%%=>%%'' (double arrow) sign, and would cause confusion. Either through people thinking it has something to do with key-value pairs, or through a simple typo could produce valid but incorrect code. e.g.
 
-~> has the advantage of being shorter and it doesn't look like a %%=>%%.
+This returns an array containing an anonymous function:
+<code php>
+return [$x ==> $x * 2];
+</code>
 
-That's why this RFC proposes to use ~>.
+This returns an array if $x is already a defined variable.
+<code php>
+return [$x => $x * 2];
+</code>
 
 ===== Backward Incompatible Changes =====
 This RFC doesn't affect backwards compatibility.
@@ -127,7 +222,9 @@ This RFC doesn't affect backwards compatibility.
 Next PHP 7.x; actually 7.1.
 
 ===== Future Scope =====
-This RFC _does not_ propose shorthand methods like
+==== Other uses for ~> operator ====
+This RFC is solely for using the shorthand anonymous functions as closures. It does not cover any other usage of the shorthand function definition such as: 
+
 <code php>
 class Foo {
     private $bar:
@@ -137,12 +234,20 @@ class Foo {
 }
 </code>
 
+Which is outside the scope of this RFC.
+
+==== Type Hints and Return Types ====
+This RFC does //not// include type hints nor return types.
+
+Type Hints are not added due to technical problems in parser and the RFC author is not sure about whether they should be really added. If anyone achieves to solve these technical issues, he should feel free to do that in a future RFC for further discussion.
+And as introducing half a typesystem would be inconsistent, the RFC proposes to not include return types either.
+
+As an alternative, the current syntax for defining Closures still can be used here. 
+
 ===== Proposed Voting Choices =====
 This RFC is a language change and as such needs a 2/3 majority.
 
 It will be a simple yes/no vote.
 
-===== Patches and Tests =====
+===== Patch =====
 Pull request is at https://github.com/php/php-src/pull/1254
-
-===== 
