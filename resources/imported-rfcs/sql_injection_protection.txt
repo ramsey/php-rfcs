@@ -1,0 +1,211 @@
+====== Automatic SQL Injection Protection ======
+  * Version: 0.9
+  * Date: 2015-07-22
+  * Author: Matt Tait, matttait#at#google.com
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/sql_injection_protection
+
+===== Background =====
+[[https://en.wikipedia.org/wiki/SQL_injection|SQL Injection]] vulnerabilities are a scourge on Internet security. [[https://www.owasp.org/index.php/Top_10_2013-Top_10|According to OWASP]] it remains by far the most commonly exploited vulnerability category used to hack websites. SQL injections are ridiculously easy to exploit, and - depending on what data is stolen - can often have a devastating and long-lasting impact on companies and users whose data is compromised.
+
+It is therefore perhaps surprising, that defending against SQL injection in the general case is straightforward: if the website ensures that the dynamic parts of every single SQL query are sent as arguments to a constant [[https://www.owasp.org/index.php/SQL_Injection_Prevention_Cheat_Sheet#Defense_Option_1:_Prepared_Statements_.28Parameterized_Queries.29|prepared statement]] (aka "parameterized queries"), the website is immediately and provably invulnerable to SQL injection via the application.
+
+But despite how easy this sounds in theory, hackers have one enormous advantage over developers: hackers need only find a single SQL-injection vulnerability in a website to fully compromise the server. Developers, in contrast, must successfully and systematically defend every single SQL query against an injection attack. That includes SQL in old code that nobody has looked at in years, SQL in third-party libraries and extensions, and SQL in that debug page that was never supposed to be uploaded to production websites, but somehow managed to get there nonetheless.
+
+Perhaps worst of all, it is frighteningly easy for SQL-injections to hide in code that //feels// safe, but turns out not to be completely unsafe, or rely on "super-double-safe" functions written by the office security guru, only to find out too late that they aren't all that safe at all. It's easy for a developer to write SQL statements that he can't SQL-inject. It's much harder for a developer to write SQL statements that nobody else can SQL inject.
+
+It is also easy for developers to underestimate the capability of hackers to get crafted input into strange places, or exploit weird and SQL injections buried deep in website back-end code. For example, hackers can exploit a website via [[https://haiderm.com/referer-header-based-blind-sql-injection-explained-example/|via headers]] (like $_SERVER["HTTP_HOST"] and $_SERVER["X-Forwarded-For"]). Hackers can SQL-inject in backend services where the hacker [[https://www.owasp.org/index.php/Blind_SQL_Injection|can't even see any output or error message]]. Hackers can [[https://haiderm.com/second-order-sql-injection-explained-example/|reflect data back at the database]]. Websites get hacked when developers use [[http://security.stackexchange.com/questions/3611/sql-injection-why-isnt-escape-quotes-safe-anymore|the wrong SQL-escape function]], when they  [[http://stackoverflow.com/questions/5741187/sql-injection-that-gets-around-mysql-real-escape-string|use the right SQL-escape function]], and (depressingly often) when they try and [[https://www.owasp.org/images/d/d4/OWASP_IL_2007_SQL_Smuggling.pdf|build their own escape function]].
+
+In short, every dynamic SQL statement that isn't a parameterized SQL statement with a constant SQL parameter is a catastrophic security-incident waiting to happen. For precisely this reason, many big companies already institute a global policy of banning all SQL-statements with dynamic query strings. Blocking insecure use of SQL - and telling developers how to convert their code into code that isn't vulnerable to them - would have an enormously positive influence on the security of webapplications written in PHP, and the security of user data on the web. 
+
+Writing code that can be SQL-injected in 2015 isn't acceptable. PHP should help developers to detect and systematically eliminate this category of vulnerability from the web, once and for all.
+
+===== Proposal (overview) =====
+
+This proposal is to modify the "zend_string" type in Zend Core to "track" whether a string contains dynamic parts that might be vulnerable to SQL injection, or whether it is provably constructed from strings that the server knows a hacker cannot control (such as constant config variables and string literals). We call these strings that attackers have no control over "SafeConsts" for the purposes of this proposal.
+
+Under this proposal, when a SQL builtin function (like "mysqli_query") runs, it can then "ask" the SQL query string whether it is one of these SafeConst strings, or is a string that might be tainted with data from outside the PHP application (like via a $_GET parameter). If the parameter is recognized as a SafeConst, the query is fine and is executed as normal. If, on the other hand, the parameter is constructed dynamically, then we have found an unsafe use of SQL that is at best unsafe coding practices, and at worst, a SQL-injection waiting to happen. Depending on how the website is configured, we then either ignore the issue entirely, alert the developer via an E_WARNING and continue, or throw a SecurityError and refuse to execute the potentially vulnerable query.
+
+=== SafeConst ===
+
+The logic for determining "SafeConst"-ness is as follows:
+  * If the compiler sees a T_STRING, and that T_STRING does not contain a variable replacement token, its corresponding zend_string is a SafeConst (i.e. "Hello world" is a SafeConst, but "Hello $name" is not).
+  * If the compiler combines constant T_STRINGs together at compile time, the combination's corresponding zend_string is a safeconst.
+  * $str1 . $str2 is a SafeConst if and only if $str1 is a SafeConst string //and// $str2 is a SafeConst string.
+  * If define("TABLE_NAME", $foo) is called, then TABLE_NAME is a SafeConst string if and only if $foo is a SafeConst string. 
+  * Assigning a value into an array (by index or name), object, function parameter, return slot, local variable or global variable does not affect the SafeConst-ness of that variable. For example, mysqli_query("SELECT * FROM " . $config["tablename"]) is fine, so long as $config["tablename"] was populated with a SafeConst.
+
+By design, SafeConstness is ***not** applied to the output of SQL-escape functions. Consider the following query:
+  mysqli_query("SELECT * from USER where $id=" . mysqli_escape_query($_GET["userid"])) 
+This can be injected via page.php?userid=1%20INJECT_HERE--. Even quoted forms
+  mysqli_query("SELECT * from USER where $id='" . mysqli_escape_query($_GET["userid"]) . "'")
+can be injected if the charset on the SQL server and the PHP server get out-of-sync. It is a critical security feature, not a bug, that this feature encourages developers to parameterize dynamic queries rather than building queries dynamically.
+
+Tracking SafeConsts reduces the number of false-positives where "effectively constant" strings are computed at compile time.
+
+=== Example SQL-queries that are allowed ===
+Most of the complexity in this proposal is in minimizing the number of false-positives (i.e. reports of a potential SQL injection that could never be exploited).
+
+The following are several different coding paradigms that are valid, and that we correctly do not report as potentially exploitable:
+ 
+Unparameterized queries are fine, so long as the query is constant:
+  mysqli_query($link, "SELECT * FROM TABLE");
+
+Building SQL strings is fine, so long as the components are constant:
+  define("TABLE_NAME", "USERTABLE");
+  ...
+  mysqli_query($link, "SELECT * FROM " . TABLE_NAME);
+  
+We also don't mind if remote data influences control-flow that constructs the query, so long as it doesn't influence the string //data//:
+
+  if($_GET["usertype"] == "admin")
+    $usertype = ADMIN";
+  else
+    $usertype = user";
+  ..
+  mysqli_query($link, "SELECT * FROM users WHERE USERTYPE='$usertype'");
+  
+This is also fine:
+  $config = array("name" => "tablename");
+  mysqli_query($link, "SELECT * FROM ". $config["name"] ." WHERE usertype=admin");
+
+Even this is fine:
+  if($_GET["isdebug"])
+    $config = include("debug-settings.php");
+  else
+    $config = include("release-settings.php");
+  mysqli_query($link, "SELECT * from ". $config["tablename"]);
+
+Even SQL-queries that would normally involve complex inter-function analysis to prove are safe are (correctly) identified as safe when the control-flow guarantees the resulting query is constant:
+
+  function query_car_by_color($color) {
+    return mysqli_query($link, "SELECT * FROM cars WHERE color='".$color."'");
+  }
+  ...
+  query_car_color("red"); // fine, no warnings.
+
+=== Examples of queries we detect ===
+
+  mysqli_query("SELECT * From Users Where NAME='". $_GET["name"] . "'");
+  
+  mysqli_query("SELECT * From Users Where ID=". mysqli_escape_string($_GET["id"]) . "");
+
+We detect when code-refactoring might expose a new bug. For example, if the old code
+  function query_car_by_color($color) {
+    return mysqli_query($link, "SELECT * FROM cars WHERE color='".$color."'");
+  }
+  // Fix: Old version only showed red cars. Let's let the user decide
+  // - query_car_color("red");
+  query_car_color($_GET["color"]); // now flags as dangerous even when ?color=red, because "red" is a safe-const but $_GET["color"] is not.
+
+=== Behavior when discovering unsafe use of SQL ===
+
+The behavior of the feature when it detects that the query string in an unparameterized query, or the parameter-string in a parameterized query is not constant will be configurable via PHP.INI:
+
+"Legacy vulnerable" mode is designed for companies and users who upgrade to PHP7 and need their application to work exactly as before. This will not be the default option, and website administrators will need to explicitly acknowledge that their website may be vulnerable to SQL-injections to enable this mode.
+
+"Hardened mode" is designed for production servers of companies and users who want to keep their server secure. If PHP discovers a potentially vulnerable use of a SQL query, it conservatively blocks the query, implicitly prioritizing user data safety and server integrity over the possibility that rarely visited code-branches might now throw an Error.
+
+"Warning mode" is designed as an interim measure for developers who are working towards implementing "hardened mode" on their production servers, but whose code includes too many SQL statements to be upgraded in one go. In this mode, developers are alerted to where vulnerable SQL statements might be in their codebase, but does not prevent the website from working in the mean-time.
+
+=== Edge-case: SQL-injection as a feature ===
+
+Some applications explicitly and deliberately expose SQL-management functionality to a user (for example: PHP-MyAdmin allows logged-in administrators to run SQL queries directly against the website).
+
+The SQL-injection detection logic will (correctly) notice that such queries are allowing a remote user to run queries against the database. In order to support this edge-case feature, we will introduce an optional "allow-dangerous" flag to some SQL-builtin functions; for example:
+
+  if(is_adminstrator() && check_form_csrf_token())
+    mysql_query($_POST["sql_query"], SECURITY_DISABLE_SQL_INJECTION_PROTECTION);
+
+This design makes developers think twice about disabling the protection, and explicitly acknowledging and accepting the security consequences of doing so. It is also by-design an easy string to search for during a security audit.
+
+=== Important consideration: behavior of string-interning ===
+
+SafeConsts and non-SafeConsts can still be string-interned, but it is a security bug if the "SafeConst"-ness of a string can "bleed" over to another string of the same value. This proposal also involves adding code to make sure this never happens, and unit-tests to verify that it does not happen.
+
+===== Proposal (internals plan) =====
+
+Implementing this proposal is comprised of the following concrete steps:
+
+  * It changes the definition of zend_string to include a field for tracking whether the string is a "sql-safe constant". The fact that a string is a "sql-safe constant" follows a value, so if a "sql-safe constant" is stored into a variable, and then loaded back, the variable can still be safely passed to SQL-query functions.
+  * The compiler is edited to automatically mark string literals (i.e T_STRING) as "sql-safe constants".
+  * The various internal string-concatenation functions are altered so that if two "sql-safe constants" are concatenated, the result is itself a "sql-safe constant". This occurs regardless of whether the strings are concatenated during the "compile pass" of the compiler, or via the runtime implementation of the concatenation opcode in the compiled page.
+  * The string duplication function so that duplicating a "sql-safe constant" yields another "sql-safe constant". This allows "sql-safe constants" to be put in arrays, objects, locals, fields, and DEFINE() calls without losing their "sql-safeness".
+  * A new Error type "SecurityError" is added to the PHP built-in types.
+  * A new PHP.INI entry is introduced (tbd) to allow developers to configure how this feature should behave when a potentially SQL-injectable query is performed.
+  * A new C function is added to ZendCore to allow plugins and extensions to report a potential security alert. This allows all of the configuration of what to do with security warnings to be centralized to a single place.
+  * The various SQL-extensions that provide built-in SQL functions are changed to validate that their query parameter is safe, and call the "security alert" function in ZendCore if the parameter is not constant.
+
+===== Significant Changes =====
+
+  * The SecurityError and E_WARNING message will contain a link to explain to PHP developers why they are seeing the error, and how to secure themselves against SQL-injection using prepared-statements. Realistically this page should be hosted somewhere on PHP.NET.
+
+  * This change implicitly makes all of the various "SQL-escape" functions obsolete. This is a good thing, because the "SQL-escape" give a false sense of security to users, as SQL [[http://stackoverflow.com/questions/5741187/sql-injection-that-gets-around-mysql-real-escape-string|queries that use them can still be SQL-injected]] in some circumstances. Users who are using SQL-escape functions should use prepared statements instead.
+
+  * This change necessarily alters the zend_string structure, and hence requires extensions to be recompiled.
+
+  * In order to support the special case of administrator SQL administration portals that by-design expose SQL-injection to the user as a feature (e.g. phpmyadmins' "Run SQL Statement" feature), some extensions may need to add a new flag that allows users to explicitly disable SQL-injection protection for specific queries, for example:
+
+  * mysqli_query($link, $_POST["sql_request"], UNSAFE_ALLOW_SQL_INJECTION);
+
+===== Non-goals of this proposal ====
+
+For the avoidance of doubt, this proposal does not, and does not attempt to:
+
+  * Detect, or prevent developers from making //deliberately// insecure websites. The purpose is to quickly alert developers to vulnerabilities and encourage them to fix them "the right way" - i.e. via prepared statements. It does not stop, or attempt to stop deliberately inserted back-doors or malware on the server from accessing user data.
+  * Detect, or prevent developers from SQL vulnerabilities unrelated to injection attacks. For instance, detecting and preventing destructive queries like 'mysql_query($link, "DROP TABLES")' is a non-goal of this feature.
+  * Detect or prevent compromise of the server through other categories of non-SQL based injection vulnerabilities, such as command-line injection, eval-injection, LDAP-injection or path-injection vulnerabilities.
+  * Prevent malicious developers or hackers who have already compromised the server and can run arbitrary crafted PHP scripts from "gaming" the SQL detection logic to trick the SQL-injection detection logic into running malicious queries.
+  * Prevent SQL-injection attacks that occur due to injection vulnerabilities present in other applications on the server (such as in a SQL Stored Procedure) that PHP cannot see.
+  * Make websites magically secure from hackers using non-SQL-injection based techniques.
+
+===== Proposed PHP Version(s) =====
+
+Hopefully introduced in PHP 7, or soon after.
+
+===== RFC Impact =====
+==== To SAPIs ====
+Describe the impact to CLI, Development web server, embedded PHP etc.
+
+Requires all SAPIs to be recompiled because of an ABI change. Otherwise, no real difference.
+
+==== To Existing Extensions ====
+
+Requires all existing extensions to be recompiled because of an ABI change. Functions that expose SQL-query builtin functions to the user will be altered to call the zend security function if their query parameter does not have the "sql-safe-constant" flag set on their string. Otherwise no changes.
+
+==== To Opcache ====
+I've not yet verified how the change impacts opcache.
+
+==== php.ini Defaults ====
+There is one new change to PHP.INI that allows configuring to behavior of the SQL-injection-protection code when it detects a possible injection.
+
+===== Open Issues =====
+Make sure there are no open issues when the vote starts!
+
+===== Unaffected PHP Functionality =====
+This change is designed to have the minimum user-visible impact for websites that do not use SQL, or who use it in a safe way.
+
+===== Future Scope =====
+This sections details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
+
+===== Proposed Voting Choices =====
+This requires a 50%+1 vote to be adopted.
+
+===== Patches and Tests =====
+Links to any external patches and tests go here.
+
+If there is no patch, make it clear who will create a patch, or whether a volunteer to help with implementation is needed.
+
+Make it clear if the patch is intended to be the final patch, or is just a prototype.
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+Links to external references, discussions or RFCs
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
