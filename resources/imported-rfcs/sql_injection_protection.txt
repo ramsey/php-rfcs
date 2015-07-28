@@ -28,18 +28,21 @@ I've hosted a proof of concept showing a vulnerable application [[http://phpoops
 
 ===== Proposal (overview) =====
 
-This proposal is to modify the "zend_string" type in Zend Core to "track" whether a string contains dynamic parts that might be vulnerable to SQL injection, or whether it is provably constructed from strings that the server knows a hacker cannot control (such as constant config variables and string literals). We call these strings that attackers have no control over "SafeConsts" for the purposes of this proposal.
+This proposal is to modify the "zend_string" type in Zend Core to "track" whether a string is statically constructed from string literals (like "SELECT VERSION()") or concatenations of string literals (like $config['table']='foo'; "SELECT * from {$config['table']}"), or is dynamically generated in a way that might allow an attacker to control its value. In this proposal we refer to these statically constructed strings as "safeconsts".
 
-Under this proposal, when a SQL builtin function (like "mysql_query") runs, it can then "ask" the SQL query string whether it is one of these SafeConst strings, or is a string that might be tainted with data from outside the PHP application (like via a $_GET parameter). If the parameter is recognized as a SafeConst, the query is fine and is executed as normal. If, on the other hand, the parameter is constructed dynamically, then we have found an unsafe use of SQL that is at best unsafe coding practices, and at worst, a SQL-injection waiting to happen. Depending on how the website is configured, we then either ignore the issue entirely, alert the developer via an E_WARNING and continue, or throw a SecurityError and refuse to execute the potentially vulnerable query.
+When a SQL builtin function (e.g. "mysql_query") runs, it can then "ask" the SQL query string whether it is a "safeconst" string. If it is, we know that the SQL query can be safely sent to the SQL database without fear that the SQL query has not been injected with malicious SQL code from a hacker. If it is *not* a safeconst, we either log, emit an E_WARNING and continue, or throw a "SecurityError exception" and abort the request, depending on the content of PHP.INI.
 
 === SafeConst ===
 
 The logic for determining "SafeConst"-ness is as follows:
-  * If the compiler sees a T_STRING, and that T_STRING does not contain a variable replacement token, its corresponding zend_string is a SafeConst (i.e. "Hello world" is a SafeConst, but "Hello $name" is not).
-  * If the compiler combines constant T_STRINGs together at compile time, the combination's corresponding zend_string is a safeconst.
-  * $str1 . $str2 is a SafeConst if and only if $str1 is a SafeConst string //and// $str2 is a SafeConst string.
-  * If define("TABLE_NAME", $foo) is called, then TABLE_NAME is a SafeConst string if and only if $foo is a SafeConst string. 
-  * Assigning a value into an array (by index or name), object, function parameter, return slot, local variable or global variable does not affect the SafeConst-ness of that variable. For example, mysqli_query("SELECT * FROM " . $config["tablename"]) is fine, so long as $config["tablename"] was populated with a SafeConst.
+  * Any string literal (i.e. a T_STRING) is a safeconst string if it does not include any auto-eval parts (i.e. "Hello World" is a safeconst).
+  * A string literal with auto-eval parts is a safeconst if every auto-eval part evaluates to a safeconst (i.e. $name="World", "Hello $name" is a safeconst, but "Hello {$_GET['q']}" is not a safeconst).
+  * If $i is an Integer or FloatingPoint type, its string promotion is a safeconst string.
+  * If $i is an object type, its string promotion is a safeconst string if $i->__toString() returns a safeconst string.
+  * $i.$j is a safeconst only if $i and $j are both string types that are safeconsts, or are promoted to string types that are safeconsts.
+  * Defined variables are safeconsts if the value they were constructed from was a safeconst. I.e define("TABLE_NAME", "mytable"); $i=TABLE_NAME yields a safeconst in $i, but define("TABLE_NAME", $_GET["table"]); $i=TABLE_NAME does not yield a safeconst.
+  * Safeconstness follows a string instance around, i.e. assigning a value into an array (by index or name), object, function parameter, return slot, local variable or global variable does not affect the SafeConst-ness of that variable. For example, mysqli_query("SELECT * FROM " . $config["tablename"]) is fine, so long as $config["tablename"] was populated with a SafeConst.
+  * Safeconstness does NOT follow string instance by value. For example $i = "Hello"; $i = $_GET["q"] leaves $i as *not* a safeconst, //even// if $_GET["q"] holds the value "Hello".
 
 By design, SafeConstness is ***not** applied to the output of SQL-escape functions. Consider the following query:
   mysqli_query("SELECT * from USER where $id=" . mysqli_escape_query($_GET["userid"])) 
