@@ -10,6 +10,96 @@ PHP binds many external libraries with the core extensions. Several libraries li
 
 Other aspects of the mentioned issue are internal PHP functions not requiring 64-bit functionality so behaving same way on 64-bit when having possibly non 64-bit argument types in signatures. Yet another impact might be also comparison of variables with 64- and 32-bit, signed and unsigned types. 
 
+==== Proposed macros for 32-bit int checks ====
+
+<code c>
+#if SIZEOF_INT == SIZEOF_ZEND_LONG
+# define ZEND_LONG_INT_OVFL(zl) (0)
+# define ZEND_LONG_INT_UDFL(zl) (0)
+#else
+# define ZEND_LONG_INT_OVFL(zlong) ((zlong) > (zend_long)INT_MAX)
+# define ZEND_LONG_INT_UDFL(zlong) ((zlong) < (zend_long)INT_MIN)
+#endif
+
+#define ZEND_SIZE_T_INT_OVFL(size) ((size) > (size_t)INT_MAX)
+
+</code>
+
+==== Example of an affected places ====
+
+Here is the real case from the current code base, the irrelevant declarations and code are removed
+
+<code c>
+PHP_FUNCTION(simplexml_load_string)
+{
+    char           *data;
+    size_t          data_len;
+    zend_long       options = 0;
+
+.........................
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|C!lsb", &data, &data_len, &ce, &options, &ns, &ns_len, &isprefix) == FAILURE) {
+        return;
+    }
+
+    docp = xmlReadMemory(data, data_len, NULL, NULL, options);
+
+.........................
+
+}
+</code>
+
+The proposed way to fix it using ZPP
+<code c>
+PHP_FUNCTION(simplexml_load_string)
+{
+    char           *data;
+    int            data_len;
+    int       options = 0;
+
+.........................
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "q|C!isb", &data, &data_len, &ce, &options, &ns, &ns_len, &isprefix) == FAILURE) {
+        return;
+    }
+
+    docp = xmlReadMemory(data, data_len, NULL, NULL, options);
+
+.........................
+
+}
+</code>
+
+The proposed way to fix it using the overflow check macro
+<code c>
+PHP_FUNCTION(simplexml_load_string)
+{
+    char           *data;
+    size_t          data_len;
+    zend_long       options = 0;
+
+.........................
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|C!lsb", &data, &data_len, &ce, &options, &ns, &ns_len, &isprefix) == FAILURE) {
+        return;
+    }
+
+    if (ZEND_LONG_INT_OVFL(options)) {
+          RETURN_FALSE;
+    }
+    if (ZEND_SIZE_T_INT_OVFL(data_len)) {
+         RETURN_FALSE;
+    }
+
+
+    docp = xmlReadMemory(data, data_len, NULL, NULL, options);
+
+.........................
+
+}
+</code>
+
+
 ===== Proposal =====
 
 It is suggested to implement two additional formats for ZPP, that are explicitly require
