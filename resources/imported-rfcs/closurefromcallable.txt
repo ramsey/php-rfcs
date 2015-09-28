@@ -1,0 +1,261 @@
+====== PHP RFC: Closure from callable function ======
+  * Version: 0.9
+  * Date: 2015-09-28 
+  * Author: Dan Ackroyd, Danack@php.net
+  * Status: Draft 
+  * First Published at: https://wiki.php.net/rfc/closurefromcallable
+
+
+==== Introduction ====
+
+PHP lacks a simple function to convert callables into a closure directly. Although it is possible to do this in userland, it is slow compared to what is possible with a built-in function, due to the number of reflection functions needed to be called, as well needing to create intermediary reflection objects.
+
+This RFC proposes adding the function `closure` to PHP's Reflection extension, to allow people to convert callables into closures directly. The method signature would be:
+
+<code php>
+function closure(callable $callable) : closure {...}
+</code>
+
+The function will check whether the callable is actually callable in the current scope, and will only return a closure if it is callable and otherwise throw an Error. For example trying to create a closure to a private method of an object from the global scope would fail. Trying to create a closure to a private method of an object from within the object would succeed.
+
+
+==== Why would you use this? ====
+
+There are three uses for converting callables into Clousures:
+
+* Better API control for classes
+
+* Easier error detection and static analysis
+
+* Performance
+
+
+==== Better API control for classes ====
+ 
+Currently if a class wants to return a method to be used as a callback, the method must be exposed as part of the public api of the class e.g.:
+
+<code php>
+class Validator {
+
+    public function getValidatorCallback($validationType) {
+    
+        if ($validationType == 'email') {
+            return [$this, 'emailValidation'];
+        }
+        
+        return [$this, 'genericValidation'];
+    }
+    
+    public function emailValidation() {...}
+    
+    public function genericValidation() {...}
+}
+
+$validator = new Validator();
+$callback = $validator->getValidator('email');
+$callback($userData);
+</code>
+
+With the closure() function, the class can easily return a closure that closes over private functions, which means those functions are no longer part of the public API.
+
+<code php>
+class Validator {
+
+    public function getValidatorCallback($validationType) {
+    
+        if ($validationType == 'email') {
+            closure([$this, 'emailValidation']);
+        }
+        
+        closure([$this, 'genericValidation']);
+    }
+    
+    private function emailValidation() {...}
+    
+    private function genericValidation() {...}
+}
+
+$validator = new Validator();
+$callback = $validator->getValidator('email');
+$callback($userData);
+
+</code>
+
+
+==== Gives errors at the right place ====
+
+Currently when you return a string to be used as a callable, if the string is not a valid function name, an error will be generated when the invalid function name is called. Having the error be generated far from where the original problem occurs makes this hard to debug.
+
+<code php>
+function foo() { }
+
+function getCallback() {
+    return 'food'; //oops the function name is misspelled.
+}
+
+$callback = getCallback();
+// ...
+// more code here.
+//...
+$callback(); //error happens here - Fatal error: Call to undefined function food()
+</code>
+
+With the closure function, the error is generated on the line where the typo exists. This makes debugging the problem be a lot easier, as well as making it easier to statically analyze whether the program has potential bugs.
+
+<code php>
+function foo() { }
+
+function getCallback() {
+    return closure('food'); //error happens here - Fatal error: Call to undefined function food()
+}
+
+$callback = getCallback();
+
+// ...
+// more code here.
+//...
+$callback(); //Because the getCallback function returned a closure, this is guaranteed to be callable.
+
+</code>
+
+==== Performance gain ====
+
+Although PHP has a 'callable' type it is quite slow to use compared to other types. This is due to the amount of work that is needed to check whether a 'callable' is actually a valid callable or not. This work needs to be each time the 'callable' parameter is called.
+ 
+ 
+Below are two files that call a function 10,000 times which calls itself recursively 8 times. One version has a callable type for the parameter, the other has Closure as the type. Measuring the number of operations with
+ 
+    valgrind --tool=callgrind ./sapi/cli/php perf_callable.php
+    valgrind --tool=callgrind ./sapi/cli/php perf_closure.php
+    
+gives the number of operations to be:
+ 
+    Callable: 112,311,913
+    Closure:   95,522,330
+    
+    Difference:16,789,583
+
+Which is a difference of over 1000 operations per loop.
+
+
+
+==== Patches and Tests ====
+
+The function has been implemented in this branch: https://github.com/Danack/php-src/tree/to_closure The patch is not finished imo, as the error messages need improving.	
+ 
+ 
+==== Proposed Voting Choices ====
+As this is a simple function addition with no langauages changes, the voting will requie a 50%+1 majority to include this in PHP 7.1
+ 
+ 
+==== Why a function? ====
+
+Some people have asked why a function is appropriate rather than making it be a constructor of the Closure class. e.g. `$fn = new Closure($callable);`. Using a plain function allows more flexibility in the implementation, without having anything be inconsistent.
+
+e.g. in cases where the same function is turned into a closure twice:
+
+<code php>
+$fn1 = closure('foo');
+$fn2 = closure('foo');
+</code>
+
+with the implementation being a function it is perfectly acceptable for $fn1 and $fn2 to be the same object. If instead the implementation was as a constructor for the closure class:
+
+<code php>
+$fn1 = new closure('foo');
+$fn2 = new closure('foo');
+</code>
+
+Having two new statements return the same object is very high on the surprise factor.
+
+Additionally having it be just a function, would make it easier in the future to implement it as a language construct, which might be desired for performance reasons.
+
+If you think that this should be implemented as the constructor of Closure rather than a function, please can you articulate the reason for that, other than 'constructors are cool'.
+
+
+==== Other languages ====
+ 
+Hack has a similar functionality, but they have chosen to split the functionality into separate functions for each of the cases.
+
+* Strings which should be a function:  http://docs.hhvm.com/manual/en/function.hack.fun.php
+* Instance and method name: http://docs.hhvm.com/manual/en/function.hack.inst_meth.php
+* Class name and method name: http://docs.hhvm.com/manual/en/function.hack.class_meth.php
+
+They have included these to allow programs to be easier to reason about, and allows their type-checker to statically analyze the hack programs.
+
+However this RFC takes the position that it is inappropriate to have a separate function per type. Instead having a single function that takes any callable parameter is more powerful, and easier for users to use.
+ 
+## Appendix
+ 
+### Code for performance test.
+ 
+<code php>
+<?php
+//File perf_callable.php
+
+class foo {
+    public function bar() { }
+}
+
+function passIt(callable $callable, $count)
+{
+    if ($count > 0) {
+        passIt($callable, $count - 1);
+    }
+    else {
+        $callable();
+    }
+}
+
+function getCallable($foo) : callable 
+{
+    return [$foo, 'bar'];
+}
+
+$foo = new Foo();
+
+for ($x=0; $x<10000 ; $x++) {
+    $callable = getCallable($foo);
+    passIt($callable, 8);
+}
+
+echo "OK";
+
+</code>
+
+<code php>
+<?php
+//File perf_closure.php
+
+class foo {
+    public function bar() {
+    }
+}
+
+function passIt(Closure $callable, $count) {
+    if ($count > 0) {
+        passIt($callable, $count - 1);
+    }
+    else {
+        $callable();
+    }
+}
+
+function getCallable($foo) : Closure
+{
+    return closure([$foo, 'bar']);
+}
+
+$foo = new Foo();
+
+for ($x=0; $x<10000 ; $x++) {
+    $callable = getCallable($foo);
+    passIt($callable, 8);
+}
+
+echo "OK";
+
+
+</code>
+
+
