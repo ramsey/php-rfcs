@@ -1,0 +1,127 @@
+====== PHP RFC: ext/curl HTTP/2 Server Push Support ======
+  * Version: 0.1
+  * Date: 2015-10-01
+  * Author: Davey Shafik, davey@php.net
+  * Status: Draft
+  * First Published at: https://wiki.php.net/rfc/curl_http2_push
+
+===== Introduction =====
+
+With the introduction of HTTP/2 support in libcurl, PHP 7.0 now has [[https://github.com/php/php-src/pull/1497|some support for HTTP/2 requests]], but it does not yet support one of the (potentially) most powerful features: Server push.
+
+Server push allows the server to push additional resources relevant to the requested resource directly to the client proactively.
+
+Server push is available in libcurl since 7.44.0.
+
+===== Libcurl Implementation =====
+
+libcurl supports registering a callback for multi handlers to handle server pushes via the ''CURLMOPT_PUSHFUNCTION'' and ''CURLMOPT_PUSHDATA'' options for ''curl_multi_setopt()''. 
+
+The callback will be passed the parent curl handle (the request the client made), a new curl handle for the pushed request, the number of headers, the ''PUSH_PROMISE'' headers, and a user-defined pointer (set using ''CURLMOPT_PUSHDATA'').
+
+The callback then returns either ''CURL_PUSH_OK'' if can handle the push, or ''CURL_PUSH_DENY'' to reject it.
+
+The new curl handle is then added to the multi handler and is then included in the handling of multiple requests.
+
+===== Suggested Implementation =====
+
+<code php>
+<?php
+$callable = function ($push_ch, $parent_ch, $header_count, $headers, &$user_data)
+{
+      if ($header_count > 0 && curl_pushheader_byname("Content-Type") !== 'application/json') {
+           return CURL_PUSH_DENY;
+      }
+      return CURL_PUSH_OK;
+}
+
+$mh = curl_multi_init();
+$user_data = null;
+
+curl_multi_setopt($mh, CURLMOPT_PUSHFUNCTION, $callable);
+curl_multi_setopt($mh, CURLMOPT_PUSHDATA, &$user_data); // Not sure this is possible, I assume C-land can do this
+?>
+</code>
+
+===== Implementation =====
+
+Within [[https://github.com/php/php-src/blob/master/ext/curl/multi.c#L409|the PHP implementation of ''curl_multi_setopt()'']] (''php\curl_multi_setopt()'') there is a switch that handles different options. When ''CURLMOPT_PUSHFUNCTION'' is set a callback is registered that will call the callable set in ''php\curl_multi_setopt()''.
+
+The user can also register a referenced variable (''$user_data'') using ''CURLMOPT_PUSHDATA''. Internally, It will pass through a pointer to the zval for the ''$user_data'' argument to ''curl\curl_multi_setopt()'', which will be passed to the callback registered above, and passed on to the userland callback.
+
+We also have to handle the ''$headers'' argument, which I believe will have to be a resource for it to work — this will then be passed into two new libcurl functions ''curl_pushheader_bynum()'' and ''curl_pushheader_byname()''.
+
+
+
+===== Backward Incompatible Changes =====
+
+No breaks, except possibly the referenced value for ''php\curl_multi_setopt()''.
+
+===== Proposed PHP Version(s) =====
+
+PHP 7.1
+
+===== RFC Impact =====
+
+==== To SAPIs ====
+
+No impact
+
+==== To Existing Extensions ====
+
+No impact outside of BC compatible changes to ext/curl
+
+2 new functions:
+
+ - ''curl_pushheader_bynum()''
+ - ''curl_pushheader_byname()''
+
+==== To Opcache ====
+
+No impact on Opcache
+
+==== New Constants ====
+
+ - ''CURLMOPT_PUSHFUNCTION''
+ - ''CURLMOPT_PUSHDATA''
+ - ''CURL_PUSH_OK''
+ - ''CURL_PUSH_DENY''
+
+These are directly exposed from libcurl, and documentation can be taken from there.
+
+==== php.ini Defaults ====
+
+None
+
+===== Open Issues =====
+
+ - Adding a new resource isn't desirable but fits the current ext/curl API
+
+===== Future Scope =====
+
+This change should track libcurl.
+
+===== Proposed Voting Choices =====
+
+Two choices: Add, Deny
+50% required as this is not a language change
+
+===== Patches and Tests =====
+
+Currently working on a patch, a mentor would be appreciated!
+
+===== Implementation =====
+
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+
+ - [[https://github.com/bagder/curl/wiki/HTTP-2-Server-Push|libcurl HTTP/2 implementation]]
+ - [[http://daniel.haxx.se/blog/2015/06/03/server-push-to-curl/|Authors blog post about the implementation]]
+
+===== Rejected Features =====
+
+Keep this updated with features that were discussed on the mail lists.
