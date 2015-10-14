@@ -1,13 +1,13 @@
 ====== PHP RFC: Void Return Type ======
-  * Version: 0.1.1
-  * Date: 2015-02-14
+  * Version: 0.2
+  * Date: 2015-02-14 (v0.1), 2015-10-14 (v0.2, revival)
   * Author: Andrea Faulds, ajf@ajf.me
-  * Status: Withdrawn
+  * Status: Under Discussion as of 2015-02-14, previously Withdrawn on 2015-02-15
   * First Published at: http://wiki.php.net/rfc/void_return_type
 
 ===== Introduction =====
 
-The [[rfc:return_types|Return Types]] RFC has introduced return types to PHP. While there is already a means to specify that any value may be returned (by omitting the return type), there is no means to specify that no value can be returned, unlike many other languages with return types. This is unfortunate, as this can be useful for documentation and error-checking purposes. In particular, it makes it clear that a function performs an action, rather than producing a result. This RFC proposes the introduction of a ''void'' return type for this purpose.
+The [[rfc:return_types|Return Types]] RFC has introduced return types to PHP. While there is already a means to specify that any value may be returned (by omitting the return type), there is no way to specify that //no// value should be returned, unlike many other languages with return types. This is unfortunate, as this can be useful for documentation and error-checking purposes. In particular, it makes it clear that a function performs an action, rather than producing a result. This RFC proposes the introduction of a ''void'' return type for this purpose, similar to that in other programming languages.
 
 ===== Proposal =====
 
@@ -15,78 +15,41 @@ Support for a new ''void'' return type is added. It requires that a function not
 
 <code php>
 function should_return_nothing(): void {
-    return 1; // Catchable fatal error: should_return_nothing() must not return a value, integer returned
+    return 1; // Fatal error: A void function must not return a value
 }
-should_return_nothing();
 </code>
 
-It accepts either an implicit return, or an explicit value-less return:
+Unlike other return types which are enforced when a function is called, this type is checked at compile-time, which means that an error is produced without the function needing to be called.
+
+A function with a ''void'' return type, or //void function//, may either return implicitly, or have a return statement without a value:
 
 <code php>
 function lacks_return(): void {
     // valid
 }
-lacks_return();
+</code>
 
+<code php>
 function returns_nothing(): void {
     return; // valid
 }
-returns_nothing();
 </code>
 
-However, it does not accept returning a ''NULL'' value:
+A void function may not return a value:
+
+<code php>
+function returns_one(): void {
+    return 1; // Fatal error: A void function must not return a value
+}
+</code>
 
 <code php>
 function returns_null(): void {
-    return NULL; // Catchable fatal error: returns_null() must not return a value, null returned
+    return null; // Fatal error: A void function must not return a value
 }
-returns_null();
 </code>
 
-This might seem odd given that ''return;'' is technically equivalent. However, allowing ''NULL'' would also allow this:
-
-<code php>
-function returns_null2(): void {
-    $x = some_computation(); // produces null most of the time
-    return $x; // Catchable fatal error: returns_null() must not return a value, null returned
-}
-returns_null2();
-</code>
-
-If PHP were to allow returning a value which evaluates to null, we'd have to allow the above, and this doesn't make sense: a ''void'' function shouldn't be trying to return a value.
-
-Furthermore, there is a code style point to be made here. ''return;'' signals different intent to ''return NULL;''. The former returns control flow and, while it does implicitly produce a null return value, signals that the return value is unimportant. The latter, on the other hand, explicitly produces a null return value, suggesting that the null value is significant.
-
-Like all functions which do not explicitly return a value in PHP, evaluating a call to a ''void'' return-typed function ("void function" from here onwards) results in null:
-
-<code php>
-function summonElePHPants(): void {
-    echo "ElePHPants of the world, unite!";
-}
-
-$useless_value = summonElePHPants();
-var_dump($useless_value); // NULL
-</code>
-
-This is unlike void functions in some other languages, which prevent the use of such functions in expressions.
-
-While it would be theoretically possible to prevent the use of void functions in expressions in PHP, this RFC does not do so for the following reasons:
-
-  * PHP doesn't do this for built-in or extension PHP functions (aka "internal functions") which return no value, and which are documented using "void"
-  * For the entirety of PHP's history, all function calls have been valid expressions, and changing this will break code which relies on that fact
-      * In particular, this would lead to unpredictable behaviour with callbacks
-          * Passing along the result of a callback with <php>return $somecallback(...);</php> is a common pattern and would be broken by this change
-      * Void return types could not be added to existing functions without possibly breaking code which calls them
-  * This would introduce an unnecessary distinction between function call expressions and function call statements
-  * This error cannot be caught at compile-time, because PHP is a dynamic language
-  * Unlike all other return types, this would be placing a restriction on the caller
-  * Implementing this in the Zend Engine would create problems:
-      * This would require checking every function call to see whether its result is used, which could result in a slowdown for non-void calls
-      * We currently do not have a mechanism to tell whether a function call's result is used - this would have to be added
-
-Finally, IDEs and code linters could easily check for using the result of a void function call and warn the user, so it does not necessarily have to be enforced by the language itself.
-
-The ''void'' type cannot be used for parameters:
+Note that ''void'' is only valid as a return type, not as a parameter type:
 
 <code php>
 function foobar(void $foo) { // Fatal error: void cannot be used as a parameter type
@@ -109,13 +72,33 @@ class Foobar extends Foo
 }
 </code>
 
+===== Rationale =====
+
+==== Why check at compile-time? ====
+
+Generally-speaking, you should warn of problems sooner rather than later. It just so happens that it's trivial (a three-line change) to make PHP to check this at compile-time rather than run-time. So, this proposal suggests just that.
+
+==== Why isn't ''return null;'' permitted? ====
+
+Some people have asked about this, since ''return;'' and ''return null;'' are technically equivalent in PHP; when a return value isn't specified, PHP will produce ''null'' for you. However, choosing one over the other suggests intent. If you specify a value, it suggests the value is significant. In a void function, the return value is insignificant: it's always the same and has no actual usefulness. Specifying it explicitly with ''return null;'' is pointless, because it doesn't really matter what value the function is going to return.
+
+Since ''void'' signifies an unimportant return value that won't be used, this proposal requires you to not specify one. This extends to ''null'' just as it does to any other value.
+
+==== Use of void functions in expressions ====
+
+In some other languages, such as C, a void function can't be used in an expression, only as a statement. Since this RFC adds a way to specify a void function to PHP's syntax, it might be expected the same restriction would now apply in PHP. However, this wouldn't match precedent. PHP has had 'void functions' of a kind since its inception, in the form of built-in functions, which are documented as "void" in the manual. Such functions //can// be used in expressions, unlike in C.
+
+We could change PHP's rules on void functions and disallow their use in expressions, but this would create a backwards-compatibility issue: it's not inconceivable that existing PHP code relies on being able to call built-in void functions in expressions, and plenty of code assumes that you can take the return value of an arbitrary PHP function (a callback, perhaps).
+
+Moreover, IDEs and other tools can warn the user when the return value of a void function is being used. It isn't strictly necessary for the language itself to cover this.
+
 ===== Backward Incompatible Changes =====
 
-Like the scalar types proposed by the [[rfc:scalar_type_hints|Scalar Type Hints]] RFC, the ''void'' return type does not become a reserved word, but is instead restricted from use in class and interface names. This avoids confusion while minimising backwards-compatibility breakage.
+Like the names reserved by the [[rfc:scalar_type_hints_v5|Scalar Type Declarations]] and [[rfc:reserve_more_types_in_php_7|Reserve More Types in PHP 7]] RFCs, the ''void'' return type does not become a reserved word proper, but is instead restricted from use in class and interface names. This avoids confusion while minimising backwards-compatibility issues. I do not expect that ''Void'' is a very common class name, and so the backwards-compatibility impact should be limited.
 
 ===== Proposed PHP Version(s) =====
 
-This is proposed for the next major version of PHP, currently PHP 7.
+This is proposed for the next minor version of PHP, currently PHP 7.1.
 
 ===== Proposed Voting Choices =====
 
@@ -123,7 +106,7 @@ As this is a language change, a 2/3 majority is required. The vote is a straight
 
 ===== Patches and Tests =====
 
-There is a patch for php-src with tests here: https://github.com/php/php-src/pull/1084 It is based on patch used by the [[rfc:scalar_type_hints|Scalar Type Hints]] RFC, since it already contains the infrastructure for reserving class and interface names for parameter and return types. However, should that RFC fail to pass, it would be possible to base the patch directly on master.
+There is a patch for php-src's master branch with tests: https://github.com/php/php-src/pull/1084
 
 There is currently no patch for the language specification.
 
@@ -135,5 +118,6 @@ After the project is implemented, this section should contain
 
 ===== Changelog =====
 
+  * v0.2 - Revived, cleaned up proposal and rationale, added compile-time checking
   * v0.1.1 - Detailed implicit null return value
   * v0.1 - Initial version
