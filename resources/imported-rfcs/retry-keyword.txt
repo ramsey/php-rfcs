@@ -8,14 +8,59 @@
 
 The ''retry'' keyword will make it easier to re-execute code blocks that failed due to recoverable errors.
 
-PHP is primarily used for web apps and many times these apps need to communicate with 3rd-party services that can temporality fail with recoverable errors. Failures typically throw exceptions which can be captured in a ''try/catch'' block. Once a recoverable error reaches a ''catch'' block, it's not super trivial in user-land to retry the ''try'' block.
+PHP is primarily used for web apps, and many times these apps need to communicate with third-party services or data stores that can temporality fail with recoverable errors. Failures typically throw exceptions which can be captured in a ''try/catch'' block. Once a recoverable error reaches a ''catch'' block, it's not always trivial in user-land to retry the ''try'' block.
 
 This RFC proposes adding the ''retry'' keyword in the ''catch'' block to re-execute the ''try'' block.
+
+<code php>
+try {
+    somethingSketchy();
+} catch (RecoverableException $e)
+    retry;
+}
+</code>
 
 
 ===== Proposal =====
 
-Currently in order to retry a block of code that failed with a recoverable error in user-land, the developer needs to write quite a bit of bootstap code. There are a few ways to implement a feature that will retry a failed block of code ''x'' number of times.
+This new keywords makes what is currently somewhat of a chore into a quick and easy activity.
+
+Currently in order to retry a block of code that failed with a recoverable error in user-land, the developer needs to write quite a bit of bootstap code. It forces the developer to make extra methods or functions, which are not always necessary or even helpful, and are just written to avoid copy/paste.
+
+**Currently**
+
+<code php>
+function uploadImage($path) {
+  $attempt = function() use ($path) {
+    $obj = $this->s3->bucket('bucket-name')->object('key');
+    $obj->upload_file($path);
+  };
+
+  try {
+    $attempt();
+  } catch (AWS\S3\UploadException $e)
+    $attempt();
+  }
+}
+</code>
+
+**Proposed**
+
+<code php>
+function uploadImage($path) {
+    try {
+        $obj = $this->s3->bucket('bucket-name')->object('key');
+        $obj->upload_file($path);
+    } catch (AWS\S3\UploadException $e)
+        retry;
+    }
+}
+</code>
+
+There are currently a few ways to implement a feature that will retry a failed block of code ''x'' number of times.
+
+=== Recursive Functions ===
+
 
 <code php>
 function myRetryFunction($maxTries) {
@@ -32,7 +77,9 @@ function myRetryFunction($maxTries) {
 myRetryFunction(5);
 </code>
 
-Wrapping recoverable failures in functions/closers is less than ideal. Let's try another method.
+Wrapping recoverable failures in functions/closures is less than ideal. Let's try another method.
+
+=== For Loops ===
 
 <code php>
 $maxTries = 5;
@@ -50,6 +97,12 @@ Wrapping the recoverable code in ''for'' loops is also less than ideal.
 
 With the ''retry'' keyword, the code becomes both easier to read and write.
 
+=== Use Goto ===
+
+No.
+
+=== Retry Keyword ===
+
 <code php>
 $maxTries = 5;
 
@@ -63,7 +116,29 @@ try {
 }
 </code>
 
-There are myriad use cases in which ''retry'' could be useful. The primary use case would be with temporary failed TCP/IP connections which are extremely common. Ideally apps would attempt to retry recoverable failures but it's currently not trial to do so scaring off a lot of developers from adding the retry logic. If were easier for developers to implement retry logic, we would see more stable apps as more developers adopt the easy-to-use syntax.
+This really does simplify quite a few workflows, that many PHP developers have just learned to accept, and could be improved greatly. 
+
+It's important not to confuse the use of this feature, with developers just not using enough methods. More and more and more methods is quite popular with the OOP mindset, but a) more methods are not in fact always a superior alternative to retry, and b) PHP is not just an OOP language.
+
+This is also not unheard of in other languages.
+
+- Ruby has the ''retry'' keyword, highlighted nicely in [[Bastards Book of Ruby: Exception and Error Handling| http://ruby.bastardsbook.com/chapters/exception-handling/#retry-section]]
+- Spring do [[some really weird stuff|http://docs.spring.io/spring-batch/reference/html/retry.html]] to make retry possible
+- Python third party library offers [[annotations to allow methods retry|https://pypi.python.org/pypi/retrying]]
+
+Other languages seem to lack retry logic directly, but Google is full of people trying to work out how to do it with a whole range of complex approaches. We'd make a lot of lives easier if the keyword existed, instead of forcing people to loop and break and count and recurse.
+
+===== Use Cases =====
+
+There are myriad use cases in which ''retry'' could be useful. 
+
+A) A popular use case would be with temporary failed TCP/IP connections which are extremely common. If a server is not available, simply sleep a second and retry. Maybe do this five times until it works.
+
+B) Attempting to make an OAuth 2.0-based API request, getting a 401 due to an expired token, refreshing that token then retrying to original request.
+
+C) Find/Create logic. This is used in the Rails world, when their ActiveRecord "ORM" does SELECT...INSERT. There is a chance that a race condition will flair up between the SELECT returning 0 rows and the INSERT happening, leading to a unique index exception being thrown. Catch that specific exception and fire out a retry, there is no way it can keep happening unless you are deleting it super quickly and timing those race conditions perfectly.
+
+Ideally apps would attempt to retry recoverable failures far more often than we see in the wild, but it's currently not trivial to do so. This scares off a lot of developers from adding the retry logic, and if it were easier, we may well see more stable apps as more developers adopt the easy-to-use syntax.
 
 ===== Backward Incompatible Changes =====
 
