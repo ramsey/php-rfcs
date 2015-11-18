@@ -27,33 +27,62 @@ The new curl handle is then added to the multi handler and is then included in t
 
 <code php>
 <?php
-$user_data = null;
+$transfers = 1;
 
-$callable = function ($push_ch, $parent_ch, $header_count, array $headers) use (&$user_data)
-{
-      if ($header_count > 0 && isset($headers['content-type']) && $headers['content-type'][0] !== 'application/json') {
-           return CURL_PUSH_DENY;
-      }
-      return CURL_PUSH_OK;
-}
+$callback = function($parent_ch, $pushed_ch, int $num_headers, array $headers) use (&$transfers) {
+	$transfers++; // increment to keep track of the number of concurrent requests
+	return CURL_PUSH_OK;
+};
 
 $mh = curl_multi_init();
 
-curl_multi_setopt($mh, CURLMOPT_PUSHFUNCTION, $callable);
-?>
+curl_multi_setopt($mh, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
+curl_multi_setopt($mh, CURLMOPT_PUSHFUNCTION, $callback);
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, "https://localhost:8080/index.html");
+curl_setopt($ch, CURLOPT_HTTP_VERSION, 3);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+
+// Debugging/Local stuff
+//curl_setopt($ch, CURLOPT_VERBOSE, 1); // will output curl debugging information
+curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0); // self-signed cert
+curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0); // self-signed cert
+
+curl_multi_add_handle($mh, $ch);
+
+$active = null;
+do {
+    $status = curl_multi_exec($mh, $active);
+
+    do {
+        $info = curl_multi_info_read($mh);
+        if (false !== $info && $info['msg'] == CURLMSG_DONE) {
+            $handle = $info['handle'];
+            if ($handle !== null) {
+                $transfers--; // decrement remaining requests
+		$out = curl_multi_getcontent($info['handle']); // Response body
+                curl_multi_remove_handle($mh, $handle);
+                curl_close($handle);
+            }
+        }
+    } while ($info);
+} while ($transfers);
+
+curl_multi_close($mh);
 </code>
 
 ===== Implementation =====
 
-Within [[https://github.com/php/php-src/blob/master/ext/curl/multi.c#L409|the PHP implementation of curl_multi_setopt()]] (referenced as ''php\curl_multi_setopt()'') there is a switch that handles different options. When ''CURLMOPT_PUSHFUNCTION'' is set a callback is registered that will call the callable set in ''php\curl_multi_setopt()''.
+Within [[https://github.com/php/php-src/blob/master/ext/curl/multi.c#L409|the PHP implementation of curl_multi_setopt()]] (referenced as ''php\curl_multi_setopt()'') there is a switch that handles different options. When ''CURLMOPT_PUSHFUNCTION'' is set a C callback is registered that will call the callable set in ''php\curl_multi_setopt()'' (and passed to the C callback using curls ''CURLMOPT_PUSHDATA'').
 
 We do not support ''CURLMOPT_PUSHDATA''. Instead, the user can use closures and ''use'' with references to replicate this behavior.
 
-We also have to handle the ''$headers'' argument, which I believe will have to be a resource for it to work — this will then be passed into two new libcurl functions ''curl_pushheader_bynum()'' and ''curl_pushheader_byname()''. libcurl does not expose the headers through any other mechanism from nghttp2, so we either have to duplicate the internal libcurl code that accesses the nghttp2 header data, or we have to use these accessors. The former seems very brittle to me.
+libcurl exposes the push headers with two functions functions ''curl_pushheader_bynum()'' and ''curl_pushheader_byname()''. We can use ''curl_pushheader_bynum()'' to create an array of header lines. These would then be parsed in user land (as with regular request headers)
 
 ===== Backward Incompatible Changes =====
 
-No breaks, except possibly the referenced value for ''php\curl_multi_setopt()''.
+No breaks
 
 ===== Proposed PHP Version(s) =====
 
@@ -76,7 +105,6 @@ No impact on Opcache
 ==== New Constants ====
 
   * ''CURLMOPT_PUSHFUNCTION''
-  * ''CURLMOPT_PUSHDATA''
   * ''CURL_PUSH_OK''
   * ''CURL_PUSH_DENY''
 
@@ -88,7 +116,7 @@ None
 
 ===== Open Issues =====
 
-  - Adding a new resource isn't desirable but fits the current ext/curl API
+Some memory leaks
 
 ===== Future Scope =====
 
@@ -101,7 +129,7 @@ Two choices: Add, Deny
 
 ===== Patches and Tests =====
 
-Patch is currently being worked on [[https://github.com/dshafik/php-src/compare/curl-http2-push|here]]
+(rough) Working patch can be found [[https://github.com/dshafik/php-src/compare/curl-http2-push|here]]
 
 ===== Implementation =====
 
