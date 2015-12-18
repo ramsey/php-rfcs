@@ -16,39 +16,48 @@ This proposal fixes session management design issue. Session ID management requi
   * Session ID cookie becomes empty randomly.
   * Increase risks of stolen session.
 
-
-==== session_regenerate_id() ====
-
 Keeping HTTP session as secure as possible is what the session manager's task. **Session manager can improve HTTP session security without user code modification while keeping compatibility with existing applications.** Please note that this RFC is for session manager behavior.
+
+==== session_regenerate_id() problems ====
 
 session_regenerate_id() is used to generate new session ID. It's better to delete old session data to reduce risk of session hijack. However, session_regenerate_id() leave old session data by default currently. (i.e. session_regenerate_id(FALSE) is the default) Old session data is active and usable until GC. 
 
 Old session is left active for reliable session ID regeneration. There are many reasons why old session is left. Examples are:
+
   * Browsers connect to web server with multiple connections. 
   * Mobile network may loose radio, may have hand over, etc. 
   * Large network providers have multiple gateways for off loading traffic and packets may arrive out of order. 
-For reliable session ID regeneration, only short periods (few seconds for wired connections, few minutes for mobile connection) is enough. 
+
+For reliable session ID regeneration, only short TTL for old session (few seconds for wired connections, few minutes for mobile connection)  is enough for stable HTTP session management.
 
 
 **Leaving old session opens window to attacker widely:**
+
   - Old session lives long term and never expires if there is access to it. i.e. Attacker may abuse stolen session forever.
   - There is no mechanism to detect possibles attack even if session manager may detect attacks.
 
-**Counter measure for session hijack:** Requirement - Session ID regeneration must be reliable.
+**Counter measure for session hijack:** Requirement
+
+  - Session ID regeneration must be reliable.
   - Make sure old session is deactivated/deleted after certain period.
   - Raise error/exception for invalid access. (Raise error for should be deleted session access)
 
 **Problem of immediate old session deletion:**
+
   - Make session ID regeneration unreliable. i.e. session_regenerate_id(TRUE) randomly destroy session data and/or browsers sent empty session ID. See referenced bug reports. (Unacceptable)
   - Remove alarm for possible attacks. (No detection = Insecure)
 
-**"Make sure old session is deleted certain period"** and **"Raise error/exception for invalid access"** provides much better security than current way or immediate deletion.
+**"Make sure old session is deleted certain period"** and **"Raise error/exception for invalid access"** provides much better security than current way (leave obsolete session invalidation to probability based GC) or immediate deletion.
 
-Errors may be raised for either legitimate user or attacker. If error is raised for legitimate user, legitimate user could know they are under attack. (Possibly network is dangerous or app has vulnerability) If error is raised for attacker, attacker could know they might be caught by illegal access.
+Errors for accessing invalid session may be raised for either legitimate user or attacker. If error is raised for legitimate user, legitimate user could know they are under attack. (Possibly network is dangerous or app has vulnerability or their network connection was too bad) If error is raised for attacker, attacker could know their illegal access might be caught.
 
 ==== Session Expiration ====
 
-Current session expiration is not precise as it depends on probability for deletion. This is similar to session_regenerate_id() issue currently exists. Session expiration should be more precise.
+Current session expiration is not precise as it depends on probability for deletion, 1/1000 probability by default. session_regenerate_id(FALSE) is affected directly by this. Obsolete(old) session data is left for GC. 
+
+Since session module should not delete old session data immediately, session module leave old session removal to GC by default. As as result, invalid old session may alive as long as it is accessed.
+
+Session expiration should be more precise. Obsolete session data must be removed few seconds to few minutes later.
 
 
 ==== Risk of stolen session ====
@@ -67,59 +76,76 @@ Even if there is only recent bug report for this, this bug is known more than 10
   * https://bugs.php.net/bug.php?id=68063 
   * https://bugs.php.net/bug.php?id=70584 
 
+session_regenerate_id() worked as session_regenerate_id(TRUE) (Remove old session data immediately) when it was made. session_regenerate_id(TRUE) caused problems like above bug reports and the default behavior was changed to session_regenerate_id(FALSE). (IIRC, session_regenerate_id(FALSE) behavior was added later and became the default.)
 
 
 ===== Proposal =====
 
-  * Add transparent Session module internal array data <nowiki>$_SESSION['__SESSION_INTERNAL__']</nowiki> to keep access timestamp, etc. Note: This array could be used to store data for automatic CSRF protection in the future also.
-  * Add session.ttl INI and deprecate session.gc_maxlifetime
-  * Add session.ttl_freq INI (TTL update frequency)
-  * Add session.ttl_destroy INI (Session destroy TTL)
-  * Add session_gc() function
-  * Add $immediate_destroy flag for session_destroy([$immediate_destroy=FALSE]) (Be consistent with session_regenerate_id() or remove immediate deletion option at all because immediate session data removal causes severe problems.)
+Based on the fact that
+
+  * Old session data cannot be deleted immediately.
+  * Obsolete old session data must be removed reliable manner.
+
+This RFC proposed followings
+
+  * Add transparent Session module internal array data <nowiki>$_SESSION['__SESSION_INTERNAL__']</nowiki> to keep access time stamp, etc. Note: This array could be used to store data for automatic CSRF protection in the future also.
+  * Add session.ttl INI (Default 1800 seconds) and deprecate session.gc_maxlifetime
+  * Add session.ttl_update INI (Default 300 seconds. Last access time stamp update frequency)
+  * Add session.ttl_destroy INI (Default 300 seconds. Session destroy TTL)
+  * Add session_gc() function for periodic GC.
+  * Remove immediate old session data deletion from session_regenerate_id().
 
 ==== How session_regenerate_id() will work ====
 
-**Add 'session.destroy_ttl' INI directive**(INI_ALL, default 300 seconds) and **"make sure old session is deleted certain period"**.
+NOTE: This is PHP pseudocode, but it will be implemented exactly.
 
-This can be achieved by time stamp in session data. When session_regenerate_id()/session_destroy() is called without parameter, session manager sets following for old session data.
+Session manager sets following data when there is session data should be deleted. i.e. session_regenerate_id() is called.
 
-NOTE: This is pseudocode.
-
+Obsolete session data has NEW_SID and TTL upto session.ttl_destroy.
 <code php>
-  $_SESSION['__SESSION_INTERNAL__']['NEW_SID'] = <new session id>;
-  $_SESSION['__SESSION_INTERNAL__']['LAST_ACCESS'] = time();
+  $_SESSION['__SESSION_INTERNAL__']['NEW_SID'] = <new session ID>;
+  $_SESSION['__SESSION_INTERNAL__']['TTL'] = time() + ini_get('session.ttl_destroy');
 </code>
 
-New session data only has LAST_ACCESS.
+New session data has TTL and TTL_UPDATE.
 
 <code php>
-  $_SESSION['__SESSION_INTERNAL__']['LAST_ACCESS'] = time();
+  $_SESSION['__SESSION_INTERNAL__']['TTL'] = time() + ini_get('session.ttl');
+  $_SESSION['__SESSION_INTERNAL__']['TTL_UPDATE'] = time() + ini_get('session.ttl_update');
 </code>
 
-Under normal session usage, <nowiki>$_SESSION['__SESSION_INTERNAL__']</nowiki> is used as follows
+Under normal session usage, <nowiki>$_SESSION['__SESSION_INTERNAL__']</nowiki> is checked/used as follows
 
 <code php>
   // Check obsolete session and destroy.
   if (isset($_SESSION['__SESSION_INTERNAL__']['NEW_SID'])) {
-    if ($_SESSION['__SESSION_INTERNAL__']['LAST_ACCESS'] < time() + ini_get('session.ttl_destroy')) {
+    // Must not update obsolete session TTL. 
+    if ($_SESSION['__SESSION_INTERNAL__']['TTL'] - time() < -60
+        && !isset($_SESSION['__SESSION_INTERNAL__']['NEW_SID_SENT']) {
+      // Resend new session ID once. This will reduce chance of client race and lost session by unstable network to acceptable level.
+      $_SESSION['__SESSION_INTERNAL__']['NEW_SID_SENT'] = time();
+    }
+    if ($_SESSION['__SESSION_INTERNAL__']['TTL'] < time()) {
       // Remove session data
-      // Send new session ID if LAST_SID_SENT is 60 sec before. (Prevent browser cookie storage race)
+      // Assign newly created session ID
       // Raise warning for obsolete session data access
     }
   } else {
-    // Do not update LAST_ACCESS for obsolete session. 
-    // LAST_ACCESS is updated by session.ttl_freq for lazy_write to work.
-    if (!isset($_SESSION['__SESSION_INTERNAL__']['NEW_SID'] &&
-        $_SESSION['__SESSION_INTERNAL__']['LAST_ACCESS'] + ini_get('session.ttl_freq) < time()) {
-      $_SESSION['__SESSION_INTERNAL__']['LAST_ACCESS'] = time(); // Update LAST_ACCESS time
+    if ($_SESSION['__SESSION_INTERNAL__']['TTL'] < time()) {
+      // Remove session data
+      // Assign newly created session ID
+    }
+    // TTL is updated by session.ttl_update for lazy_write to work.
+    else if ($_SESSION['__SESSION_INTERNAL__']['TTL_UPDATE'] < time()) {
+      $_SESSION['__SESSION_INTERNAL__']['TTL'] = time() + ini_get('session.ttl'); 
+      $_SESSION['__SESSION_INTERNAL__']['TTL_UPDATE'] = time() + ini_get('session.ttl_update'); 
     }
   }
 </code>
 
 User will never see <nowiki>$_SESSION['__SESSION_INTERNAL__']</nowiki> array as it is removed/added upon session data serialization internally in session module. 
 
-When session_regenerate_id(true)/session_destroy(true) is called, session module destroy session data immediately. (It may be better to remove immediate deletion because it causes serious errors)
+When session_regenerate_id()/session_destroy() is called, session module destroy session data immediately. (It may be better to remove immediate deletion because it causes serious errors)
 
 Users may add $_SESSION['<nowiki>__SESSION_INTERNAL__</nowiki>']. When this is happened, session module raise E_WARNING and replace with the session internal data.
 
@@ -139,14 +165,15 @@ Since current session depends on probability based GC, low traffic site may keep
 
 ==== $_SESSION['__SESSION_INTERNAL__'] data definition ====
 
-  * <nowiki>$_SESSION['__SESSION_INTERNAL__']['LAST_ACCESS'] </nowiki> : Last access UNIX time.
+  * <nowiki>$_SESSION['__SESSION_INTERNAL__']['TTL'] </nowiki> : TTL of session. UNIX time.
+  * <nowiki>$_SESSION['__SESSION_INTERNAL__']['TTL_UPDATE'] </nowiki> : TTL update time. UNIX time. Used to reduce session internal data update frequency.
   * <nowiki>$_SESSION['__SESSION_INTERNAL__']['NEW_SID'] </nowiki> : New session ID generated by session_regenerate_id(). If this is set, it means this session is obsolete.
-  * <nowiki>$_SESSION['__SESSION_INTERNAL__']['LAST_SID_SENT'] </nowiki> : Used to prevent browser cookie storage race condition.
+  * <nowiki>$_SESSION['__SESSION_INTERNAL__']['NEW_SID_SENT'] </nowiki> : Set if NEW_SID is resent to client. Used to prevent browser cookie storage race condition. UNIX time.
 
   
 ==== Adding session_gc() ====
 
-Session TTL Timestamp eliminates needs of probability based expiration. However, garbage will be left. Therefore, there should be GC API for cron task for instance.
+Session TTL Time stamp eliminates needs of probability based expiration for obsolete sessions. However, garbage will be left. Therefore, there should be GC API for cron task for instance.
 
 
 ==== Adding session.ttl ====
@@ -185,15 +212,15 @@ If there are any php.ini settings then list:
 
 New
 
-  * "session.ttl = 1440" for all. (1440 seconds. Replaces session.gc_maxlifetime. INI_ALL)
-  * "session.ttl_freq = 300" for all. (300 seconds. TTL update frequency. If TTL is updated for every request, lazy_write won't work. INI_ALL)
+  * "session.ttl = 1800" for all. (1800 seconds. Replaces session.gc_maxlifetime. INI_ALL)
+  * "session.ttl_update = 300" for all. (300 seconds. TTL update frequency. If TTL is updated for every request, lazy_write won't work. INI_ALL)
   * "session.ttl_destroy = 300" for all. (300 seconds. TTL value for removing obsolete session. INI_ALL)
 
 Existing
-  * "session.gc_divisor = 10000" for all. Currently, 100 hardcoded, 1000 for development/production. Changed since frequent GC is not required with new session management.
+  * "session.gc_divisor = 10000" for all. Currently, 100 hardcoded, 1000 for development/production. Changed since less frequent GC is required with new session management.
 
 Deprecated
-  * "session.gc_maxlifetime" "session.ttl" should be used instead. This is supported until PHP 7.3.
+  * "session.gc_maxlifetime" "session.ttl" should be used instead.
 
 ===== Open Issues =====
 
@@ -205,7 +232,7 @@ Other than session management, there is no affected functionality.
 
 ===== Future Scope =====
 
-Fully automatic/site wide CSRF protection may be introduced with <nowiki>$_SESSION['__SESSION_INTERNAL__']</nowiki>.
+Fully automatic/site wide CSRF protection may be introduced with <nowiki>$_SESSION['__SESSION_INTERNAL__']</nowiki> and rewrite var feature.
 
 ===== Vote =====
 
@@ -235,3 +262,4 @@ TBD
   * 2014/03/18 - Change RFC to propose time stamping.
   * 2013/10/30 - Added details and message option.
   * 2013/10/29 - Created RFC
+
