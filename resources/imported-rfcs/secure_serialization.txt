@@ -1,0 +1,164 @@
+====== PHP RFC: Secure serialization by authentication code ======
+  * Version: 0.1
+  * Date: 2015-12-30
+  * Author: Yasuo Ohgaki <yohgaki@php.net>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/secure_serialization
+
+===== Introduction =====
+
+PHP variable serialization was source of security issues. The root cause of issues is "crafted serialized data". Crafted serialized data can be rejected by message authentication code using crypt-graphic hash function. This RFC proposes serialize/unserialize function that supports authentication code.
+
+Recent example of vulnerabilities are Joomla! 3.4.6 and 3.4.7.
+
+  * https://developer.joomla.org/security-centre/639-20151206-core-session-hardening.html
+  * https://developer.joomla.org/security-centre/630-20151214-core-remote-code-execution-vulnerability.html
+
+
+
+===== Proposal =====
+
+  * Add secure_serialize() and secure_unserialize() supports message authentication code generation/validation and expiration.
+
+  string secure_serialize($data_to_be_serialized [, $secret_key = NULL [, $ttl = time() + 36000 [,bool $session_only]]])
+  mixed secure_unserialize($data_to_be_unserialized [, $secret_key = NULL [, $ttl = time() + 36000 ]])
+
+  * Add system wide secret key INI setting.
+
+  mac_secret_key - Secret string used for authentication code
+  mac_ttl - Authentication code TTL
+
+==== How secure_serialize() works ====
+
+Pseudo code
+<code php>
+function secure_serialize(string $data_to_be_serialized, string $secret_key = '', int $ttl = 36000, bool $session_only = FALSE) : string {
+  $secret_key = $secret_key ?: ini_get('mac_secret_key');
+  if (strlen($secret_key) < 32) {
+    trigger_error('Too short secret key');
+    return FALSE;
+  }
+  if (ini_get('mac_ttl')) {
+    $ttl = time() + ini_get('mac_ttl');
+  } else {
+    $ttl = $ttl ?: time() + $ttl; // 10 hours TTL by default
+  }
+  $session_only = $session_only ? TRUE : FALSE;
+  $key = sha256(random_bytes(64));
+  
+  $serialized_data = serialize($data_to_be_serialized);
+  if ($session_only) {
+    if (!session_id()) {
+      trigger_error('Session is not started');
+      return FALSE;
+    }
+    $mac = sha256($secret_key.$ttl.$key.sha256(session_id()).$serialized_data);
+    return serialize['mac'=>$mac, 'ttl'=>$ttl, 'key'=>$key, 'id'=>sha256(session_id()),  'data'=>$serialized_data];
+  } else {
+    $mac = sha256($secret_key.$ttl.$key.$serialized_data);
+    return serialize['mac'=>$mac, 'ttl'=>$ttl, 'key'=>$key, 'data'=>$serialized_data];
+  }
+}
+</code>
+
+
+==== How secure_unserialize() works ====
+
+Pseudo code
+<code php>
+function secure_serialize(string $data_to_be_unserialized, string $secret_key = '') : mixed {
+  $secret_key = $secret_key ?: ini_get('mac_secret_key');
+  if (strlen($secret_key) < 32) {
+    trigger_error('Too short secret key');
+    return FALSE;
+  }
+  
+  $tmp = unserialize($data_to_be_unserialized);
+  if ($tmp['ttl'] < time() {
+    // Serialized data is expired
+    return FALSE;
+  }
+  
+  if (isset($tmp['id'])) {
+    // Old session ID may be used if session module store old IDs in internal data.
+    $mac = sha256($secret_key.$tmp['ttl'].$tmp['key'].sha256(session_id()).$tmp['data']);
+  } else {
+    $mac = sha256($secret_key.$tmp['ttl'].$tmp['key'].$tmp['data']);
+  }
+  
+  if ($mac !== $tmp['mac']) {
+    return FALSE;
+  }
+  return $tmp['data']; 
+}
+</code>
+
+    
+
+===== Backward Incompatible Changes =====
+
+None.
+
+===== Proposed PHP Version(s) =====
+
+PHP 7.1
+
+===== RFC Impact =====
+==== To SAPIs ====
+
+None.
+
+==== To Existing Extensions ====
+
+None.
+
+==== To Opcache ====
+
+None.
+
+==== New Constants ====
+
+None.
+
+==== php.ini Defaults ====
+If there are any php.ini settings then list:
+  * hardcoded default values
+  * php.ini-development values
+  * php.ini-production values
+
+
+  * mac_secret_key - Default '' for all. Secret string used for authentication code
+  * mac_ttl - Default 36000 (10 hours) for all. Authentication code TTL
+
+===== Open Issues =====
+Make sure there are no open issues when the vote starts!
+
+===== Unaffected PHP Functionality =====
+List existing areas/features of PHP that will not be changed by the RFC.
+
+This helps avoid any ambiguity, shows that you have thought deeply about the RFC's impact, and helps reduces mail list noise.
+
+===== Future Scope =====
+
+If session module stores old session ID, automatic fallback to old session ID may be supported.
+
+===== Proposed Voting Choices =====
+
+50%+1 majority
+
+
+===== Patches and Tests =====
+
+TBD
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+Links to external references, discussions or RFCs
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
