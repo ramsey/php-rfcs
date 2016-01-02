@@ -1,10 +1,9 @@
 ====== PHP RFC: On-demand Name Mangling ======
-  * Version: 1
+  * Version: 1.1
   * Date: 2016-01-01
   * Author: Bishop Bettini, bishop@php.net
   * Status: Under Discussion
-  * First Published at: http://wiki.php.net/rfc/on_demand_name_mangling
-
+  * First Published at: http://wiki.php.net/rfc/remove_name_mangling
 
 ===== Introduction =====
 PHP marshals external key-value pairs into super-globals by mangling some disallowed characters to underscores:
@@ -43,11 +42,9 @@ TOTAL TIME: 00:00
 0 SKIPPED TESTS
 </code>
 
-Mangling has the undesirable consequence that //many// external variables may map to //one// PHP variable. For example, three separate HTML form elements named ''a.b'', ''a_b'' and ''a b'' will all resolve to ''a_b'' in the corresponding super-global, with the last seen value winning. This leads to user confusion and user-land work arounds, not to mention bug reports: [[https://bugs.php.net/bug.php?id=34882|#34882]] and [[https://bugs.php.net/bug.php?id=42055|#42055]] for example.
+Mangling has the undesirable consequence that //many// external variables may map to //one// PHP variable. For example, three separate HTML form elements named ''a.b'', ''a_b'' and ''a b'' will all resolve to ''a_b'' in the corresponding super-global, with the last seen value winning. This leads to user confusion and userland work arounds, not to mention bug reports: [[https://bugs.php.net/bug.php?id=34882|#34882]] and [[https://bugs.php.net/bug.php?id=42055|#42055]] for example.
 
-Automatic name mangling supported ''[[http://php.net/manual/en/ini.core.php#ini.register-globals|register_globals]]'' and ''[[http://php.net/manual/en/function.import-request-variables.php|import_request_variables()]]'', but those features ended in August 2014. Name mangling isn't required for super-global marshaling, because the associative array nature of super-globals can accommodate any string variable name. So do we need automatic name mangling?
-
-Yes, but not on import as before. Now, name mangling can be moved when extracting, which is when it's needed. Consider this hypothetical new test:
+Automatic name mangling supported ''[[http://php.net/manual/en/ini.core.php#ini.register-globals|register_globals]]'' and ''[[http://php.net/manual/en/function.import-request-variables.php|import_request_variables()]]'', but those features ended in August 2014. Name mangling isn't required for super-global marshaling, because the associative array nature of super-globals can accommodate any string variable name. So do we need automatic name mangling? Consider this hypothetical new test:
 
 <code>
 --TEST--
@@ -56,7 +53,7 @@ Name mangling logic moved to extract()
 a.b=dot&a$b=dollar&a%20b=space&a[b=bracket
 --FILE--
 <?php
-extract($_GET);
+extract($_GET, EXTR_MANGLE);
 print_r(get_defined_vars());
 ?>
 --EXPECTF--
@@ -74,25 +71,73 @@ Array
 )
 </code>
 
-In this new paradigm, all name mangling has moved to ''extract()'', while all input variables retain their original form. This has the side effect of fixing ''extract()'' bug reports like [[https://bugs.php.net/bug.php?id=70344|#70344]].
-
+In this new implementation, marshaled superglobals are no longer mangled.  Instead, the //ability// to mangle names has moved to ''extract()''.  This has the happy side effect of fixing ''extract()'' bug reports like [[https://bugs.php.net/bug.php?id=70344|#70344]].((''extract()'' should be able to extract non-conformant keys anyway, because they're accessible with the ''${'foo.bar'}'' syntax. That, however, is out of scope for this RFC.))
 
 ===== Proposal =====
 This RFC proposes to phase out automatic name mangling, replacing it with on-demand mangling in ''extract()'': 
 
   * Next minor release (currently 7.1):
-    * Emit an ''E_DEPRECATED'' warning for each variable that is mangled. The warning indicates that name mangling on import will be removed in the next major PHP version.
+    * Emit an ''E_DEPRECATED'' warning the first time a variable is mangled. The warning indicates that name mangling on import will be removed in the next major PHP version.
   * Next major release (currently 8.0):
     * Remove all name mangling code in super-global marshalling functions
     * Update ''extract()'' to mangle names, subject to the following additional rules:
+      * Add a new constant, ''EXTR_MANGLE'', which converts any character outside the variable documented regex ((Unquoted variable names must match the regex ''[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*'')) to an ''_'' 
       * If a prefix is given by any of the ''EXTR_PREFIX_*'' constants, prepend that to any resulting mangled name
       * Honor ''EXTR_OVERWRITE'' and ''EXTR_SKIP'' using the mangled name as the check
-      * Mangle the name such that any letter outside the documented regex ''[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*'' is converted to an ''_''
-      * Emit an ''E_NOTICE'' for each mangled name. The notice indicates the original name and the mangled name.
 
+==== Discussion ====
+
+These questions were raised in the mailing list discussion.
+
+=== Should multiple ''E_DEPRECATED'' be emitted? ===
+
+No, because we do not know how many instances of mangling may be present and we do not want to flood application logs.
+
+The message intends to provide //some// warning to application developers when there is //known// use of name mangling. As such, a single warning when the mangler runs is sufficient to meet this intent.
+
+=== Should an INI configuration control mangling? ===
+
+Nikita Popov suggested:
+
+>  I would favor the introduction of a new ini setting. E.g. mangle_names=0 disables name mangling, while mangle_names=1 throws a deprecation warning on startup and enables name mangling. mangle_names=0 should be the default. That is essentially disable name mangling, but leave an escape hatch for those people who rely on it (for whatever reason).
+
+An INI setting to disable mangling must be engine-wide (i.e., ''PHP_INI_ALL'') as its historical effect occurs before userland code runs. Engine-wide settings are tricky because they force conditions across all instances of PHP running in a given SAPI process.  In a hosted environment where many unrelated sites share the same engine configuration, it's possible that one site might require mangling while another site requires no-mangling.  These two sites could not co-exist. Thus, an INI setting would introduce operational problems for users.
+
+However, there is an "escape hatch": userland code can emulate engine super-global mangling using the mangle-aware
+''extract()''. An implementation is given in the Backward Compatibility section.
+
+=== Should ''extract()'' automatically mangle names? ===
+
+No, because this would introduce new, unnecessary BC breakage. Instead, ''extract()'' should have the option to emit mangled names.
 
 ===== Backward Incompatible Changes =====
-This proposal introduces backward incompatible changes: any userland code relying on mangled names would have to change to using original variable names.
+This proposal introduces backward incompatible changes: any userland code relying on mangled names would have to either (a) change to using original variable names or (b) re-mangle the super-globals with a polyfill. The latter case could be accomplished with code like:
+
+<code php>
+$mangler = function () {
+    // mangle names like before
+    extract($_ENV, EXTR_MANGLE);
+
+    // push them into env
+    foreach (get_defined_vars() as $var => $val) {
+        if (! array_key_exists($var, $_ENV)) {
+            $_ENV[$var] = $val;
+        }
+    }
+};
+$mangler();
+</code>
+
+Similar algorithms could be applied to the other super-globals.
+
+To reduce the burden on userland, a polyfill library could be made available to simplify this:
+
+<code>
+$ composer require php/mangle-polyfill ^1.0
+$ cat example.php
+<?php mangle_superglobals();
+
+</code>
 
 ===== Proposed PHP Version(s) =====
 PHP 7.1 (for notice of impending BC break) and PHP 8.0 (for actual implementation and corresponding BC break).
