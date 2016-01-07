@@ -1,0 +1,120 @@
+====== PHP RFC: Warn about invalid strings in arithmetic ======
+  * Version: 1.0
+  * Date: 2016-01-07
+  * Author: Andrea Faulds, ajf@ajf.me
+  * Status: In Draft
+  * First Published at: http://wiki.php.net/rfc/invalid_strings_in_arithmetic
+
+===== Introduction =====
+PHP's arithmetic operators allow not only numbers, but also numeric strings to be used as operands. For example, not only <php>1 + 1</php> produces <php>2</php>, but also <php>'1' + '1'</php>. This can be a useful feature when dealing with user input, which is often a string when dealing with the web. However, the arithmetic operators do not just accept numeric strings, but any string at all, and do not produce any type of error message if nonsensical input is given, instead simply considering it equivalent to zero. This means, for example, that <php>"not a number" + "12"</php> produces <php>12</php>, without any warning that the string <php>"not a number"</php> was thrown away. Similarly, strings which only start with a number are accepted, with the remainder silently ignored. For example, <php>"10 apples" + "5 pears"</php> results in <php>15</php>, also without any error message. The lack of error message produced here can create bugs which are not immediately obvious.
+
+This can be particularly problematic for users dealing with other programming languages. For example, in many other languages the ''+'' symbol is used for concatenating strings, whereas in PHP the ''.'' operator is used. When a user has been using another language and then writes PHP code, they may mistakenly use the ''+'' operator to concatenate strings. Unfortunately, PHP will not warn them of their mistake in this case, instead simply producing 0 as the result of the operation. This is easy to miss when looking at a program's output or, worse, may not even be in the output itself. It may also be hard to figure out where the zero value originated in the source code.
+
+===== Proposal =====
+For all arithmetic operators, using a non-numeric string (such as <php>"foobar"</php>) as an operand where a number is expected will produce an [[http://php.net/manual/en/errorfunc.constants.php|E_WARNING]] error, and using a non-well-formed numeric string (such as <php>"10 apples"</php>) will produce an [[http://php.net/manual/en/errorfunc.constants.php|E_NOTICE]] error. For our purposes, the "arithmetic operators" are considered to be the set { ''+ - * / % << >> | & ^'' }. The bitwise NOT operator ''~'' is not included, because it does not perform automatic numeric string conversion.
+
+In short, the following code, which currently produces no errors
+
+<code php>
+<?php
+
+$numberOfApples = "10 apples" + "5 pears";
+</code>
+
+will now produce the following errors:
+
+<code>
+
+Notice: A non well formed numeric string encountered in example.php on line 3
+
+Notice: A non well formed numeric string encountered in example.php on line 3
+</code>
+
+Similarly, this code
+
+<code php>
+<?php
+
+$numberOfPears = 5 * "orange";
+</code>
+
+will now produce this error:
+
+<code>
+
+Warning: A non-numeric string encountered in example.php on line 3
+</code>
+
+The "A non well formed numeric string encountered" E_NOTICE is the same as that currently produced when passing such non-well-formed values where a number is expected to a built-in PHP function or userland function with type declarations. It is produced for strings which start with a number (possibly preceded by whitespace), but also contain non-numeric content. This includes strings like ''"  123abc"'' or ''"  1.23e3FOOBAR"''. It also, perhaps unfortunately, includes strings with trailing whitespace like ''"  123  "''.
+
+The "A non-numeric string encountered" E_WARNING is a newly invented error for this RFC, with the wording chosen to match the existing error. It is shown when a string does not start with a number (possibly preceded by whitespace). There is no such E_WARNING for function type checks, because they simply reject non-numeric strings outright. This RFC does not do this, in order to avoid breaking backwards compatibility (see the "Backwards Incompatible Changes" section below).
+
+===== Backward Incompatible Changes =====
+The introduction of a new E_NOTICE and E_WARNING may create backwards-incompatibility issues in projects which use error handlers to convert these types of errors into exceptions, or have other special handling of E_NOTICEs and E_WARNINGs. This is, unfortunately, an unavoidable consequence of producing error messages where it was not done before. There is less risk of breakage with the E_NOTICE, as E_NOTICE is often silenced and ignored in production.
+
+However, the situations where an E_WARNING is produced are likely to be accidental, so the introduction of this error message may be helpful. Furthermore, it is trivial to fix any case where these new errors would be produced, either by using an explicit conversion (e.g. <php>(int)"10 apples" + (int)"5 pears"</php>), suppressing the error (e.g. <php>@("10 apples" + "5 pears")</php>) or fixing whatever issue caused invalid data to be used in the operation.
+
+This RFC specifically chooses to introduce an E_WARNING for using a non-numeric string, rather than produce a <php>TypeError</php>, in order to reduce potential backwards-compatibility issues. 
+
+===== Proposed PHP Version(s) =====
+This is proposed for the next minor version of PHP, currently PHP 7.1.
+
+===== RFC Impact =====
+==== To Internals ====
+
+This RFC is implemented by modifying how ''add_function'', ''sub_function'' etc. coerce strings to numbers. Operator functions which used ''convert_scalar_to_number'' now use a private, modified version which instructs ''zend_is_numeric_string_ex'' to not silence errors, and additionally produces the "A non-numeric string encountered" warning if ''zend_is_numeric_string_ex'' indicates failure. Operator functions which used ''_zval_get_long_func'' similarly now use a private, modified version which first runs ''zend_is_numeric_string_ex'', likewise producing the "A non-numeric string encountered" warning if it indicates failure.
+
+==== To Existing Extensions ====
+
+Because this RFC affects the operator functions, which are part of the Zend API, any extension which uses them will now produce the new behaviour outlined above.
+
+==== To SAPIs ====
+
+No specific impact I am aware of.
+
+==== To Opcache ====
+
+To the best of my knowledge, this does not have any problematic interactions with Opcache.
+
+==== To Constants ===
+
+Constant scalar expressions (e.g. <php>const APPLE_COUNT = "10 apples" + "5 pears";</php>) are not excepted from the introduction of this E_NOTICE and E_WARNING. Similarly, they are already subject to the "Undefined offset:" E_NOTICE.
+
+===== Open Issues =====
+
+None curr
+
+===== Unaffected PHP Functionality =====
+
+This does not impact the type conversion rules for functions. It also does not impact the behaviour of type juggling for comparisons.
+
+===== Future Scope =====
+
+Ideally, using non-numeric strings where numbers are expected in arithmetic operations would produce a ''TypeError'' in the next major version of PHP, currently PHP 8.0. This may be worth adding to the RFC.
+
+===== Proposed Voting Choices =====
+
+A simple Yes/No vote will be held, on whether to accept the RFC for the next minor version of PHP and merge the patch into ''master''.
+
+As this is a language change, the RFC requires a 2/3 majority to pass.
+
+===== Patches and Tests =====
+A complete and working patch with updated tests can be found here: https://github.com/php/php-src/compare/master...TazeTSchnitzel:operator_numeric_string_notices
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+
+  * In a talk I gave at PHP North West in October 2015, I gave a personal anecdote about why I would like this RFC: https://www.youtube.com/watch?v=bYMUbavj9uE&t=15m27s
+
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
+
+===== Changelog =====
+
+  * v1.0 - first public version
