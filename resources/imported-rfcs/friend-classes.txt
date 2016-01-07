@@ -8,9 +8,11 @@
 
 
 ===== Introduction =====
-Class Friendship allows a class to be better encapsulated by granting per-class access to protected properties that would otherwise have to be marked public. This affords developers an opportunity to better-model objects as behavioural units while making-explicit presentation concerns through friendship. Class Friendship is a valuable expression for object modeling when used properly. It also has value in Characterization Testing as a short-term strategy for refactoring legacy applications. It provides a natural marker / target for further work through explicit friend relationships between Systems Under Test and their test cases.
+Class Friendship allows a class to be better encapsulated by granting per-class access to protected properties. Class Friendship is an explicit and concise expression of tight-coupling between collaborators that separates concerns delegated to a friended class for purposes of better encapsulation of behaviour. This affords developers an opportunity to better-model objects as behavioural "tell don't ask" units while explicating concerns like presentation through friendship. Class Friendship is a valuable expression for object modeling when used properly. It also has value in white-box testing as a tactical refactoring tool when approaching legacy applications. 
 
-There have been [[https://marc.info/?l=php-internals&m=144639394529142|discussions]] around the topic of limited-visibility collaborators amongst the PHP community. Among these, an effort for "package-private" or otherwise vendor-namespaced private collaborators has been suggested as a solution to a class of problem that is currently solved through convention; exposing implementation details and using doc-block "@internal" tags to mark properties as "package-private"! This is sometimes a necessary evil in frameworks and other core components. This convention could be alleviated through use of class friendship, but is not necessarily an appropriate use of the feature. Vendor namespacing or true package private classes are a better fit, albeit possibly in the same problem-space.
+A common use-case for friendship here is separating presentation concerns from what would otherwise be a "tell don't ask" behavioral unit or write model. This can be applied in a variety of scenarios. Without this feature, developers are left with a trade-off of marking internal properties public to make them available and sacrificing design opportunities torwards the future. Another common occurrence is the addition of getters that simply proxy internal state and grow the public API of a unit by necessity. To be sure, this feature is not merely about pulling off "access to protected class members", but about modeling a semantic relationship between two collaborators. In fact, access to private and protected class properties is already possible through closure scope "juggling" or nasty use of `debug_backtrace`. Both of these are included in references below. While it is technically possible to execute friend-like features in user-land, it would be preferable to concisely represent the relationship with a known and well-documented concept supported by the language.
+
+The purpose of the feature should not be conflated / confused with the goals of something like package-private classes or namespace visibility, in general. I feel those features apply more closely to the types of behaviors user-land sees in Symfony (and other framework) packages that mark properties as `@internal` but are forced to make them public to share access between internal data structures. I don't necessarily feel that class friendship is the "Right Answer TM" in this case, but I think that the dance package developers currently have to do to express "don't use this property, we use this internally to help you" is worth improving.
 
 ===== Proposal =====
 Support for class friendship is added through a new keyword, ''friend''. It allows per-class access to protected properties as follows:
@@ -20,31 +22,33 @@ A subject class may declare another class a friend through the use of a new ''fr
 
 C++ implements Class Friendship such that friends have access to both private and protected properties. [[https://marc.info/?l=php-internals&m=144972388219786&w=2|In discussing this implementation detail]], there was concern that allowing unfettered access to all properties risked exposing intentionally hidden implementation details local to a given unit whereby a developer absolutely did not want the given property accessible by any means other than the subject class. This RFC suggests that friend classes in PHP only have access to protected and higher properties. 
 
-Below, a class ''Person'' declares ''PersonFormatter'' as a friend for the purposes of separating presentation concerns:
+Below, a class ''Person'' declares ''HumanResourceReport'' as a friend for the purposes of separating presentation concerns:
 
 <code php>
 class Person
 {
-    friend PersonFormatter;
+    friend HumanResourceReport;
     
+    protected $id;
     protected $firstName;
     protected $lastName;
 
-    public function __construct($firstName, $lastName)
+    public function __construct($id, $firstName, $lastName)
     {
+        $this->id = $id;
         $this->firstName = $firstName;
         $this->lastName = $lastName;
     }
 
-    public function format()
+    public function makeReport()
     {
-        return new PersonFormatter($this);
+        return new HumanResourceReport($this);
     }
 }
 </code>
 
 <code php>
-class PersonFormatter
+class HumanResourceReport
 {
     private $person;
     
@@ -59,17 +63,23 @@ class PersonFormatter
         // of Person if not explicitly listed as a friend.
         return $this->person->firstName . ' ' . $this->person->lastName;
     }
+    
+    public function getReportIdentifier()
+    {
+        return "HR_REPORT_ID_{$this->person->id}";
+    }
 }
 </code>
 
 <code php>
-$person = new Person('Alice', 'Wonderland');
-$formatter = $person->format();
+$person = new Person(Uuid::uuid4(), 'Alice', 'Wonderland');
+$report = $person->makeReport();
 
-var_dump($formatter->getFullName()); // string(16) "Alice Wonderland"
+var_dump($report->getFullName()); // string(16) "Alice Wonderland"
+var_dump($report->getReportIdentifier()); // string(49) "HR_REPORT_ID_3F2504E0-4F89-41D3-9A0C-0305E82C3301"
 </code>
 
-Class friendship can also be used to implement characterization tests as part of a refactoring project for legacy applications. Consider the following class responsible for executing a Fibonacci sequence:
+Class friendship can also be used to implement white-box (characterization) tests as part of a refactoring project for legacy applications. Consider the following class responsible for executing a Fibonacci sequence:
 
 <code php>
 class Fibonacci
@@ -123,9 +133,9 @@ class FibonacciTest
 }
 </code>
 
-Characterization Tests are a form of white-box test useful for describing the **current actual** behaviour of a unit. They are usually a temporary measure used to verify that modifications made to a system to not have unintended or undesirable changes in **how** the system works. These tests are useful to initiate a refactoring loop. Friend designations are also a good marker for follow-up work to improve units. This may possibly eliminate the need for white-box tests after improving the behavioural API of the system under test.
+Characterization Tests are a form of white-box test useful for describing the **current actual** behaviour of a unit given knowledge of that unit's internals. They are usually a tactical measure used to verify that modifications made to a system to not have unintended or undesirable changes in **how** the system works. These tests are useful to initiate a refactoring loop. Friend designations are also a good marker for follow-up work to improve units. This may possibly eliminate the need for white-box tests after improving the behavioural API of the system under test.
 
-Currently, in many examples, we have to either change visibility of properties that only exist for implementation, provide meaningless getters to these properties (thus polluting the public API of the object and risking abuse by other objects) or navigate the Reflection API or Proxy implementations. We really want to declare a limited set of collaborators privileged access to these properties for a single purpose in the use-case for Characterization Tests.
+Currently, in many examples, we have to either change visibility of properties that only exist for implementation, provide meaningless getters to these properties (thus polluting the public API of the object and risking abuse by other objects) or navigate the Reflection API or Proxy implementations. We really want to declare a limited set of collaborators privileged access to these properties for a single purpose in the use-case for these types of tests.
 
 ==== Other Properties ====
 There are several rules of class friendship that clarify how the feature works with regard to direction, transitivity and inheritance. 
