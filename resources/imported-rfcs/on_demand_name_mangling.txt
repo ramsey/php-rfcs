@@ -1,7 +1,7 @@
 ====== PHP RFC: On-demand Name Mangling ======
-  * Version: 1.2a
+  * Version: 1.2b
   * Created Date: 2016-01-01
-  * Updated Date: 2016-01-04
+  * Updated Date: 2016-01-08
   * Author: Bishop Bettini, bishop@php.net
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/remove_name_mangling
@@ -49,15 +49,15 @@ TOTAL TIME: 00:00
 0 SKIPPED TESTS
 </code>
 
-Mangling has the undesirable consequence that //many// external variables may map to //one// PHP variable. For example, three separate HTML form elements named ''a.b'', ''a_b'' and ''a b'' will all resolve to ''a_b'' in the corresponding super-global, with the last seen value winning. This leads to user confusion and userland work arounds, not to mention bug reports: [[https://bugs.php.net/bug.php?id=34882|#34882]] and [[https://bugs.php.net/bug.php?id=42055|#42055]] for example.
+Mangling has the undesirable consequence that //many// external variables may map to //one// PHP variable. For example, three separate HTML form elements named ''a.b'', ''a_b'' and ''a[b'' will all resolve to ''a_b'' in the corresponding super-global, with the value from ''a[b'' winning (because it was last). This leads to user confusion and userland work arounds, not to mention bug reports: [[https://bugs.php.net/bug.php?id=34882|#34882]] and [[https://bugs.php.net/bug.php?id=42055|#42055]] for example.
 
 Automatic name mangling supported ''[[http://php.net/manual/en/ini.core.php#ini.register-globals|register_globals]]'' and its kin like ''[[http://php.net/manual/en/function.import-request-variables.php|import_request_variables()]]'', but those features ended in August 2014. Name mangling isn't required for super-global marshaling, because the associative array nature of super-globals can accommodate any string variable name. So do we need automatic name mangling? Consider this hypothetical new test:
 
 <code>
 --TEST--
-Name mangling logic moved to extract()
+Name mangling logic removed from engine, placed in polyfill
 --GET--
-a.b=dot&a$b=dollar&a%20b=space&a[b=bracket
+a.b=dot&a_b=underscore&a$b=dollar&a%20b=space&a[b=bracket
 --FILE--
 <?php
 print_r(get_defined_vars());
@@ -70,6 +70,7 @@ Array
     [_GET] => Array
         (
             [a.b] => dot
+            [a_b] => underscore
             [a$b] => dollar
             [a b] => space
             [a[b] => bracket
@@ -80,16 +81,21 @@ Array
     [_GET] => Array
         (
             [a.b] => dot
+            [a_b] => bracket
             [a$b] => dollar
             [a b] => space
             [a[b] => bracket
         )
-
-    [a_b] => bracket
 )
 </code>
 
-In this new implementation, the engine no longer mangles marshaled superglobals at startup.  Instead, the //ability// to mangle names has moved to an optional, userland-provided polyfill function ''mangle_superglobals()''.  The polyfill algorithm is simple:
+In this new implementation, the engine no longer mangles marshaled superglobals at startup.  Instead, the //ability// to mangle names has moved to an optional, userland-provided polyfill function ''mangle_superglobals()''.
+
+In the example above, an ''a_b'' key was externally supplied. The call to ''mangle_superglobals'' clobbered the original value of ''a_b'' with the value of the /last/ seen mangle-equivalent key (''a[b'').
+
+Importantly, the user made this mangling happen: the engine did not do it automatically.
+
+The polyfill algorithm is simple:
 
   * find all superglobal keys that violate the PHP unquoted variable name regex ((Unquoted variable names must match the regex ''[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*''))
   * for each, create a new mangled key linked to the corresponding value.
