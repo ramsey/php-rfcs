@@ -1,5 +1,5 @@
 ====== PHP RFC: On-demand Name Mangling ======
-  * Version: 1.2b
+  * Version: 1.3
   * Created Date: 2016-01-01
   * Updated Date: 2016-01-08
   * Author: Bishop Bettini, bishop@php.net
@@ -98,36 +98,37 @@ Importantly, the user made this mangling happen: the engine did not do it automa
 The polyfill algorithm is simple:
 
   * find all superglobal keys that violate the PHP unquoted variable name regex ((Unquoted variable names must match the regex ''[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*''))
-  * for each, create a new mangled key linked to the corresponding value.
+  * for each, create a new mangled key linked to the corresponding value
 
 Applications requiring name mangling may call the polyfill during their bootstrap phase to emulate prior engine behavior.
 
 ===== Proposal =====
-This RFC proposes to phase out automatic name mangling, replacing it with on-demand mangling in ''extract()'': 
+This RFC proposes to remove automatic name mangling, with backward compatibility maintained through a userspace polyfill function that mangles super-globals on-demand: 
 
   * Next minor release (currently 7.1):
-    * Emit an ''E_DEPRECATED'' warning the first time a variable is mangled. The warning indicates that name mangling on import will be removed in the next major PHP version.
+    * Update documentation that name mangling is deprecated and will be removed in 8.0
+  * Between RFC acceptance and the next major release:
+    * Release a userland polyfill that implements ''mangle_superglobals''
+    * Polyfill shall be available via composer (but not PEAR)
   * Next major release (currently 8.0):
     * Remove all name mangling code in super-global marshalling functions
-    * Release a userland polyfill implementing ''mangle_superglobals'' that is available as a composable package
 
 ==== Discussion ====
 
 These questions were raised in the mailing list discussion.
 
-=== Should multiple ''E_DEPRECATED'' be emitted? ===
+=== Should a notice be raised if the engine mangles a superglobal? ===
 
-No, because we do not know how many instances of mangling may be present and we do not want to flood application logs.  The proposed single message intends to provide //some// warning to application developers when there is //known// use of name mangling. This notice is similar to the behavior of the ''datetime.timezone'' INI option: at most once per startup.
-
-=== How can I disable the ''E_DEPRECATED'' notice? ===
-
-Rouven Weßling asked:
+Before version 1.3, this RFC proposed raising an ''E_DEPRECATED'' message (once per startup) when the engine mangled a name, so that developers were made aware of future changes. However, Rouven Weßling asked:
 
 > If I have a well behaved application that doesn’t rely on name mangling or have included the polyfill, how can I prevent a log message from being emitted when a user appends (unused) parameters to the query string that require mangling?
 
-As written, one can't: the engine emits the error as soon as it mangles a variable, at most one time per startup. While that's annoying, it's also informative: someone's hitting your application in a way that may not expect.
+and Nikita Popov commented:
 
-This behavior is similar to [[http://php.net/manual/en/info.configuration.php#ini.max-input-vars|max_input_vars]], which emits a warning as soon as more variables are sent than PHP is configured to accept. This message happens at most once per startup. There's no way to turn the message off: the best one can do is increase the upper limit in the configuration file.
+> Even if it's only a single deprecation warning instead of multiple, it's still a deprecation warning that I, as the application author, have absolutely no control over. For me, a deprecation warning indicates that there is some code I must change to make that warning *go away*.
+> Sure, it's informative. But it's enough to be informative about this *once*, rather than every time a user makes an odd-ish request.
+
+Given that (a) an application could get spammed by malicious users((The ''max_input_vars'' configuration option behaves similarly with the once-per-startup deprecation message proposed prior to version 1.3. The difference is the ''max_input_vars'' message could be squelched by increasing the limit, whereas the proposed mangling message could never be squelched by user code)), and (b) that documentation suffices to notify users of this change, then the RFC changed as of 1.3 to only document the removal of name mangling as of the next major version.
 
 === Should an INI configuration control mangling? ===
 
@@ -137,7 +138,7 @@ Nikita Popov suggested (and Stanislav Malyshev seconded) a counter-proposal to u
 
 An INI setting to disable mangling must be engine-wide (e.g., ''PHP_INI_SYSTEM'' or ''PHP_INI_PERDIR'') as its historical effect occurs before userland code runs. Engine-wide settings are tricky because they force conditions across all instances of PHP running in a given SAPI process.  In a hosted environment where many unrelated sites share the same engine configuration, it's possible that one site might require mangling while another site requires no-mangling.  These two sites could not co-exist unless the site operator allows per directory configuration, which they may not. Thus, an INI setting would introduce operational problems for some definable sub-set of users.
 
-It's still possible to provide an "escape hatch" for applications requiring name mangling: the polyfill described eariler. Applications need only include the polyfill code and add it to their bootstrapping. The polyfill would be available via Composer, and the polyfill would populate all the mangled variables as before.
+It's still possible to provide an "escape hatch" for applications requiring name mangling: the polyfill described earlier. Applications need only include the polyfill code and add it to their bootstrapping. The polyfill would be available via Composer, and the polyfill would populate all the mangled variables as before.
 
 The polyfill approach is considered superior to the INI approach for three reasons:
 
@@ -147,7 +148,7 @@ The polyfill approach is considered superior to the INI approach for three reaso
 
 === Should ''extract()'' automatically mangle names? ===
 
-Early versions of this proposal (< v1.2) proposed using extract to mangle names. Rowan Collins and others pointed out this was an unnecessary complication: ''preg_match'' could also accomplish the goal.  Thus, all references to ''extract'' in this RFC have been removed.
+Early versions of this proposal (< v1.2) proposed using ''extract'' to mangle names. Rowan Collins and others pointed out this was an unnecessary complication: ''preg_match'' could also accomplish the goal.  Thus, all references to ''extract'' in this RFC have been removed.
 
 However, ''extract()'' should have the option to emit mangled names with a new constant (''EXTR_MANGLE'').  ''extract()'' should also be fixed to export variables with any variable name, because they are all technically valid with the quoted variable syntax (''${'foo.bar'}'').  These will be handled as function fixes and not with this RFC.
 
@@ -180,7 +181,7 @@ To reduce the burden on userland, this polyfill library could be made available 
 
 <code>
 $ composer require php/mangle-superglobals ^1.0
-$ cat app/boostrap.php
+$ cat app/bootstrap.php
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
