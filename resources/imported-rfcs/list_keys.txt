@@ -1,0 +1,274 @@
+====== PHP RFC: Allow specifying keys on list() elements ======
+  * Version: 1.0
+  * Date: 2016-01-17
+  * Author: Andrea Faulds, ajf@ajf.me
+  * Status: In Draft
+  * First Published at: http://wiki.php.net/rfc/list_keys
+
+===== Introduction =====
+
+The elevator pitch for the RFC. The first paragraph in this section will be slightly larger to give it emphasis; please write a good introduction.
+
+Unpacking array elements into variables is a common operation in certain types of PHP code. For example, it is common to use an array as an "argument bag" when initialising an object:
+
+<code php>
+class ElePHPant
+{
+    private $name, $colour, $age, $cuteness;
+    
+    public function __construct(array $attributes) {
+        $this->name = $attributes["name"];
+        $this->colour = $attributes["colour"];
+        $this->age = $attributes["age"];
+        $this->cuteness = $attributes["cuteness"];
+    }
+    
+    // ...
+}
+</code>
+
+However, doing so line-by-line, as in the above example, is somewhat cumbersome, because the name of the array must be repeated each line.
+
+Apparently ideal for this use-case, PHP has a language construct for unpacking multiple array elements into variables, namely <php>list()</php>, which is used like so:
+
+<code php>
+list($first, $second, $third) = $someArray;
+</code>
+
+And is equivalent to:
+
+<code php>
+$first = $someArray[0];
+$second = $someArray[1];
+$third = $someArray[2];
+</code>
+
+Unfortunately for use cases like our first example however, <php>list()</php> has no support for unpacking array elements with specified keys, instead it only works for numbered keys starting from zero.
+
+This RFC proposes to introduce a way to specify keys in the <php>list()</php> construct, such that our first example could be rewritten like so, behaving identically:
+
+<code php>
+class ElePHPant
+{
+    private $name, $colour, $age, $cuteness;
+    
+    public function __construct(array $attributes) {
+        list(
+            "name" => $this->name,
+            "colour" => $this->colour,
+            "age" => $this->age,
+            "cuteness" => $this->cuteness
+        ) = $attributes;
+    }
+    
+    // ...
+}
+</code>
+
+===== Proposal =====
+
+Instead of having implied numbered keys from zero, <php>list()</php> can also now contain explicit keys, instead.
+
+As well as being strings, these keys can also be numbers:
+
+<code php>
+$powersOfTwo = [1 => 2, 2 => 4, 3 => 9];
+list(1 => $oneBit, 2 => $twoBit, 3 => $threeBit) = $powersOfTwo;
+</code>
+
+Keys can not only be literals like <php>2</php> or <php>"foo"</php>, but also constants:
+
+<code php>
+list(
+    CURLOPT_GET => $isGet,
+    CURLOPT_POST => $isPost,
+    CURLOPT_URL => $url
+) = $curlOptions;
+</code>
+
+However, keys cannot be variables or other expressions:
+
+<code php>
+// Parse error: syntax error, ...
+list($foo => $bar) = $array;
+</code>
+
+The problem here is that there are two different behaviours that you might expect here:
+
+  - <php>$foo</php> is set to the key of the first element in <php>$array</php>, and <php>$bar</php> is set to its key <php>$array</php> (i.e. <php>$bar = reset($array); $foo = key($array);</php>)
+  - <php>$bar</php> is set to the value of the element in <php>$array</php> with the key <php>$foo</php> (i.e. <php>$bar = $array[$foo];</php>)
+
+So, this is not allowed in order to prevent misunderstanding.
+
+<php>list()</php> elements with and without keys cannot be mixed, unlike in the <php>array()</php> syntax:
+
+<code php>
+// Parse error: syntax error, ...
+list($unkeyed, "key" => $keyed) = $array;
+</code>
+
+Implementing this would be more complicated, and it also is not very useful behaviour given arrays typically have either explicit (usually string) keys or implicit sequential numbered keys, not both. 
+
+Empty elements are not allowed where keys are specified, because there is no need for them:
+
+<code php>
+// Parse error: syntax error, ...
+list(,,,, "key" => $keyed) = $array;
+</code>
+
+However, a trailing comma is permitted in <php>list()</php> with keys, like in <php>array()</php>:
+
+<code php>
+list(
+    CURLOPT_GET => $isGet,
+    CURLOPT_POST => $isPost,
+    CURLOPT_URL => $url,
+) = $curlOptions;
+</code>
+
+Nesting of <php>list()</php> is still possible for this syntax, including nesting a <php>list()</php> with keys inside a <php>list()</php> without keys, and vice-versa:
+
+<code php>
+$points = [
+    ["x" => 1, "y" => 2],
+    ["x" => 2, "y" => 1]
+];
+
+list(list("x" => $x1, "y" => $y1), list("x" => $x2, "y" => $y2)) = $points;
+
+$points = [
+    "first" => [1, 2],
+    "second" => [2, 1]
+];
+
+list("first" => ($x1, $y1), "second" => ($x2, $y2)) = $points;
+</code>
+
+Explicit keys in <php>list()</php> also work in <php>foreach</php> statements, as does every other feature of <php>list()</php>:
+
+<code php>
+$points = [
+    ["x" => 1, "y" => 2],
+    ["x" => 2, "y" => 1]
+];
+
+foreach ($points as list("x" => $x, "y" => $y)) {
+    echo "Point at ($x, $y)", PHP_EOL;
+}
+</code>
+
+As with regular <php>list()</php>, objects implementing [[https://php.net/ArrayAccess|ArrayAccess]] are supported.
+
+Handling of implicit conversions of keys, and of accessing undefined keys, follows the same rules as for regular array indexing.
+
+===== Backward Incompatible Changes =====
+
+None. The existing <php>list()</php> continues to work.
+
+===== Proposed PHP Version(s) =====
+
+This is proposed for the next minor or major PHP version, currently PHP 7.1.
+
+===== RFC Impact =====
+==== To SAPIs ====
+
+No specific impact I am aware of.
+
+==== To Existing Extensions ====
+
+PHP extensions generally do not directly interact with the language syntax, so impact here is unlikely.
+
+However, the addition of this syntax means that the content of the <php>ZEND_AST_LIST</php> abstract syntax tree node will now be different for arrays with keys, so this will affect extensions that deal with the AST.
+
+==== To Opcache ====
+
+**I have not yet verified the RFC's compatibility with opcache.** The <php>ZEND_FETCH_LIST</php> opcode can now take a string OP2, and OP2 can now be TMPVAR as well as CONST (so that constants resolved at runtime work), which might create problems if Zend Optimizer hanldes this opcode.
+
+==== New Constants ====
+
+No new constants are introduced.
+
+==== php.ini Defaults ====
+
+No impact on php.ini.
+
+===== Open Issues =====
+
+None.
+
+===== Unaffected PHP Functionality =====
+
+This does not impact the <php>array()</php> syntax or the behaviour of array indexing.
+
+===== Future Scope =====
+
+It would be useful to support <php>list()</php> in function parameter lists, so that an "argument bag" parameter could be immediately destructured: 
+
+<code php>
+class ElePHPant
+{
+    private $name, $colour, $age, $cuteness;
+    
+    public function __construct(list("name" => $name, "colour" => $colour, "age" => $age, "cuteness" => $cuteness)) {
+        $this->name = $name;
+        $this->colour = $colour;
+        $this->age = $age;
+        $this->cuteness = $cuteness;
+    }
+    
+    // ...
+}
+
+$myElePHPant = new ElePHPant(["name" => "Andrea", "colour" => "fuchsia", "age" => 19, "cuteness" => rand()]);
+</code>
+
+This would be more practical to implement than the [[rfc:named_parameters|Named Parameters]] RFC, and could be applied to existing function which already use the "argument bag" pattern.
+
+If we implemented this, we might want to extend the syntax to support type declarations:
+
+<code php>
+class ElePHPant
+{
+    private $name, $colour, $age, $cuteness;
+    
+    public function __construct(list("name" => string $name, "colour" => \Colour $colour, "age" => int $age, "cuteness" => float $cuteness)) {
+        $this->name = $name;
+        $this->colour = $colour;
+        $this->age = $age;
+        $this->cuteness = $cuteness;
+    }
+    
+    // ...
+}
+</code>
+
+It was the future possibility of using <php>list()</php> in function parameter lists that motivated the creation of this RFC.
+
+===== Proposed Voting Choices =====
+The vote will be a simple Yes/No vote on whether to accept the RFC and merge the patch into PHP master.
+
+As this adds a feature to the language, this RFC requires a 2/3 majority to succeed.
+
+===== Patches and Tests =====
+
+I have written a complete patch with tests: https://github.com/php/php-src/compare/master...TazeTSchnitzel:list_keys
+
+There is not yet a patch for the language specification.
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+
+  * [[rfc:named_parameters|Named Parameters RFC]]
+
+===== Rejected Features =====
+
+None as yet.
+
+===== Changelog =====
+
+  * v1.0 - First announced version
