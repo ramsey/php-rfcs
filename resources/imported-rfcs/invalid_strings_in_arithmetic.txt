@@ -1,8 +1,8 @@
 ====== PHP RFC: Warn about invalid strings in arithmetic ======
-  * Version: 1.0
+  * Version: 1.1
   * Date: 2016-01-08
   * Author: Andrea Faulds, ajf@ajf.me
-  * Status: In Voting
+  * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/invalid_strings_in_arithmetic
 
 ===== Introduction =====
@@ -11,7 +11,9 @@ PHP's arithmetic operators allow not only numbers, but also numeric strings to b
 This can be particularly problematic for users dealing with other programming languages. For example, in many other languages the ''+'' symbol is used for concatenating strings, whereas in PHP the ''.'' operator is used. When a user has been using another language and then writes PHP code, they may mistakenly use the ''+'' operator to concatenate strings. Unfortunately, PHP will not warn them of their mistake in this case, instead simply producing 0 as the result of the operation. This is easy to miss when looking at a program's output or, worse, may not even be in the output itself. It may also be hard to figure out where the zero value originated in the source code.
 
 ===== Proposal =====
-For all arithmetic operators, using a non-numeric string (such as <php>"foobar"</php>) as an operand where a number is expected will produce an [[http://php.net/manual/en/errorfunc.constants.php|E_WARNING]] error, and using a non-well-formed numeric string (such as <php>"10 apples"</php>) will produce an [[http://php.net/manual/en/errorfunc.constants.php|E_NOTICE]] error. For our purposes, the "arithmetic operators" are considered to be the set { ''+ - * / % << >> | & ^'' }. The bitwise NOT operator ''~'' is not included, because it does not perform automatic numeric string conversion.
+
+==== New E_NOTICE and E_WARNING ====
+For all arithmetic operators, using a non-numeric string (such as <php>"foobar"</php>) as an operand where a number is expected will produce an [[http://php.net/manual/en/errorfunc.constants.php|E_WARNING]] error, and using a non-well-formed numeric string (such as <php>"10 apples"</php>) will produce an [[http://php.net/manual/en/errorfunc.constants.php|E_NOTICE]] error. For our purposes, the "arithmetic operators" are considered to be the set { ''+ - * / *''''* % << >> | & ^'' }. The bitwise NOT operator ''~'' is not included, because it does not perform automatic numeric string conversion.
 
 In short, the following code, which currently produces no errors
 
@@ -51,12 +53,32 @@ The "A non-numeric string encountered" E_WARNING is a newly invented error for t
 
 Note that the operation still completes, since E_NOTICE and E_WARNING do not, by default, stop code execution, though see "Backwards Incompatible Changes" below.
 
+==== Fractional and scientific notation strings with integer operators ====
+
+Currently, there is an inconsistency in PHP with how numeric strings are interpreted. This comes down to which function is used internally to convert numeric strings into integers or floats. There are three functions at play:
+
+  * [[http://www.cplusplus.com/reference/cstdlib/strtol/|strtol]], a C standard library function for converting strings to integers. In its usage in PHP, it is always given a ''base'' argument value of 10. It only accepts numbers in the format of optional leading whitespace, followed by an optional leading sign (''-'' or ''+''), followed by a sequence of decimal digits (''0'' through ''9''). So, it accepts numbers like ''-12345'' and ''+42''.
+  * [[http://www.cplusplus.com/reference/cstdlib/strtod/|strtod]], a C standard library function for converting strings to floating-point numbers. It accepts anything ''strtol'' accepts, but also numbers with a decimal point in them, and numbers written in scientific notation with an ''e'' separating the coefficient and exponent. So, it accepts not only numbers like ''-12345'' and ''+42'', but also numbers like ''123.45'' and ''1.2345e9''.
+  * [[http://lxr.php.net/s?refs=is_numeric_string_ex&project=PHP_7_0|is_numeric_string_ex]], a Zend Engine function for converting strings to integers or floating-point numbers. It accepts anything ''strtol'' or ''strtod'' accepts. It is the function which produces the "A non well formed numeric string encountered" error.
+
+Operators that can take either an integer or a float (''+ - * / *''''*''), and type checks for function parameters and return types (both ''int'' and ''float'') use ''is_numeric_string_ex''. This means that they can handle numbers in scientific notation, so for example, <php>var_dump(1.2345e9 + 0);</php> results in ''float(1234500000)'', and <php>var_dump(intdiv(1.2345e9, 1));</php> results in ''int(1234500000)''.
+
+However, the integer operators (''% << >> | & ^'') and the integer type casts (<php>(int)</php> and <php>intval()</php>) both use ''strtol''. ''strtol'' stops reading a string when it hits a character it doesn't accept, so ''-123.45'' is interpreted correctly, as it stops reading at the unaccepted ''.'' and produces ''-123''. But for numbers in scientific notation, this produces the wrong result: when reading ''1.2345e9'', it will stop at ''.'' and produce ''1''. Thus, <php>var_dump((int)"1.2345e9");</php> and <php>var_dump("1.2345e9" | 0);</php> both produce ''int(1)''.
+
+This inconsistency is unintuitive, and becomes a greater problem if we add warnings and notices for non-numeric strings, as some operators would tell you strings like ''"1.2345e9"'' and ''"-123.45"'' are non-well-formed, whereas other operators would happily accept such strings.
+
+To avoid this problem, this RFC proposes to use ''is_numeric_string_ex'' for numeric string handling with the integer operators and integer casts, resolving the inconsistency.
+
 ===== Backward Incompatible Changes =====
+
+==== E_NOTICEs and E_WARNINGs ====
 The introduction of a new E_NOTICE and E_WARNING may create backwards-incompatibility issues in projects which use error handlers to convert these types of errors into exceptions, or have other special handling of E_NOTICEs and E_WARNINGs. This is, unfortunately, an unavoidable consequence of producing error messages where it was not done before. There is less risk of breakage with the E_NOTICE, as E_NOTICE is often silenced and ignored in production.
 
 However, the situations where an E_WARNING is produced are likely to be accidental, so the introduction of this error message may be helpful. Furthermore, it is trivial to fix any case where these new errors would be produced, either by using an explicit conversion (e.g. <php>(int)"10 apples" + (int)"5 pears"</php>), suppressing the error (e.g. <php>@("10 apples" + "5 pears")</php>) or fixing whatever issue caused invalid data to be used in the operation.
 
 This RFC specifically chooses to introduce an E_WARNING for using a non-numeric string, rather than produce a <php>TypeError</php>, in order to reduce potential backwards-compatibility issues. 
+
+Recognising scientific notation numeric strings when casting to integers (due to now using ''is_numeric_string_ex'' across-the-board) may cause backwards-compatibility issues in code which expects the exponent part to be ignored (i.e. expecting that, e.g. ''"1.2345e9"'' will be converted to ''1''). This is very unlikely to cause problems in practice, but it is a possibility.
 
 ===== Proposed PHP Version(s) =====
 This is proposed for the next minor version of PHP, currently PHP 7.1.
@@ -64,11 +86,15 @@ This is proposed for the next minor version of PHP, currently PHP 7.1.
 ===== RFC Impact =====
 ==== To Internals ====
 
-This RFC is implemented by modifying how ''add_function'', ''sub_function'' etc. coerce strings to numbers. Operator functions which used ''convert_scalar_to_number'' now use a private, modified version which instructs ''zend_is_numeric_string_ex'' to not silence errors, and additionally produces the "A non-numeric string encountered" warning if ''zend_is_numeric_string_ex'' indicates failure. Operator functions which used ''_zval_get_long_func'' similarly now use a private, modified version which first runs ''zend_is_numeric_string_ex'', likewise producing the "A non-numeric string encountered" warning if it indicates failure.
+This RFC is implemented by modifying how ''add_function'', ''sub_function'' etc. coerce strings to numbers. Operator functions which used ''convert_scalar_to_number'' now use a private, modified version which instructs ''is_numeric_string_ex'' to not silence errors, and additionally produces the "A non-numeric string encountered" warning if ''is_numeric_string_ex'' indicates failure. ''_zval_get_long_func'' has been modified to use ''is_numeric_string_ex'' for conversion, and operator functions which used ''_zval_get_long_func'' now use a private, modified version which instructs ''is_numeric_string_ex'' to not silence errors, likewise producing the "A non-numeric string encountered" warning if it indicates failure.
 
 ==== To Existing Extensions ====
 
-Because this RFC affects the operator functions, which are part of the Zend API, any extension which uses them will now produce the new behaviour outlined above.
+=== Operator functions ===
+
+Because this RFC affects the operator functions, which are part of the Zend API, any extension which uses them will now produce the new E_NOTICEs and E_WARNINGs detailed above.
+
+Because this RFC affects the Zend Engine's integer conversion functions (''_zval_get_long_func'' (and its wrappers ''_zval_get_long'' and ''zval_get_long''), ''convert_to_long'' and ''multi_convert_to_long_ex''), any extension which uses them will now convert numeric strings using scientific notation differently, as detailed above.
 
 ==== To SAPIs ====
 
@@ -84,7 +110,7 @@ Constant scalar expressions (e.g. <php>const APPLE_COUNT = "10 apples" + "5 pear
 
 ===== Open Issues =====
 
-None currently.
+None.
 
 ===== Unaffected PHP Functionality =====
 
@@ -106,9 +132,9 @@ The vote is a simple Yes/No on **whether to accept the RFC for the next minor ve
 
 As this is a language change, the RFC requires a 2/3 majority to pass.
 
-Voting started on 2016-01-23 and ends on 2016-01-31.
+Voting started on 2016-01-23 and was scheduled to end on 2016-01-31, but was cancelled due to the issue of float handling (see //Open Issues//).
 
-<doodle title="Warn about invalid strings in arithmetic" auth="ajf" voteType="single" closed="false">
+<doodle title="Warn about invalid strings in arithmetic" auth="ajf" voteType="single" closed="true">
    * Yes
    * No
 </doodle>
@@ -132,4 +158,5 @@ Keep this updated with features that were discussed on the mail lists.
 
 ===== Changelog =====
 
-  * v1.0 - first public version
+  * v1.1 - Expanded proposal to change handling of fractional and scientific-notation numeric strings with integer operators
+  * v1.0 - First public version
