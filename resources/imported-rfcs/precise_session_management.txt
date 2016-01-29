@@ -1,8 +1,8 @@
 
 ====== PHP RFC: Precise Session Management ======
-  * Version: 1.6
+  * Version: 1.7
   * Date Created: 2013-10-30
-  * Date Updated: 2016-01-25
+  * Date Updated: 2016-01-29
   * Author: Yasuo Ohgaki <yohgaki@php.net>
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/session_regenerate_id
@@ -47,13 +47,13 @@ Followings will be added/changed to achieve above.
 
 session_regenerate_id() is used to generate new session ID. It's better to delete old session data to reduce risk of session hijack. However, session_regenerate_id() leaves old session data by default currently. (i.e. session_regenerate_id(FALSE) is the default) Old session data is active and usable until GC. 
 
-Old session is left active for reliable session ID regeneration. Examples are:
+Old session is left active for reliable session ID regeneration/deletion. Examples are:
 
-  * Browsers connect to web server with multiple connections. i.e. Connection immediately after destroy should be able to access old session data content or new session data.
-  * Mobile network may lose radio, may have hand over, etc. i.e. Server sends new session ID cookie, but client did not get it.
-  * Large network providers have multiple gateways for off loading traffic and packets may arrive out of order. i.e. Cannot assume multiple access to server is in order as well as response.
+  * Browsers connect to web server with multiple connections. When a session ID data is removed, server sends multiple new session ID cookies at once. This causes client side race condition result in empty cookies and lost sessions. i.e. **Session data cannot be removed immediately by client side reason.**
+  * Mobile network may lose radio, may have hand over, etc. i.e. Server sends new session ID cookie, but client may not get it. i.e. **Session data cannot be removed immediately by server side reason.**
+  * Large network providers have multiple gateways for off loading traffic and packets may arrive out of order. i.e. **Session data cannot be removed immediately by network reason.**
 
-For reliable session ID regeneration, only short TTL for old session (few seconds for wired connections, few minutes for mobile connection)  is enough for stable HTTP session management. (Alternatively, server may ask browser to reload page a little later. This approach would not be acceptable because of increase response time)
+For reliable session ID regeneration, only short TTL for old session (few seconds for wired connections, few minutes for mobile connections)  is enough for stable HTTP session management. (Alternatively, server may ask browser to reload page a little later. This approach would not be acceptable because of increased response time. It still has higher chances of random lost session also.)
 
 Session ID can be stolen various ways. Therefore, session ID should be renewed periodically to reduce risk of stolen sessions.
 
@@ -153,38 +153,84 @@ New session data has CREATED, UPDATED, SIDS.
   $_SESSION['__PHP_SESSION__']['SIDS'] = array('SESS ID1', 'SESS ID2');
 </code>
 
-Under normal session usage, <nowiki>$_SESSION['__PHP_SESSION__']</nowiki> is checked/used as follows
+Under normal session usage, <nowiki>$_SESSION['__PHP_SESSION__']</nowiki> is checked/used as follows in php_session_initialize().
 
-<code php>
-  // Check if session ID should be regenerated
-  if (ini_get('session.regenerate_id')
-      && isset($_SESSION['__PHP_SESSION__']['CREATED'])
-      && $_SESSION['__PHP_SESSION__']['CREATED'] + ini_get('session.regenerate_id') < time()) {
-      session_regenerate_id();
-  }
-  // Check obsolete session and destroy.
-  if (isset($_SESSION['__PHP_SESSION__']['NEW_SID'])) {
-    // Must not update obsolete session TTL. 
-    if ($_SESSION['__PHP_SESSION__']['UPDATED'] - time() < -60
-        && !isset($_SESSION['__PHP_SESSION__']['NEW_SID_SENT']) {
-      // Resend new session ID once. This will reduce chance of client race and lost session by unstable network to acceptable level.
-      $_SESSION['__PHP_SESSION__']['NEW_SID_SENT'] = time();
-    }
-    if ($_SESSION['__PHP_SESSION__']['UPDATED'] + ini_get('session.ttl') < time()) {
-      // Remove session data
-      // Assign newly created session ID
-      // Raise warning for obsolete session data access
-    }
-  } else {
-    if ($_SESSION['__PHP_SESSION__']['UPDATED'] + ini_get('session.ttl') < time()) {
-      // Remove session data
-      // Assign newly created session ID
-    }
-    // TTL is updated by session.ttl_update for lazy_write to work.
-    else if ($_SESSION['__PHP_SESSION__']['UPDATED'] + ini_get('session.ttl_update') < time()) {
-      $_SESSION['__PHP_SESSION__']['UPDATED'] = time();    
-    }
-  }
+<code c>
+		/* Handle internal session data */
+		entry = zend_hash_str_find(Z_ARRVAL_P(Z_REFVAL(PS(http_session_vars))),
+											   PSDK_ARRAY, sizeof(PSDK_ARRAY)-1);
+		if (entry) {
+			zval *new_sid, *created, *updated;
+
+			ZVAL_COPY(&PS(internal_data), entry);
+			if (php_session_validate_internal_data(&PS(internal_data)) == FAILURE) {
+				php_session_set_timestamps(1);
+				/* Do not raise error for PHP7, but PHP 8 */
+				/*
+				php_error_docref(NULL, E_WARNING, "Broken internal session data detected. Broken data has been wiped");
+				*/
+			}
+			zend_hash_str_del(Z_ARRVAL_P(Z_REFVAL(PS(http_session_vars))),
+							  PSDK_ARRAY, sizeof(PSDK_ARRAY)-1);
+
+			new_sid = zend_hash_str_find(Z_ARRVAL(PS(internal_data)),
+										 PSDK_NEW_SID, sizeof(PSDK_NEW_SID)-1);
+			created = zend_hash_str_find(Z_ARRVAL(PS(internal_data)),
+									PSDK_CREATED, sizeof(PSDK_CREATED)-1);
+			updated = zend_hash_str_find(Z_ARRVAL(PS(internal_data)),
+									PSDK_UPDATED, sizeof(PSDK_UPDATED)-1);
+
+			/* Check destroyed/regenerated session TTL is reached */
+			if (new_sid && Z_LVAL_P(updated) + PS(ttl_destroy) < now) {
+				switch (Z_TYPE_P(new_sid)) {
+					case IS_STRING:
+						php_error_docref(NULL, E_NOTICE,
+										 "Obsolete session data access detected. Possible "
+										 "security incident, but alert could be false positive. "
+										 "(Decendant session ID: %s)", Z_STRVAL_P(new_sid));
+					/* Fall through */
+					case IS_NULL:
+						php_session_destroy(-1);
+						/* Back to active state */
+						PS(session_status) = php_session_active;
+						goto retry;
+						break;
+					default:
+						/* Should not happen */
+						php_error_docref(NULL, E_ERROR,
+										 "Malformed NEW_SID: %d", Z_TYPE_P(new_sid));
+						break;
+				}
+			} else if (Z_LVAL_P(updated) + PS(ttl) < now) {
+				/* Check newly created session TTL is reached */
+				php_session_destroy(-1);
+				/* Back to active state */
+				PS(session_status) = php_session_active;
+				goto retry;
+			}
+
+			/* Check regenerate ID is required */
+			if (PS(regenerate_id) > 0 && Z_LVAL_P(created) + PS(regenerate_id) < now) {
+				php_session_regenerate_id(0);
+				return;
+			}
+
+			if (!new_sid) {
+				/* Update outstanding session timestamps */
+				updated = zend_hash_str_find(Z_ARRVAL(PS(internal_data)),
+										PSDK_UPDATED, sizeof(PSDK_UPDATED)-1);
+				if (Z_LVAL_P(updated) + PS(ttl_update)  < now) {
+					php_session_set_timestamps(0);
+				}
+			} else {
+				/* Send new SID again if needed */
+				php_session_send_new_sid(new_sid);
+			}
+		} else {
+			/* Newly created session */
+			php_session_set_timestamps(1);
+		}
+	}
 </code>
 
 User will not see <nowiki>$_SESSION['__PHP_SESSION__']</nowiki> array as it is removed/added upon session data serialization internally in session module. Use may get <nowiki>$_SESSION['__PHP_SESSION__']</nowiki> contents via session_info() function.
@@ -372,6 +418,7 @@ Requires 50%+ vote is required.
 
 ===== ChangeLog =====
 
+  * 2016/01/29 - Use actual C code for logic.
   * 2016/01/25 - Remove TTL and TTL_UPDATE from __PHP_SESSION__.
   * 2016/01/23 - Remove session_ids() in favor of session_info()
   * 2016/01/22 - Added PR. Modified RFC according to PR.
