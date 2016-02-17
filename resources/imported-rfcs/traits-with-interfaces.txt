@@ -1,0 +1,223 @@
+====== PHP RFC: Your Title Here ======
+  * Version: 0.1
+  * Date: 2016-02-12
+  * Author: Kevin Gessner, kgessner@etsy.com
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/traits-with-interfaces
+
+
+===== Introduction =====
+Allow traits to implement interfaces.  Classes that insert the trait would then implement the interface, as though it was declared on the class.
+
+===== Proposal =====
+Traits provide horizontal reuse of methods: a class that uses a trait mixes in the implementation of a set of methods.  Interfaces provide a promise of a class's implementation: a class that implements an interface is guaranteed to provide a set of methods.
+
+These concepts fit together well.  The set of methods provided by a trait may match the set of methods guaranteed by an interface.  When a class inserts that trait, the class now fulfills the interface.  PHP currently requires that the class explicitly specify that it implements the interface.  This RFC proposes that the trait be permitted to implement the interface.  Any class that inserts that trait would then implement the interface.
+
+Having the trait declare that it implements an interface makes the relationship between the interface (specification) and trait (implementation) explicit.
+
+The trait must implement each of the methods from all the interfaces it implements.  Failure to do so will be a fatal error.  The method declarations must be compatible with the interface.  Some or all of the trait’s implementing methods may be abstract, with the class including the trait providing the method implementation (similar to an abstract class that implements an interface).
+
+Concretely, this RFC proposes that this code be valid and functional:
+
+''<?php
+
+interface I {
+    function foo();
+}
+
+trait T implements I {
+    function foo() {
+    }
+}
+
+class C {
+    use T;
+}
+
+print_r(class_implements(C::class));
+// Array
+// (
+//     [I => I]
+// )''
+
+Compared to an abstract class, using a trait plus interface provides looser coupling.  A trait implementing an interface provides an implementation of the interface, but it need not be the only implementation.  Classes are still free to implement the interface directly.  Classes that insert the trait may override any members (as with existing traits) and continue to implement the interface.  Other classes need not be aware that a class implements an interface via a trait or directly, in the same way they need not be aware if an interface is inherited by a class.
+
+This pattern -- where a trait provides a standard implementation of an interface -- exists in the wild.  See “References” for links.  This change reduces the overhead of implementing that pattern, because a class will only need to implement the trait, not also explicitly specify the interface.  Semantically, it makes the relationship between the trait and interface more explicit.
+
+Other languages that implement languages features like PHP’s traits allow for interface specifications like this RFC.  Again, see “References” for links.
+
+This change does not introduce any new keywords.  The syntax change is limited to the trait declaration. See “Patches and Tests” for a proposed patch for the language specification.
+
+===== Examples =====
+
+==== Example #1: Trait implementing interface and additional methods ====
+
+  <?php
+  
+  interface Logger {
+      function error($message);
+      function info($message);
+  }
+  
+  trait FileLogger implements Logger {
+      abstract function logToFile($message);
+  
+      function error($message) {
+          $this->logToFile("ERROR: $message");
+      }
+  
+      function info($message) {
+          $this->logToFile("INFO: $message");
+      }
+  }
+  
+  class Widget {
+      use FileLogger;
+  
+      function logToFile($message) {
+          // ...
+      }
+  }
+  
+  // Prints Array( [Logger] => Logger )
+  print_r(class_implements(Widget::class))
+
+
+==== Example #2: Trait that does not implement all required methods ====
+
+  <?php
+  
+  interface Logger {
+      function error($message);
+      function info($message);
+  }
+  
+  // Fatal error: Trait ErrorLogger contains 1 abstract method and must implement the remaining methods (Logger::info)
+  trait ErrorLogger implements Logger {
+      function error($message) {
+          print $message;
+      }
+  }
+
+==== Example #3: Trait that implements part of the interface via an abstract method ====
+
+  <?php
+  
+  interface Logger {
+      function error($message);
+      function info($message);
+  }
+  
+  trait ErrorLogger implements Logger {
+      function error($message) {
+          print $message;
+      }
+  
+      abstract function info($message);
+  }
+  
+  class Widget {
+      use ErrorLogger;
+  
+      function info($message) {
+          // ...
+      }
+  }
+  
+  // Prints Array( [Logger] => Logger )
+  print_r(class_implements(Widget::class))
+
+
+==== Example #4: Method from trait is renamed, so interface is no longer satisfied ====
+
+  <?php
+  
+  trait VarsToJson implements JsonSerializable {
+      public function jsonSerialize() {
+          return get_object_vars($this);
+      }
+  }
+  
+  // Fatal error: Access level to VarsToJson::jsonSerialize() must be public (as in class JsonSerializable)
+  class Widget {
+      use VarsToJson {
+          jsonSerialize as private;
+      }
+  }
+
+
+===== Backward Incompatible Changes =====
+
+None.  All existing traits will continue to work.
+
+===== Proposed PHP Version(s) =====
+
+Next PHP 7.x, currently PHP 7.1.
+
+===== RFC Impact =====
+
+==== To SAPIs ====
+None.
+
+==== To Existing Extensions ====
+
+Any extension that is aware of PHP’s AST will need to be updated to handle the change to trait declarations.
+
+==== To Opcache ====
+
+None expected. TBD once a draft implementation is complete.
+
+==== New Constants ====
+
+No new constants.
+
+==== php.ini Defaults ====
+
+No new settings.
+
+===== Open Issues =====
+
+None yet!
+
+===== Unaffected PHP Functionality =====
+
+This does not impact interfaces or class inheritance, nor how classes include traits.
+
+Trait conflict resolution is unchanged, as adding interfaces to a class is always additive: if multiple superclasses or traits specify the same interface, the class will simply implement it once.
+
+This change does not affect the runtime semantics of traits.  A class that implements an interface via a trait is indistinguishable from a class that implements it directly (or via inheritance).
+
+===== Future Scope =====
+
+Nothing yet.
+
+===== Proposed Voting Choices =====
+
+Vote date TBD. This change will require a 2/3 majority.
+
+===== Patches and Tests =====
+
+Language spec patch: https://github.com/php/php-langspec/compare/master...kevingessner:traits-with-interfaces
+
+Other patches TBD.
+
+===== Implementation =====
+
+TBD
+
+===== References =====
+
+==== Existing PHP codebases that would benefit from this change ====
+
+  * Symfony: [[https://github.com/symfony/symfony/blob/582f4753a343f230fbe18b4e9a0747d48351ddfb/src/Symfony/Component/DependencyInjection/ContainerAwareInterface.php|ContainerAwareInterface]] + [[https://github.com/symfony/symfony/blob/582f4753a343f230fbe18b4e9a0747d48351ddfb/src/Symfony/Component/DependencyInjection/ContainerAwareTrait.php|ContainerAwareTrait]]
+  * PHP-fig’s log PSR: [[https://github.com/php-fig/log/blob/d8e60a5619fff77f9669da8997697443ef1a1d7e/Psr/Log/LoggerInterface.php|LoggerInterface]] + [[https://github.com/php-fig/log/blob/d8e60a5619fff77f9669da8997697443ef1a1d7e/Psr/Log/LoggerTrait.php|LoggerTrait]]
+  * Phan: [[https://github.com/etsy/phan/blob/f4dd2d9a0cd57be9f729454c3e3b38f6740fa8ac/src/Phan/Language/Element/ConstantInterface.php|ConstantInterface]] + [[https://github.com/etsy/phan/blob/f4dd2d9a0cd57be9f729454c3e3b38f6740fa8ac/src/Phan/Language/Element/ConstantTrait.php|ConstantTrait]], [[https://github.com/etsy/phan/blob/f4dd2d9a0cd57be9f729454c3e3b38f6740fa8ac/src/Phan/Language/Element/FunctionInterface.php|FunctionInterface]] + [[https://github.com/etsy/phan/blob/f4dd2d9a0cd57be9f729454c3e3b38f6740fa8ac/src/Phan/Language/Element/FunctionTrait.php|FunctionTrait]]
+
+==== Trait-like forms with interfaces in other languages ====
+
+  * C# Rotor trait prototype: [[http://scg.unibe.ch/archive/projects/Reic05a.pdf]], section 8.2
+  * Racket (called mixins): [[http://docs.racket-lang.org/guide/classes.html#(part._.Mixins_and_.Interfaces)]]
+
+===== Rejected Features =====
+Nothing yet.
