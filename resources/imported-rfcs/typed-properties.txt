@@ -1,5 +1,5 @@
 ====== PHP RFC: Typed Properties ======
-  * Version: 0.1.2
+  * Version: 0.2.0
   * Date: 2016-03-16
   * Author: Joe Watkins <krakjoe@php.net>, Phil Sturgeon <philstu@php.net>
   * Status: Under Discussion
@@ -9,11 +9,11 @@ Following the raging success of PHP 7.0 additions [[https://wiki.php.net/rfc/sca
 
 ===== Introduction =====
 
-Typed Properties allow for an optional keyword in the definition, after the visibility scope, which contains the type the property should allow. Any parameter type hint or return type will work here, there are no new set of rules.
+Typed Properties allow for an optional keyword in the definition, after the visibility scope, which contains the type the property should allow.
 
 ===== Proposal =====
 
-By providing keywords for all PHP types, you can describe your properties like so:
+Properties can have the same types as parameters:
 
 <code php>
 class Foo {
@@ -35,62 +35,45 @@ This can be rather useful, as a lot of the job of setters is to ensure the value
 
 There are two possible outcomes to type mismatches, as one check is done at compile time and another done at runtime. 
 
-If an attempt is made to assign a value of an incorrect type at compile time, a fatal error will be occur:
+===== Default Values =====
+
+[[https://3v4l.org/EnGUI/rfc#tabs|If an attempt is made to assign a value of an incorrect type at compile time, a fatal error will be raised:]]
 
 <code php>
-class Foo {
+<?php
+new class {
 	public int $bar = "turtle";
+};
+</code>
+
+<code>
+PHP Fatal error:  Default value for properties with integer type can only be integer in turtle.php on line 3
+</code>
+
+===== Coercion and Strictness =====
+
+[[https://3v4l.org/O4bdX/rfc#tabs|Typed properties follow the same coercion rules as parameters with type information, and respect strict_types:]]
+
+<code php>
+<?php
+var_dump(new class() {
+	public int $bar;
+
+        public function __construct() {
+            $this->bar = "42";
+        }
+});
+</code>
+
+<code>
+object(class@anonymous)#1 (1) { 
+  ["bar"]=> int(42) 
 }
-
-var_dump((new Foo)->bar); // Fatal error: Typed property Foo::$bar must be integer, string used
 </code>
 
-If an attempt is made to assign an incorrect type at runtime, a TypeError will be thrown:
+===== TypeError =====
 
-<code php>
-$foo = new class() {
-	public int $bar;
-};
-
-$foo->bar = "turtle"; // Fatal error: Uncaught TypeError: Typed property class@anonymous::$bar must be integer, string used
-</code>
-
-Typed Properties are entirely strict, following the same strict rules as strict type hints. This means trying to put a numeric string
-into an int field will fail:
-
-<code php>
-new class() {
-	public int $bar = "2";
-}; // Fatal error: Typed property class@anonymous::$bar must be integer, string used
-</code>
-
-As you might expect, integers cannot be declared with floats:
-
-<code php>
-new class() {
-	public int $bar = 2.2;
-}; // Fatal error: Typed property class@anonymous::$bar must be integer, float used
-</code>
-
-//**Note:** There is one exception to this. Whilst integers cannot take floats at compile time, they are allowed to widen to float in runtime. This is because int's overflow to float when they get too large, so restricting this would break big ints. This may cause some confusion, but seems like something that could be fixed at a later point.
-//
-
-//So, to allow for int widening, this would be valid, but not other type mismatches are:
-//
-
-<code php>
-$foo = new class() {
-	public int $bar;
-};
-
-$foo->bar = 2.2;
-var_dump($foo->bar); // float(2.2)
-
-$foo->bar = "2.2";
-var_dump($foo->bar); // Fatal error: Uncaught TypeError: Typed property class@anonymous::$bar must be integer, string used
-</code>
-
-Due to the usage of TypeError, you can catch runtime errors for mismatched types:
+[[https://3v4l.org/obW7U/rfc#tabs|Due to the usage of TypeError, you can catch runtime errors for mismatched types:]]
 
 <code php>
 class Math {
@@ -111,13 +94,88 @@ try {
     (new Math(3, "nonsense"))->add();
 } catch (Error $e) {
     echo "Look, I'm Python!";
-}</code>
+}
+</code>
 
-This will output "Look, I'm Python!".
+<code>
+Look, I'm Python!
+</code>
 
-==== Similarities to HHVM ====
+===== Use before initialization =====
 
-The type system in HHVM uses matching syntax. In fact, an example taken from the [[https://docs.hhvm.com/hack/types/type-system|HHVM Type System]] works perfectly with this implementation:
+[[https://3v4l.org/cVkcj/rfc#tabs|The implementation will raise an exception where a typed property is accessed before being initialized:]]
+
+<code php>
+<?php
+$foo = new class {
+    
+  public int $bar;  
+};
+
+var_dump($foo->bar);
+</code>
+
+<code>
+Fatal error: Uncaught TypeError: Typed property class@anonymous::$bar must not be accessed before initialization in /in/cVkcj:7 
+Stack trace: 
+  #0 {main} thrown in /in/cVkcj on line 7
+</code>
+
+===== References =====
+
+[[https://3v4l.org/WEZHv/rfc#tabs|The implementation prohibits the use of references to properties with type information:]]
+
+<code php>
+<?php
+$foo = new class {
+  
+  public int $bar = 42;
+};
+
+$reference = &$foo->bar;
+</code>
+
+<code>
+Fatal error: Uncaught TypeError: Typed property class@anonymous::$bar must not be referenced in /in/WEZHv:7 
+Stack trace: 
+  #0 {main} thrown in /in/WEZHv on line 7
+</code>
+
+//Other code can raise the same exception, foreach by reference, accept as arg by reference, etc.//
+
+===== Magic (__get) =====
+
+[[https://3v4l.org/Lq5dA/rfc#tabs|The magical __get method is not be allowed to violate the declared type:]]
+
+<code php>
+<?php
+$foo = new class {
+    
+  public int $bar;
+  
+  public function __construct() {
+      unset($this->bar); # will result in the invocation of magic
+  }
+  
+  public function __get($name) {
+      return "oh dear!";
+  }
+};
+
+var_dump($foo->bar);
+</code>
+
+<code>
+Fatal error: Uncaught TypeError: Typed property class@anonymous::$bar must be integer, string used in /in/Lq5dA:15 
+Stack trace: 
+  #0 {main} thrown in /in/Lq5dA on line 15
+</code>
+
+===== Similarities to HHVM =====
+
+The type system in HHVM uses matching syntax. 
+
+In fact, an example taken from the [[https://docs.hhvm.com/hack/types/type-system|HHVM Type System]] works perfectly with this implementation:
 
 <code php>
 class A {
@@ -149,7 +207,7 @@ Whilst the syntax is almost identical, this works a little differently to Hack.
 
 Hack a offers static analysis tools to detect mismatched types, but when the code is executed it will allow any type to be passed through. This implementation is done at compile time to avoid the need for this, but static analysis tools and editors/IDEs will no doubt catch up.
 
-==== Other Languages ====
+===== Other Languages =====
 
 Of course, while "But Xlang does it!" is never a strong reason to do anything, it is sometimes nice to know how our friends are doing it in other languages.
 
@@ -161,7 +219,7 @@ Of course, while "But Xlang does it!" is never a strong reason to do anything, i
   * [[https://en.wikipedia.org/wiki/Property_(programming)#ActionScript_3.0|ActionScript]]
   * [[https://en.wikipedia.org/wiki/Property_(programming)#Visual_Basic|Visual Basic]]
 
-==== Syntax ====
+===== Syntax =====
 
 The authors of this RFC considered other syntax possibilities, however they were considered to be inferior for the following reasons.
 
@@ -191,14 +249,9 @@ That sticks out a bit, we don't do this anywhere else.
 
 The current patch seems the most consistent with popular languages, avoids new reserved words, skips syntax soup and looks great regardless of assignment being used or not.
 
-==== Weak or Strict ====
-Currently the patch is entirely strict, following the same rules as strict type hinting, with no respect given to the declare() switch. It seems unlikely people will accept this approach, so this will almost certainly be revisited. 
+===== Performance =====
 
-Jump on the mailing list with a "+1 respect weak/strict switch" if you want to see this changed.
-
-==== Performance ====
-
-Using a typed property is a tiny bit more expensive than using a mixed property, but this loss will be recovered by avoiding the need for a bunch of boilerplate userland code to check types are the correct type.
+Checking the type of a zval is an extremely cheap operation, there may be some very minor performance impact only when typed properties are used.
 
 ===== Backward Incompatible Changes =====
 None
@@ -214,41 +267,28 @@ None
 None
 
 ==== To Opcache ====
+
 Opcache has been patched, needs review.
 
-===== Open Issues =====
+===== Constructors =====
 
-1. There is a question around temporary nullability, with a concern that if an object is initialized and properties are not set at the end of the constructor, it should error. 
+Some have voiced concern that, if an object has typed properties and the constructor does not set them, an exception should be raised because the object is in an invalid state.
 
-Currently it errors if you try to use the unset property instead? Pros/Cons undecided.
+However, lazy initialization of properties is a common idiom in PHP, that the authors of the RFC are not willing to restrict to untyped properties.
 
-For example:
+//No rules have been violated until the engine returns a value//, since any value returned is //always// of the correct type, we do not see the need to place further restrictions upon typed properties.
 
-<code php>
-class Foo {
-    public int $foo;
-} 
-$foo = new Foo(); // Some would expect error here
-echo $foo->foo; // Patch currently errors here
-</code>
+===== Union Types / Nullable =====
 
-Maybe we need to look into setting type-relevant defaults for items instead of erring on call?
-
-2. Respect weak/strict switch.
-
-===== Future Scope =====
-
-==== Union Types / Nullable ====
-
-This RFC intentionally avoids the quagmire that is union types or nullable types. For example: if you specify an array, then you have to provide an array, and null will return an error. 
+This RFC intentionally avoids the quagmire that is union types or nullable types. For example: if you specify an array, then you have to provide an array, and null will raise an error. 
 
 Future RFCs could take this on, with some `public ?array $foo;` syntax, or with union types providing `public array|null $foo;` syntax. This is just something we don't need to get into at this point. It is consistent with return types, if you specify `array` and return `null`, that too will error.
 
-==== Typed Local Variables ====
+===== Typed Local Variables =====
 
 This is an entirely different feature, and something not worth conflating into this RFC. The idea might be wanted, but to keep things simple it will not be discussed in this RFC.
 
-==== Typed Constant Properties ====
+===== Typed Constant Properties =====
 
 There is currently no known value in adding a type to a constant. Seeing as constants cannot be modified, the type is just whatever the constant is set to, and seeing as it cannot change there is no chance for a constant to be assigned a invalid value afterwards.
 
@@ -269,7 +309,8 @@ If you want to play with this functionality, it's up on 3v4l.
 https://3v4l.org/j2Hlg/rfc#tabs
 
  ===== Changelog =====
-
+  
+  * v2.0  : Revision prompted by feedback and consensus
   * v0.1.2: Definitely not allowing void
   * v0.1.1: Expanded on compile time vs. run time errors
   * v0.1.0: Initial draft
