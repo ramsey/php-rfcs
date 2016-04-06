@@ -1,34 +1,94 @@
-====== PHP RFC: Typesafe callable ======
+====== PHP RFC: Callable interfaces ======
   * Version: 0.1
-  * Date: 2016-04-04
+  * Date: 2016-04-06
   * Author: Ben Scholzen, mail@dasprids.de
+  * Author: Marco Pivetta, ocramius@gmail.com
   * Status: Draft
-  * First Published at: http://wiki.php.net/rfc/typesafe-callable
+  * First Published at: http://wiki.php.net/rfc/callable-interfaces
 
 ===== Introduction =====
-Currently, when you typehint against "callable" in your method signatures, you can never be certain whether it accepts the parameters you are giving it or if the return type is what you'd expect. You can of course validate the return type, and catch exceptions about the invalid parameters and such when calling the callable, but that is not ideal.
+Currently, when you type-hint against "callable" in your method signatures, you can never be certain whether the function will accept the parameters you are giving it, or if the return type is what you'd expect. You can manually validate the return type, and catch exceptions about the invalid parameters, but that is not ideal.
 
-This RFC tries to solve this problem by introducing user-defined callables.
+This RFC tries to solve this problem by allowing callables to follow user-specified interfaces.
+This RFC is inspired by https://wiki.php.net/rfc/typesafe-callable
 
 ===== Proposal =====
-This RFC proposes the definition of user-defined callables. Since "callable" is already a reserved keyword, this should not be a BC break. User-defined callables should be be both allowed to be namespaced like functions and classes, but also invoke the autoloader if they are not found in the current scope. A simple callable definition could look like this:
+
+PHP already has a way to define objects that act as functions. That mechanism is the <code>__invoke</code> magic method, which is widely used in libraries and frameworks. In addition to that, <code>Closure</code> already implements <code>__invoke</code>.
+
+<code>__invoke</code> already works quite well: with this proposal, generic <code>callable</code> arrays, functions and objects will be usable as if they implemented a matching interface:
 
 <code php>
-callable FilterCallable(string $input) : string;
+interface RegisterUser
+{
+    public function __invoke(Username $username) : UserRegistration;
+}
 </code>
 
-With such a callable in place, the user can now typehint against it, like they would against any other property, and be certain that it will accept the parameters they pass in, as well as guarantee the return type they expect:
+We can now implicitly implement this interface by just defining any <code>callable</code> that matches this interface:
+
+
+As a function:
 
 <code php>
-function foo(FilterCallable $filter) : string
+function register (Username $username) : UserRegistration {
+    // ... domain logic here ...
+    
+    return new UserRegistration($userId);
+}
+</code>
+
+As a closure:
+
+<code php>
+$register = function (Username $username) : UserRegistration {
+    // ... domain logic here ...
+    
+    return new UserRegistration($userId);
+};
+</code>
+
+As a static callable array:
+
+<code php>
+class Register
 {
-    return $filter('bar');
+    public static function register(Username $username) : UserRegistration {
+        // ... domain logic here ...
+    
+        return new UserRegistration($userId);
+    }
 }
 
-foo(function (string $foo) : string { return trim($foo); });
+$register = [Register::class, 'register'];
 </code>
 
-Of course, this works with any other kind of callable as well, be it a string, an array or an object.
+As an instance callable array:
+
+<code php>
+class Register
+{
+    public function register(Username $username) : UserRegistration {
+        // ... domain logic here ...
+    
+        return new UserRegistration($userId);
+    }
+}
+
+$register = [new Register(), 'register'];
+</code>
+
+We are now able to consume any of these callables wherever the interface is required in a type-hint:
+
+<code php>
+function runRegistration(Username $username, RegisterUser $handler) {
+    var_dump($handler($username));
+}
+
+runRegistration(new Username('DASPRiD'), $register);
+</code>
+
+In order for this to work, any implicitly defined callable should be cast to a <code>Closure</code> at call-time.
 
 ===== Backward Incompatible Changes =====
 This RFC expects no BC breaks.
