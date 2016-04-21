@@ -1,0 +1,210 @@
+====== PHP RFC: Attributes ======
+  * Version: 0.9
+  * Date: 2016-04-21
+  * Author: Dmitry Stogov, dmitry@zend.com
+  * Status: Draft (or Under Discussion or Accepted or Declined)
+  * First Published at: http://wiki.php.net/rfc/attributes
+
+===== Introduction =====
+Attributes (or annotation) is a form of syntactic metadata that can be added to language classes, functions, etc. PHP offers only a single form of such metadata - doc-comments. This is just a string and to keep some structured information, we had to use some pseudo-language. Then we has to parse it to access particular element of that structure.
+
+Many languages like Java, C#, Hack, etc provide a simpler way. They allow definition of structured meta-information through small syntax extension.
+
+===== Proposal =====
+
+==== Attribute Syntax ====
+Attribute is a specially formatted text enclosed with "<<" and ">>". Attributes may be applied to functions, classes, interfaces, traits, methods, properties and class constants. In the same way as doc-comments, attributes should be placed before the corresponding definition, but in opposite, it is possible to define few attributes for the same declaration.
+
+<code>
+<<...>>
+<<...>>
+function foo() {}
+</code>
+
+Each attribute definition construct may also define one or few named attributes, each attribute may be used without value, with single value or multiple values. See the EBNF:
+
+<code>
+<attribute> ::= "<<" <name> [ "(" <value> { "," <value> } ")" ]
+                { "," <name> [ "(" <value> { "," <value> } ")" ] } ">>".
+<name>      ::= STRING.
+<value>     ::= <php-constant> | <php-expression>.
+</code>
+
+And Example:
+
+<code>
+<<WithoutValue, SingleValue(0), FewValues('Hello', 'World')>>
+function foo() {}
+</code>
+
+It's not possible to use the same attribute name for the same definition few times, however it's possible to use multiple attribute values.
+
+<code>
+<<test(1),test(2)>> // Error
+function foo() {}
+
+<<test(1,2)>> // Works
+function foo() {}
+</code>
+
+==== Arbitrary PHP Expressions as Attribute Values (AST attributes) ====
+
+Except for simple scalars, attribute values may be represented with any valid PHP expression.
+
+<code>
+<<test($a + $b > 0)>>
+function foo($a, $b) {
+}
+</code>
+
+In this case, internally, the value of attribute is kept as an Abstract Syntax Tree, and we will able to read every individual node of this tree separately. This approach implies usage of the same PHP syntax for meta data and eliminates need for separate parser.
+
+==== Reflection ====
+
+Few reflection classes are extended with getAttributes() method, hat returns array of attributes.
+
+<code>
+function ReflectionFunction::getAttributes(): array;
+function ReflectionClass::getAttributes(): array;
+function ReflectionProperty::getAttributes(): array;
+function ReflectionClassConstants::getAttributes(): array;
+</code>
+
+These functions return false if there were no attributes defined. Otherwise they return array with attribute names as keys and corresponding values. Attributes without values represented as boolean **true**, attributes with single values by the value itself, and with multiple values by the array of the values.
+
+<code>
+<<WithoutValue, SingleValue(0), FewValues('Hello', 'World')>>
+function foo() {}
+$r = new ReflectionFunction("foo");
+var_dump($r->getAttributes());
+</code>
+
+<code>
+array(3) {
+  ["WithoutValue"]=>
+  bool(true)
+  ["SingleValue"]=>
+  int(0)
+  ["FewValues"]=>
+  array(2) {
+    [0]=>
+    string(5) "Hello"
+    [1]=>
+    string(5) "World"
+  }
+}
+</code>
+==== AST Representation ====
+
+While internally AST is stored in native zend_ast format, Reflection*::getAttributes() methods return the corresponding representation built with objects of \ast\Node and \ast\Node\Decl classes, borrowed from [[https://github.com/nikic/php-ast|php-ast]]. These classes moved onto PHP core and may be used even without php-ast extension. However, it also defines useful constants and functions, that would simplify work with AST in PHP.
+
+<code>
+<<test($a + $b > 0)>>
+function foo($a, $b) {
+}
+$r = new ReflectionFunction("foo");
+var_dump($r->getAttributes());
+</code>
+
+<code>
+array(1) {
+  ["test"]=>
+  object(ast\Node)#2 (4) {
+    ["kind"]=>
+    int(521)
+    ["flags"]=>
+    int(0)
+    ["lineno"]=>
+    int(0)
+    ["children"]=>
+    array(2) {
+      [0]=>
+      object(ast\Node)#3 (4) {
+        ["kind"]=>
+        int(520)
+        ["flags"]=>
+        int(1)
+        ["lineno"]=>
+        int(0)
+        ["children"]=>
+        array(2) {
+          [0]=>
+          object(ast\Node)#4 (4) {
+            ["kind"]=>
+            int(256)
+            ["flags"]=>
+            int(0)
+            ["lineno"]=>
+            int(0)
+            ["children"]=>
+            array(1) {
+              [0]=>
+              string(1) "a"
+            }
+          }
+          [1]=>
+          object(ast\Node)#5 (4) {
+            ["kind"]=>
+            int(256)
+            ["flags"]=>
+            int(0)
+            ["lineno"]=>
+            int(0)
+            ["children"]=>
+            array(1) {
+              [0]=>
+              string(1) "b"
+            }
+          }
+        }
+      }
+      [1]=>
+      int(0)
+    }
+  }
+}
+</code>
+
+===== Backward Incompatible Changes =====
+None
+
+===== Proposed PHP Version(s) =====
+7.1
+
+===== RFC Impact =====
+==== To SAPIs ====
+None
+
+==== To Existing Extensions ====
+[[https://github.com/nikic/php-ast|php-ast]] will require minor modification ,because the patch moved classes "\ast\Node" and "\ast\Node\Decl" into core.
+
+==== To Opcache ====
+opcache modifications are parts of the proposed patch.
+
+==== New Constants ====
+None. However, we may move some constants from [[https://github.com/nikic/php-ast|php-ast]] into core.
+
+==== php.ini Defaults ====
+None.
+
+===== Open Issues =====
+None.
+
+===== Proposed Voting Choices =====
+This RFC modifies the PHP language syntax and therefore requires a two-third majority of votes
+
+===== Patches and Tests =====
+[[https://github.com/php/php-src/pull/1878|PR 1878]]
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+  * [[https://docs.hhvm.com/hack/attributes/introduction|Attributes in Hack]]
+  * [[https://en.wikipedia.org/wiki/Java_annotation|Java Annotation]]
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
