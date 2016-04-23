@@ -1,6 +1,6 @@
 ====== PHP RFC: Closure from callable function ======
-  * Version: 0.9
-  * Date: 2015-09-28 
+  * Version: 0.95
+  * Date: 2016-04-23 
   * Author: Dan Ackroyd, Danack@php.net
   * Status: Under Discussion 
   * First Published at: https://wiki.php.net/rfc/closurefromcallable
@@ -10,10 +10,14 @@
 
 PHP lacks a simple function to convert callables into a closure directly. Although it is possible to do this in userland, it is slow compared to what is possible with a built-in function, due to the number of reflection functions needed to be called, as well needing to create intermediary reflection objects.
 
-This RFC proposes adding the function `closure` to PHP's Reflection extension, to allow people to convert callables into closures directly. The method signature would be:
+This RFC proposes adding a static method to the Closure class, to allow conversion of callables into closures directly. The method signature would be:
 
 <code php>
-function closure(callable $callable) : closure {...}
+class Closure {
+    ...
+    public static function fromCallable(callable $callable) : Closure {...}
+    ...
+}
 </code>
 
 The function will check whether the callable is actually callable in the current scope. It will return a closure if it is callable, otherwise throw a TypeError. For example trying to create a closure to a private method of an object from the global scope would fail. Trying to create a closure to a private method of an object from within the object would succeed.
@@ -23,11 +27,11 @@ The function will check whether the callable is actually callable in the current
 
 There are three uses for converting callables into closures:
 
-* Better API control for classes
+  * Better API control for classes
 
-* Easier error detection and static analysis
+  * Easier error detection and static analysis
 
-* Performance
+  * Performance
 
 
 ==== Better API control for classes ====
@@ -56,7 +60,7 @@ $callback = $validator-> getValidatorCallback('email');
 $callback($userData);
 </code>
 
-With the closure() function, the class can easily return a closure that closes over private functions, which means those functions are no longer part of the public API.
+With the Closure::fromCallable() method, the class can easily return a closure that closes over private functions, which means those functions are no longer part of the public API.
 
 <code php>
 class Validator {
@@ -64,14 +68,14 @@ class Validator {
     public function getValidatorCallback($validationType) {
     
         if ($validationType == 'email') {
-            return closure([$this, 'emailValidation']);
+            return Closure::fromCallable([$this, 'emailValidation']);
         }
         
-        return closure([$this, 'genericValidation']);
+        return Closure::fromCallable([$this, 'genericValidation']);
     }
-    
+
     private function emailValidation($userData) {...}
-    
+
     private function genericValidation($userData) {...}
 }
 
@@ -106,7 +110,7 @@ With the closure function, the error is generated on the line where the typo exi
 function foo() { }
 
 function getCallback() {
-    return closure('food'); //error happens here
+    return Closure::fromCallable('food'); //error happens here
 }
 
 $callback = getCallback();
@@ -121,8 +125,7 @@ $callback(); //Because the getCallback function returned a closure, this is guar
 ==== Performance gain ====
 
 Although PHP has a 'callable' type it is quite slow to use compared to other types. This is due to the amount of work that is needed to check whether a 'callable' is actually a valid callable or not. This work needs to be each time the 'callable' parameter is called.
- 
- 
+
 Below are two files that call a function 10,000 times which calls itself recursively 8 times. One version has a callable type for the parameter, the other has Closure as the type. Measuring the number of operations with
  
     valgrind --tool=callgrind ./sapi/cli/php perf_callable.php
@@ -131,45 +134,41 @@ Below are two files that call a function 10,000 times which calls itself recursi
 gives the number of operations to be:
 
 ^        ^ Operations  ^ 
-| Callable | 112,311,913 |
+| Callable | 114,465,014 |
 | Closure | 95,522,330 |    
-| Difference | 16,789,583 |
+| Difference | 18,942,684 |
 
-Which is a difference of over 1000 operations per loop.
+Which is a difference of 1,894 operations per loop.
 
 
 ==== Patches and Tests ====
 
-The function has been implemented in this branch: https://github.com/Danack/php-src/tree/to_closure The patch is not finished as the error messages need some improvement.
+The function has been implemented in this branch: https://github.com/danack/php-src/tree/closureSimpler The patch is not finished as the error messages need some improvement.
  
  
 ==== Proposed Voting Choices ====
-As this is a simple function addition with no langauages changes, the voting will requie a 50%+1 majority to include this in PHP 7.1
+As this is a simple function addition with no language changes, the voting will requie a 50%+1 majority to include this in PHP 7.1
  
  
-==== Why a function? ====
+==== Why the long name? ====
 
-Some people have asked why a function is appropriate rather than making it be a constructor of the Closure class. e.g. `$fn = new Closure($callable);`. Using a plain function allows more flexibility in the implementation, without having anything be inconsistent.
-
-e.g. in cases where the same function is turned into a closure twice:
+Although I would prefer to implement this as a short function e.g.
 
 <code php>
-$fn1 = closure('foo');
-$fn2 = closure('foo');
+    function fn(callable $callable) : Closure {}
 </code>
 
-with the implementation being a function it is perfectly acceptable for $fn1 and $fn2 to be the same object. If instead the implementation was as a constructor for the closure class:
+there are downsides that make that be a poor choice.
+
+It clutters up the root namespace, which in general is bad practice. Making the implementation be a static method of the Closure class avoids this problem, as well as avoid clashing with future needs. For example Hack has specific separate implementations for converting strings, instance methods to closures. We may wish to add these in the future. Using a static method with a descriptive name avoids clashing with those names in the future.
+
+If anyone wants to use a short name for this functionality in their application or library they can do so easily, by defining a function:
 
 <code php>
-$fn1 = new closure('foo');
-$fn2 = new closure('foo');
+    function fn(callable $callable) : Closure {
+        return Closure::fromCallable($callable);
+    }
 </code>
-
-Having two new statements return the same object is very high on the surprise factor.
-
-Additionally having it be just a function, would make it easier in the future to implement it as a language construct, which might be desired for performance reasons.
-
-If you think that this should be implemented as the constructor of Closure rather than a function, please can you articulate the reason for that, other than 'constructors are cool'.
 
 
 ==== Other languages ====
@@ -242,7 +241,7 @@ function passIt(Closure $callable, $count) {
 
 function getCallable($foo) : Closure
 {
-    return closure([$foo, 'bar']);
+    return Closure::fromCallable([$foo, 'bar']);
 }
 
 $foo = new Foo();
@@ -256,5 +255,3 @@ echo "OK";
 
 
 </code>
-
-
