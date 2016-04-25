@@ -24,8 +24,8 @@ function foo() {}
 Each attribute definition construct may also define one or few named attributes, each attribute may be used without value, with single value or multiple values. See the EBNF:
 
 <code>
-<attribute> ::= "<<" <name> [ "(" <value> { "," <value> } ")" ]
-                { "," <name> [ "(" <value> { "," <value> } ")" ] } ">>".
+<attribute> ::= "<<" <namespace-name> [ "(" <value> { "," <value> } ")" ]
+                { "," <namespace-name> [ "(" <value> { "," <value> } ")" ] } ">>".
 <name>      ::= STRING.
 <value>     ::= <php-constant> | <php-expression>.
 </code>
@@ -59,6 +59,16 @@ function foo($a, $b) {
 
 In this case, internally, the value of attribute is kept as an Abstract Syntax Tree, and we will able to read every individual node of this tree separately. This approach implies usage of the same PHP syntax for meta data and eliminates need for separate parser.
 
+The native usage of AST is not especially necessary. It's also possible to use plain strings and transform then into AST at user level, through php-ast extension.
+
+<code php>
+<<test("$a + $b > 0")>>
+function foo($a, $b) {
+}
+$r = new ReflectionFunction("foo");
+$ast = ast\parse_code($r->getAttributes()["foo"][0]);
+</code>
+
 ==== Reflection ====
 
 Few reflection classes are extended with getAttributes() method, hat returns array of attributes.
@@ -70,7 +80,7 @@ function ReflectionProperty::getAttributes(): array;
 function ReflectionClassConstant::getAttributes(): array;
 </code>
 
-These functions return false if there were no attributes defined. Otherwise they return array with attribute names as keys and corresponding values. Attributes without values represented as boolean **true**, attributes with single values by the value itself, and with multiple values by the array of the values.
+These functions return empty array if there were no attributes defined. Otherwise they return array with attribute names as keys and nested arrays as corresponding values. Attributes without values represented by empty arrays, attributes with single value by arrays with single element, etc.
 
 <code php>
 <<WithoutValue, SingleValue(0), FewValues('Hello', 'World')>>
@@ -82,9 +92,13 @@ var_dump($r->getAttributes());
 <code>
 array(3) {
   ["WithoutValue"]=>
-  bool(true)
+  array(0) {
+  }
   ["SingleValue"]=>
-  int(0)
+  array(1) {
+    [0]=>
+    int(0)
+  }
   ["FewValues"]=>
   array(2) {
     [0]=>
@@ -109,57 +123,60 @@ var_dump($r->getAttributes());
 <code>
 array(1) {
   ["test"]=>
-  object(ast\Node)#2 (4) {
-    ["kind"]=>
-    int(521)
-    ["flags"]=>
-    int(0)
-    ["lineno"]=>
-    int(0)
-    ["children"]=>
-    array(2) {
-      [0]=>
-      object(ast\Node)#3 (4) {
-        ["kind"]=>
-        int(520)
-        ["flags"]=>
-        int(1)
-        ["lineno"]=>
-        int(0)
-        ["children"]=>
-        array(2) {
-          [0]=>
-          object(ast\Node)#4 (4) {
-            ["kind"]=>
-            int(256)
-            ["flags"]=>
-            int(0)
-            ["lineno"]=>
-            int(0)
-            ["children"]=>
-            array(1) {
-              [0]=>
-              string(1) "a"
+  array(1) {
+    [0]=>
+    object(ast\Node)#2 (4) {
+      ["kind"]=>
+      int(521)
+      ["flags"]=>
+      int(0)
+      ["lineno"]=>
+      int(0)
+      ["children"]=>
+      array(2) {
+        [0]=>
+        object(ast\Node)#3 (4) {
+          ["kind"]=>
+          int(520)
+          ["flags"]=>
+          int(1)
+          ["lineno"]=>
+          int(0)
+          ["children"]=>
+          array(2) {
+            [0]=>
+            object(ast\Node)#4 (4) {
+              ["kind"]=>
+              int(256)
+              ["flags"]=>
+              int(0)
+              ["lineno"]=>
+              int(0)
+              ["children"]=>
+              array(1) {
+                [0]=>
+                string(1) "a"
+              }
             }
-          }
-          [1]=>
-          object(ast\Node)#5 (4) {
-            ["kind"]=>
-            int(256)
-            ["flags"]=>
-            int(0)
-            ["lineno"]=>
-            int(0)
-            ["children"]=>
-            array(1) {
-              [0]=>
-              string(1) "b"
+            [1]=>
+            object(ast\Node)#5 (4) {
+              ["kind"]=>
+              int(256)
+              ["flags"]=>
+              int(0)
+              ["lineno"]=>
+              int(0)
+              ["children"]=>
+              array(1) {
+                [0]=>
+                string(1) "b"
+              }
             }
           }
         }
+        [1]=>
+        int(0)
       }
-      [1]=>
-      int(0)
     }
   }
 }
@@ -178,6 +195,49 @@ function add(int $a, $int $b): int {
 <<jit>>
 function foo() {
   ...
+}
+</code>
+
+Attributes may be used provide annotation system similar to Doctrine, where each attribute is represented by an object of corresponding class that perform validation and other actions.
+
+<code php>
+<?php
+namespace Doctrine\ORM {
+
+	class Entity {
+		private $name;
+		public function __construct($name) {
+			$this->name = $name;
+		}
+	}
+
+	function GetClassAttributes($class_name) {
+		$reflClass = new \ReflectionClass($class_name);
+		$attrs = $reflClass->getAttributes();
+		foreach ($attrs as $name => &$values) {
+			$name = "Doctrine\\" . $name;
+			$values = new $name(...$values);
+		}
+		return $attrs;
+	}
+}
+
+namespace {
+	<<ORM\Entity("user")>>
+	class User {}
+
+	var_dump(Doctrine\ORM\GetClassAttributes("User"));
+}
+?>
+</code>
+
+<code>
+array(1) {
+  ["ORM\Entity"]=>
+  object(Doctrine\ORM\Entity)#2 (1) {
+    ["name":"Doctrine\ORM\Entity":private]=>
+    string(4) "user"
+  }
 }
 </code>
 
@@ -202,6 +262,10 @@ function triangleArea($a, $b, $c)
 	* ($halfPerimeter - $c));
 }
 </code>
+
+==== Special Attributes ====
+
+Attribute names starting with "__" are reserved for internal purpose. Usage of unknown special attributes leads to compile-time error. Currently, no any special attributes are defined.
 
 ==== Criticism and Alternative Approach ====
 
@@ -246,7 +310,7 @@ e.g. to check "jit" attribute, today, we would perform regular expression matchi
 It might be possible to make PHP parse existing doc-comments and keep information as structured attributes, but we would need to invoke additional parser for each doc-comment; doc-comment may not conform to context-grammar and we have to decide what to do with grammar errors; finally this is going to be another language inside PHP.
 
 ===== Backward Incompatible Changes =====
-None
+The RFC doesn't make backward incompatibility changes, however, it makes forward incompatibility change. This means that frameworks that use native attributes won't be able to run on PHP versions lower than 7.1.
 
 ===== Proposed PHP Version(s) =====
 7.1
@@ -269,14 +333,16 @@ None.
 
 ===== Open Issues =====
   * part of patch related to new AST classes (zend_ast.*) might need to be slightly changed to satisfy need of attributes and php-ast in best way.
-  * getAttributes() should return empty array in case of no attributes
-  * For each defined attribute getArray() should return a numerically indexed array independently of number of associated values. For attributes without values it should return empty arrays.
-  * Attribute names might be namespace qualified e.g. <nowiki><<\Foo\Bar>></nowiki>
+  * <del>getAttributes() should return empty array in case of no attributes</del> [INCLUDED]
+  * <del>For each defined attribute getArray() should return a numerically indexed array independently of number of associated values. For attributes without values it should return empty arrays.</del> [INCLUDED]
+  * <del>Attribute names might be namespace qualified e.g. <nowiki><<\Foo\Bar>></nowiki></del> [INCLUDED]
   * It may be useful to optionally allow some extra special character e.g. <nowiki><<@\Foo\Bar>></nowiki>. This character won't have any special meaning for PHP itself, but higher layer may use this "@" as a flag of special meaning.
-  * May be we don't need special functionality for AST in attributes. We may store attribute as a simple strings and then get them through getAttributes() and call ast\parse_code() to get AST (if necessary). Both enabling and disabling native AST support make sense with their profs and cons.
+  * <del>May be we don't need special functionality for AST in attributes. We may store attribute as a simple strings and then get them through getAttributes() and call ast\parse_code() to get AST (if necessary). Both enabling and disabling native AST support make sense with their profs and cons.</del> [ADDITIONAL VOTING QUESTION]
   
 ===== Proposed Voting Choices =====
 This RFC modifies the PHP language syntax and therefore requires a two-third majority of votes
+
+In addition, allow <php-expression> as attribute values using transparent AST representation. (1/2 majority required)
 
 ===== Patches and Tests =====
 [[https://github.com/php/php-src/pull/1878|PR 1878]]
