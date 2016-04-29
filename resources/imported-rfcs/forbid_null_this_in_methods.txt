@@ -1,0 +1,183 @@
+====== PHP RFC: Forbid $this being null in instance methods ======
+  * Version: 1.0
+  * Date: 2016-04-29
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Target version: PHP 7.1
+  * Patch: https://github.com/php/php-src/pull/1894
+
+===== Introduction =====
+
+Currently it is possible for ''$this'' to be NULL inside a non-static method. This RFC proposes to remove this possibility, while still retaining compatibility with legacy PHP 4 code that performs static calls to non-static methods.
+
+The primary case which may result in ''$this'' being undefined (with an effective NULL value) occurs when a non-static method is called statically:
+
+<code php>
+// Deprecated: Non-static method A::method() should not be called statically
+A::method();
+
+class A {
+	public function method() {
+		// Uncaught Error: Using $this when not in object context
+		$this->something();
+	}
+}
+</code>
+
+Note that the call throws a deprecation warning, but is allowed. However the use of ''$this'' inside the method then throws an ''Error'' exception. This RFC essentially proposes to throw the ''Error'' exception already when ''A::method()'' is called.
+
+A common pattern for legacy PHP 4 code is to statically call non-static methods **that do not use ''$this''** (simply because PHP 4 had no concept of static methods). Under this RFC these calls continue to be allowed (with the existing deprecation warning). Only calls to methods actually using ''$this'' are affected. For example the following remains valid:
+
+<code php>
+// Deprecated: Non-static method A::method() should not be called statically
+A::method();
+
+class A {
+	public function method() {
+		// No use of $this in here!
+	}
+}
+</code>
+
+The goal of this RFC is to tighten guarantees that any reasonable person is expecting anyway, removing one of our largest remaining type-system loopholes. This RFC will ensure that within a non-static method the assertion ''$this instanceof self'' never fails. Furthermore this eliminates a large number of runtime checks and paves the way for future optimization (like method inlining).
+
+===== Proposal =====
+
+This section outlines the precise semantics of the proposal, which covers a slightly larger scope than outlined in the Introduction. In particular this RFC also encompasses rebinding of fake method-closures and also deals with concerns surrounding use of ''$this'' in free functions (or other scope-free contexts), which are implementationally related.
+
+==== Forbid static calls to non-static methods using $this ====
+
+The primary change of this RFC is to forbid static calls to non-static methods that use ''$this'', while calls to non-static methods not using ''$this'' continue to be allowed. The following examples illustrate which calls will be affected and which will behave as currently. The first two examples are repeated from the Introduction.
+
+This ''A::method()'' call is prohibited, because ''A::method()'' uses ''$this'':
+
+<code php>
+class A {
+	public function method() {
+		$this->foo();
+	}
+}
+
+// This will throw an Error exception, because A::method() uses $this
+A::method();
+</code>
+
+This ''A::method()'' call is allowed, because ''A::method()'' does not use ''$this'':
+
+<code php>
+class A {
+	public function method() {
+		// No use of $this in here
+	}
+}
+
+// This call is allowed and will only throw a deprecation warnings
+A::method();
+</code>
+
+This ''A::method()'' call is allowed, because the ''$this'' access is realized using variable-variables and cannot (generally) be detected at compile-time:
+
+<code php>
+class A {
+	public function method() {
+		$name = 'this';
+		var_dump($$name);
+	}
+}
+
+// This call is allowed, because the use of $this is not known at compile-time
+A::method();
+</code>
+
+This behavior is similar to many other existing restrictions that can be circumvented using variable-variables. For example assignments to ''$this'' are prohibited at compile-time, but this restriction can also be avoided using variable-variables.
+
+The following ''parent::method()'' call is allowed, because this is not a static call, but rather a scoped instance call. It will have a valid ''$this'' (namely of class ''B'' or a child class):
+
+<code php>
+class A {
+	public function method() {
+		$this->foo();
+	}
+}
+class B extends A {
+	public function method() {
+		// This call is allowed, because it's not a static call (it only looks like one)
+		parent::method();
+	}
+}
+</code>
+
+==== Forbid unbinding $this from fake closures for methods using $this ====
+
+Next to static calls to non-static methods there is another way how ''$this'' may end up being NULL inside a method, namely closure rebinding of fake closures returned by ''ReflectionMethod::getClosure()'':
+
+<code php>
+class A {
+	public function method() {
+		$this->foo();
+	}
+}
+
+$closure = (new ReflectionMethod('A', 'method'))->getClosure(new A);
+$closure = $closure->bindTo(null, 'A');
+$closure();
+</code>
+
+For the case where ''A::method()'' uses ''$this'', this operation will now be forbidden. Like all other rebinding failures, it will result in a warning and a false being returned.
+
+Note that this does **not** affect ordinary closures in any way. Only closures obtained using ''ReflectionMethod::getClosure()'' may be affected.
+
+Alternative action: This check could be made more strict, by forbidding unbinding of $this even if the non-static method does not use ''$this''. As we have no legacy concerns here, it may be preferable to be stricter right away.
+
+==== Remove special treatment of $this in non-scoped contexts ====
+
+It is currently possible to use ''$this'' as an ordinary variable in non-scoped contexts (e.g. free functions), however ''$this'' will still be subjected to special treatment in some (but not all) operations. For example:
+
+<code php>
+function test($this) {
+	$this->prop = 42;
+}
+test(new stdClass);
+</code>
+
+This code will not generate compile-time errors and will also allow the function call, however the ''$this->prop'' operation will throw an Error exception with message "Using $this when not in object context". This is odd in that the ''$this'' variable here does hold an object (which a var_dump would show), but the ''%%$this->prop%%'' access still generates an error.
+
+This RFC will allow the shown code to run without errors.
+
+Alternative action: Alternatively we could completely forbid use of ''$this'' in non-scoped contexts. An issue with this is that we would also have to forbid unbinding of ''$this'' from closures that use it, which has unclear backwards compatibility implications.
+
+===== Backward Incompatible Changes =====
+
+This RFC is specifically designed to retain compatibility with patterns seen in legacy PHP 4 code. Calls are only prohibited if ''$this'' is used in the method, as such we generally only generate an error in cases that would already error at a later point in time.
+
+There is only one case I can imagine where this change might cause a genuine compatibility issue, namely code checking ''isset($this)'' to determine whether a method was called statically or non-statically:
+
+<code php>
+class A {
+	public function test() {
+		if (isset($this)) {
+			echo "Called non-statically\n";
+		} else {
+			echo "Called statically\n";
+		}
+	}
+}
+(new A)->test(); // Prints: Called non-statically
+A::test();       // Prints: Called statically
+</code>
+
+This pattern will no longer be supported. (Actually it's still possible to do this using variable-variables for people with strong masochistic tendencies.)
+
+HHVM already forbids ''$this'' from being NULL in non-static methods. This implies that a wide range of major libraries and frameworks are certainly compatible with this behavior.
+
+===== Future Scope =====
+
+In the future static calls to non-static methods may be completely forbidden (as they are already deprecated). However this change is not part of this RFC.
+
+===== Vote =====
+
+As this is a language change, a 2/3 majority is required. The vote will be a simple Yes/No vote.
+
+===== Patches and Tests =====
+
+Patch: https://github.com/php/php-src/pull/1894
