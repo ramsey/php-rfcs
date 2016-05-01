@@ -1,0 +1,133 @@
+====== PHP RFC: Forbid dynamic calls to scope introspection functions ======
+  * Version: 1.0
+  * Date: 2016-05-01
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Under Discussion
+  * Target version: PHP 7.1
+
+===== Introduction =====
+
+Dynamic calls to functions like ''extract()'', which either inspect or modify the parent scope or stack frame, have unclear behavior (with disagreements between PHP versions and runtimes and dependence on surrounding code), may result in highly unexpected scope modifications (e.g. when used as an autoloader) and for this reason also pose a signficant reason for the optimization of PHP. This RFC aims to forbid dynamic calls to such functions.
+
+===== Proposal =====
+
+For the functions
+
+  * extract()
+  * compact()
+  * get_defined_vars()
+  * parse_str() with one arg
+  * mb_parse_str() with one arg
+  * func_get_args()
+  * func_get_arg()
+  * func_num_args()
+
+dynamic calls of the form
+
+  * ''$fn()''
+  * ''call_user_func($fn)''
+  * ''array_map($fn, $array)''
+  * etc.
+
+will be forbidden. Such calls will result in a warning being thrown and an error-indicating return value being returned, that is consistent with other error-indicating return values of the respective functions.
+
+===== Rationale =====
+
+There are two fundamental reasons for making this change:
+
+  * Firstly, it is not clear how these functions should behave in this situation. In the following, examples will be shown where behavior depends on inconsequential changes (e.g. whether code is namespaced or not) or differs between PHP versions and runtimes. Furthermore cases will be illustrated where such dynamic calls may lead to highly unexpected scope modifications.
+  * Secondly, these dynamic calls pose a significant problem for optimization, because they may lead to unexpected scope modifications which are hard to account for. Even without optimization, such calls have been known to cause crashes, because their implementation does not account for such edge-cases.
+
+==== Unclear behavior ====
+
+The primary issue is that dynamic calls to scope introspection functions have behavior ranging between unclear to downright evil. They all fundamentally work by inspecting higher stack frames, but don't agree on which frame they should operate on.
+
+<code php>
+namespace {
+    function test($a, $b, $c) {
+        var_dump(call_user_func('func_num_args'));
+    }
+    test(1, 2, 3);
+}
+
+namespace Foo {
+    function test($a, $b, $c) {
+        var_dump(call_user_func('func_num_args'));
+    }
+    test(1, 2, 3);
+}
+</code>
+
+This code will print int(3) int(1) on PHP 7 and HHVM (and two times int(1) on PHP 5). The reason is that in the non-namespaced case the number of arguments of the test() frame is returned, while in the namespaced case the number of arguments of the call_user_func() frame is returned, because of internal differences in stack frame management.
+
+<code php>
+function test() {
+    array_map('extract', [['a' => 42]]);
+    var_dump($a);
+}
+test();
+</code>
+
+This will print int(42) on PHP 5 and PHP 7, but result in an undefined variable on HHVM. The reason is that HHVM will extract ['a' => 42] into the scope of the array_map() frame, rather than the test() frame. It does this because HHVM implements array_map as a userland (HHAS) function, rather than an internal function.
+
+One might write this off as a bug in the HHVM implementation, but really this illustrates a dichotomy between internal and userland functions with regard to dynamic calls of these functions. Namely, if you were to reimplement the array_map function in userland
+
+<code php>
+function array_map($fn, $array) {
+    $result = [];
+    foreach ($array as $k => $v) {
+        $result[$k] = $fn($v);
+    }
+    return $result;
+}
+</code>
+
+and then try the same array_map call, it would indeed extract the array into the scope of array_map() and not the calling test() function. So maybe HHVM is correct and PHP is wrong? This example further illustrates why calling these functions dynamically is a problem: They will generally be executed in a different scope than the one where the callback is defined. This means you can actually arbitrarily modify the scope of functions that accept callbacks, even though they were certainly not designed for this use. E.g. you can switch the $fn callback in the middle of the array_map execution using something like:
+
+<code php>
+array_map('extract', [['fn' => ...]]);
+</code>
+
+But this is only where it starts. PHP has a number of magic callbacks that may be implicitly executed in all kinds of contexts. For example, what happens if one of these is used in spl_autoload_register?
+
+<code php>
+spl_autoload_register('parse_str');
+function test() {
+    $FooBar = 1;
+    class_exists('FooBar');
+    var_dump($FooBar); // string(0) ""
+}
+test();
+</code>
+
+Now any invocation of the autoloader (here using class_exists, but can be generalized to new or anything else) will create a variable for the class name in the local scope (with value ''%%""%%''). Of course there are many more possibilities in this area, e.g. using tick functions.
+
+==== Stability and Optimization ====
+
+As might be expected, nobody has bothered testing edge-cases of dynamic calls to these functions previously. Recently two segfaults relating to this were found, see bug #71220 and bug #72102. However, these are "just bugs". The more important issue is that these dynamic calls to scope modifying functions go against assumptions in the current optimizer. For example the following very simple script currently crashes if opcache is enabled, because $i is incorrectly determined to be an integer:
+
+<code php>
+function test() {
+    $i = 1;
+    array_map('extract', [['i' => new stdClass]]);
+    $i += 1;
+    var_dump($i);
+}
+test();
+</code>
+
+This is, of course, a bug in the optimizer and not in PHP. However, if we try to catch this kind of situation in the optimizer we will have to do very pessimistic assumptions (especially if you consider things like the spl_autoload_register example), for a "feature" nobody needs and that doesn't work particularly well anyway (see previous point).
+
+===== Backward Incompatible Changes =====
+
+Dynamic calls to the listed functions will no longer be possible. The practical impact of this backwards compatibility break is assumed to be minimal.
+
+===== Vote =====
+
+It is not clear whether this constitutes a language or library change, however we opt for a 2/3 majority voting threshold. The vote is a simple Yes/No vote.
+
+===== Patches and Tests =====
+
+Pull request: https://github.com/php/php-src/pull/1886
+
+The patch works by setting an additional call flag for dynamic calls and subsequently checking it in the respective functions.
