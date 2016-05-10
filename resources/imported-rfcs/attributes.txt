@@ -13,7 +13,7 @@ Many languages like Java, C#, Hack, etc provide a simpler way. They allow the de
 ===== Proposal =====
 
 ==== Attribute Syntax ====
-<nowiki>An attribute is a specially formatted text enclosed with "<<" and ">>". Attributes may be applied to functions, classes, interfaces, traits, methods, properties and class constants. In the same way as doc-comments, attributes must be placed before the corresponding definition, but it's possible to define more than one attribute one the same declaration.</nowiki>
+<nowiki>An attribute is a specially formatted text enclosed with "<<" and ">>". Attributes may be applied to functions, classes, interfaces, traits, methods, properties and class constants. In the same way as doc-comments, attributes must be placed before the corresponding definition, but it's possible to define more than one attribute on the same declaration.</nowiki>
 
 <code php>
 <<...>>
@@ -21,7 +21,7 @@ Many languages like Java, C#, Hack, etc provide a simpler way. They allow the de
 function foo() {}
 </code>
 
-Each attribute definition construct may also define one or more named attribute, which may be used with no value, a single value or multiple values. Cf. the EBNF:
+Each attribute definition construct may also define one or more named attribute, which may be used with no value, a single value or multiple values. See the EBNF grammar:
 
 <code>
 <attribute> ::= "<<" <namespace-name> [ "(" <value> { "," <value> } ")" ]
@@ -71,7 +71,7 @@ $ast = ast\parse_code($r->getAttributes()["test"][0]);
 
 ==== Reflection ====
 
-Reflection classes are extended with the getAttributes() method, and returns array of attributes.
+Reflection classes are extended with the getAttributes() methods, and return array of attributes.
 
 <code php>
 function ReflectionFunction::getAttributes(): array;
@@ -182,9 +182,11 @@ array(1) {
 }
 </code>
 
+[[https://github.com/nikic/php-ast|php-ast]] is also going to be included into core PHP distribution, but this is a subject of another RFC.
+
 ==== Use Cases ====
 
-With attributes it's extremely simple to mark some functions with some specific attribute and then perform checks and special handling in extensions.
+With attributes, it's extremely simple to mark some functions with some specific "flag" and then perform checks and special handling in extensions.
 
 <code php>
 <<inline>>
@@ -198,7 +200,7 @@ function foo() {
 }
 </code>
 
-Attributes may be used to provide an annotation system similar to Doctrine, where each attribute is represented by an object of corresponding class that perform validation and other actions.
+Attributes may be used as a base level for an annotation system similar to Doctrine, where each attribute is represented by an object of corresponding class that perform validation and other actions.
 
 <code php>
 <?php
@@ -265,9 +267,11 @@ function triangleArea($a, $b, $c)
 
 ==== Special Attributes ====
 
-Attribute names starting with "__" are reserved for internal purpose. Usage of unknown special attributes leads to compile-time error. Currently, no any special attributes are defined.
+<nowiki>Attribute names starting with "__" are reserved for internal purpose. Usage of unknown special attributes leads to compile-time error. Currently, no any special attributes are defined.</nowiki>
 
-==== Criticism and Alternative Approach ====
+==== Criticism and Alternative Approaches ====
+
+=== Doc-comments ===
 
 Today we are using single doc-comments for any kind of meta-information, and many people don't see a benefit in the introduction of a special syntax. Everything may be grouped together and formatted using another special language.
 
@@ -309,6 +313,121 @@ e.g. to check "jit" attribute, today, we would perform regular expression matchi
 
 It might be possible to make PHP parse existing doc-comments and keep information as structured attributes, but we would need to invoke additional parser for each doc-comment; doc-comment may not conform to context-grammar and we have to decide what to do with grammar errors; finally this is going to be another language inside PHP.
 
+=== Full Featured Annotation System (like Doctrine) ===
+
+This RFC proposes only base PHP attribute functionality. It doesn't define how attributes are validated and used. The full-featured annotation systems may be implemented on top of the base. The following example shows how a real life doc-comment annotation taken from Drupal may be implemented, validated and constructed on top of PHP attributes.
+
+<code php>
+/**
+  * @Block(
+  *   id = "system_branding_block",
+  *   admin_label = @Translation("Site branding")
+  * )
+  */
+
+<<Drupal(@Block([
+       "id" => "system_branding_block",
+       "admin_label" => @Translation("Site branding")
+]))>>
+class PageTitleBlock {
+} 
+
+function TranslateDrupalAttribute($value) {
+  if ($value instanceof \ast\Node) {
+    if ($value->kind == 264 && count($value->children) == 1) { // '@'
+      $a = $value->children[0];
+      if (is_string($a) && class_exists($a)) {
+        $value = new $a;
+      } else if ($a instanceof \ast\Node &&
+                 $a->kind == 515 && // NAME(ARGS)
+                 count($a->children) == 2 &&
+                 is_string($a->children[0]) &&
+                 class_exists($a->children[0]) &&
+                 $a->children[1] instanceof \ast\Node &&
+                 $a->children[1]->kind == 128 &&
+                 count($a->children[1]->children) == 1) {
+        $args = $a->children[1]->children[0];
+        if ($args instanceof ast\Node && $args->kind == 130) {
+          $obj = new $a->children[0];
+          foreach ($args->children as $arg) {
+            if ($arg instanceof ast\Node &&
+                $arg->kind == 525 &&
+                count($arg->children) == 2 && 
+                is_string($arg->children[1])) {
+              $name = $arg->children[1];
+              $val = $arg->children[0];
+              if ($val instanceof ast\Node) {
+                $obj->{$name} = TranslateDrupalAttribute($val);
+              } else {
+                $obj->{$name} = $val;
+              }	
+            } else {
+              throw DrupalAnnotationError("...");
+            }
+          }
+        } else {
+          $name = $a->children[0];
+          $obj = new $name($args);
+        }
+        $value = $obj;
+      } else {
+        throw DrupalAnnotationError("...");
+      }
+    } else {
+      throw DrupalAnnotationError("...");
+    }		
+  }
+  return $value;
+}
+
+function GetDrupalAnnotations($class_name) {
+  $reflClass = new \ReflectionClass($class_name);
+  $attrs = $reflClass->getAttributes();
+  $ret = [];
+  foreach ($attrs as $name => $values) {
+    if ($name == "Drupal") {
+      foreach ($values as &$value) {
+        $ret[] = TranslateDrupalAttribute($value);
+      }
+    }
+  }
+  return $ret;
+}
+
+class Block {}
+class Translation {
+  public $text;
+  function __construct($text) {
+    $this->text = $text;
+  }
+}
+
+var_dump(GetDrupalAnnotations("PageTitleBlock"));
+</code>
+
+<code>
+array(1) {
+  [0]=>
+  object(Block)#11 (2) {
+    ["id"]=>
+    string(21) "system_branding_block"
+    ["admin_label"]=>
+    object(Translation)#12 (1) {
+      ["text"]=>
+      string(13) "Site branding"
+    }
+  }
+}
+</code>
+
+=== '@' Prefix in Attribute Names ===
+
+'@' symbol may be used in attribute values (as part of PHP expressions) and reused by annotation system for special purpose, but attribute names can't be prefixed with '@' their selves. See the example above.
+
+=== Naming (attributes or annotations) ===
+
+Different programming languages use different terms for similar features. Some use annotation, some attributes. I prefer name "attributes" because it's used in Hack and makes less fragmentation. It also makes less confusion for external high-level annotation systems (Doctrine, etc).
+
 ===== Backward Incompatible Changes =====
 The RFC doesn't make backward incompatibility changes, however, it makes forward incompatibility change. This means that frameworks that use native attributes won't be able to run on PHP versions lower than 7.1.
 
@@ -336,9 +455,9 @@ None.
   * <del>getAttributes() should return empty array in case of no attributes</del> [INCLUDED]
   * <del>For each defined attribute getArray() should return a numerically indexed array independently of number of associated values. For attributes without values it should return empty arrays.</del> [INCLUDED]
   * <del>Attribute names might be namespace qualified e.g. <nowiki><<\Foo\Bar>></nowiki></del> [INCLUDED]
-  * It may be useful to optionally allow some extra special character e.g. <nowiki><<@\Foo\Bar>></nowiki>. This character won't have any special meaning for PHP itself, but higher layer may use this "@" as a flag of special meaning.
+  * <del>It may be useful to optionally allow some extra special character e.g. <nowiki><<@\Foo\Bar>></nowiki>. This character won't have any special meaning for PHP itself, but higher layer may use this "@" as a flag of special meaning.</del> [ADDED into criticism section]
   * <del>May be we don't need special functionality for AST in attributes. We may store attribute as a simple strings and then get them through getAttributes() and call ast\parse_code() to get AST (if necessary). Both enabling and disabling native AST support make sense with their profs and cons.</del> [ADDITIONAL VOTING QUESTION]
-  * Naming: "Attributes" or "Annotation(s)"?
+  * <del>Naming: "Attributes" or "Annotation(s)"?</del> [ADDED into criticism section]
   
 ===== Proposed Voting Choices =====
 This RFC modifies the PHP language syntax and therefore requires a two-third majority of votes
