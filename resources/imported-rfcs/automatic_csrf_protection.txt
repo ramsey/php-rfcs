@@ -17,11 +17,14 @@ Although basic authenticity should be part of web infrastructure, it was not add
 
 PHP has output buffer and URL rewriter. These are used for Trans SID (Transparent Session ID) for session management without cookie currently. These can be extended to add CSRF protection.
 
+This proposal does not intended to replace framework's CSRF protections, but it provides alternative to PHP applications with minimum code/setting changes.
+
+
 ===== Proposal =====
 
 ====TL;DR;====
 
-This RFC achives:
+This RFC archives:
 
   * **Web applications can be protected from CSRF attacks easily**, if CSRF protection is required only for POST requests from web forms.
   * For more complex CSRF protections, developers may use CSRF token and validation manually.
@@ -127,9 +130,9 @@ Output to browser will be something like
 delete.php
 <code php>
 <?php
-// Disable automatic rewrite and validation explicitly - they are disabled by default
-session_start(['csrf_rewrite'=>SESSION_CSRF_NONE, 'csrf_validate'=SESSION_CSRF_NONE]);
-if (session_csrf_validate(SESSION_CSRF_GET) !== SESSION_CSRF_VALID) {
+// Disable automatic rewrite ('csrf_rewrite'=>SESSION_CSRF_NONE) and validation explicitly ('csrf_validate'=>SESSION_CSRF_NONE) - they are disabled by default
+session_start(['csrf_rewrite'=>SESSION_CSRF_NONE, 'csrf_validate'=>SESSION_CSRF_NONE]);
+if (session_csrf_validate($_GET) !== SESSION_CSRF_VALID) {
   die('CSRF Attack or expired CSRF token');
 }
 // Delete data
@@ -151,7 +154,7 @@ edit.php
 <?php
 // Disable automatic rewrite and validation explicitly - they are disabled by default
 session_start(['csrf_rewrite'=>SESSION_CSRF_NONE, 'csrf_validate'=SESSION_CSRF_NONE]);
-if (session_csrf_validate(SESSION_CSRF_POST) !== SESSION_CSRF_VALID) {
+if (session_csrf_validate($_POST) !== SESSION_CSRF_VALID) {
   die('CSRF Attack or expired CSRF token');
 }
 // Modify data
@@ -181,6 +184,7 @@ to
 ==POST rewrite==
 
 <code php>
+// Add CSRF protection token for POST ('csrf_rewrite'=>SESSION_CSRF_POST)
 session_start(['csrf_rewrite'=>SESSION_CSRF_POST]);
 </code>
 
@@ -203,31 +207,41 @@ to
 </form>
 </code>
 
+NOTE: <input type="hidden" name="SESSCSRF" value="1462920523-5fd057a6ff9dc7a124fa5c814765a498e5aa024a" /> is added to form automatically.
+
+
 ==CSRF Token Validation==
 
 Validate GET request.
 <code php>
+// 'csrf_validate'=>SESSION_CSRF_GET enables $_GET CSRF token validation
 session_start(['csrf_validate'=>SESSION_CSRF_GET]);
 </code>
 
 Validate POST request.
 <code php>
+// 'csrf_validate'=>SESSION_CSRF_POST enables $_POST CSRF token validation
 session_start(['csrf_validate'=>SESSION_CSRF_POST]);
 </code>
 
 Validate GET and POST request.
 <code php>
+// Enable both $_GET/$_POST CSRF token validation
 session_start(['csrf_validate'=>SESSION_CSRF_GET|SESSION_CSRF_POST]);
 </code>
 
 
 ====Added/Extended settings/features====
 
+It may seem implementation is complex, but it is straightforward and simple.
+
   - Add hidden internal data structure to session data that stores CSRF token generation key. \\ "<nowiki>__PHP_SESSION__</nowiki>" array is stored in session data, but user cannot see the key from their application.
+  - Add **session.csrf_token_name**(string) INI. \\ CSRF token name. Default "SESSCSRF".
   - Add **session.csrf_rewrite**(int) INI. \\ Enable CSRF rewrite. (This INI value may be specified as session_start() parameter) Default: session.csrf_rewrite=0. 0: disable, 1: SESSION_CSRF_POST, 2: SESSION_CSRF_GET, 3: SESSION_CSRF_POST|SESSION_CSRF_GET
   - Add **session.csrf_validate**(int) INI. \\ Enable CSRF validation when session.csrf_protection=1. (This INI value may be specified as session_start() parameter) Default: session.csrf_validate=0. 1: SESSION_CSRF_POST, 2: SESSION_CSRF_GET, 3: SESSION_CSRF_POST|SESSION_CSRF_GET
   - Add **session.csrf_ttl**(int - seconds) INI. \\ Controls expiration of CSRF protection token when value is greater than 0. 0 for disabling TTL control. Default: 1800
   - Add **session.csrf_domains**(string) INI. \\ Controls trusted domains default to "". When empty, HTTP_HOST is used. Default: empty
+  - Add **session.csrf_hash**(string) INI. \\ Controls hash algorithm used for CSRF token generation. Any supported hash functions. "hmac-" prefix for HMAC. Default "hmac-sha256".
   - Add **session.csrf_error**(int - error level) INI. \\ Controls which error is raised for CSRF token validation error. Default: E_RECOVERABLE_ERROR
   - Extend **session_start()** \\ Support csrf_rewrite, csrf_validate, csrf_ttl, csrf_domains, csrf_error options.
   - Add int **session_csrf_status(void)** function \\ It returns CSRF token validation status. 
@@ -235,18 +249,18 @@ session_start(['csrf_validate'=>SESSION_CSRF_GET|SESSION_CSRF_POST]);
     - SESSION_CSRF_INVALID : Invalid request
     - SESSION_CSRF_EXPIRED : CSRF token expired
     - SESSION_CSRF_VALID : Valid request 
-  - Add int **session_csrf_validate(int $input_to_validate)** function \\ It validates CSRF token manually.
-    - SESSION_CSRF_NONE : No validation
-    - SESSION_CSRF_GET : Check $_GET
-    - SESSION_CSRF_POST : Check $_POST. Option may be session_csrf_validate(SESSION_CSRF_GET|SESSION_CSRF_POST).
-  - Add string **session_csrf_token()** returns CSRF token string.
+  - Add int **session_csrf_validate(array $input_to_validate)** function \\ It validates CSRF token manually, $_GET/$_POST or whatever array variables contains CSRF token.
+  - Add string **session_csrf_token([int $token_string_type = SESSION_CSRF_TOKEN_ONLY])** returns CSRF token string.
+    - SESSION_CSRF_TOKEN_ONLY : Return CSRF token value only.
+    - SESSION_CSRF_TOKEN_GET : Return CSRF token string for GET(query string). e.g. ini_get('session.csrf_token_name') . '=' . session_csrf_token().
+    - SESSION_CSRF_TOKEN_POST : Return CSRF token string for POST. e.g. '<input type="hidden" name="'.ini_get('session.csrf_token_name').'" value="'. session_csrf_token().'" />';
 
 
 ====Behaviors====
 
 ==Page Generation==
   - Generate random CSRF token key (csrf_token_key) if it does not exist in <nowiki>__PHP_SESSION__</nowiki> array.
-  - Compute CSRF protection token. \\ SESSCSRF (CSRF protection token value) = time()+session.csrf_ttl ."-". sha1(time()+session.csrf_ttl . csrf_token_key). 
+  - Compute CSRF protection token. \\ SESSCSRF (CSRF protection token value) = time()+session.csrf_ttl ."-". hash_hmac('sha256', time()+session.csrf_ttl , csrf_token_key) by default. 
   - Set SESSCSRF as URL rewrite var. (This results URLs/forms have SESSCSRF=token_value in the page)
 
 
@@ -269,7 +283,7 @@ echo json_encode(['SESSCSRF'=>session_csrf_token()]);
   - Split SESSCSRF token value by "-"
     - Check CSRF validation mode (i.e. SESSION_CSRF_POST/GET). 
     - Check TTL value part > time(). If expired, raise error.
-    - Check CSRF token part === sha1(ttl_value . csrf_token_key). If does not match, raise error.
+    - Check CSRF token part === hash_hmac('sha256', ttl_value , csrf_token_key). If does not match, raise error.
   - If error is not raised, CSRF protection status can be verified by session_csrf_status() manually.
 
 
@@ -278,25 +292,27 @@ echo json_encode(['SESSCSRF'=>session_csrf_token()]);
   * Since users may enable/disable CSRF protection, pages that accept requests must enable CSRF protection. Otherwise, protection will not work. i.e. This feature is not fool proof.
   * Since CSRF protections adds CSRF protection token to all applicable URLs, pages that have both private URL and public URL cannot use automatic CSRF protection.
   * CSRF token in URLs has the same risk as Trans SID. (CSRF token in URL is not recommended)
-  * POST/GET must have a element to be validated. If you need to validate empty POST/GET, use session_csrf_validate(). It returns SESSION_CSRF_DISABLED for empty POST/GET.
+  * POST/GET must have a element to be validated. If you need to validate empty POST/GET, use session_csrf_validate() manually. It returns SESSION_CSRF_DISABLED for empty POST/GET.
 
 ===== Q & A =====
 
 ==Why PHP should have this?==
-Simplicity and Security. 
+Simplicity and Security for user code. 
 
 If application requires POST CSRF protection only, 2 INI settings is good enough to protect whole application. No code modification is required. There are many existing applications that could be protected by this.
 
-This implementation is more secure than most CSRF protection implementations because it has TTL. CSRF token is only valid specified time and token value changes according to TTL. This implementation is much secure than session lifetime CSRF token.
+This implementation is more secure than most CSRF protection implementations because it has TTL. CSRF token is only valid specified time and token value changes according to TTL. This implementation is much secure than session lifetime CSRF token (semi static CSRF token).
 
-Implementation (patch for this RFC) is simple and straightforward also.
+It adds codes to PHP session module, but implementation (patch for this RFC) is straightforward and simple.
 
 
 ==CSRF protection does not belong to session management==
 
-Session task, by its definition, is to distinguish and manage state of requests. Session must distinguish requests, i.e. must keep authenticity. CSRF is obvious authenticity issue. Some of us see session manager as just a storage, but it's not a correct definition.
+Session task, by its definition, is to distinguish and manage state of requests. Session must distinguish requests, i.e. must keep authenticity. CSRF is obvious authenticity issue. Some of us see session manager as just a storage, but it's not sufficient definition.
 
-One can argue that "CSRF protection is not a mandatory requirement for session management". I agree this argument. It's not considered as a mandatory today at least. However, "CSRF protection does not belong to session management" cannot be correct because authenticity is part of session.
+One can argue that "CSRF protection is not a mandatory requirement for session management". I agree with this argument. It's not considered as a mandatory today at least. However, "CSRF protection does not belong to session management" cannot be correct because authenticity is basic feature of session. 
+
+The main reason why CSRF protection is not included in other languages' session managers is technical limitation. Output buffering and buffered content rewriter is required for implementation. PHP has them both, but other languages do not. PHP is made for web and not utilizing ability would be a waste of features. 
 
 
 ==How to use with JS applications?==
@@ -319,7 +335,7 @@ For instance, I have CSRF lib that detects both CSRF attack and multiple submits
 
 ===== Backward Incompatible Changes =====
 
-  * SESSCSRF may be used by users already
+  * None
 
 ===== Proposed PHP Version(s) =====
 
@@ -334,11 +350,10 @@ For instance, I have CSRF lib that detects both CSRF attack and multiple submits
     * SESSION_CSRF_EXPIRED
     * SESSION_CSRF_VALID
 
-
-  * Protection Type 
-    * SESSION_CSRF_NONE
-    * SESSION_CSRF_GET
-    * SESSION_CSRF_POST
+  * CSRF token string type
+    * SESSION_CSRF_TOKEN_ONLY
+    * SESSION_CSRF_TOKEN_GET
+    * SESSION_CSRF_TOKEN_POST
 
 ==== php.ini Defaults ====
 
@@ -348,15 +363,16 @@ For instance, I have CSRF lib that detects both CSRF attack and multiple submits
 
 All defaults are the same
 
+  * session.csrf_token_name = "SESSCSRF"
   * session.csrf_rewrite = SESSION_CSRF_NONE (0)
   * session.csrf_validate = SESSION_CSRF_NONE (0)
   * session.csrf_ttl = 1800 (seconds)
+  * session.csrf_hash = "hmac-sha256"
   * session.csrf_domains = ""
   * session.csrf_error = E_RECOVERABLE_ERROR
 
 ===== Open Issues =====
 
-  - SHA1 is used because it is available always. SHA256 or any hash could be used. It is possible to store which hash function is used in CSRF protection token. Please request if you feel it is required.
   - Any names (functions/constants/etc) are subject to be changed. Please comment.
   - How it works is subject to be changed. Please comment.
   - URL rewriter must be fixed before this RFC. (It has a issue. Patch exists, not applied yet)
@@ -364,10 +380,9 @@ All defaults are the same
 ===== Unaffected PHP Functionality =====
 
   * This RFC does not affect how session ID is managed.
-  * If there is CSRF protection module, this proposal works as long as SESSCSRF is not used in GET/POST.
+  * If there is CSRF protection module, this proposal works as long as session.csrf_token_name is not used in GET/POST.
 
 ===== Future Scope =====
-
 
 
 ===== Proposed Voting Choices =====
