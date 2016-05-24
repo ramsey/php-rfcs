@@ -1,7 +1,7 @@
 ====== PHP RFC: Union Types ======
   * Version: 1.0
   * Date: 2015-02-14
-  * Author: Levi Morrison <levim@php.net>
+  * Author: Levi Morrison <levim@php.net>, Bob Weinand <bobwei9@hotmail.com>
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/union_types
 
@@ -35,17 +35,10 @@ There can be more than two types in the union. As an example, it is somewhat com
 
 This could be modeled with a union of three types: <php> function get_user(string $id): User | Error | Null;</php> I have seen projects that do return one of those three types; they just can't model it strictly and rely on unrestricted dynamic types.
 
-To cover the common use-case of returning some type or null the null type needs to be permitted in a type declaration. The name is already reserved and the documentation already documents that null is both a type and a value. Previously it was not a helpful type declaration - if something is always passed null then there doesn't need to be a parameter at all, and if a function always returns null then there is no need to assign it. With the introduction of union types it becomes helpful and so this RFC proposes allowing it in type declarations:
 
-<PHP>
-function lookup_user(string $id): User | Null;
-</PHP>
-
-===== Proposed PHP Version(s) =====
-This RFC targets PHP version 7.1.
-
-===== Open Issues =====
 ==== Weak Scalar Types ====
+
+=== Problem ===
 PHP 7 allows weak scalar types. There is a question of how things will get converted in some situations when used in unions. As an example, if we have a union type of ''int'' and ''float'' and are passed the string "10" how is it converted?
 
 <PHP>
@@ -57,13 +50,62 @@ f("10");
 
 Would it be converted to ''int(10)'' or ''float(10)'', since either is acceptable? Does it matter given they are both acceptable?
 
-This issue is avoided if a parameter type exactly matches the input type or if PHP is in strict type mode.
+=== Solution ===
+
+Primarily, this issue is avoided if a parameter type exactly matches the input type or if PHP is in strict type mode.
+
+With the only exception that an ''int(10)'' passed to a parameter requiring float as one of its types, but not int (e.g. ''string | float''), will be, in accordance with normal handling of integers passed to floats, converted to ''float(10)''.
+
+Otherwise, the only solution is to have certain rules, which are made in order to be as lossless as possible (in that order):
+
+  * If object passed, cast to (if allowed) string
+  * If non-scalar passed, fail the conversion
+  * If boolean passed, cast to (if allowed, in that order) long, double, string
+  * If long passed, cast to (if allowed, in that order) string, boolean
+  * If double passed, cast to (if allowed, in that order) long if exact match or string not allowed, string, boolean
+  * If string passed and numeric cast possible, cast to long or double
+  * If possible to cast to boolean
+  * Else fail the conversion
+
+The RFC authors are aware that this is quite a complex handling, but it behaves quite sanely in general. The premise of weak typing is to not fail whenever a conversion is possible. Thus, failing is not an option in most cases (well, if you pass ''"lalala"'' to a function requiring ''int | float'', there is nothing we can do, but fail). The only thing we can do, is ensuring as sensible and lossless conversions as possible, which we do in form of these conversion rules.
+
+==== Nullable types ====
+To cover the common use-case of returning some type or null the null type needs to be permitted in a type declaration. The name is already reserved and the documentation already documents that null is both a type and a value. Previously it was not a helpful type declaration - if something is always passed null then there doesn't need to be a parameter at all, and if a function always returns null then there is no need to assign it. With the introduction of union types it becomes helpful and so this RFC proposes allowing it in type declarations:
+
+<PHP>
+function lookup_user(string $id): User | null;
+</PHP>
+
+While this is currently already possible via the ?QuestionMarkNullable, within union types, it is problematic:
+
+''?Foo | Bar'' is pretty weird, it reads like "(nullable Foo) or (Bar)". This RFC disallows ''?'' being used in combination with union types. Thus ''Foo | Bar | null'' is allowed, but not ''?Foo | Bar''.
+
+Also, it is the RFC authors opinion is that ''Union | null'' looks much better, is more visible and expressive. On top of that, having two ways to do a same thing is not great here. Hence this RFC proposes a vote on whether ''?'' shall be replaced by ''| null'' in general. 
 
 ==== Standalone Null Type ====
-This RFC permits the null type to be used in type declarations such as ''Foo | Null''. While it isn't very helpful it doesn't cause any harm to permit only ''Null'': <php>function foo(): Null;</php> However, some people feel it may be redundant with ''void''((It is this RFC author's opinion that ''void'' was a mistake given that ''Null'' already existed and PHP will always return null if return value is omitted.)).
+This RFC permits the null type to be used in type declarations such as ''Foo | null''. While it isn't very helpful it doesn't cause any harm to permit only ''null'': <php>function foo(): null;</php> However, some people feel it may be redundant with ''void''. In addition, should we some day introduce covariant return types, we need to be able (given that we want to be as specific as possible) to specify a return type of ''null'', where the parent has a signature like ''Foo | null''.
+
+Thus this RFC proposes another vote whether ''void'' shall be replaced with ''null'' in general.
+
+==== True/False ====
+Peter Cowburn (salathe) has suggested that being able to explicitly use ''| false'' for return types could be helpful as this is a common idiom in PHP's standard functions. As an example, the function signature for ''strpos'' could change:
+
+<PHP>// from
+strpos ( string $haystack , mixed $needle [, int $offset = 0 ] ): mixed
+// to
+strpos ( string $haystack , mixed $needle [, int $offset = 0 ] ): int | false</PHP>
+
+Also ''false'' and ''true'' are not types in user-land, but they are internally.
+
+This RFC proposes a last vote whether to include true and false types - only for unions. (They do not make sense anywhere else, just like null).
 
 ==== Reflection ====
-There isn't any part of our current Reflection extension that can deal with union types. This will require some thought.
+This RFC proposes the addition of ReflectionType::isUnion(): bool to check whether the type is an union type.
+
+ReflectionType::__toString() will now provide a full union type as string; e.g. ''"int | float | NumberObject"''.
+
+===== Proposed PHP Version(s) =====
+This RFC targets PHP version 7.1.
 
 ===== Future Scope =====
 This sections details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
@@ -91,23 +133,20 @@ function filter(Callable $f, Iterable $input): Iterable {
 
 It may also be advantageous for implementation reasons to define a type name for an expression. 
 
-==== False ====
-
-Peter Cowburn (salathe) has suggested that being able to explicitly use ''| false'' for return types could be helpful as this is a common idiom in PHP's standard functions. As an example, the function signature for ''strpos'' could change:
-
-<PHP>// from
-strpos ( string $haystack , mixed $needle [, int $offset = 0 ] ): mixed
-// to
-strpos ( string $haystack , mixed $needle [, int $offset = 0 ] ): int | false</PHP>
-
-''false'' is not a type in user-land but it is internally. This is possible if we want to allow it.
-
 ===== Proposed Voting Choices =====
 This RFC requires that two-thirds of voters vote in favor of the RFC to pass.
+
+Additionally, there are three 50%+1 votes:
+
+  * on abolishing ?QuestionMarkNullables in favor of union | null,
+  * the removal of void in favor of standalone null,
+  * and the true/false types (for unions only).
 
 ===== Patches and Tests =====
 
 Bob Weinand and Joe Watkins have made a proof-of-concept patch that also has some other experimental features: https://github.com/php/php-src/pull/1887.
+
+This patch is principally fine to be merged (intersection types are still included, but may be easily removed at any point, void type is still present).
 
 ===== References =====
 
