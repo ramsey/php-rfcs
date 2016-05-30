@@ -1,17 +1,18 @@
+
 ====== PHP RFC: More precise float value handling ======
-  * Version: 0.9
+  * Version: 1.0
   * Date: 2015-07-30
-  * Author: Yasuo Ohgaki <yohgaki@ohgaki.net>
+  * Author: Yasuo Ohgaki <yohgaki@ohgaki.net>, Jakub Zelenka <bukka@php.net>
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/precise_float_value
 
 ===== Introduction =====
 
-This RFC is based on float like JSON numeric discussion and proposes more precise float value handling overall.
+This RFC is based on the discussion about displaying float values in json_encode and proposes more precise float value handling overall.
 
-JSON is used to exchange data between systems. Although [[https://tools.ietf.org/html/rfc7159|JSON RFC "6 Numbers"]]  does not require specific implementation for float/int type, float value should be able to handle precise float values as much as possible by default. 
+JSON is used to exchange data between systems. Although [[https://tools.ietf.org/html/rfc7159|JSON RFC "6 Numbers"]]  does not require specific implementation for float/int type, float value should be handled as precise as possible by default. 
 
-Currently, json_encode() uses EG(precision) which is 14. IEEE 754 double supports more precision and serialize()/var_export() uses PG(serialize_precision)=17 to be more precise. Since json_encode() uses EG(precision), json_encode() removes lower digits of fraction parts and destroys original value even if PHP's float could hold more precise float value. 
+Currently, json_encode() uses EG(precision) which is set to 14. That means that 14 digits max are used for displaying (printing) the number. IEEE 754 double supports higher precision and serialize()/var_export() uses PG(serialize_precision)=17 to be more precise. Since json_encode() uses EG(precision), json_encode() removes lower digits of fraction parts and destroys original value even if PHP's float could hold more precise float value.
 
 <code php>
 <?php
@@ -39,7 +40,7 @@ string(28) "{"v":0.12345678901234567737}"
 float(0.12345678901234567737)
 </code>
 
-PHP's float type stores "raw" IEEE 754 double and could store accurate fraction value up 17 digits.
+PHP's float type stores "raw" IEEE 754 double and could display accurate fraction value up to 17 digits.
 
 Current PHP outputs meaningless values for oversized EG(precision)/PG(serialize_precision).
 
@@ -57,18 +58,13 @@ float(0.12345678901235)
 float(0.12345678901234567736988623209981597028672695159912109375)
 </code>
 
+That is caused by used mode for double to string conversion.
+
 ===== Proposal =====
 
-  * PHP 7.1: Introduce EG(precision)=-1 and PG(serialize_precision)=-1 that uses zend_dtoa()'s 0 mode that rounds to nearest value. (-1 is used to indicate 0 mode)
+This RFC proposes to introduce EG(precision)=-1 and PG(serialize_precision)=-1 that uses zend_dtoa()'s mode 0 which uses better algorigthm for rounding float numbers (-1 is used to indicate 0 mode).
 
-Since JSON is used extensively for web apps, we may have JSON specific INI setting for better compatibility and ease of use.
-
-  * PHP 7.1: Add JSON_G(json_precision) - Add JSON module specific precision INI setting.
-
-PHP 5.6/7.0's json_encode() uses EG(precision) and could lose floating point number information. 
-
-  * PHP 5.6/7.0: Make json_encode() uses PG(serialize_precision).
-
+Since JSON is used extensively for web apps, we may have JSON specific INI setting for better compatibility and ease of use. It means to add JSON_G(json.precision) which will be used for JSON module specific precision INI setting.
 
 Followings are sample codes and outputs of the proposed patch.
 
@@ -122,16 +118,15 @@ Please note that IEEE float cannot store exactly precise values. e.g. Result of 
 
 ===== Backward Incompatible Changes =====
 
-PHP 7.1 will have 0 mode as the default. var_export()/serialize() may have different number. 
+Setting mode 0 as default can mean that the rounding will be more precise which also means that the rounding might be different in var_export()/serialize().
 
-FYI: Existing tests passes even when 0 mode is used.
+The BC break could happen only if someone would rely on exact output but that shouldn't be the case. All our existing tests passes even when 0 mode is used.
 
 None when old INI value is used.
 
 ===== Proposed PHP Version(s) =====
 
-  * PHP 7.1.0 - EG(precision)/PG(serialize_precision) 0 mode and JSON_G(json_precision) that support 0 mode.
-  * PHP 5.6.x/7.0.0 - JSON uses PG(serialize_precision) for float precision.
+  * PHP 7.1
 
 ===== RFC Impact =====
 ==== To SAPIs ====
@@ -142,10 +137,10 @@ PHP overall
   * 0 mode (EG(precision)= -1) float outputs values rounded to nearest.
 
 Standard module
-  * serialize(), var_export() - PHP7.1: Use PG(serialieze_precision) and 0 mode.
+  * serialize(), var_export() - Use PG(serialize_precision) and 0 mode by default.
 
 JSON
-  * json_encode() - PHP7.1: Use PG(serialize_precision) and 0 mode. PHP5.6/7.0: Use PG(serialize_precision).  It uses EG(precision) currently. If JSON_G(json_precision) is accepted, use it instead of PG(serialize_precision).
+  * json_encode() - Use ini selected from the vote result and 0 mode by default.
 
 
 ==== To Opcache ====
@@ -163,17 +158,12 @@ precision
   * php.ini-development values : 14 Unmodified
   * php.ini-production values : 14 Unmodified
 
-serialize_precision(PHP5.6/7.0)
-  * hardcoded default values : 17 Unmodified
-  * php.ini-development values : 17 Unmodified
-  * php.ini-production values : 17 Unmodified
-
-serialize_precision(PHP7.1)
+serialize_precision
   * hardcoded default values : -1
   * php.ini-development values : -1
   * php.ini-production values : -1
 
-json.precision(NEW - PHP7.1 only)
+json.precision (if accepted)
   * hardcoded default values : -1
   * php.ini-development values : -1
   * php.ini-production values : -1
@@ -190,8 +180,6 @@ PHP uses "raw" IEEE 754 value internally regardless of precision settings. There
 
 ===== Future Scope =====
 
-  * Remove PG(serialize_precision) setting. If we are going to remove PG(serialize_precision) in the future, we may be better to have JSON_G(json_precision) as one may need specific precision for JSON data.
-
 WDDX
   * wddx_serialize_vars/value() - Use PG(serialize_precision) and 0 mode. It uses EG(precision) currently.
 
@@ -203,39 +191,10 @@ XML_RPC
 
 Requires a 50%+1 majority
 
-Please choose Yes/No for 0 mode EG(precision)/PG(serialize_precision)
+There will be two votings
 
-<doodle title="Introduce 0 mode to EG(precision)/PG(serialize_precision) for PHP 7.1" auth="yohgaki" voteType="single" closed="True">
-   * Yes
-   * No
-</doodle>
-
-.
-
-Please choose your preference whether JSON module should use PG(serialize_precision) or new JSON_G(json_precision). i.e. JSON module has its own precision setting or not.
-
-<doodle title="Add JSON_G(json_precision) for JSON module only setting for PHP 7.1" auth="yohgaki" voteType="single" closed="True">
-   * Yes
-   * No
-</doodle>
-
-.
-
-Please choose if PHP 5.6's JSON should use PG(serialize_precision) or EG(precision). Currently it uses EG(precision).
-
-<doodle title="Make json_encode() uses PG(serialize_precision) for PHP 5.6" auth="yohgaki" voteType="single" closed="True">
-   * Yes
-   * No
-</doodle>
-
-Please choose if PHP 7.0's JSON should use PG(serialize_precision) or EG(precision). Currently it uses EG(precision).
-
-<doodle title="Make json_encode() uses PG(serialize_precision) for PHP 7.0" auth="yohgaki" voteType="single" closed="True">
-   * Yes
-   * No
-</doodle>
-
-
+  * whether to introduce mode 0 as default
+  * what precision ini should be used for json (precision, serialize_precision, json.precision).
 
 ===== Patches and Tests =====
 
