@@ -6,40 +6,71 @@
   * First Published at: http://wiki.php.net/rfc/union_types
 
 ===== Introduction =====
-In PHP 5.1 the ability to provide explicit types for parameters was added to PHP. It supported classes, interfaces and arrays. In PHP 5.4 the ''callable'' pseudo-type was added. The ability to provide explicit return types was added in PHP 7. PHP 7.1 introduced nullable types; A special union of any type and null.
+In PHP using "type hints" to define either the allowed parameter types for a function, or the return type of a function, performs two useful roles:
 
-Apart from nullables, it allows for ''string | array'', forwarding typical PHP function return types (e.g. strpos() returning ''int | false''), workarounds for the commonly requested unions ''array'' and ''Traversable'', and ''int'' and ''float'', and many more cases including also unions between objects.
+  * Using types allows the PHP engine to enforce the correct type of variable passed to, or returned from, a function.
+  * Using types makes it easy to reason about what types need to be passed to, or can be returned from a function. This makes it easier for both humans, and static code analysis tools, to determine about whether code is correct or not.
 
-All of these requests and discussions suggest that the ability to accept multiple types for a parameter or return type could be useful. This RFC is an investigation into the feasibility of this idea and to flesh out the impact it would have on other parts of PHP. 
+For a lot of functions in PHP, each parameter will only be one type. Similarly, for the majority of functions, the return value of a function, will only ever be of one type.
 
-===== Proposal =====
-This RFC proposes the ability to define multiple possible types for a parameter or return type and calls them "union types". A union typed value passes the type check if the value would pass any one of the types in the union. A single vertical bar (OR) is placed between types.
+However, for a significant number of functions, the acceptable parameters, or the possible return values, can be of more than one type. For example consider the ''stripos'' function where the return value varies based on:
 
-Here is an example of a parameter accepting either an ''array'' or a ''string'' and no other types:
+  * if the needle exists it returns an integer.
+  * if the needle is not found, false is returned.
 
+In the documentation on php.net, the two possible return types are documented as ''mixed'' - however this does not actually document what the possible return types are, only that there is more than one possible type returned.
+
+Currently in userland code, when a parameter for a function can be one of a multiple but limited set of types, or the return value from a function can be one of a multiple but limited set of types, there can be no type information supplied, and so it is not possible for the PHP engine to enforce any types passed to/from that function, and it is not easy for people using that function to reason about the types passed to/returned from that function.
+
+This RFC seeks to address this limitation.
+
+==== Proposal ====
+This RFC proposes the ability to define multiple possible types for parameter and return types. To define a 'union type' a single vertical bar (OR) is placed between types e.g. ''int|bool'' represents the union type of either integer or boolean. For these 'union types' a value passes the type check if the value would pass any one of the types in the union. 
+
+Additionally this RFC proposes that the values ''true'', ''false'' (see [[#truefalse|the "True/False" section]]) and ''null'' (equal to type ''null''; see [[#nullable_types|the "Nullable types" section]]) will be usable as types in both parameter types and return type definitions.
+
+There can be more than two types in the union.
+
+=== Parameter type examples ===
+A function that requires either a string or an array is passed to it as the parameter:
 <PHP>
-// in future we'll maybe be able to explicitly specify array<string>
 function print_each(array | string $in) {
     foreach ((array) $in as $value) {
         echo $value, PHP_EOL;
     }
 }
-
+ 
 print_each(['Bob', 'Joe', 'Levi']); // ok
 print_each('Levi'); // ok
-print_each(new stdclass()); // not ok
+print_each(new stdclass()); // TypeError
 </PHP>
+For this example, it is clear to both static analysis tools and humans that passing anything other than an array or a string to this function, would be an error. (or will be weakly cast to a string if strict_types are disabled, see also [[#weak_scalar_types|the "Weak Scalar Types" section]])
 
-There can be more than two types in the union. As an example, it is somewhat common for a routine that interacts with a database to have one of three results:
+A class instance method that requires that either a string or a ParameterGenerator object is passed as the parameter.
+<PHP>
+// From zend-code
+class MethodGenerator extends AbstractMemberGenerator {
+     ...
+    public function setParameter(ParameterGenerator|string $parameter) {
+        ...
+    }
+}
+</PHP>
+For this example, it is clear to both static analysis tools and humans that passing anything other than a ParameterGenerator object or a string to this function, would be an error. 
 
-  - Successfully found results
-  - Successfully found no results
-  - There was an error
+=== Return type example ===
+A userland definition of ''stripos'' function:
 
-This could be modelled with a union: <php> function get_user(string $id): User | Error | null;</php>
+</PHP>
+function stripos(string $haystack, string $needle, int $offset = 0): int|false {
+    $lowerHaystack = strtolower($haystack);
+    $lowerNeedle = strtolower($needle);
+    return strpos($lowerHaystack, $lowerNeedle, $offset);
+}
+</PHP>
+For this example, it is clear to both static analysis tools and humans this function can return either an integer or the value 'false', and so both cases need to be handled in the calling code.
 
 ==== Variance ====
-
 Return types are covariant: it is possible to remove types from the union in child functions.
 
 Parameter types are contravariant: it is possible to add types to the union in child functions.
@@ -104,12 +135,16 @@ To address some of these issues this RFC disallows ''?'' being used in combinati
 This RFC proposes a vote on whether ''?Foo'' shall be replaced by ''Foo | null'' in general.
 
 ==== True/False ====
-Peter Cowburn (salathe) has suggested that being able to explicitly use ''| false'' for return types could be helpful as this is a common idiom in PHP's standard functions. As an example, the function signature for ''strpos'' could change:
+It has suggested that being able to explicitly use ''| false'' for return types could be helpful as this is a common idiom in PHP's standard functions. As an example, the function signature for ''strpos'' could change:
 
-<PHP>// from
+<PHP>
+// from
 strpos ( string $haystack , mixed $needle [, int $offset = 0 ] ): mixed
 // to
-strpos ( string $haystack , mixed $needle [, int $offset = 0 ] ): int | false</PHP>
+strpos ( string $haystack , mixed $needle [, int $offset = 0 ] ): int | false
+</PHP>
+
+This now allows to perfectly forward any internal signature and allows users to be more explicit.
 
 Also ''false'' and ''true'' are not types in user-land, but they are internally.
 
@@ -132,10 +167,7 @@ Additionally, there are two 50%+1 votes:
   * and the true/false types (for unions only).
 
 ===== Patches and Tests =====
-
-Bob Weinand and Joe Watkins have made a proof-of-concept patch that also has some other experimental features: https://github.com/php/php-src/pull/1887.
-
-This patch is principally fine to be merged (intersection types are still included, but may be easily removed at any point).
+Bob Weinand and Joe Watkins have created a patch: https://github.com/php/php-src/pull/1887 which is needs some small polishing but implements the proposed features.
 
 ===== Future Scope =====
 This sections details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
