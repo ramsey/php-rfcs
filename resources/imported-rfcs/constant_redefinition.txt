@@ -1,0 +1,85 @@
+====== PHP RFC: Throw Exception on Attempt of Constant Redefinition ======
+  * Version: 0.9
+  * Date: 2016-06-10
+  * Author: Dmitry Stogov, dmitry@zend.com
+  * Status: Under Discussion
+  * First Published at: https://wiki.php.net/rfc/constant_redefinition
+
+===== Introduction =====
+PHP allows multiple statements that define the same constant, they are executed at run-tinw and only the first one actually define the constant value. Others just produce a notice.
+
+<code php>
+<?php
+const A = 1;
+const A = 2;  // Notice: Constant A already defined
+var_dump(A)   // int(1)
+?>
+</code>
+
+Note: that constant definitions statement may be placed in different files or even set through php.ini auto_prepend_file directive. Taking all this into account, we can never be sure in constant value.
+
+<code php>
+<?php
+const WORLD = "World";
+echo "Hello ".WORLD."\n"; // This may print anything...
+                          // e.g. define("WORLD", file_get_contents("/etc/passwd"));
+?>
+</code>
+
+Except of inconsistency and some vulnerability smell, this prevents us from obvious Constant Propagation Optimisation. 
+
+===== Proposal =====
+
+I propose to throw Error exception on attempt of constant redefinition. This would protect unintended constant redefinition and would catch dangerous cases before usage of unexpected value.
+
+On the other hand it'll be possible to support old redefinition behavior "op purpose", wrapping second constant definition in try/catch.
+
+<code php>
+<?php
+const A = 1;
+try {
+    define("A", 2);
+} catch (Throwable $e) {
+    echo "Exception:" . $e->getMessage . "\n";
+}
+var_dump(A); // int(1)
+?>
+</code>
+
+===== Proposed PHP Version(s) =====
+PHP 7.1.
+
+===== Proposed Voting Choices =====
+The vote is a straight Yes/No vote, that requires a 2/3 majority. The voting began on Jun 16 and will close on Jun 23. 
+
+===== Patches and Tests =====
+The change is too simple.
+
+<code diff>
+diff --git a/Zend/zend_constants.c b/Zend/zend_constants.c
+index 3e09f0c..66addfb 100644
+--- a/Zend/zend_constants.c
++++ b/Zend/zend_constants.c
+@@ -513,7 +513,11 @@ ZEND_API int zend_register_constant(zend_constant *c)
+ 		if (ZSTR_VAL(c->name)[0] == '\0' && ZSTR_LEN(c->name) > sizeof("\0__COMPILER_HALT_OFFSET__")-1
+ 			&& memcmp(ZSTR_VAL(name), "\0__COMPILER_HALT_OFFSET__", sizeof("\0__COMPILER_HALT_OFFSET__")) == 0) {
+ 		}
+-		zend_error(E_NOTICE,"Constant %s already defined", ZSTR_VAL(name));
++		if (EG(current_execute_data)) {
++			zend_throw_error(NULL, "Constant %s already defined", ZSTR_VAL(name));
++		} else {
++			zend_error(E_NOTICE,"Constant %s already defined", ZSTR_VAL(name));
++		}
+ 		zend_string_release(c->name);
+ 		if (!(c->flags & CONST_PERSISTENT)) {
+ 			zval_dtor(&c->value);
+</code>
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+
+===== References =====
+[[https://bugs.php.net/bug.php?id=71127|bug #71127]]
