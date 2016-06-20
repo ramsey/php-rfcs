@@ -1,5 +1,5 @@
 ====== PHP RFC: Additional Context in pcntl_signal Handler ======
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2016-06-14
   * Author: David Walker <dave@mudsite.com>, Bishop Bettini <bishop@php.net>
   * Status: Draft
@@ -7,27 +7,40 @@
 
 
 ===== Introduction =====
-Modern UNIX kernels include additional context when delivering a signal, however the callable handler for [[http://php.net/manual/en/function.pcntl-signal.php|pcntl_signal]] does not receive this information. Developers coordinating multiple processes through signals must arrange to gather and send this same information using alternative channels, which is time-consuming, error-prone, and unnecessary.
+Modern UNIX kernels include additional, contextual information when delivering a signal, however the callable handler for [[http://php.net/manual/en/function.pcntl-signal.php|pcntl_signal]] does not receive this information. Developers coordinating multiple processes through signals must arrange to gather and send this same information using alternative channels, which is time-consuming, error-prone, and unnecessary.
 
 
 ===== Proposal =====
-Currently the signal handler receives only one formal argument, the [[http://man7.org/linux/man-pages/man7/signal.7.html|number of the signal]] sent. This proposal would add a second formal argument, an array of signal info as provided by the kernel, as seen here:
+Currently the signal handler receives only one formal argument, the [[http://man7.org/linux/man-pages/man7/signal.7.html|number of the signal]] sent. This proposal would add a second formal argument, an array of signal info as provided by the underlying system's kernel.
+
+One possible use case is identifying the process ID of the signal //sender//, [[http://serverfault.com/a/94995/204816|described at the C level in this StackOverflow Q&A]] and implemented in PHP as seen here:
 
 <file php>
 <?php
 pcntl_signal(SIGUSR1, function ($signo, $siginfo) {
-    print_r($siginfo);
+    printf('USR1 from %s', $siginfo['pid'] ?? 'unknown');
 });
 posix_kill(0, SIGUSR1);
 </file>
 
+Other uses cases include identifying the cause of the signal (such as asynchronous I/O or timer expiration), identifying the sending user, and finding the consumed user & system time of an exited process.
+
 The ''$siginfo'' array may contain [[https://www.mkssoftware.com/docs/man5/siginfo_t.5.asp|one or more of the following keys]], depending upon the system support for signal information and the nature of the sent signal:
 
-  * ''si_signo'', the signal number being sent (duplicates the first argument).
-  * ''si_code'', the signal code, which depends upon the signal sent and provides context-specific reason //why// the signal was sent.
-  * ''si_value'', the value for the code, if appropriate.
+  * **''signo''**, the signal number being sent (duplicates the first argument to the handler).
+  * **''code''**, the signal code, which depends upon the signal sent and provides context-specific reason //why// the signal was sent.
+  * **''value''**, the value for the code, if appropriate for the code.
+  * **'' errno''**, the error number associated with the signal, if appropriate for the signal //and// non-zero.
+  * **''pid''**, the process ID of the signal sender, if appropriate for the signal.
+  * **''uid''**, the real user ID of the signal sender, if appropriate for the signal.
+  * **''addr''**, the address at which the faulting signal occurred: only faulting signals like ''SIGFPE'' include this.
+  * **''status''**, the status code of an exiting process: only exiting signals like ''SIGCHLD'' include this.
+  * **''band''**, the asynchronous I/O band, if appropriate for the signal.
+  * **''mtime''**, the time of last data modification, if appropriate for the signal.
 
-These are generally useful to a wide range of process interactions.
+Like other ''pcntl'' functions that map internal ''signal.h'' names into PHP keys, the leading ''si_'' has been removed. (That is, in the C documentation "''si_signo''" becomes "''signo''" in PHP.) However, this does not apply to the values of the ''code'' field, as those represent system-specific constants that follow no normative naming convention.
+
+Some older systems not conforming to [[https://standards.ieee.org/findstds/standard/1003.1-2001.html|POSIX.1-2001]] (where this structure was formally codified) may not support passing the additional context. In such case, PHP will pass ''null'' as the second argument to the handler.
 
 
 ===== Backward Incompatible Changes =====
@@ -43,7 +56,7 @@ Next PHP 7.x.
 ===== RFC Impact =====
 ==== To SAPIs ====
 
-TODO
+None.
 
 
 ==== To Existing Extensions ====
@@ -53,15 +66,12 @@ The ''[[http://php.net/manual/en/book.pcntl.php|pcntl]]'' extension will be upda
 
 ==== To Opcache ====
 
-TODO
+None.
 
 
 ===== Open Issues =====
 
-  * Should we send ''null'' if the underlying system doesn't support ''siginfo_t'', or should we send ''array ()''?
-  * Should we normalize the array keys (for example, ''si_signo'' is removed because it's a duplicate, and ''si_code'' becomes just ''code'')?
-  * Are there any effects to opcache or web SAPI?
-
+None.
 
 ===== Proposed Voting Choices =====
 
