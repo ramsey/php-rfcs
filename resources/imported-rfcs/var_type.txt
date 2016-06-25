@@ -1,0 +1,272 @@
+====== PHP RFC: var_type ======
+  * Version: 0.0
+  * Date: 2016-06-07
+  * Author: Richard Fussenegger, php@fleshgrinder.com
+  * Status: Under Discussion
+  * First Published at: https://wiki.php.net/rfc/var_type
+
+===== Introduction =====
+The idiomatic way to retrieve type information of a variable in PHP is via the ''[[https://secure.php.net/gettype|gettype()]]'' function. This function suffers from upholding backwards compatibility promises, and returns unexpected results for some types. Hence, it does not reflect the current state of our type system. This RFC proposes to introduce a new function called ''var_type()'' that addresses these and more issues.
+
+===== Proposal =====
+==== Status Quo ====
+The existing ''gettype()'' function has the following mode of operation:
+
+<code php>
+echo gettype([]);           // array
+echo gettype(true);         // boolean
+echo gettype(0.0);          // double
+echo gettype(0);            // integer
+echo gettype(null);         // NULL
+echo gettype(new stdClass); // object
+echo gettype(STDIN);        // resource
+echo gettype('');           // string
+</code>
+
+Most apparent is the usage of ''double'' instead of ''float'', as well as the longer alias versions of ''boolean'' and ''integer'' instead of ''bool'' and ''int''. These are highly unexpected results for users, who do not know the history of PHP's type system. Especially new users, who are going to learn PHP with the new and current type [[https://secure.php.net/functions.arguments#functions.arguments.type-declaration|declaration system]], will be surprised by those results. Note well that this group of users will grow in the future.
+
+Another anomaly is the all caps ''NULL'' that stands alone between all the other results. The usage of ''null'' vs. ''NULL'' is a topic that goes hand in hand with ''false'' vs. ''FALSE'' and ''true'' vs. ''TRUE''. The reason why ''NULL'' is written in all caps is most probably because it is good practice to do so in C.(([[http://pubs.opengroup.org/onlinepubs/7908799/xsh/stddef.h.html|IEEE Std 1003.1 stddef]])) However, this contradicts with the usage of ''false'' and ''true'' in lowercase everywhere in PHP, since they are written in all caps in C, too.(([[http://pubs.opengroup.org/onlinepubs/009695399/basedefs/stdbool.h.html|IEEE Std 1003.1 stdbool]])) Note that this is not meant to say anything about the usage of **NULL**, **FALSE**, and **TRUE** in documentation, like the PHP manual. It is a good idea to keep them uppercase there, as they are right now, to make them stand out from the surrounding text.
+
+<code>
+$ php -r 'var_dump(null, true, false);'
+NULL
+bool(true)
+bool(false)
+</code>
+
+These differences already casted various discussions (e.g. [[https://www.drupal.org/node/217379|this]] or [[https://groups.drupal.org/node/3308|this]] Drupal discussion). The fact that it was possible to redefine ''FALSE'' and ''TRUE'' in PHP in the past worsens the situation further. Additionally, userland seems to have settled with all lower caps already (e.g. [[http://www.php-fig.org/psr/psr-2/#2-5-keywords-and-true-false-null|PSR-2]]). It is believed that the casing of the returned values should be consistent in order to allow users to apply an appropriate transformation to fit their needs. This is not possible with results of mixed case since they always require special conditions to account for.
+
+=== Unknown Type ===
+<code php>
+$fh = tmpfile();
+fclose($fh);
+echo gettype($fh); // unknown type
+</code>
+
+Trying to get the type of a closed resource results in a very unhelpful ''unknown type'' result. This is due to the fact that the implementation only considers resources that have a known resource type to be of type resource. This is consistent with the result of ''is_resource()'', but that function serves a different purpose. Note that ''gettype()'' is at the same time not consistent with ''is_object()'', when an incomplete object is passed in (''is_object()'' returns **FALSE** in such a case, whereas ''gettype()'' returns ''object'').
+
+The result of ''unknown type'' is furthermore not helpful to the user, who is trying to determine what type a variable is of. Especially not, if the result of ''gettype()'' is used as part of an error message in a complex system. It is believed that consistency with ''is_resource()'' and ''is_object()'' is not desired nor required because these functions serve completely different purposes: determining if a given variable contains a valid value of certain type.
+
+A last, admittedly weak, point is the naming of the function that does not follow the coding standards, and is bad for auto-completion in editors and IDEs. According to the coding standard, the function should be called ''get_type()''. But then it would still not auto-complete effectively. The same is true for the complement function ''settype()''. Both are consistently named to each other, however, both suffer from the same problem, as described above. Please refer to the [[#future_scope|future scope]] section in regards to ''settype()''.
+
+==== A Successor ====
+The introduction of a new function to fix these inconsistencies has the advantage that it does not affect existing code, and users have time to adjust. The name //var_type// was chosen to expand on an already existing function prefix in the PHP language that is meant for operations on variables.
+
+The signature of the new ''var_type()'' function is as follows:
+
+<code php>
+/**
+ * Get the type of a variable.
+ *
+ * The returned value is a string that corresponds to one of the `TYPE_*`
+ * constants:
+ *
+ * - {@see TYPE_ARRAY} for [arrays](https://secure.php.net/language.types.array),
+ * - {@see TYPE_BOOL} for [booleans](https://secure.php.net/language.types.boolean),
+ * - {@see TYPE_FLOAT} for [floats](https://secure.php.net/language.types.float),
+ * - {@see TYPE_INT} for [integers](https://secure.php.net/language.types.integer),
+ * - {@see TYPE_NULL} for [null](https://secure.php.net/language.types.null),
+ * - {@see TYPE_OBJECT} for [objects](https://secure.php.net/language.types.object),
+ * - {@see TYPE_RESOURCE} for [resources](https://secure.php.net/language.types.resource), and
+ * - {@see TYPE_STRING} for [strings](https://secure.php.net/language.types.string).
+ *
+ * There is the possibility that the returned value is `unknown`, however,
+ * this should be impossible and a bug should be filed if this situation
+ * is encountered.
+ *
+ * ## Differences to Other Variable Functions
+ * This function will return `TYPE_OBJECT` for incomplete objects (refer
+ * to {@see unserialize}) whereas {@see is_object} returns **FALSE**.
+ * This is because the type of an incomplete object is an object, however,
+ * it is not an object that should be worked with and that is the reason
+ * why {@see is_object} correctly returns **FALSE**.
+ *
+ * The same is true for {@see is_resource} which returns **FALSE** for
+ * invalid or unknown resource types ({@see get_resource_type}) while
+ * _typeof_ returns `TYPE_RESOURCE` for the same reason as above.
+ *
+ * These differences also illustrate the different purposes of them.
+ * Functions like {@see is_object} and {@see is_resource} are meant for
+ * validating if a given variable is of a legal type that can be used to
+ * work with. The result of _typeof_ is meant for debugging purposes and
+ * not type checks. Hence, conditions like
+ * `if (typeof($var) === TYPE_RESOURCE)` are not encouraged and better
+ * replaced with `if (is_resource($var))`.
+ *
+ * @param mixed $var
+ *  Variable to get the type for.
+ * @return string
+ *  Type of the variable.
+ */
+function var_type($var): string;
+</code>
+
+The mode of operation is similar to the existing ''gettype()'' function, as can be seen in the extensive documentation above. However, the returned values reflect the current state of the names used for regular data types, as well as the type declarations useable in function and method signatures:
+
+<code php>
+echo typeof([]);           // array
+echo typeof(true);         // bool
+echo typeof(0.0);          // float
+echo typeof(0);            // int
+echo typeof(null);         // null
+echo typeof(new stdClass); // object
+echo typeof(STDIN);        // resource
+echo typeof('');           // string
+
+$fh = tmpfile();
+fclose($fh);
+echo typeof($fh);          // resource
+</code>
+
+=== Differences to Other Variable Functions ===
+The ''var_type()'' function returns ''object'' for incomplete objects which are an instance of ''__PHP_Incomplete_Class'' (see [[https://secure.php.net/unserialize|unserialize()]]), whereas ''is_object()'' returns **FALSE**. The same is true for resources of unknown resource type where ''is_resource()'' returns **FALSE**. The reason for this difference is simple: these functions serve different purposes. The ''is_*'' functions are meant for flow control and validation, while the ''var_type()'' function is meant to retrieve type information in string form for later usage. In other words, it is not encouraged nor was it ever encouraged to implement something like ''if (var_type($var) === 'resource')''. The idiomatic way to perform this kind of check is ''if (is_resource($var))''. Consistency between these functions, in this regard, is not desirable because it makes it unclear to users when to use which function, as was already mentioned earlier.
+
+At the same time, it would be confusing for users if ''var_type()'' would return unknown for incomplete objects and/or closed/invalid resources. This is because the result might be used in debugging information and/or error messages, and the user reading this information might not know at that point what went wrong. Getting unknown is by far the most unhelpful result that we could present to the users at that point; like an unknown error occurred. Especially since the type is actually **not** unknown.
+
+=== Unknown Type ===
+There is still a default path in the C code that would result in the returned type being ''unknown''. This happens if none of the existing type checks available in C results in a positive check. In other words: this should never happen. The documentation above clearly states that this is actually an impossible situation, and encourages users to file a bug with a detailed description for us to account for it, if they manage to provoke such a situation.
+
+==== Phasing Out of gettype ====
+This RFC does **not** propose a deprecation of ''gettype()'' in PHP 7.x because it is a widely used function and there are currently no plans on how to deal with its counterpart ''settype()''. However, a //soft deprecation// of ''gettype()'' is recommended, this means that the documentation page of ''gettype()'' will be updated with an informational box that recommends the usage of ''var_type()'' in favor of ''gettype()'' and any references to ''gettype()'' in the manual should be replaced with ''var_type()''.
+
+===== Backward Incompatible Changes =====
+None
+
+===== Proposed PHP Version(s) =====
+This RFC targets the next feature release, currently 7.1.0.
+
+===== RFC Impact =====
+==== To SAPIs ====
+None
+
+==== To Existing Extensions ====
+None but the usage of the new type name constants is highly encouraged to avoid typos or the usage of discouraged names (see also [[#future_scope|Future Scope]]).
+
+==== To Opcache ====
+None
+
+==== New Constants ====
+The introduction of ''TYPE_*'' constants for the various data types of PHP is a logical additional extension to minimize magic strings in userland software an to avoid typos that might lead to bugs. That being said, the existence of these constants is not essential to this feature and has a separate voting poll.
+
+<code php>
+/**
+ * Name of the regular compound data type array.
+ *
+ * @link https://secure.php.net/language.types.array
+ */
+const TYPE_ARRAY = 'array';
+
+/**
+ * Name of the regular scalar data type bool.
+ *
+ * @link https://secure.php.net/language.types.boolean
+ */
+const TYPE_BOOL = 'bool';
+
+/**
+ * Name of the pseudo data type callable.
+ *
+ * @link https://secure.php.net/language.types.callable
+ */
+const TYPE_CALLABLE = 'callable';
+
+/**
+ * Name of the regular scalar data type bool's negative value.
+ *
+ * @link https://secure.php.net/language.types.boolean
+ */
+const TYPE_FALSE = 'false';
+
+/**
+ * Name of the regular scalar data type float.
+ *
+ * @link https://secure.php.net/language.types.float
+ */
+const TYPE_FLOAT = 'float';
+
+/**
+ * Name of the regular scalar data type int.
+ *
+ * @link https://secure.php.net/language.types.integer
+ */
+const TYPE_INT = 'int';
+
+/**
+ * Name of the regular special data type null.
+ *
+ * @link https://secure.php.net/language.types.null
+ */
+const TYPE_NULL = 'null';
+
+/**
+ * Name of the regular compound data type object.
+ *
+ * @link https://secure.php.net/language.types.object
+ */
+const TYPE_OBJECT = 'object';
+
+/**
+ * Name of the regular special data type resource.
+ *
+ * @link https://secure.php.net/language.types.resource
+ */
+const TYPE_RESOURCE = 'resource';
+
+/**
+ * Name of the regular scalar data type string.
+ *
+ * @link https://secure.php.net/language.types.string
+ */
+const TYPE_STRING = 'string';
+
+/**
+ * Name of the regular scalar data type bool's positive value.
+ *
+ * @link https://secure.php.net/language.types.boolean
+ */
+const TYPE_TRUE = 'true';
+</code>
+
+==== php.ini Defaults ====
+None
+
+===== Open Issues =====
+  * Update of the ''[[https://secure.php.net/gettype|gettype()]]'' manual page with an informational box that recommends the usage of ''var_type()'' in favor of ''gettype()''.
+  * Update the [[https://secure.php.net/language.types.intro|Types Introduction]] manual page with ''var_type()'' information, and remove ''gettype()''.
+  * Update the [[https://secure.php.net/types.comparisons|PHP type comparison tables]] manual page with ''var_type()'' information, and remove ''gettype()''.
+  * Update the ''[[https://secure.php.net/is_object|is_object()]]'' manual page to explain why it does not consider incomplete objects as valid, while ''var_type()'' reports them as such.
+  * Update the ''[[https://secure.php.net/is_resource|is_resource()]]'' manual page to explain why it does not consider closed/invalid resources as valid, while ''var_type()'' reports them as such.
+
+===== Unaffected PHP Functionality =====
+Everything
+
+===== Future Scope =====
+==== Userland ====
+  * New ''var_info()'' function that returns a human readable explanation of the variable in plain English for inclusion in error messages.
+  * New ''resource_is_closed()'' function that allows direct checks whether a resource is closed/invalid to avoid constructs like:<code php>
+if (is_resource($var) === false && var_type($var) === 'resource') {
+    // ...
+}
+</code>
+
+==== Internals ====
+  * All messages should be refactored to use the new type name constants. This ensures that all messages are consistent, and to avoid confusing messages like the following:<code>Fatal error: Uncaught TypeError: Argument 1 passed to test() must be an instance of boolean, boolean given,
+called in - on line 1 and defined in -:1</code>The combination of //boolean, boolean given// is confusing for users, especially new ones, and should be avoided. With the usage of the new constants the message would instead read as:<code>Fatal error: Uncaught TypeError: Argument 1 passed to test() must be an instance of boolean, bool given,
+called in - on line 1 and defined in -:1</code>
+  * Another topic that should be thought about is the usage of //double// and //long// to refer to the userland types of //float// and //int// in internals. For instance ''IS_DOUBLE'' and ''IS_LONG'' would be better defined as ''IS_FLOAT'' and ''IS_INT'' to avoid confusion. There are many more places where this could be refactored in order to increase readability, and lower confusion over what something refers to.
+
+===== Proposed Voting Choices =====
+This RFC will have two polls, one for the introduction of the ''var_type()'' function and one for the new ''TYPE_*'' constants in userland. Both require a 50%+1 majority to be accepted as they do not change the language's syntax.
+
+===== Patches and Tests =====
+The [[https://github.com/php/php-src/pull/1935|GitHub Pull Request #1935]] contains the implementation as well as tests for the new function. The changes in the PR are considered final, however, a thorough code review would be much appreciated and might result in minor changes.
+
+===== Implementation =====
+  - Merged to Version: //?//
+  - Git Commits: //?//
+  - PHP Manual: https://secure.php.net/var_type
+
+===== References =====
+
+===== Rejected Features =====
+The initial idea for a successor function of ''gettype()'' was named ''typeof()'' and not ''var_type()''. That name was chosen due to its popularity in other programming languages but dismissed in order to allow future usage of that name as an operator like ''instanceof''.
