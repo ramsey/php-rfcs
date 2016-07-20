@@ -1,5 +1,5 @@
 ====== PHP RFC: Pipe Operator ======
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2016-04-29
   * Author: Sara Golemon <pollita@php.net>
   * Status: Under Discussion
@@ -7,21 +7,59 @@
 
 ===== Introduction =====
 
-Complex nested expressions can become progressively difficult to read the deeper they go with function returns leading into arguments to functions which return an argument to another call and so on and so forth.  This RFC aims to improve code readability by decomposing complex nested expressions into a series of linearly readable chained statements.
+A common PHP OOP pattern is the use of method chaining, or what is also known as "Fluent Expressions".  So named for the way one method flows into the next to form a conceptual hyper-expression.
+
+For example, the following shows a SQL query expression built out of component pieces, then executed:
+
+  $rs = $db
+    ->select()->fields('id', 'name', 'email')
+    ->from('user_table')
+    ->whereLike('email'=>'%@example.com')
+    ->orderAsc('id')
+    ->execute();
+
+This works well enough for OOP classes which were designed for fluent calling, however it is impossible, or at least unnecessarily arduous, to adapt non-fluent classes to this usage style, harder still for functional interfaces.
+
+While decomposing these expressions to make use of multiple variables is an option, this can lead to reduced readability, polluted symbol tables, or static-analysis defying type inconsistency such as in the following two examples:
+
+  $config = loadConfig();
+  $dic = buildDic($config);
+  $app = getApp($dic)
+  $router = getRouter($app)
+  $dispatcher = getDispatcher($router, $request)
+  $logic = dispatchBusinessLogic($dispatcher, $request, new Response())
+  $render = renderResponse($logic)
+  $psr7 = buildPsr7Response($render)
+  $response =emit($psr7);  
+
+Or:
+
+  $x = loadConfig();
+  $x = buildDic($x);
+  $x = getApp($x)
+  $x = getRouter($x)
+  $x = getDispatcher($x, $request)
+  $x = dispatchBusinessLogic($x, $request, new Response())
+  $x = renderResponse($x)
+  $x = buildPsr7Response($x)
+  $response =emit($x);  
+
+These sorts of chains could also, conceivably, be handled using deeply nested expressions, but the code becomes even more unreadable this way:
+
+  $dispatcher = getDispatcher(getRouter(getApp(buildDic(loadConfig()))), $request);
+  $response = emit(buildPsr7Response(renderResponse(dispatchBusinessLogic($dispatcher, $request, new Response()))));
+
+This RFC aims to improve code readability by bringing fluent expressions to functional and OOP libraries not originally designed for the task.
 
 ===== Proposal =====
 
-Introduce the "Pipe Operator" `|>`, a binary expression which uses the result of the LHS as an input to the RHS expression at an arbitrary point denoted by the additional "Pipe Replacement Variable" expression `$$`.  The result of the RHS expression, after substitution, is used as the result of the operator.
+Introduce the "Pipe Operator" `|>`, mirroring the method call operator `->`.  This expression acts as a binary operation using the result of the LHS as an input to the RHS expression at an arbitrary point denoted by the additional "Pipe Replacement Variable" expression `$$`.  The result of the RHS expression, after substitution, is used as the result of the operator.
 
 This feature is being culled from HackLang 3.13 and the manual page for it may be referenced at: https://docs.hhvm.com/hack/operators/pipe-operator
 
 ==== PSR7 Example ====
 
-Here's the pseudo-code for a typical request/response dispatch cycle:
-
-    $request = getGlobals()
-     |> parseRequest($$)
-     |> buildPsr7Request($$);
+Here's the equivalent chain of function calls as demonstrated in the intro section above:
 
     $response = loadConfig()
      |> buildDic($$)
@@ -33,20 +71,9 @@ Here's the pseudo-code for a typical request/response dispatch cycle:
      |> buildPsr7Response($$)
      |> emit($$);
 
-Here's what it would look like with a separate approach (more business-oriented):
-
-    buildRequest() // (basically the first part of the previous example here)
-     |> validate($$)
-     |> convertToCommand($$)
-     |> execute($$)
-     |> convertToViewModel($$)
-     |> render($$)
-     |> convertToHttpResponse($$)
-     |> emit($$);
-
 ==== File collection Example ====
 
-As an example, consider the following real block of code I wrote while creating a test importer (to migrate HHVM format tests into PHPT format):
+As an example, consider the following real block of code I wrote while creating a test importer (to migrate HHVM format tests into PHPT format).  Please try not to get hung up into whether or not it's "good" PHP code, but rather that it's solving a problem, which is precisely what PHP is designed to do:
 
   $ret = 
     array_merge(
@@ -75,6 +102,35 @@ With this proposal, the above could be rewritten as:
 
 This clearly, and unambiguously shows `scandir()` as the initial source of data, that it goes through an `array_filter` to avoid recursion, an `array_map` to requalify the paths, some local function, and finally a merge to combine the result with a collector variable.
 
+==== FBShipIt Example ====
+
+Also consider [[https://github.com/facebook/fbshipit/blob/a995e82/fb-examples/lib/FBCommonFilters.php-example#L20,L41|the follow segment of code]] which is used in production by FBShipIt to translate and export nearly all of Facebook's Opensource projects to github:
+
+  return $changeset
+      |> self::skipIfAlreadyOnGitHub($$)
+      |> self::stripCommonFiles(
+          $$,
+          $config['stripCommonFiles/exceptions'] ?? ImmVector {},
+        )
+      |> self::stripSubjectTags($$)
+      |> self::stripCommands($$)
+      |> self::delinkifyDifferentialURLs($$)
+      |> self::restoreGitHubAuthor($$)
+      |> ShipItUserFilters::rewriteSVNAuthor(
+          $$,
+          FBToGitHubUserInfo::class,
+        )
+      |> self::filterMessageSections(
+          $$,
+          $config['filterMessageSections/keepFields']
+            ?? self::getDefaultMessageSectionNames(),
+        )
+      |> self::rewriteMentions($$)
+      |> self::rewriteReviewers($$)
+      |> self::rewriteAuthor($$);
+
+This presents every step taken by the common filter chain in an easy to follow list of actions.
+
 ===== Backward Incompatible Changes =====
 
 While most ambiguities of `$$` between pipe replacement variable and variable variables are covered in the lexer rule, the following case is not accounted for:
@@ -85,7 +141,7 @@ While most ambiguities of `$$` between pipe replacement variable and variable va
   // Expected: int(1)
   // Actual: Use of $$ outside of a pipe expression
 
-This particular quirk of the parser (allowing comments in the middle of a variable-variable-brace-expression) is doubtlessly a rare occurance in the wild, so the current implementation stopped short of trying to resolve it.
+This particular quirk of the parser (allowing comments in the middle of a variable-variable-brace-expression) is doubtlessly a rare occurrence in the wild, so the current implementation stopped short of trying to resolve it.
 
 Potential resolutions:
   * Use a less-ambiguous token.  `$>` which mirrors `|>` is my personal favorite.  Downshot: doesn't match HackLang
