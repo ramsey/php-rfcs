@@ -20,7 +20,7 @@ I suggest new operator, which make escaping operation more easier, safer and use
 
 Of course, we can make a function with short name like <php><?= h($something) ?></php>. But the problem is not that we don't have a function.
 
-The problem is that <php><?= h($something) ?></php> and <php><?= $something ?></php> both work good, and unsafe variant works exactly as safe one until we get unsafe data. There is no such problem with other contexts. If we don't call json_encode() when passing an array or object into javascript, this only will break the script, and this will be noticeable, there won't be a problem with security. Also, because we need to call escaping function everywhere, there is a possibility to forget to do this sometime. So, the purpose of this operator is remove this copy-paste and improve a security.
+The problem is that <php><?= h($something) ?></php> and <php><?= $something ?></php> both work good, and unsafe variant works exactly as safe one until we get unsafe data. There is no such problem with other contexts. If we don't call json_encode() when passing an array or object into javascript, this only will break the script, and this will be noticeable, there won't be a problem with security. Also, because we need to call escaping function everywhere, there is a possibility to forget to do this sometime.
 
 Main argument against such operator is that main problem is in specific context. There are various contexts and each one requires special escaping. But I think this is not required to support all of them. Because - who asks about it?) There are no requests about special operator for json_encode(), but there are many requests for htmlspecialchars(). You can not deny the problem with HTML escaping really exists. My first goal is to draw the attention on it. Exact implementation is a secondary thing.
 
@@ -50,6 +50,12 @@ Actually, on web page we have 3 external contexts - HTML, <script> tag, <style> 
 
 But anyway we need to be able to set different flags for htmlspecialchars(). So, handling for other contexts also can be added the same way. And I have an idea about how to do it.
 
+===== Purpose =====
+
+The purpose of this operator is
+  - To make frequent operations for escaping more easy to use.
+  - To remove copy-paste for calling an escaping function.
+  - To improve a security, because the escaping will become automatic in all places, and this will prevent XSS.
 
 ===== Proposal =====
 
@@ -58,94 +64,91 @@ Operator has the following form:
 <PHP>
 <?* $str ?>
 <?* $str, 'html' ?>
-<?* $str, 'js | html' ?>
+<?* $str, $context ?>
 </PHP>
 
-Both expressions can be a constant or a variable of any type which can be converted to string. Second expression is optional.
+Both expressions any constant or variable. Second expression is optional. How to handle a context is up to appllication.
 
 I suggest the symbol <php>'*'</php> because it is not unary operator and it gives an error in previous PHP versions. All symbols in <php><?* ?></php> are typed with Shift, and they require another way to type, unlike <php><?= ?></php>, so there is a less possibility to write <php>'='</php> instead.
 The symbol tilde '~' is not present on keyboard layouts for some european languages.
 
 Operator is compiled into the following AST:
 <PHP>
-echo PHPEscaper::escape(first_argument, second_argument);
+echo escape_handler_call(first_argument, second_argument);
 </PHP>
 This is done very similar to backticks operator for shell_exec().
 
-There is a default implementation of the class 'PHPEscaper'. It has 4 static methods:
+There are 3 functions:
 <PHP>
-PHPEscaper::escape($string, $context = 'html');
-PHPEscaper::registerHandler($context, $escaper_function);
-PHPEscaper::unregisterHandler($context);
-PHPEscaper::getHandlers();
+set_escape_handler($handler);
+restore_escape_handler();
+escape_handler_call($string[, $context]);
 </PHP>
 
-Method <php>PHPEscaper::escape($string, $context)</php> splits <php>$context</php> by <php>'|'</php> delimiter, all parts are trimmed, and then calls registered handler for every context in a chain. If there is no handler for certain context, the exception is thrown. Nothing has to be output as is.
+They work similar to set_error_handler() / restore_error_handler().
 
-'html' is a default value for context, and it has special handling. If there is no handler for 'html' context, the method calls <php>htmlspecialchars($string, ENT_QUOTES | ENT_SUBSTITUTE)</php>. These flags are used in the majority of popular frameworks.
+Function set_escape_handler() sets user-defined handler which will be called from escape_handler_call(). Returns previously set handler or null. The handler can be any valid callable value. Arguments for this handler are the same as for escape_handler_call().
+
+Function restore_escape_handler() removes current handler and restores previously set handler.
+
+Function escape_handler_call() just pass given arguments into user-defined handler. Second argument is not required. If the handler is not set, it throws an exception. There is no default handler for any context, to prevent 'built-in' wrong work of <?* $str ?> constructions in non-HTML contexts like CSV. This is not hard to create a handler once. Default context can be set in it as default value for second argument.
+
 
 We can use it like this:
 
 <PHP>
 <?php
     // anywhere in application
-    PHPEscaper::registerHandler('html', function($str) {
-        return htmlspecialchars($str, ENT_QUOTES | ENT_HTML5 | ENT_DISALLOWED | ENT_SUBSTITUTE);
+    set_escape_handler(function($str, $context = 'html') {
+        if ($context == 'html') {
+            return htmlspecialchars($str, ENT_QUOTES | ENT_HTML5 | ENT_DISALLOWED | ENT_SUBSTITUTE);
+        }
+
+        if ($context == 'js') {
+            return my_js_encode($str);
+        }
+
+        throw new Exception('Unknown context: ' . $context);
     });
-    PHPEscaper::registerHandler('js', [MyEscaper, 'escapeJs']);
+
+    // or
+
+    // set_escape_handler([$this, 'escape']);
 ?>
-<?* $str, 'js | html' ?>
+<?* $str ?>
+<?* $str, 'html' ?>
 </PHP>
 
 
-And even more.\\
-In the AST, 'PHPEscaper' is registered as not fully qualified name (ZEND_NAME_NOT_FQ).
-This allows us to use namespaces and autoloading, according to naming convention and autoloading mechanism in application:
+There are no magic constants, problem with autoloading, complicated syntax, or big changes in the logic of existing constructions. This is just a helper to call user-defined escaper, the same as if he would call it manually everywhere.
+
+In this way we can have multiple contexts, default escaping, and full control and customization.
+
+===== Functions =====
+
+Implementation is done similar to set_error_handler() mechanism.
 
 <PHP>
-<?php use MyEscaper as PHPEscaper; ?>
-<?* $str, 'js | html' ?>
-</PHP>
-
-<php>MyEscaper::escape($str, 'js | html')</php> will be called.
-
-
-In this way we can have autoloading, multiple contexts, html escaping by default, and full control and customization. Default implementation of PHPEscaper is not required, so it is possible to make it as a separate extension, and applications can provide their own implementation on PHP.
-
-===== Class PHPEscaper =====
-
-Class definition is done similar to SPL autoloading mechanism.
-
-<PHP>
-class PHPEscaper
-{
-    public static function escape($string, $context = 'html');
-    public static function registerHandler($context, $escaper_function);
-    public static function unregisterHandler($context);
-    public static function getHandlers();
-}
+set_escape_handler($escape_handler_callable);
+restore_escape_handler();
+escape_handler_call($string[, $context]);
 </PHP>
 
 
-<php>mixed PHPEscaper::escape(mixed $string, string $context)</php>
+<php>callable|null set_escape_handler(callable $handler)</php>
 
-Splits <php>$context</php> by <php>'|'</php> delimiter, all parts are trimmed, and then calls registered handler for every context in a chain. If there is no handler for certain context, the exception is thrown. Nothing has to be output as is. Both arguments can be a string or any type which can be converted to string. First argument is passed between the handlers without any type conversion. Conversion to string is made automatically by <php>echo</php> operator. Second argument is optional, <php>'html'</php> is the default value, it is converted to string while parsing method arguments (zend_parse_parameters()).
-
-
-<php>bool PHPEscaper::registerHandler(string $context, callable $escaper_function)</php>
-
-Registers new handler for a given context. If handler for this context is already registered, it returns <php>false</php>, on success registration returns <php>true</php>. All contexts are stored in associative array. There is no stack, unlike SPL autoloading.
+Sets user-defined handler which will be called from escape_handler_call(). Returns previously set handler or null. The handler can be any valid callable value. Arguments for this handler are the same as for escape_handler_call().
 
 
-<php>bool PHPEscaper::unregisterHandler(string $context)</php>
+<php>bool restore_escape_handler()</php>
 
-Unregisters new handler for a given context. If handler for this context is not registered, it returns <php>false</php>, otherwise unsets the key and returns <php>true</php>.
+Removes current handler and restores previously set handler.
 
 
-<php>array PHPEscaper::getHandlers(string $context, callable $escaper_function)</php>
+<php>mixed escape_handler_call(mixed $string[, mixed $context])</php>
 
-Returns array of all registered handlers. If no handlers are registered, returns an empty array.
-
+Passes given arguments into user-defined handler. Argumants are passed 'as is', without any changes.
+Second argument is not required. If the handler is not set, it throws an exception. There is no default handler for any context, to prevent 'built-in' wrong work of <?* $str ?> constructions in non-HTML contexts. User must define itws own handler before using escaping operator. Default context can be set in it as default value for second argument.
 
 ===== Main arguments 'for' and 'against' =====
 
@@ -155,9 +158,9 @@ The problem is not that we have no function. The problem is that the same action
 
 Both variants <php><?= h($something) ?></php> and <php><?= $something ?></php> work good. But the second variant is unsafe. One is a subset of another, we have the same beginning <?= and then can write helper function or not. It is easy to forget to write that main part.
 
-Also there is a problem with function autoloading.
-
-With new operator we can write or <?* ?>, or <?= ?>, they are mutually exclusive, and we need specially write one or another. And we need write <?* ?> almost everywhere.
+With new operator we can write or <?* ?>, or <?= ?>, they are mutually exclusive, and we need specially write one or another.
+Safe variant becomes as easy as unsafe.
+And we need to write <?* ?> almost everywhere.
 \\
 \\
 
@@ -225,23 +228,64 @@ Maybe it would be good to create some official poll and to know community opinio
 \\
 \\
 
-  * Default flags
-
-In popular frameworks there are the following flags:
-  * [[https://github.com/symfony/symfony/blob/f29d46f29b91ea5c30699cf6bdb8e65545d1dd26/src/Symfony/Component/Templating/PhpEngine.php#L421|Symfony]] — ENT_QUOTES | ENT_SUBSTITUTE \\
-  * [[https://github.com/yiisoft/yii2/blob/c370c17e93f364a843ed7c31e1e1f7fc8caef0a3/framework/helpers/BaseHtml.php#L104|Yii]] — ENT_QUOTES | ENT_SUBSTITUTE \\
-  * [[https://github.com/zendframework/zend-escaper/blob/1a855b5f7074607b1260d85c5526a59b1ab36593/src/Escaper.php#L117|Zend]] — ENT_QUOTES | ENT_SUBSTITUTE \\
-  * [[https://github.com/twigphp/Twig/blob/f0a4fa678465491947554f6687c5fca5e482f8ec/lib/Twig/Extension/Core.php#L1039|Twig]] — ENT_QUOTES | ENT_SUBSTITUTE \\
-
-
 ===== Conclusion =====
 
-This operator allows HTML escaping by default, multiple contexts, autoloading, and full control and customization.
+This operator allows to set default escaping, multiple contexts, and full control and customization, without any problems with autoloading.
+It is easy to use and has small amount of code.
 It does not change Zend VM opcodes and does not break any existing code.
 Also it will be useful for beginners, which don't know about HTML escaping or forget about it. If there will be special operator for HTML-safe output, beginners will use it, because this is simple.
 
 This small change can really improve a security and make development easier in many applications - all projects without template engine.
 
+
+
+===== Under discussion =====
+
+Here is what is under discussion:
+
+
+Starting sign:
+<PHP>
+<?* $a, $b ?>
+<?: $a, $b ?>
+</PHP>
+Last one is more comfortable to type.
+
+
+Separator sign:
+<PHP>
+<?* $a , $b ?>
+<?* $a | $b ?>
+<?* $a |> $b ?>
+<?: $a : $b ?>
+</PHP>
+Maybe it should differ from standard <?= $a, $b ?> syntax to prevent mistakes like <?= $a, 'html' ?> instead of <?* $a, 'html' ?>.
+'|' won't give error, but looks more similar to escaping in template engines.
+
+
+If to wrap in a class or namespace (fully qualified), to not clutter up a global namespace:
+<PHP>
+set_escape_handler()
+restore_escape_handler()
+escape_handler_call()
+
+PHPEscaper::setEscapeHandler()
+PHPEscaper::restoreEscapeHandler()
+PHPEscaper::escapeHandlerCall()
+</PHP>
+
+And also any names in source code or details of implementation, without changing main algorithm.
+
+\\
+\\
+
+What is not under discussion:
+
+Multiple arguments.
+I think, it is enough that second argument can be any type, e.g. an array.
+
+Complicated syntax like <php><?*html*js= $str ?></php>.
+If we allow custom handlers, then we need runtime processing, so the example above cannot be compiled into <php><?= htmlspecialchars(json_encode($str)) ?></php> directly, and it will something like <php><?= escape_handler_call(escape_handler_call($str, 'html'), 'js') ?></php>. I.e. we anyway need to pass context as a second argument, so why not allow user to do it.
 
 
 ===== Backward Incompatible Changes =====
@@ -261,23 +305,23 @@ This is new operator, there will be the changes in the language parser.
 Not sure but more likely none. It does not change Zend VM opcodes.
 
 ==== To Existsing Applications/Extensions ====
-There may be some applications or extensions which contains class 'PHPEscaper'.
+There may be some applications or extensions which contains <?* some text ?> as raw text in PHP template.
 
 
 ===== Unaffected PHP Functionality =====
 This is new operator, all existing functionality will not be chagned.\\
-There is no php.ini settings, no new Zend VM opcodes.
+There are no php.ini settings, no new Zend VM opcodes.
 
 ===== Proposed Voting Choices =====
 
-The question is - Can this operator be useful for many people?\\ 
-The choices are Yes or No\\ 
-Requires a 2/3 majority\\ 
+Can this operator be useful for many people and implemented in PHP in some of forms described above?\\
+The choices are Yes or No\\
+Requires a 2/3 majority\\
 
 
 ===== Patches and Tests =====
 Diff with changes:\\
-https://github.com/michael-vostrikov/php-src/commit/571cd7c88488a08c82b10f0c3af559881f1a2951
+https://github.com/michael-vostrikov/php-src/commit/ae620ae003067919b1a105b0438bab0db71d7391
 
 This is just a concept, to show main idea. All details of implementation can fully be changed, depending on discussion result.
 
@@ -285,11 +329,13 @@ This is just a concept, to show main idea. All details of implementation can ful
 ===== Implementation =====
 
 ===== References =====
-Discussion: http://marc.info/?t=146619199100001
+Discussions:
+http://marc.info/?t=146619199100001
+http://marc.info/?t=146868366400003
 
 Diff with changes:
-  * Parser: [[https://github.com/michael-vostrikov/php-src/commit/571cd7c88488a08c82b10f0c3af559881f1a2951#diff-7eff82c2c5b45db512a9dc49fb990bb8R844|zend_language_parser.y]]
-  * AST handler: [[https://github.com/michael-vostrikov/php-src/commit/571cd7c88488a08c82b10f0c3af559881f1a2951#diff-3a8139128d4026ce0cb0c86beba4e6b9R4122|zend_compile.c]]
-  * PHPEscaper::escape(): [[https://github.com/michael-vostrikov/php-src/commit/b2103dc517c309f7515909ba45a291ceada4eb01#diff-a1a59a5452bf9df0fc5b58bc9fdb6a11R413|cde.c]]
+  * Parser: [[https://github.com/michael-vostrikov/php-src/commit/ca149a3dfea71f529eb1647f2d0ed2b8d63e279d#diff-7eff82c2c5b45db512a9dc49fb990bb8R844|zend_language_parser.y]]
+  * AST handler: [[https://github.com/michael-vostrikov/php-src/commit/ca149a3dfea71f529eb1647f2d0ed2b8d63e279d#diff-3a8139128d4026ce0cb0c86beba4e6b9R4122|zend_compile.c]]
+  * escape_handler_call: [[https://github.com/michael-vostrikov/php-src/commit/ca149a3dfea71f529eb1647f2d0ed2b8d63e279d#diff-a1a59a5452bf9df0fc5b58bc9fdb6a11R244|cde.c]]
 
 ===== Rejected Features =====
