@@ -1,120 +1,203 @@
 ====== PHP RFC: Object typehint ======
   * Version: 0.1
   * Date: 2016-08-12
-  * Author: Michał Brzuchalski <michal.brzuchalski@gmail.com>
+  * Author: Michał Brzuchalski <michal.brzuchalski@gmail.com>, Dan Ackroyd <danack@php.net>
   * Status: Draft
   * First Published at: https://wiki.php.net/rfc/object-typehint
-  
-Following the raging success of PHP 7.0 additions [[https://wiki.php.net/rfc/scalar_type_hints_v5|scalar type hints]] and [[https://wiki.php.net/rfc/return_types|return types]],
-there is also place for object typehint and return type. That feature can replace double ''is_object()'' validation inside function/method and it's result validation - which increases performance at runtime about ~6%.
 
 ===== Introduction =====
-Function and method typehints allow to declare expected sort of scalar type or class/interface but there is no way to declare any object type.
-Function and method return type allow to declare expected sort of scalar type or class/interface but there is same situation imposiible to declare any object type.
-Those two (typehint and return type) should exists both for consistency, allowing typehint should able to declare same return type.
+PHP 7 introduced scalar types for parameters and also for declaring return types for functions.
+
+However it is not currently possible to declare that a function either needs to be passed an object as a parameter, or to declare that a function must return an object.
 
 ===== Proposal =====
-The ''object'' typehint and return type should be added to the engine, working the same way like in case of scalar does.
-This would also mean to make ''object'' a reserved classname.
+This RFC proposes that ''object'' should be used as a parameter type and as a return type. Any object would pass the type check.
 
-==== Return type ====
+Passing a value that is not an object to a parameter that is declared as type ''object'' would fail the type check, and a TypeError would be thrown.
 
-=== Function ===
-Function return-type set to ''object'' acts exactly as it is for scalar return-type right now. It means there is return-type validation at runtime based on ''zval'' type.
+Similarly, if a function is declared as returning an ''object'' but does not return an object, again a TypeError would be thrown.
 
-<code php>
-function shouldReturnObject() : object {
-    $obj = json_decode('{}');
-    return $obj;
-}
-</code>
+As it would be used internally, object would become a reserved classname, unavailable for use as a class name in userland code.
 
-=== Methods ===
-Method return-type set to ''object'' behaves the same as for function return-type in both class/interface contexts.
+For class methods that use object as either a parameter or return type, the same inheritance rules would apply for inherited methods as all other parameter/return types i.e. invariant.
 
-<code php>
-class One {
-    public function a() : object {}
-}
-interface Two {
-    public function a() : object;
-}
-</code>
+===== Examples =====
 
-There is possibility to add return-type at inheritance in both class/interface contexts.
-
-<code php>
-class One {
-    public function a() {}
-}
-class SubOne extends One {
-    public function a() : object {}
-}
-interface Two {
-    public function a();
-}
-interface SubTwo extends Two {
-    public function a() : object;
-}
-</code>
-
-At inheritance there must be same declaration type so it works like for scalar/class return-type. Missing return type at inheritance returns ''Fatal error: Declaration of Inherited::a() must be compatible with Original::a(): object''.
-
-==== Parameter type hint ====
-
-=== Function ===
-Function parameter type-hint set to ''object'' acts exactly as it is for scalar type-hint right now. It means there is validation of given params type at runtime.
+==== Parameter type ====
 
 <code php>
 function acceptsObject(object $obj) {
-    // there is no need to check `is_object($obj)` you can simply check for eg. `instanceof`
-    if ($obj instanceOf \stdClass) {
-    
-    } elseif ($obj instanceof \MyObject) {
-    
-    }
+    ...
 }
+
+// This code can be statically analyzed to be correct
 acceptsObject(json_decode('{}'));
+
+// This code can be statically analyzed to be correct
 acceptsObject(new \MyObject());
+
+// This can be statically analysed to contain an error.
+// and would throw an TypeError at runtime.
+acceptsObject("Ceci n'est pas une object.");
 </code>
 
-=== Methods ===
-Method type-hint set to ''object'' behaves the same as for function type-hint in both class/interface contexts.
+==== Return type ====
+Functions and methods can be declared with an object return type, to enforce that the function must return an object.
 
 <code php>
-class One {
-    public function a(object $obj) {}
+// This function can be statically analysed to conform to the
+// return type
+function correctFunction() : object {
+    $obj = json_decode('{}');
+
+    return $obj;
 }
-interface Two {
-    public function a(object $obj);
+
+// This function can be statically analysed to contain an error
+// and will also fail at runtime.
+function errorFunction() : object {
+    return [];
 }
 </code>
 
-At inheritance there must be same declaration type so it works like for scalar/class return-type. Missing type-hint at inheritance returns eg. ''Warning: Declaration of Two::a(object $obj) should be compatible with One::a($obj)''.
+===== Benefits =====
 
-====== Benefits ======
-The main reason ''object'' type should be added is filling a gap caused of no root-class in PHP type system.
+==== Make code easier to understand ====
 
-  - ''object'' type declarations allow functions to require that parameters are objects at call time.
-  - ''object'' type declarations doesn't need additional ''is_object()'' validation in functions
-  - ''object'' type declarations keeps compatibility at intheritance
-  - ''object'' return type allow functions to validate that return value is object at call time
-  - ''object'' return type keeps compatibility at inheritance
-  - ''object'' return type and type declarations both eliminates double ''is_object()'' validation given param and returned value which increases performance at runtime about ~6% faster
+Although most code deals with specific types, there are several types of library where it is common to handle arbitrary object types. 
 
-If the given/returned value is of the incorrect type, then PHP will throw a TypeError exception.
-If methods declaration differs at inheritance there is warning generated.
+=== Hydrators + data extractor ===
 
-====== Reflection ======
+Hydrators allow objects to be filled with data from an array. Extractors do the opposite, they take an object and return an array of data.
+
+<code php>
+interface Hydration {
+  // Hydrate an object by populating data
+  public function hydrate(array $data, object $object) : object;
+}
+
+interface Extraction {
+  // Extract values from an object
+  public function extract(object $object) : array;
+}
+</code>
+
+The extraction step can take an arbitrary object as the sole parameter. The hydration step can take an arbitrary object as the second parameter, and will return an arbitrary object. Having the type for the parameters and the return type be set as ''object'' will make the expected types be clearer to anyone using these functions, as well as detect incorrect types if there is an error in the code.
+
+=== Service containers and DIC libraries ===
+
+For both service containers and dependency injection libraries, it is common to want to put services and other objects into the container. 
+
+<code php>
+interface ServiceContainer {
+  // Set service definition
+  public function set(string $id, object $service);
+
+  // Retrieve service object from container
+  public function get(string $id) : object;
+}
+</code>
+
+Additionally, ORM libraries such as Doctrine have functions that will either consume or produce arbitrary objects.
+
+
+==== Catching return errors ====
+
+Having an object return type would allow some errors to be detected more quickly. The following function is meant to return an object. With the object return typ set for the function, failing to return an object would cause a TypeError to be thrown in the location where the bug is.
+
+<code php>
+function unserialize($data) : object {
+
+    $type = $data['type'];
+    
+    switch ($type) {
+        case 'foo': { return new Foo(); }
+        case 'bar': { return new Ba(); }
+        case 'zot': { new zot(); }  // Ooops, this is an error
+    }
+}
+</code>
+
+Without the object return type, an incorrect value of null is returned from the function. This error can only be found by debugging at runtime.
+
+==== Enforcing signature in inheritance ====
+
+Currently, as PHP does not allow 'object' to be used as a return type, it is not possible to enforce the return type in a child class. In this example the method is supposed to return an object, but a programmer has changed what the function does in the child class.
+
+<code php>
+class WidgetFactory {
+    function create() {
+        return new Widget();
+    }
+}
+
+class CustomWidgetFactory extends WidgetFactory {
+    function create() {
+        $object = new Widget();
+
+        return true; //This is an error that cannot be statically analyzed.
+    }
+}
+
+</code>
+
+This type of error can only be detected when running the code.
+
+If we had object as a type, even if a programmer misunderstood what the method was supposed to do, and accidentally tried to create a child class that had a different signature, the code would not compile, and the error would be caught before the code is run:
+
+<code php>
+class WidgetFactory {
+    function create() : object {
+        return new Widget();
+    }
+}
+
+class CustomWidgetFactory extends WidgetFactory {
+    // This class would not compile, as the signature of the metod in
+    // the child class is not compatible with the method signature in 
+    // the parent class.
+    function create() : bool {
+       ...
+    }
+}
+</code>
+
+
+If the programmer wrote the correct signature for the method in the child class, but returned the wrong value, this error would also be caught:
+
+<code php>
+class WidgetFactory {
+    function create() : object {
+        return new Widget();
+    }
+}
+
+class CustomWidgetFactory extends WidgetFactory {
+    function create() : object {
+        $object = new Widget();
+
+        // returning something that is not an object throws a TypeError exception.
+        return true;
+    }
+}
+</code>
+
+This would also be an error detectable by a static analyzer.
+
+===== Reflection =====
 There are two changes in reflection:
-  - ''ReflectionType::isBuiltin'' returns true if ''object'' type-hint or return-type used in case of objects given, it returns false when class used instead of ''object'' type hint as it was before
-  - ''ReflectionType::__toString'' returns ''"object"'' when type-hint or return-type used in case of objects given, it returns class name when class used instead of ''object'' keyword as it was before
+
+  * ReflectionType::isBuiltin returns true for parameters and return types declared as 'object'.
+
+  * ReflectionType::__toString returns “object” for parameters and return types declared as 'object'.
 
 ===== Backward Incompatible Changes =====
-Althought ''object'' is [[http://php.net/manual/en/reserved.other-reserved-words.php|soft reserved word]] this RFC adds ''object'' as reserved classname. This may collide with existing classes which are neither namespaced nor prefixed.
+
+Althought object is soft reserved word this RFC adds object as reserved classname. This may collide with existing classes which are neither namespaced nor prefixed.
 
 ===== Proposed PHP Version(s) =====
-This is proposed for the next minor version of PHP, currently PHP 7.2.
+
+PHP 7.2.
 
 ===== RFC Impact =====
 
@@ -125,7 +208,6 @@ None.
 None.
 
 ==== Unaffected PHP Functionality ====
-
 This doesn't affect the behaviour of cast operators.
 
 ===== Proposed Voting Choices =====
