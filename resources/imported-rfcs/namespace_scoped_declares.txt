@@ -65,6 +65,10 @@ If ''namespace_declare'' was already called for a certain ''$namespace'', anothe
 
 The declare directive defaults specified by ''namespace_declare()'' take effect for all files compiled (i.e. included) **after** the execution of the function call. Files included prior to the function call are not affect. The file that contains the call is also not affected, because the function will only be executed after the file has already been compiled.
 
+''namespace_declare'' has no impact on aliases created using ''class_alias'' and entities declared by internal code.
+
+TODO: What about the encoding directive?
+
 ==== Nesting behavior ====
 
 If ''namespace_declare'' has been called for namespaces ''A'' and ''A\B'', where ''A\B'' is a sub-namespace of ''A'', then the directive defaults for ''A\B'' take precedence before those of ''A''. Consider the following example:
@@ -90,6 +94,25 @@ namespace_declare('A\B', ['no_dynamic_properties' => 0]);
 namespace_declare('A', ['strict_types' => 1, 'no_dynamic_properties' => 1]);
 </code>
 
+==== Interaction with files using mixed namespaces ====
+
+If multiple namespaces are mixed in a single file, all used namespaces are required to have consistent namespace-scoped declares. For example, the following code is illegal:
+
+<code php>
+// bootstrap.php
+namespace_declare('A', ['strict_types' => 1]);
+namespace_declare('B', ['strict_types' => 0]);
+
+// some_file.php
+namespace A; // strict_types=1
+...
+
+namespace B; // strict_types=0
+...
+</code>
+
+This restriction is introduced for two reasons: Firstly, lack of such a restriction would imply that language behavior can silently change in the middle of a single file, which would be very confusing. Secondly, there are are significant implementational complexities associated with allowing this type of code due to limitations of specific declare directives. In particular the current implementation of ''strict_types'' only permits a consistent ''strict_types'' value for a whole file. Lifting the declare-consistency requirement would require changing the ''strict_types'' implementation to support this and, more importantly, commitment to support this for all future declare directives we introduce, which may be non-trivial.
+
 ==== Open Question: Handling of unknown directives ====
 
 The ''declare()'' statement will throw a compile-time warning if an unknown directive is used. This has the advantage that typos can be easily spotted. On the other hand this is bad for forward-compatibility, because specifying a directive that is only known in newer PHP versions would generate a warning in older versions. If the directive only exists to make certain checks stricter (such as  the ''dynamic_object_properties'' example) it would be preferably it would simply be (silently) ignored on older versions.
@@ -102,29 +125,6 @@ As specified above, it is possible to first load code in a certain namespace and
 
 To avoid this, ''namespace_declare()'' could throw an ''Error'' if it called after code in the given namespace (or a sub-namespace) has already been loaded. However, this would require us to internally track which namespaces have had code loaded, something which we currently don't do. This tracking would also require opcache support.
 
-==== Open Question: Files with mixed namespaces ====
-
-PHP allows mixing multiple namespaces in a single file. This is problematic for the feature being proposed, because the different namespaces could have different namespace-scoped declares:
-
-<code php>
-// bootstrap.php
-namespace_declare('A', ['strict_types' => 1]);
-namespace_declare('B', ['strict_types' => 0]);
-
-// some_file.php
-namespace A; // Is strict_types=1
-...
-
-namespace B; // Is strict_types=0
-...
-</code>
-
-Not only is this very confusing, because this means that language behavior can silently change in the middle of a file, but it also poses a significant implementational problem. For example the current implementation of ''strict_types'' only permits a consistent ''strict_types'' value for a whole file. Allowing this kind of code would require changing the ''strict_types'' implementation to support this and, more importantly, commit to support this for all future declare directives we introduce, which may be non-trivial.
-
-Instead it may be preferable to only allow mixing multiple namespaces in the same file if they have consistent declare directive defaults. This still allows mixing namespaces, but enforces that declare directives will not magically change throughout the file.
-
-TODO: What about the encoding directive
-
 ===== Challenges, Disadvantages, Alternatives =====
 
 ==== Technical challenges ====
@@ -132,7 +132,6 @@ TODO: What about the encoding directive
 There are a number of technical challenges involved in the implementation of this feature:
 
   * If the open question "namespace_declare after namespace already used" is resolved in favor of forbidding such uses, information about namespaces that have already been loaded needs to be stored by the runtime. This requires opcache integration. (I consider this resolution likely.)
-  * If the open question "Files with mixed namespaces" is resolved in favor of allowing such uses, the strict_types implementation will have to be significantly changed to allow changing strict_types in the middle of a file. (I consider this resolution unlikely.)
   * In any case, namespace-scoped declares will have to be taken into account by opcache. Namely, if a file is compiled with a certain set of namespace-scoped declares, it cannot necessarily be reused if it is compiled with a different set of declares. This could be solved by storing a checksum based on the namespace-scoped declares at the time of compilation together with the cached file and compare it when loading it. I believe this can be done efficiently.
 
 ==== Disadvantages ====
