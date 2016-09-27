@@ -17,10 +17,10 @@ As an example of the declaration overhead, consider this function that [[https:/
     return array_map(function($x) use ($arr) { return $arr[$x]; }, $keys);
 }</PHP>
 
-The closure performs a single operation <php>$arr[$x]</php> and is 8 characters but requires 30 other characters of boilerplate (excluding whitespace). This means that roughly 79% of the closure's code is boilerplate overhead (30/38). This RFC proposes arrow functions to reduce the amount of boilerplate by having a shorter syntax and importing used variables from the outer scope implicitly. Using all possible features proposed by this RFC this would reduce to the following:
+The closure performs a single operation <php>$arr[$x]</php> and is 8 characters but requires 30 other characters (excluding whitespace). This means that roughly 79% of the closure's code is overhead (30/38). For this RFC these extra characters are called 'boilerplate'. This RFC proposes arrow functions to reduce the amount of boilerplate by having a shorter syntax and importing used variables from the outer scope implicitly. Using all possible features proposed by this RFC this would reduce to the following:
 
 <PHP>function array_values_from_keys($arr, $keys) {
-    return array_map(^$x => $arr[$x], $keys);
+    return array_map($x => $arr[$x], $keys);
 }</PHP>
 
 This reduces the amount of boilerplate from 30 characters down to 5.
@@ -30,16 +30,18 @@ See more examples in the [[#examples|Examples]] section. The [[#longer_examples|
 Many other languages have ways to write closures in a succinct form as well. TODO: decide how much summary of this topic should be given here. At minimum provide links to closure documentation for a few other relevant and major languages?
 
 ===== Proposal =====
-Arrow functions have the basic form of:
+Arrow functions have a few forms:
 
 <PHP>
-^(parameter_list) => expr
+(parameter_list) => expr
+singleParam => expr
+() => expr
 </PHP>
 
-The ''expr'' is a single expression. The expression will be evaluated and then the result will be returned:
+The ''expr'' is a single expression in all cases. This expression will be evaluated and then the result will be returned:
 
 <PHP>
-$mul2 = ^($x) => $x * 2;
+$mul2 = ($x) => $x * 2;
 
 $mul2(3); // evaluates to 6
 </PHP>
@@ -47,132 +49,78 @@ $mul2(3); // evaluates to 6
 If there is only a single parameter for the arrow function then the parenthesis around the parameter list can be omitted:
 
 <PHP>
-$mul2 = ^$x => $x * 2;
+$mul2 = $x => $x * 2;
 
 $mul2(3); // evaluates to 6
 </PHP>
 
-When a variable in the expression is defined in the parent scope it will be captured implicitly. Whether these variables are bound by value or by reference will be determined by vote.
-For example:
+When a variable in the expression is defined in the parent scope it will be captured implicitly by-value.
+In the following example the functions identified by ''$versionA'' and ''$versionB'' are exactly equivalent:
 
 <PHP>
 $y = 1;
 
-$versionA = ^$x => $x + $y;
+$versionA = $x => $x + $y;
 
-// Equivalent if capture by-value
 $versionB = function($x) use($y) {
     return $x + $y;
-};
+};</PHP>
 
-// Equivalent if capture by-reference
-$versionC = function($x) use(&$y) {
-    return $x + $y;
-};
-</PHP>
-
-Note that searching for variables to close over will descend into nested arrow functions:
-<PHP>
-$y = 1;
-
-// I have no idea why you would do this but it works
-$f = ^() => ^() => $y;
-
-var_dump($f()()); // int(1)
-</PHP>
-
-It also will look at <php>use</php> sections of inline functions:
-
-<PHP>
-$y = 1;
-
-// Again I have no idea why you would do this but it works
-$f = ^() => function() use($y) {
-    return $y;
-};
-
-var_dump($f()()); // int(1)
-</PHP>
-
+Note that searching for variables to close over will descend into nested arrow functions and <php>use</php> sections of inline functions. This functionality is not expected to be common but is supported.
 
 Arrow functions are similar to those found in EcmaScript 2015 (ES6)((https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Arrow_functions)) and lambda expressions from C#((https://msdn.microsoft.com/en-us/library/bb397687.aspx)).
 
 ==== Type Declarations ====
-This RFC allows for type declarations for both parameters and return types. This feature was missing in Bob's [[rfc:short_closures|short closure]] RFC because of implementation complications. This issue was noted multiple times on the mailing list as something that bothered voters. Arrow functions do not have this issue because the caret (''^'') prefix will prevent the parser issues from happening.
+This RFC does not permit type declarations for parameters and return types. This issue was noted multiple times on the mailing list during the short closures RFC as something that bothered voters. However, the main purpose of arrow functions is to focus on the functionality by removing boilerplate. Arrow functions have very small bodies because they are single expressions. This makes them easy to audit and type information is not expected to be helpful.
 
-Here is an example of type declarations in an arrow function:
-
-<PHP>$mul2 = ^(int $x): int => $x * 2;</PHP>
-
-The parentheses are always required if type information is present.
-
-Note that the ability to provide type information is included only because of the common complaints about Bob's short closures RFC. This RFC addresses this issue by allowing it but the authors of this document discourage its general use.
-
-==== Why keep the prefix? ====
-The short closures proposal dropped the ''function'' prefix because of brevity. This is also done in EcmaScript 2015 (ES6) and C#. However, in PHP we can provide type information on parameters and can also pass variables by reference which together cause an ambiguity. In the definition <php>(Type &$x) => expr</php> the part <php>(Type &$var)</php> can parse as "take constant ''Type'' and variable ''$var'' and do a bitwise and ''&'' operation." After that the ''<nowiki>=></nowiki>'' will be an unexpected token. Even though the rule would be invalid the parser doesn't know that far ahead there will be an error and it doesn't know which rule to pick. This can be resolved by inefficient GLR parsing or a painstaking rewrite of our parsing rules. This author is of the opinion that it is better to avoid the issue than to resolve it in this case. The ''^'' prefix will avoid these issues while maintaining brevity.
-
-The <php>^</php> prefix also prevents ambiguities with the existing usages of the ''T_DOUBLE_ARROW'' token (''<nowiki>=></nowiki>''). Note that if we just used [[https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Arrow_functions|EcmaScript 2015's arrow function]] syntax there would be two ambiguities:
+==== Ambiguities ====
+Arrow functions do have an ambiguity with array key definitions and yield expressions that provide a key.
 
 <PHP>
 // Does this mean:
-//   1. Create an array key with the result of `($x)` and a value with `$x * 2`
+//   1. Create an array key of`$x` and a value with `$x * 2`
 //   2. Create an array with one value that is an anonymous function
-[($x) => $x * 2]
+[$x => $x * 2]
 
 // Does this mean:
-//   1. Yield a key with the result of `($x)` and a value with `$x * 2`
+//   1. Yield a key of `$x` and a value with `$x * 2`
 //   2. Yield an anonymous function
-yield ($x) => $x * 2;
+yield $x => $x * 2;
 </PHP>
 
-This RFC avoids the issue because the <php>^</php> token is prefixed:
+These ambiguities are solved by preferring the existing meanings. To obtain the semantics of arrow functions wrap the arrow function in parenthesis. For example:
 
 <PHP>
-// an array with an anonymous function
-[^($x) => $x * 2];
+// Create an array key of`$x` and a value with `$x * 2`
+[$x => $x * 2];
 
-// yields an anonymous function
-yield ^($x) => $x * 2;
+// Create an array with one member that is an arrow function
+[($x => $x * 2)];
+
+// Yield a key of `$x` and a value with `$x * 2`
+yield $x => $x * 2;
+
+// Yield an anonymous function
+yield ($x => $x * 2);
 </PHP>
-
-==== Why is the prefix a caret? ====
-Originally this RFC used a new token ''fn''. However, adding a new keyword was disliked by a few collaborators. So instead we looked at symbols. There aren't many available; only the symbols that do not have unary variants are available. These are: 
-
-  * asterisk (''*'')
-  * caret (''^'')
-  * pipe (''|'')
-  * forward slash (''/'')
-  * backslash (''<nowiki>\</nowiki>'')
-  * percent (''%'')
-  * greater than (''>'')
-  * less than (''<'')
-
-It turns out two of those have precedence in other languagues; Objective-C uses caret and Haskell uses the backslash. The caret was selected because it is used less often in PHP than the backslash currently is. Additionally this RFC author estimates that more people will be familiar with Objective-C than Haskell within our community making the caret symbol more relatable.
 
 ==== Backward Incompatible Changes ====
 There are no backwards incompatible changes.
 
 ==== Patches and Tests ====
-An implementation with tests can be found here: https://github.com/morrisonlevi/php-src/tree/arrow_functions. This patch is feature-complete. However, the primary implementation was written a long time ago and the master branch has changed significantly in the meantime. Please report any bugs you encounter.
+An old implementation with tests can be found here: https://github.com/morrisonlevi/php-src/tree/arrow_functions. This patch was feature-complete for an old version of this RFC that used ''^'' to prefix the function expressions. The implementation can still be used but portion that deals with the grammar must be rewritten.
 
 ==== PHP Version ====
 This RFC targets PHP 7.NEXT, currently version 7.2.
 
 ==== Voting ====
-The voting is split into two votes. The first is to accept the idea of arrow functions and requires 2/3 vote. The second is to decide whether ''use''d variables are bound by value or by reference and is a simple majority wins.
+Voting will be a simple Yes/No that requires 2/3 or more of the votes to be "Yes" to be accepted.
 
 -----
 
 <doodle title="Accept arrow functions? (2/3 required)" auth="levijm" voteType="single" closed="true">
    * Yes
    * No
-</doodle>
-
------
-
-<doodle title="Should used variables be bound by value or by reference? (majority wins)" auth="levijm" voteType="single" closed="true">
-   * Value
-   * Reference
 </doodle>
 
 -----
@@ -187,9 +135,9 @@ Taken from [[https://github.com/silexphp/Pimple/blob/62b5d317a83b02eea42b5b785b6
 };
 
 // with arrow function:
-$extended = ^$c => $callable($factory($c), $c);</PHP>
+$extended = $c => $callable($factory($c), $c);</PHP>
 
-This reduces the amount of boilerplate from 44 characters down to 5.
+This reduces the amount of boilerplate from 44 characters down to 4.
 
 -----
 
@@ -200,9 +148,9 @@ Taken from [[https://github.com/doctrine/dbal/blob/master/lib/Doctrine/DBAL/Sche
 });
 
 // with arrow function
-$this->existingSchemaPaths = array_filter($paths, ^$v => in_array($v, $names));</PHP>
+$this->existingSchemaPaths = array_filter($paths, $v => in_array($v, $names));</PHP>
 
-This reduces the amount of boilerplate from 31 characters down to 5.
+This reduces the amount of boilerplate from 31 characters down to 4.
 
 -----
 
@@ -216,7 +164,7 @@ The complement function as found in many libraries:
 
 // with arrow function:
 function complement(callable $f) {
-    return ^(... $args) => !$f(... $args);
+    return (... $args) => !$f(... $args);
 }</PHP>
 
 === Longer Examples ===
@@ -241,12 +189,12 @@ Taken from Pinq's example in their [[https://github.com/TimeToogo/Pinq|README.md
 With arrow functions:
 
 <PHP>$youngPeopleDetails = $people
-    ->where(^$row => $row['age'] <= $maxAge)
-    ->orderByAscending(^$row => $row['firstName'])
-    ->thenByAscending(^row => $row['lastName'])
+    ->where($row => $row['age'] <= $maxAge)
+    ->orderByAscending($row => $row['firstName'])
+    ->thenByAscending(row => $row['lastName'])
     ->take(50)
-    ->indexBy(^$row => $row['phoneNumber'])
-    ->select(^$row => [
+    ->indexBy($row => $row['phoneNumber'])
+    ->select($row => [
         'fullName'    => $row['firstName'] . ' ' . $row['lastName'],
         'address'     => $row['address'],
         'dateOfBirth' => $row['dateOfBirth'],
@@ -269,8 +217,8 @@ echo $result; //6
 
 // with arrow functions:
 $result = Collection::from([1, 2])
-    ->map(^$v => $v * 2)
-    ->reduce(^($tmp, $v) => $tmp + $v, 0);
+    ->map($v => $v * 2)
+    ->reduce(($tmp, $v) => $tmp + $v, 0);
 
 echo $result; //6
 </PHP>
@@ -302,13 +250,13 @@ And with arrow functions:
 
 <PHP>function groupByKey($collection, $key)
 {
-    $generatorFactory = ^() =>
-        groupBy(
+    $generatorFactory =
+        () => groupBy(
             filter(
                 $collection,
-                ^$item => isCollection($item) && has($item, $key)
+                $item => isCollection($item) && has($item, $key)
             ),
-            ^$value => get($value, $key);
+            $value => get($value, $key);
         );
 
     return new Collection($generatorFactory);
@@ -324,5 +272,9 @@ Some languages permit multi-statement closures with a syntax like:
     stmt2;
     //…
 }</PHP>
+In this case nothing would be automatically returned. This feature was included in the short closures RFC but there were two primary complaints about it:
 
-In this case nothing would be automatically returned. It would be necessary to keep the caret prefix if this was added to PHP.
+  * If you are specifying multiple statements doesn't that work against the purpose of being concise and short? 
+  * Auditing the implicitly bound variables becomes more difficult as the number of statements increase.
+
+This RFC omitted this feature for these reasons. If arrow functions are accepted and become more common it may make sense to revisit this feature.
