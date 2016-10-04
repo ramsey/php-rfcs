@@ -6,33 +6,29 @@
   * First Published at: http://wiki.php.net/rfc/replace_parse_url
 
 ===== Introduction =====
-This RFC came about for an attempt to resolve [[https://bugs.php.net/bug.php?id=72811|Bug #72811]].  In the attempt, discussion shifted from trying to patch the current implementation of ''parse_url()'' to replacing it with an re2c based parser.  The current implementation of ''parse_url()'' does not respect [[https://tools.ietf.org/html/rfc3986|RFC 3986]] with regard to most of the components of a URL.  The bug in question noted that
+This RFC came about for an attempt to resolve [[https://bugs.php.net/bug.php?id=72811|Bug #72811]].  In the attempt, discussion shifted from trying to patch the current implementation to more generally replacing the current one.  The current implementation of ''parse_url()'' does not respect [[https://tools.ietf.org/html/rfc3986|RFC 3986]] with regard to most of the components of a URL.
+
+The RFC proposes replacing the current implementation of ''parse_url()'' using a re2c based parser that will be strict to the RFC when parsing URI's.
+
+===== Reasoning =====
+The bug described an issue where using ''parse_url()'' with an IPv4 address would correctly parse the host, but with IPv6 it would not.
 
 <file php>
 <?php
 var_dump(parse_url("127.0.0.1:80", PHP_URL_HOST));
+var_dump(parse_url("[::1]:80", PHP_URL_HOST));
 
 /* Outputs:
 string(9) "127.0.0.1"
-*/
-</file>
-
-While we all may agree that this is sensible, and totally expected, it is actually a lie.  That is not how the RFC defines how that string should be interpreted.  It should parse as a single PATH element ''string(12) "127.0.0.1:80"''.  Why?  Well the RFC defines the ''hier-part'', which contains the host portion, of the URI to be after a double-slash, to which the example lacks.  This would result in the ''path-noscheme'' portion of the parsing to match beginning at the ''1'' and fill the path until a ''?'' or ''#'' is found.
-
-So a RFC standard implementation should be parsed as such:
-<file php>
-<?php
-var_dump(parse_url("127.0.0.1:80", PHP_URL_HOST));
-var_dump(parse_url("127.0.0.1:80", PHP_URL_PATH));
-
-/* Outputs:
 NULL
-string(12) "127.0.0.1:80"
 */
 </file>
 
-The bug does state that the parsing difference between IPv4 address and IPv6 addresses are handled differently (in the sense that the IPv4 parsing isn't standards compliant).  However, according to the RFC, the simple case the user reported in the bug exists per the spec.
+While we may agree the that former line is sensible and maybe expected; the behavior is contrary to how the RFC defines parsing a URI.  To be compliant it should parse as a single PATH element ''string(12) "127.0.0.1:80"''.  Why?  The RFC defines the ''host'' as a component of the ''authority''.  The authority is only parsed if it's preceded by a double-slash.  Since the above example lacks a double-slash, the ''authority'' portion of the ''hier-part'' should not be processed, and the example would match into the ''path-rootless'' portion.
 
+The bug does state that the parsing difference between IPv4 address and IPv6 addresses are handled differently (in the sense that the IPv4 parsing isn't standards compliant).  However, according to the RFC, the IPv6 case the user reported in the bug is accurate per the spec.  None of the path elements permit a ''['' as the first character of the path, so the IPv6 formatted line should be NULL.
+
+An accurate example of standards compliant parsing:
 <file php>
 <?php
 var_dump(parse_url("127.0.0.1:80", PHP_URL_PATH));
@@ -44,8 +40,7 @@ NULL
 */
 </file>
 
-This is due to the rules of the path, which allow a path to begin with a ''/'', or an alpha-numeric character.  Paths can not being with a ''['', and so the IPv6 formatted URI fails.  But with the above, we are basing what we expect to be the output based on a standards poor format.  A proper look at getting the correct HOST output for both an IPv4 and IPv6 example follows
-
+With that in mind, a correct example of parsing URI's to acquire the host portion, per the bugs request would look similar to the following:
 <file php>
 <?php
 var_dump(parse_url("127.0.0.1:80/index.php", PHP_URL_HOST));
