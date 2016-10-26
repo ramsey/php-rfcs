@@ -1,5 +1,5 @@
 ====== PHP RFC: Debugging PDO Prepared Statement Emulation ======
-  * Version: 0.2
+  * Version: 0.3
   * Date: 2016-10-17
   * Author: Adam Baratz adambaratz@php.net
   * Status: Under Discussion
@@ -13,59 +13,7 @@ If you're a PHP developer, this can add time to the development process. Dependi
 If you're a PHP internals developer, this prevents you from writing good .phpt tests against pdo_sql_parser.re. Without being able to inspect the raw query string, you can only test the effects of the queries it generates. For example, you might want to verify an int is quoted as 1 and not '1'. A database might cast the string to an int, doing the right thing with it, but obscuring that to the developer.
 
 ===== Proposal =====
-People who use emulated prepared statements should be able to debug them within userland, without using additional tools. PDO already provides some debug functionality in the form of ''PDOStatement::debugDumpParams()''. The goal would be to offer another slice on PDO internals, not to create another path for developers to communicate with a database. I would like to discuss three possible solutions to this problem.
-
-==== Consistency Between Prepared Statement Emulation And PDO::quote() ====
-The piece of functionality that usually needs to be debugged is how values are escaped. There is already a method, ''PDO::quote()'', that is meant to reveal this, but it typically behaves differently from the prepared statement emulator:
-
-<code php>
-$db = new PDO(...);
-
-$stmt = $db->query('SELECT :int');
-$stmt->bindValue(':int', 1, PDO::PARAM_INT);
-$stmt->execute(); // => SELECT 1
-
-$stmt = $db->query('SELECT ' . $db->quote(1, PDO::PARAM_INT));
-$stmt->execute(); // => SELECT '1'
-</code>
-
-I say typically, because the behavior of PDO::quote() is determined by a driver's [[https://github.com/php/php-src/blob/master/ext/pdo/php_pdo_driver.h#L302|quoter]] function. While these functions are given the specified parameter type, they all ignore that value and assume all input should be handled as a string.
-
-Currently, the prepared statement emulator escapes values like [[https://github.com/php/php-src/blob/master/ext/pdo/pdo_sql_parser.re#L251|this]]:
-  * Bool, int, and null values are handled within the emulator.
-  * Other values have their zvals cast to a string, which is passed to the driver's quoter function.
-
-This logic could be moved to a common PDO C API, which ''PDO::quote()'' could invoke. If a driver didn't define a quoter function, ''PDO::quote()'' could continue to return false.
-
-This approach doesn't feel ideal. It would be difficult to work out how people expect ''PDO::quote()'' to behave. That method would be changed in different ways for different drivers. And it wouldn't allow full debugging of the emulator.
-
-==== PDO::DBLIB_ATTR_ACTIVE_QUERY_STRING ====
-Since prepared statements are only mandatory for pdo_dblib, a driver-specific attribute could produce the parsed query:
-
-<code php>
-$db = new PDO(...);
-
-// works with statements without bound values
-$stmt = $db->query('SELECT 1');
-var_dump($stmt->getAttribute(PDO::DBLIB_ATTR_ACTIVE_QUERY_STRING)); // => string(8) "SELECT 1"
-
-$stmt = $db->prepare('SELECT :string');
-$stmt->bindValue(':string', 'foo');
-
-// returns unparsed query before execution
-var_dump($stmt->getAttribute(PDO::DBLIB_ATTR_ACTIVE_QUERY_STRING)); // => string(14) "SELECT :string"
-
-// returns parsed query after execution
-$stmt->execute();
-var_dump($stmt->getAttribute(PDO::DBLIB_ATTR_ACTIVE_QUERY_STRING)); // => string(11) "SELECT 'foo'"
-</code>
-
-Since this would be a debug tool, the attribute shouldn't affect the state of the ''PDOStatement'' instance. You usually don't know something went wrong with the parsing until after execution, anyway.
-
-This is a slightly awkward use of an attribute -- the existing debug hook, ''PDOStatement::debugDumpParams()'', is a method -- and users of other drivers could benefit from the functionality. It doesn't feel like good design to push special behavior into individual drivers.
-
-==== PDOStatement::activeQueryString() ====
-Similar to the above, but as an API addition:
+People who use emulated prepared statements should be able to debug them within userland, without using additional tools. PDO already provides some debug functionality in the form of ''PDOStatement::debugDumpParams()''. The goal would be to offer another slice on PDO internals, not to create another path for developers to communicate with a database. I propose a new method, ''PDOStatement::activeQueryString()'':
 
 <code php>
 $db = new PDO(...);
@@ -85,27 +33,24 @@ $stmt->execute();
 var_dump($stmt->activeQueryString()); // => string(11) "SELECT 'foo'"
 </code>
 
-This feels like the least disruptive solution to this problem. If more guardrails are desired, an error could be raised via ''pdo_raise_impl_error()'' if emulation isn't active or if the parser hasn't been used yet.
+Since this would be a debug tool, the method shouldn't affect the state of the ''PDOStatement'' instance. For example, this method shouldn't trigger parsing or errors. You usually don't know something went wrong with the parsing until after execution, anyway. This means the method simply retrieves a value that already exists in memory.
 
 ===== Backward Incompatible Changes =====
-The first proposal could introduce functionality changes, but they would be in the interest of more consistent behavior across PDO.
+N/A
 
 ===== Proposed PHP Version(s) =====
 Next PHP 7.x.
 
-===== RFC Impact =====
-The second proposal would introduce a new constant.
-
 ===== Future Scope =====
-It's been suggested that PDO shouldn't allow prepare statement emulation. Since the mssql extension was deprecated in PHP 7 in favor of pdo_dblib, I don't think this is possible. But perhaps this functionality could be isolated in pdo_dblib as "grandfathered" functionality. If people feel strongly about this, the third proposal wouldn't be a good idea.
+It's been suggested that PDO shouldn't allow prepare statement emulation. Since the mssql extension was deprecated in PHP 7 in favor of pdo_dblib, I don't think this is possible.
+
+It's been suggested that this change would turn PDO into a leaky (or leakier) abstraction. I'd counter that this is strictly a tool that allows tests to expand their code coverage. If emulated prepared statements are being kept in PDO, we should be able to test the >700 LoC in the associated query parser.
 
 ===== Proposed Voting Choices =====
 This project requires a 50%+1 majority.
 
 ===== Patches and Tests =====
-A working implementation, with tests, of the third proposal: https://github.com/php/php-src/pull/2159
-
-If one of the other proposals is accepted, I could do the implementation myself.
+A working implementation with tests: https://github.com/php/php-src/pull/2159
 
 ===== References =====
 Initial discussion of this proposal on the internals mailing list: http://marc.info/?l=php-internals&m=147638162506291&w=2
