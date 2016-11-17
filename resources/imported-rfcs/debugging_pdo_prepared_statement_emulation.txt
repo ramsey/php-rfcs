@@ -1,8 +1,8 @@
 ====== PHP RFC: Debugging PDO Prepared Statement Emulation ======
-  * Version: 0.4
+  * Version: 0.3
   * Date: 2016-10-17
   * Author: Adam Baratz adambaratz@php.net
-  * Status: In Discussion
+  * Status: Accepted
   * First Published at: https://wiki.php.net/rfc/debugging_pdo_prepared_statement_emulation
 
 ===== Introduction =====
@@ -13,48 +13,27 @@ If you're a PHP developer, this can add time to the development process. Dependi
 If you're a PHP internals developer, this prevents you from writing good .phpt tests against pdo_sql_parser.re. Without being able to inspect the raw query string, you can only test the effects of the queries it generates. For example, you might want to verify an int is quoted as 1 and not '1'. A database might cast the string to an int, doing the right thing with it, but obscuring that to the developer.
 
 ===== Proposal =====
-People who use emulated prepared statements should be able to debug them within userland, without using additional tools. PDO already provides some debug functionality in the form of ''PDOStatement::debugDumpParams()''. This method would be extended to include the parsed query string:
+People who use emulated prepared statements should be able to debug them within userland, without using additional tools. PDO already provides some debug functionality in the form of ''PDOStatement::debugDumpParams()''. The goal would be to offer another slice on PDO internals, not to create another path for developers to communicate with a database. I propose a new method, ''PDOStatement::activeQueryString()'':
 
 <code php>
-/* Execute a prepared statement by binding PHP variables */
-$calories = 150;
-$colour = 'red';
+$db = new PDO(...);
 
-$sth = $dbh->prepare('SELECT name, colour, calories
-    FROM fruit
-    WHERE calories < ? AND colour = ?');
-$sth->bindParam(1, $calories, PDO::PARAM_INT);
-$sth->bindValue(2, $colour, PDO::PARAM_STR);
-$sth->execute();
+// works with statements without bound values
+$stmt = $db->query('SELECT 1');
+var_dump($stmt->activeQueryString()); // => string(8) "SELECT 1"
 
-$sth->debugDumpParams();
+$stmt = $db->prepare('SELECT :string');
+$stmt->bindValue(':string', 'foo');
 
-/*
+// returns unparsed query before execution
+var_dump($stmt->activeQueryString()); // => string(14) "SELECT :string"
 
-Output:
-
-SQL: [82] SELECT name, colour, calories
-    FROM fruit
-    WHERE calories < ? AND colour = ?
-Parsed SQL: [88] SELECT name, colour, calories
-    FROM fruit
-    WHERE calories < 150 AND colour = 'red'
-Params:  2
-Key: Position #0:
-paramno=0
-name=[0] ""
-is_param=1
-param_type=1
-Key: Position #1:
-paramno=1
-name=[0] ""
-is_param=1
-param_type=2
-
-*/
+// returns parsed query after execution
+$stmt->execute();
+var_dump($stmt->activeQueryString()); // => string(11) "SELECT 'foo'"
 </code>
 
-The "Parsed SQL" section will only be shown if the prepared statement emulation is enabled.
+Since this would be a debug tool, the method shouldn't affect the state of the ''PDOStatement'' instance. For example, this method shouldn't trigger parsing or errors. You usually don't know something went wrong with the parsing until after execution, anyway. This means the method simply retrieves a value that already exists in memory.
 
 ===== Backward Incompatible Changes =====
 N/A
@@ -63,18 +42,23 @@ N/A
 Next PHP 7.x.
 
 ===== Future Scope =====
-It's been suggested that PDO shouldn't allow prepare statement emulation. This new functionality would only engage if emulation is enabled, so it will self-destruct if emulation is dropped.
+It's been suggested that PDO shouldn't allow prepare statement emulation. Since the mssql extension was deprecated in PHP 7 in favor of pdo_dblib, I don't think this is possible.
+
+It's been suggested that this change would turn PDO into a leaky (or leakier) abstraction. I'd counter that this is strictly a tool that allows tests to expand their code coverage. If emulated prepared statements are being kept in PDO, we should be able to test the >700 LoC in the associated query parser.
 
 ===== Proposed Voting Choices =====
 This project requires a 50%+1 majority.
 
-<doodle title="Debugging PDO Prepared Statement Emulation v0.4" auth="abaratz" voteType="single" closed="false">
+<doodle title="Debugging PDO Prepared Statement Emulation" auth="abaratz" voteType="single" closed="true">
    * Yes
    * No
 </doodle>
 
+===== Patches and Tests =====
+A working implementation with tests: https://github.com/php/php-src/pull/2159
+
 ===== References =====
-Initial discussion of this proposal on the internals mailing list:
-  * http://marc.info/?l=php-internals&m=147638162506291&w=2
-  * http://marc.info/?l=php-internals&m=147734024403899&w=2
-  * http://marc.info/?l=php-internals&m=147673258418764&w=2
+Initial discussion of this proposal on the internals mailing list: http://marc.info/?l=php-internals&m=147638162506291&w=2
+
+===== Implementation =====
+This feature was implemented in PHP 7.2 ([[https://github.com/php/php-src/commit/83086d9a72675bad2b2560c6f427d0c1f1d1eba0|83086d9a72675bad2b2560c6f427d0c1f1d1eba0]]).
