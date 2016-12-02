@@ -8,12 +8,13 @@
 
 ===== Introduction =====
 
-This RFC proposes introduction of immutable classes and properties. Currently PHP lacks native support for immutability. Because of that user-land applications are using third party libraries or resort to custom implementations and still there is no easy enforcement of immutability. Introducing this feature would help bring one unified solution to this problem, and also it would remove unnecessary logic from user-land applications.
+This RFC proposes introduction of immutable classes and properties. Currently the only way of achieving immutability is trough encapsulation. Because of that user-land applications are using third party libraries or resort to custom implementations and still there is no easy enforcement of immutability. Introducing this feature would help bring one unified solution to this problem, and also it would remove unnecessary logic from user-land applications.
+If those mechanizsm is utilized, developer can be sure that he is programming with no side effects, meaning that state of the object can not be changed with developer beeing unaware of that. This especialy comes hand in hand with concurrency when we can guarantee that threads will always read the same value.
 
 
 **Pros**
   - Immutability guaranteed by language instead of user-land implementation.
-  - Memory optimizations.
+  - Programming with no side effects.
   - Safe for concurrency. 
   - Value objects, DTO's etc. can be easily created.
   - Properties can be public which removes need for getters without allowing state modification.
@@ -23,43 +24,11 @@ This RFC proposes introduction of immutable classes and properties. Currently PH
   - (Please point it out more disadvantages)
 
 
-**Before**
-<code php>
-<?php
-
-class Email {
-  private $_email;
-
-  public function __construct ($email) {
-    // validation
-
-    $this->_email = $email;
-  }
-
-  public function getValue() {
-     return $this->_email;
-  }
-}
-</code>
-
-**After**
-<code php>
-<?php
-
-immutable class Email {
-  public $email;
-
-  public function __construct ($email) {
-    // validation
-
-    $this->email = $email;
-  }
-}
-</code>
-
 ===== Proposal =====
 
-Class defined as immutable will imply immutability across all of it's properties by default. After constructor returns, it will not be possible to modify state of immutable properties from any scope.
+==== Immutable Class ====
+
+Class defined as immutable will imply immutability across all of it's properties by default. After object is constructor, it is not possible to modify state of object from any scope.
 
 <code php>
 
@@ -67,8 +36,6 @@ immutable class Email {
   public $email;
 
   public function __construct ($email) {
-    // validation
-
     $this->email = $email;
   }
 }
@@ -78,24 +45,7 @@ $email->email = "bar@php.net" // Call will result in Fatal Error
 
 </code>
 
-Regular classes can define immutability per property.
-
-<code php>
-class Email {
-  public immutable $email;
-
-  public function __construct ($email) {
-    // validation
-
-    $this->email = $email;
-  }
-}
-
-$email = new Email("foo@php.net");
-$email->email = "bar@php.net" // Call will result in Fatal Error
-</code>
-
-Any class that extends immutable class must be also declared as immutable.
+Changes to inheritance are made to add constraints when extending a immutable class, child class must also be immutable in order to to preserve immutability across whole object.
 
 <code php>
 immutable class Foo{}
@@ -103,7 +53,44 @@ class Bar extends Foo{} // Will result in Fatal Error
 </code>
 
 
-It will not be possible to assign value by reference to immutable property.
+==== Immutable Properties ====
+
+Classes have ability to enforce immutability to only subset of properties if needed, in that case immutability will be implied only on properties that are delared immutable.
+
+<code php>
+class User {
+  private $id;
+  public immutable $email;
+
+  public function __construct ($id, $email) {
+    $this->id = $id;
+    $this->email = $email;
+  }
+}
+</code>
+
+
+If immutable property contains object, to preserve immutability, object that is beeing assigned to immutable property must also immutable.
+<code php>
+immutable class Email{}
+
+class User {
+  public immutable $email;
+
+  public function __construct (Email $email) {
+    $this->email = $email;
+  }
+}
+</code>
+
+If immutable property of parent class is overridden in child class, it has to be declared as immutable.
+Since focus of this RFC is on immutable objects, having static properties in immutable classes will result in compile error.
+
+
+==== References ====
+
+Assigning by references to immutable properties will result with error, otherwise object looses controll over properties and immutability can be broken.
+
 <code php>
 immutable class Email {
   public $email;
@@ -118,38 +105,6 @@ immutable class Email {
 $email = new Email("foo@php.net");
 $emailRef = &$email->email;
 $emailRef = "bar@php.net" // Call will result in Fatal Error
-</code>
-
-It will not be possible to assign value by reference to immutable property.
-<code php>
-immutable class Email {
-  public $email;
-
-  public function __construct ($email) {
-    // validation
-
-    $this->email = $email;
-  }
-}
-</code>
-
-Interfaces can be declared as immutable which results requirement that any class implementing immutable interface must be declared as immutable..
-
-<code php>
-
-immutable interface ValueObject {}
-
-class Foo  implements ValueObject{
-  public $foo;
-
-  public function __construct ($foo) {
-    // validation
-
-    $this->foo = $foo;
-  }
-}
-
-// Will result in a error because Foo is not immutable class but implements immutable interface.
 </code>
 
 
@@ -299,213 +254,6 @@ $oneThousand = new Money(1000, Currency::USD());
 
 There is no need for getters because internally immutable object if deeply frozen and none of his properties cannot be written anymore. All properties accepts scalar values or objects which implements immutable classes so there is high guarantee such Money object will keep his internal state untouched.
 
-==== URI ====
-Uri's domain is like Money complex ValueObjects and can be presented for eg. in this way.
-
-<code php>
-class Scheme {
-
-    private $protocol;
-
-    private function __construct(string $protocol) {
-        $this->protocol = $protocol;
-    }
-
-    public function getProtocol()
-    {
-        return $this->protocol;
-    }
-
-    public static function HTTP() {
-        return new Scheme('http');
-    }
-}
-
-class UserInfo {
-
-    private $username;
-    private $password;
-
-    public function __construct(string $username, string $password)
-    {
-        $this->username = $username;
-        $this->password = $password;
-    }
-
-    public function getUsername() : string
-    {
-        return $this->username;
-    }
-
-    public function getPassword() : string
-    {
-        return $this->password;
-    }
-}
-
-class Authority {
-
-    private $host;
-    private $port;
-    private $userInfo;
-
-    public function __construct(string $host, int $port = 80, UserInfo $userInfo = null)
-    {
-        $this->host = $host;
-        $this->port = $port;
-        $this->userInfo = $userInfo;
-    }
-
-    public function getHost() : string
-    {
-        return $this->host;
-    }
-
-    public function getPort() : int
-    {
-        return $this->port;
-    }
-
-    public function getUserInfo() : UserInfo
-    {
-        return $this->userInfo;
-    }
-}
-
-class Path {
-
-    private $path;
-
-    public function __construct(string $path)
-    {
-        $this->path = $path;
-    }
-
-    public function getPath() : string
-    {
-        return $this->path;
-    }
-}
-
-class Uri {
-
-    private $scheme;
-    private $authority;
-    private $path;
-
-    public function __construct(Scheme $scheme, Authority $authority, Path $path)
-    {
-        $this->scheme = $scheme;
-        $this->authority = $authority;
-        $this->path = $path;
-    }
-
-    public function getScheme() : Scheme
-    {
-        return $this->scheme;
-    }
-
-    public function getAuthority() : Authority
-    {
-        return $this->authority;
-    }
-
-    public function getPath() : Path
-    {
-        return $this->path;
-    }
-}
-
-$phpNetUri = new Uri(Scheme::HTTP(), new Authority('php.net'), new Path('/downloads'));
-</code>
-
-After refactoring to immutable class implementation the model is getting simplier:
-
-<code php>
-immutable class Scheme {
-
-    /** @var string */
-    public $protocol;
-
-    private function __construct(string $protocol) {
-        $this->protocol = $protocol;
-    }
-    
-    public static function HTTP() {
-        return new Scheme('http');
-    }
-
-    public static function HTTPS() {
-        return new Scheme('https');
-    }
-}
-
-immutable class UserInfo {
-
-    /** @var string */
-    public $username;
-    /** @var string */
-    public $password;
-
-    public function __construct(string $username, string $password)
-    {
-        $this->username = $username;
-        $this->password = $password;
-    }
-}
-
-immutable class Authority {
-
-    /** @var string */
-    public $host;
-    /** @var int */
-    public $port;
-    /** @var UserInfo */
-    public $userInfo;
-
-    public function __construct(string $host, int $port = 80, UserInfo $userInfo = null)
-    {
-        $this->host = $host;
-        $this->port = $port;
-        $this->userInfo = $userInfo;
-    }
-}
-
-immutable class Path {
-
-    /** @var string */
-    public $path;
-
-    public function __construct(string $path)
-    {
-        $this->path = $path;
-    }
-}
-
-immutable class Uri {
-
-    /** @var Scheme */
-    public $scheme;
-    /** @var Authority */
-    public $authority;
-    /** @var Path */
-    public $path;
-
-    public function __construct(Scheme $scheme, Authority $authority, Path $path)
-    {
-        $this->scheme = $scheme;
-        $this->authority = $authority;
-        $this->path = $path;
-    }
-    
-    public function changeScheme(Scheme $scheme) : Uri {
-        return new self($scheme, $this->authority, $this->path);
-    }
-}
-
-$http = new Uri(Scheme::HTTP(), new Authority('php.net'), new Path('/downloads'));
-$https = $http->changeScheme(Scheme::HTTPS());
-</code>
 
 ===== Backward Incompatible Changes =====
 
@@ -523,7 +271,7 @@ No backward incompatible changes.
 No SAPI impact.
 
 ==== To Existing Extensions ====
- - Reflection.
+ - Reflection is patched.
 
 ==== To Opcache ====
 
@@ -555,7 +303,6 @@ Proposals require 2/3 majority
 [[https://github.com/php/php-src/compare/master...brzuchal:immutable]]
 
 
-
 ===== Implementation =====
 After the project is implemented, this section should contain 
   - the version(s) it was merged to
@@ -565,5 +312,5 @@ After the project is implemented, this section should contain
 ===== References =====
 
 
-
 ===== Rejected Features =====
+ - Immutable interfaces
