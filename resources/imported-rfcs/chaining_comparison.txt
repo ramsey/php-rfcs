@@ -6,7 +6,7 @@
   * First Published at: http://wiki.php.net/rfc/chaining_comparison
 
 ===== Introduction =====
-The point of this RFC is to allow the chaining together of [<, <=, >, >=] comparison operations to allow for easy range checking.  Today, to determine if a variable is between two values you end up having to do two operations for the check, rather than a single check.
+The point of this RFC is to allow the chaining together of comparison and equality operations [''==, !=, !==, ===, <, <=, >, >=''] to allow arbitrary comparisons.  The initial request that spawned this RFC was for interval checking.
 
 Today such comparisons must be written as such:
 <file php>
@@ -29,31 +29,73 @@ if (0 < $a < 100) {
 </file>
 
 ===== Proposal =====
+The proposal creates a new AST operation type ''ZEND_AST_COMPARE_OP'' which will be compiled in a left-precedence required manor.  In doing this compilation we introduce a new means of emitting an operation, by noting where a ''JMPZ_EX'' may need to exist, depending if we are continuing the compare chain.  This will shift operations that may have been emitted by compiling the right side of this AST compare to allow jumping over them if the left side of the operation is evaluated to false.
+
+The proposal also changes the precedence of the equality, and comparison, operations to being left recursive.  This is required, since if the left node of this operation is true, and it itself is a comparison operation, it should return the right node (for less than) to be used in the next comparison op.  Example: 
+
+<file php>
+<?php
+$a = 1;
+$b = 10;
+
+var_dump($a < 5 < $b++);
+
+/*
+ * AST Dump
+ *   AST_CALL
+ *     expr: AST_NAME
+ *         flags: NAME_NOT_FQ (1)
+ *       name: "var_dump"
+ *     args: AST_ARG_LIST
+ *        0: AST_COMPARE_OP
+ *            flags: COMPARE_IS_SMALLER (19)
+ *            left: AST_COMPARE_OP
+ *                flags: COMPARE_IS_SMALLER (19)
+ *                left: AST_VAR
+ *                    name: "a"
+ *                right: 5
+ *            right: AST_POST_INC
+ *                var: AST_VAR
+ *                    name: "b"
+ */
+
+/*
+ * OPCodes
+ *
+ *    2        INIT_FCALL                                               'var_dump'
+ *    3        IS_SMALLER                                       ~4      !0, 5
+ *    4      > JMPZ_EX                                          ~6      ~4, ->7
+ *    5    >   POST_INC                                         ~5      !1
+ *    6    >   IS_SMALLER                                       ~6      ~4, ~5
+ *    7    >   SEND_VAL                                                 ~6
+ *    8        DO_ICALL                                                 
+ */
+</file>
+
+So we can see what this feature will do internally.  Speaking directly at the OPCodes we see how our ''JMPZ_EZ'' code injection works.  Since the first evaluated ''IS_SMALLER'' op is the left side-recursive of the expression, we determine this expressions result.  If the result evaluates to true (and if you look at the code it checks to see if there's an extended_value flag) we continue to the ''POST_INC'' otherwise we skip to the sending of the value which would be false.
 
 ===== Backward Incompatible Changes =====
-This does not break any existing code
+No BC Breaking changes expected
 
 ===== Proposed PHP Version(s) =====
 Next PHP (currently 7.2)
 
 ===== RFC Impact =====
 ==== To Opcache ====
-Yes, we're adding new JMP codes when chainging to ensure false values correctly jump over any pre/post inc/dev ops from eval.
+Yes, we're adding new JMPZ_EX codes when chaining to ensure false values correctly jump over any pre/post inc/dev ops from eval.
 
 ===== Open Issues =====
-Make sure there are no open issues when the vote starts!
 
 ===== Unaffected PHP Functionality =====
-This does not touch the other binary-op comparisons [==, ===, <=>]
+Does not alter the operation of the comparison Spaceship [<=>] operator.
 
 ===== Future Scope =====
-Discuss if equality, or spaceship, would need this chaining:  '''$a == $b == $c''' could be possible.
 
 ===== Proposed Voting Choices =====
 Requires 2/3 vote
 
 ===== Patches and Tests =====
-Work In Progress: https://github.com/php/php-src/compare/master...bp1222:multi-compare
+A Proposed Implementaiton: https://github.com/php/php-src/compare/master...bp1222:multi-compare
 
 Will need eyes of those more familiar with AST/VM to review.
 
