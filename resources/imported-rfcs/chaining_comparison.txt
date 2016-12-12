@@ -29,6 +29,7 @@ if (0 < $a < 100) {
 </file>
 
 ===== Proposal =====
+==== Comparison Chaining ====
 The proposal creates a new AST operation type ''ZEND_AST_COMPARE_OP'' which will be compiled in a left-precedence required manor.  In doing this compilation we introduce a new means of emitting an operation, by noting where a ''JMPZ_EX'' may need to exist, depending if we are continuing the compare chain.  This will shift operations that may have been emitted by compiling the right side of this AST compare to allow jumping over them if the left side of the operation is evaluated to false.
 
 The proposal also changes the precedence of the equality, and comparison, operations to being left recursive.  This is required, since if the left node of this operation is true, and it itself is a comparison operation, it should return the right node (for less than) to be used in the next comparison op.  Example: 
@@ -38,25 +39,26 @@ The proposal also changes the precedence of the equality, and comparison, operat
 $a = 1;
 $b = 10;
 
-var_dump($a < 5 < $b++);
+var_dump($a < 5 < $b++); // bool(true)
 
 /*
  * AST Dump
- *   AST_CALL
- *     expr: AST_NAME
- *         flags: NAME_NOT_FQ (1)
- *       name: "var_dump"
- *     args: AST_ARG_LIST
- *        0: AST_COMPARE_OP
- *            flags: COMPARE_IS_SMALLER (19)
- *            left: AST_COMPARE_OP
- *                flags: COMPARE_IS_SMALLER (19)
- *                left: AST_VAR
- *                    name: "a"
- *                right: 5
- *            right: AST_POST_INC
- *                var: AST_VAR
- *                    name: "b"
+ *
+ * 2:  AST_CALL
+ *      expr: AST_NAME
+ *          flags: NAME_NOT_FQ (1)
+ *        name: "var_dump"
+ *      args: AST_ARG_LIST
+ *         0: AST_COMPARE_OP
+ *             flags: COMPARE_IS_SMALLER (19)
+ *             left: AST_COMPARE_OP
+ *                 flags: COMPARE_IS_SMALLER (19)
+ *                 left: AST_VAR
+ *                     name: "a"
+ *                 right: 5
+ *             right: AST_POST_INC
+ *                 var: AST_VAR
+ *                     name: "b"
  */
 
 /*
@@ -72,7 +74,110 @@ var_dump($a < 5 < $b++);
  */
 </file>
 
-So we can see what this feature will do internally.  Speaking directly at the OPCodes we see how our ''JMPZ_EZ'' code injection works.  Since the first evaluated ''IS_SMALLER'' op is the left side-recursive of the expression, we determine this expressions result.  If the result evaluates to true (and if you look at the code it checks to see if there's an extended_value flag) we continue to the ''POST_INC'' otherwise we skip to the sending of the value which would be false.
+So we can see what this feature will do internally.  Speaking directly at the OPCodes we see how our ''JMPZ_EX'' code injection works.  Since the first evaluated ''IS_SMALLER'' op is the left side-recursive of the expression, we determine this expressions result.  If the result evaluates to true (and if you look at the code it checks to see if there's an extended_value flag) we continue to the ''POST_INC'' otherwise we skip to the sending of the value which would be false.
+
+==== Equality Chaining ====
+The proposal is also extended to allow chaining of equality operators.  However, equality operators are at a higher (or not as significant) precedence as the comparison operations.  This enforces equality operators operate on either booleans, or values that will be compared to a boolean value.  Example:
+
+<file php>
+<?php
+$a = 1;
+$b = 10;
+
+var_dump($a == 1 === true); // bool(true)
+
+/*
+ * AST Dump
+ *
+ *   2: AST_CALL
+ *       expr: AST_NAME
+ *           flags: NAME_NOT_FQ (1)
+ *           name: "var_dump"
+ *       args: AST_ARG_LIST
+ *           0: AST_COMPARE_OP
+ *               flags: COMPARE_IS_IDENTICAL (15)
+ *               left: AST_COMPARE_OP
+ *                   flags: COMPARE_IS_EQUAL (17)
+ *                   left: AST_VAR
+ *                       name: "a"
+ *                   right: 1
+ *               right: AST_CONST
+ *                   name: AST_NAME
+ *                       flags: NAME_NOT_FQ (1)
+ *                       name: "true"
+ */
+
+/*
+ * OPCodes
+ *
+ *   2        INIT_FCALL                                               'var_dump'
+ *   3        IS_EQUAL                                         ~4      !0, 1
+ *   4      > JMPZ_EX                                          ~5      ~4, ->6
+ *   5    >   IS_IDENTICAL                                     ~5      ~4, <true>
+ *   6    >   SEND_VAL                                                 ~5
+ */
+</file>
+
+==== Combined Uses (Open Discussion Topic)====
+One of the concerns raised in the implementation of this feature would be how to handle expressions such as ''1 < 2 == 3 < 4''.  This is valid syntax in PHP 7.1 and before that essentially checks if true == true.  The current implementation respects the current syntax, by evaluating the comparison operators before equality operators.  Combining the two chaining methods we can write a new expression like this example:
+
+<file php>
+<?php
+$a = 1;
+$b = 4;
+$c = 10;
+
+var_dump($a < 2 == 3 < $b < 5 == 20 > $c); // bool(true)
+
+/*
+ * AST Dump
+ *
+ *  3: AST_CALL
+ *       expr: AST_NAME
+ *           flags: NAME_NOT_FQ (1)
+ *           name: "var_dump"
+ *       args: AST_ARG_LIST
+ *           0: AST_COMPARE_OP
+ *               flags: COMPARE_IS_EQUAL (17)
+ *               left: AST_COMPARE_OP
+ *                   flags: COMPARE_IS_EQUAL (17)
+ *                   left: AST_COMPARE_OP
+ *                       flags: COMPARE_IS_SMALLER (19)
+ *                       left: AST_VAR
+ *                           name: "a"
+ *                       right: 2
+ *                   right: AST_COMPARE_OP
+ *                       flags: COMPARE_IS_SMALLER (19)
+ *                       left: AST_COMPARE_OP
+ *                           flags: COMPARE_IS_SMALLER (19)
+ *                           left: 3
+ *                           right: AST_VAR
+ *                               name: "b"
+ *                       right: 5
+ *               right: AST_COMPARE_OP
+ *                   flags: COMPARE_IS_SMALLER (19)
+ *                   left: 20
+ *                   right: AST_VAR
+ *                       name: "c"
+ */
+
+/*
+ * OPCodes
+ *
+ *   3        INIT_FCALL                                               'var_dump'
+ *   4        IS_SMALLER                                       ~6      !0, 2
+ *   5      > JMPZ_EX                                          ~9      ~6, ->10
+ *   6    >   IS_SMALLER                                       ~7      3, !1
+ *   7      > JMPZ_EX                                          ~8      ~7, ->9
+ *   8    >   IS_SMALLER                                       ~8      ~7, 5
+ *   9    >   IS_EQUAL                                         ~9      ~6, ~8
+ *  10    > > JMPZ_EX                                          ~11     ~9, ->13
+ *  11    >   IS_SMALLER                                       ~10     !2, 20
+ *  12        IS_EQUAL                                         ~11     ~9, ~10
+ *  13    >   SEND_VAL                                                 ~11
+ *  14        DO_ICALL                                                 
+ */
+</file>
 
 ===== Backward Incompatible Changes =====
 No BC Breaking changes expected
@@ -85,6 +190,10 @@ Next PHP (currently 7.2)
 Yes, we're adding new JMPZ_EX codes when chaining to ensure false values correctly jump over any pre/post inc/dev ops from eval.
 
 ===== Open Issues =====
+====Should equality and comparison expressions be treated as same precedence?====
+This is a tough question.  It's essentially asking if an expression like ''1 < 2 == 3 < 4'' should be evaluated as ''(1 < 2) == (3 < 4)'' OR ''(1 < 2) && (2 == 3) && (3 < 4)''.
+
+Why is this even a question?  A majority of languages would evaluate the expression with the former interpretation.  However, Python does the latter.  The latter does enforce more of a "chaining" of these comparisons.  During discussion, this question should be addressed, as the underlying code to support either means is very minor.
 
 ===== Unaffected PHP Functionality =====
 Does not alter the operation of the comparison Spaceship [<=>] operator.
