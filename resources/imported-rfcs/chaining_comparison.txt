@@ -1,12 +1,13 @@
 ====== PHP RFC: Chaining Comparison ======
-  * Version: 0.1
-  * Date: 2016-12-08
-  * Author: David Walker (dave@mudsite.com), Richard Fussenegger (php@fleshgrinder.com)
+  * Version: 0.2
+  * Date: 2016-12-13
+  * Author: David Walker (dave@mudsite.com)
+  * Author: Richard Fussenegger (php@fleshgrinder.com)
   * Status: Draft
   * First Published at: http://wiki.php.net/rfc/chaining_comparison
 
 ===== Introduction =====
-The point of this RFC is to allow the chaining together of comparison and equality operations [''==, !=, !==, ===, <, <=, >, >=''] to allow arbitrary comparisons.  The initial request that spawned this RFC was for interval checking.
+The point of this RFC is to allow the chaining together of comparison and equality operations ''[==, !=, !==, ===, <, <=, >, >=]'' to allow arbitrary comparisons.  The initial request that spawned this RFC[1] was initially for interval checking.
 
 Today such comparisons must be written as such:
 <file php>
@@ -27,6 +28,8 @@ if (0 < $a < 100) {
     echo "Value is between 0 and 100\n";
 }
 </file>
+
+Discussion on the thread expanded the scope of the request to go from strictly interval checking to allowing arbitrary number of comparisons.  It evolved from there to expand to a majority of the comparison operations.
 
 ===== Proposal =====
 ==== Comparison Chaining ====
@@ -118,67 +121,6 @@ var_dump($a == 1 === true); // bool(true)
  */
 </file>
 
-==== Combined Uses (Open Discussion Topic)====
-One of the concerns raised in the implementation of this feature would be how to handle expressions such as ''1 < 2 == 3 < 4''.  This is valid syntax in PHP 7.1 and before that essentially checks if true == true.  The current implementation respects the current syntax, by evaluating the comparison operators before equality operators.  Combining the two chaining methods we can write a new expression like this example:
-
-<file php>
-<?php
-$a = 1;
-$b = 4;
-$c = 10;
-
-var_dump($a < 2 == 3 < $b < 5 == 20 > $c); // bool(true)
-
-/*
- * AST Dump
- *
- *  3: AST_CALL
- *       expr: AST_NAME
- *           flags: NAME_NOT_FQ (1)
- *           name: "var_dump"
- *       args: AST_ARG_LIST
- *           0: AST_COMPARE_OP
- *               flags: COMPARE_IS_EQUAL (17)
- *               left: AST_COMPARE_OP
- *                   flags: COMPARE_IS_EQUAL (17)
- *                   left: AST_COMPARE_OP
- *                       flags: COMPARE_IS_SMALLER (19)
- *                       left: AST_VAR
- *                           name: "a"
- *                       right: 2
- *                   right: AST_COMPARE_OP
- *                       flags: COMPARE_IS_SMALLER (19)
- *                       left: AST_COMPARE_OP
- *                           flags: COMPARE_IS_SMALLER (19)
- *                           left: 3
- *                           right: AST_VAR
- *                               name: "b"
- *                       right: 5
- *               right: AST_COMPARE_OP
- *                   flags: COMPARE_IS_SMALLER (19)
- *                   left: 20
- *                   right: AST_VAR
- *                       name: "c"
- */
-
-/*
- * OPCodes
- *
- *   3        INIT_FCALL                                               'var_dump'
- *   4        IS_SMALLER                                       ~6      !0, 2
- *   5      > JMPZ_EX                                          ~9      ~6, ->10
- *   6    >   IS_SMALLER                                       ~7      3, !1
- *   7      > JMPZ_EX                                          ~8      ~7, ->9
- *   8    >   IS_SMALLER                                       ~8      ~7, 5
- *   9    >   IS_EQUAL                                         ~9      ~6, ~8
- *  10    > > JMPZ_EX                                          ~11     ~9, ->13
- *  11    >   IS_SMALLER                                       ~10     !2, 20
- *  12        IS_EQUAL                                         ~11     ~9, ~10
- *  13    >   SEND_VAL                                                 ~11
- *  14        DO_ICALL                                                 
- */
-</file>
-
 ===== Backward Incompatible Changes =====
 No BC Breaking changes expected (see: Open Issues)
 
@@ -191,11 +133,12 @@ Yes, we're adding new JMPZ_EX codes when chaining to ensure false values correct
 
 ===== Open Issues =====
 ====Should equality and comparison expressions be treated as same precedence?====
-This is a tough question.  It's essentially asking if an expression like ''1 < 2 == 3 < 4'' should be evaluated as ''(1 < 2) == (3 < 4)'' OR ''(1 < 2) && (2 == 3) && (3 < 4)''.
+This is harder of a question that it seems.  What we are asking is how should we parse a seemingly simple expression:
+''1 < 2 == 3 < 4''
 
-Why is this even a question?  A majority of languages would evaluate the expression with the former interpretation.  However, Python, and WolframAlpha, appear to do the latter.  The latter does enforce more of a "chaining" of these comparisons.  During discussion, this question should be addressed, as the underlying code to support either means is very minor.
+Why is this even a question, much less a challenging one?  Well, a seemingly majority of languages ''[C, C++, Java, Ruby, Perl]'' all would tell you that the expression would evaluate to true.  However some, ''[WollframAlpha, Python]'' would evaluate that expression to false.  Some, like ''[Numbers, LibreOffice]'' will raise a syntax error, or give awkward answers.  The question we have is which way should PHP go with the evaluation of this expression?  Clearly we can ascertain that the true-evaluating languages have the precedence of the less-than operator more imporatant than that of the equality, so they check if true == true.  Whereas the false-evaluating languages treat comparisons and equality with the same precedence.  As such they compare 1 less than 2, 2 is-equal 3.  The latter group are apparently more strictly typed and won't compare bools to numbers, but even there we can see the precedence is equal, as it's comparing the result of the first expression into the next ''(1 < 2) == 3''
 
-If we do decide to proceed with the Python/Wolfram interpretation of a very chained left-to-right this would introduce a BC break as PHP 7.1 and prior do support the syntax ''expr1 < expr2 == expr3 < expr4'' to be interpreted as ''(expr1 < expr2) == (expr3 < expr4)'' where boolean == boolean.  If implemented as a strict left-to-right comparison, the new interpretation would be ''(expr1 < expr2) && (expr2 == expr3) && (expr3 < expr4)'' where boolean && boolean && boolean.  You can be explicit with parenthesis using strict-chaining to get the same result.
+It is important to point out that the example syntax is currently valid in PHP 7.1.  PHP 7.1 currently has a C-like precedence where ''[<, <=, >, >=]'' are a higher precedence than ''[==, !=, ===, !==]''.  Below are expressions and their return values in PHP 7.1, and with the two potential methods of evaluating that expression.
 
 <file php>
 <?php
@@ -220,17 +163,41 @@ var_dump(1 < 2 == 3 < 4 == 5 < 6) // bool(false)
 var_dump((1 < 2) == (3 < 4) == (5 < 6)) // bool(true)
 </file>
 
+====Should we allow user-defined right recursion?====
+Both proposed implementations currently, for non-equality, operations require a left-recursive chain.  In doing this, the right node of the left comparison, if evaluated to true, is returned up the tree for comparison.
+
+''1 < 2 < 3''
+
+What I mean by this, for this example, the compiler would have the first compiled AST with a left side of another comparison-op, and the right side of 3.  So it'd recurse and evaluate the left child, being 1 < 2.  If the node can evaluate, and evaluate to true rather than the return result being ''true'' it would be the result of the right node, in this case 2.  So when the parent node compiles the left-node, rather than the bool true being there, it's that childs right node of 2.  And would then compare 2 < 3.  Being a non-child node it'll here set the result to true.
+
+The question is should we allow users to define right recursion in the manor of
+
+''1 < (2 < 3)''
+
+This would then instruct the compiler to have the 'top' node have a left side of 1, and a right side of a comparison-op.  Should we be evaluating this as 1 < true, or, allow right-side defined recursion and return the left node for comparison with a 1 < (result of expr) := 1 < 2?
+
+This is a question when it comes to personal preference, and the short circuiting of expressions.  For example:
+
+''1 < 1 < $a++''
+
+With the above expression, the ''$a++'' would never run, so after the line ''$a'' would not be altered.  However, we could allow right recursion with
+
+''1 < (1 < $a++)''
+
+This writing would ensure ''$a++'' is evaluated in the chain of less than expressions.  However the above could easily be written with greater than expressions to prevent right-recursion
+
+''$a++ > 1 > 1''
+
+
+
 ===== Unaffected PHP Functionality =====
 Does not alter the operation of the comparison Spaceship [<=>] operator.
-
-===== Future Scope =====
 
 ===== Proposed Voting Choices =====
 Requires 2/3 vote
 
 ===== Patches and Tests =====
 Implementation #1: comparisons evaluated before equality: https://github.com/php/php-src/compare/master...bp1222:multi-compare
-
 Implementation #2: comparisons and equality evaluated together: https://github.com/php/php-src/compare/master...bp1222:multi-compare-equal-prec
 
 Will need eyes of those more familiar with AST/VM to review.
