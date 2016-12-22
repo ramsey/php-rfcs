@@ -160,34 +160,89 @@ var_dump((1 < 2) == (3 < 4) == (5 < 6)) // bool(true)
 </file>
 
 ==== Right Recursion ====
-Another syntax difference that could be BC problematic is with right-recursion of the chained expression.  Currently PHP will evaluate right recursive single expression comparisons.  The proposed feature would raise a compile time error doing this.  The example being:
+Another syntax difference that could be BC problematic is with right-recursion of the chained expression.  Currently PHP will evaluate right recursive single expression comparisons.  The proposed feature would raise a compile time error doing this.  The question is should it, or should we permit right-recursive chaining? The test case we can look at:
 
 <file php>
 <?php
-
-/*
- * PHP <= 7.1
- */
-var_dump(1 < (2 < 3); // bool(false) - in short it simplifies:  1 < (true) := false
-var_dump(1 < 2 == 3); // bool(true)
-var_dump(1 < 2 == 3 == 4); // Parse Error
-var_dump(1 < 2 == (3 == 4)); //bool(false)
-
-/*
- * Proposed Chaining
- */
-var_dump(1 < (2 <3)); // Compile Error
-var_dump(1 < 2 == 3 == 4); // bool(true) - evaluated: true == 3 == 4 := true == 4 := true
-var_dump(1 < 2 == (3 == 4)); //bool(false) - evaluated true == false := false
-
-/*
- * Possible change allowing right-recursive chaining
- */
-var_dump(1 < (2 < 3)); // bool(true) - evaluated as: 1 && (2 < 3) && (1 < 2) := true && true && true := true
-
+var_dump(1 < (2 < 3);
+var_dump(1 < 2 == 3);
+var_dump(1 < 2 == 3 == 4);
+var_dump(1 < 2 == (3 == 4));
 </file>
 
-The potential fix, is evaluated as such.  If it looks odd with the ''1 && ...'' that's because we evaluate left to right, and the left side there could have been ''$a++'', we want to ensure the post-inc operator is correctly run as we do evaluate left-to-right.
+We will go over how PHP 7.1 currently would evaluate each, and then how a right-recursive chain would pan out.
+<file php>
+<?php
+var_dump(1 < (2 < 3));
+/*
+ * 1 < (2 < 3) := 1 < true := false
+ */
+
+var_dump(1 < 2 == 3);
+/*
+ * 1 < 2 == 3 := true == 3 := true
+ */
+
+var_dump(1 < 2 == 3 == 4);
+/*
+ * Parse Error, unexpected ==
+ */
+
+var_dump(1 < 2 == (3 == 4));
+/*
+ * 1 < 2 == (3 == 4) := true == false := false
+ */
+</file>
+
+The current proposal (implemented) evaluation method.  You'll notice that we do permit right-recursion for equality operations.  This is due to the fact that equality operations will evaluate against boolean, or boolean-converted values.  Since you don't really care what the left-node of the right-recursive side is, you only care if the right side evaluates to true or not.
+<file php>
+<?php
+var_dump(1 < (2 < 3));
+/*
+ * Parse Error: No right recursion
+ */
+
+var_dump(1 < 2 == 3);
+/*
+ * 1 < 2 == 3 := true == 3 := true
+ */
+
+var_dump(1 < 2 == 3 == 4);
+/*
+ * 1 < 2 == 3 == 4 := (true == 3) == 4 := true == 4 := true
+ */
+
+var_dump(1 < 2 == (3 == 4));
+/*
+ * 1 < 2 == (3 == 4) := true == false := false
+ */
+</file>
+
+If however we permitted right recursive comparison operations we would evaluate as such:
+<file php>
+<?php
+var_dump(1 < (2 < 3));
+/*
+ * 1 < (2 < 3) := 1 && (2 < 3) && (1 < 2) := true && true && true := true
+ */
+
+var_dump(1 < 2 == 3);
+/*
+ * 1 < 2 == 3 := true == 3 := true
+ */
+
+var_dump(1 < 2 == 3 == 4);
+/*
+ * 1 < 2 == 3 == 4 := (true == 3) == 4 := true == 4 := true
+ */
+
+var_dump(1 < 2 == (3 == 4));
+/*
+ * 1 < 2 == (3 == 4) := true == false := false
+ */
+</file>
+
+If the first example in this last one looks a little odd, it's because it is.  We do design for short-cutting of a long expression when a fault is found to prevent further execution much like you have in ''if()'' statements.  However, we do process in a left-to-right manor.  So the first thing would require us to ensure the left most side evaluates to true, and if it wasn't ''1'' but rather ''$a++'', we'd want to ensure to get that left nodes potential opcodes to execute before comparing the right hand side.  Since we are chaining, we'd want to evaluate the right, then return the left node of it to be evaluated against the top's left node.  This, odd syntax is why I didn't implement a right-recursive chaining of comparison operations.
 
 ===== Unaffected PHP Functionality =====
 Does not alter the operation of the comparison Spaceship [<=>] operator.
