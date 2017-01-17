@@ -1,0 +1,201 @@
+====== PHP RFC: Your Title Here ======
+  * Version: 0.1
+  * Date: 2017-01-17
+  * Author: Richard Fussenegger <php@fleshgrinder.com>, Tim Behashvyly <tim.bezhashvyly@gmail.com>
+  * Status: Draft
+  * First Published at: https://wiki.php.net/rfc/disallow-multiple-constructor-calls
+
+===== Introduction =====
+Disallow multiple calls to an object’s constructor to ensure that the encapsulated data cannot be mutated even if an object is meant to be immutable. The goal is it to ensure that developers can trust their intuition about how things work instead of reading the documentation and to provide helpful errors from the compiler and runtime.
+
+===== Proposal =====
+PHP currently supports multiple calls to the magic <html>__construct</html> method of classes, this is in line with all other methods of a PHP class. This means that the following PHP code is perfectly legal. It illustrates both multiple calls to a constructor and explicit invocation of a constructor on the existing object (which in effect are multiple calls too):
+
+<code php>
+class A {
+
+    public function __construct() {
+        echo self::class , "\n";
+    }
+
+}
+
+class B extends A {
+
+    public function __construct() {
+        parent::__construct();
+        echo self::class , "\n";
+        parent::__construct();
+    }
+
+}
+
+$b = new B;
+$b->__construct();
+</code>
+
+Output of the above code is as follows:
+
+<code>
+A
+B
+A
+A
+B
+A
+</code>
+
+However, support for multiple calls to the constructor is highly unintuitive for developers and can result in subtle bugs or misuse of objects. An example would be any class that is meant to be immutable.
+
+<code php>
+final class User {
+
+    private $id;
+
+    public function __construct(int $id) {
+        assert($id > 0);
+        $this->id = $id;
+    }
+
+    public function isRoot(): bool {
+        return $this->id === 1;
+    }
+
+}
+
+final class Area51 {
+
+    private $user;
+
+    public function __construct(User $user) {
+        // No need for deep cloning since our user class is immutable.
+        $this->user = $user;
+    }
+
+    public function access() {
+        if ($this->user->isRoot() === false) {
+            echo 'Not Authorized!';
+        }
+        else {
+            echo 'Welcome to Area51!';
+        }
+    }
+
+}
+
+$user   = new User(42);
+$area51 = new Area51($user);
+$area51->access(); // Not Authorized!
+$user->__construct(1);
+$area51->access(); // Welcome to Area51!
+</code>
+
+As illustrated, the functionality allows breaking of the encapsulation of objects at runtime. It is true that there are many ways to achieve the same thing and that the likelihood that a developer does anything like the above by accident. But there is also no argument why this requires support other than misusing the constructor of a class for things it was never intended to be used for. This is most apparent with <html>parent::__construct()</html> calls from child classes where the PHP language specification states that:
+
+> //A constructor should not call its base-class constructor more than once.//
+>
+> --- [[https://github.com/php/php-langspec/blob/ae3a7639a05fae1cd1690ef28213bfebcb7d3af0/spec/14-classes.md#constructors|php language specification: constructors]]
+
+Leaving the problem to the developers themselves. It is possible for developers to protect their objects against such unintended usage by asserting that all properties are null but this is unnecessary boilerplate code in a language that is already very verbose.
+
+We propose that multiple calls to the constructor of an object should result in an error instead of breaking encapsulation. This means in effect that the only idiomatic way to create a new instance is via the new keyword. Child classes are only permitted to call their parent constructor once and further calls are going to result in an error too.
+
+This means in effect that the code examples posted earlier would result in errors, however, another code example that posted on internals as a legitimate use case for calling the constructor method directly would continue to work as is:
+
+<code php>
+final class DbConnection {
+
+    private $dsn;
+
+    private $initializer;
+
+    public function __construct(string $dsn) {
+        $this->dsn = $dsn;
+        // socket stuff happens here, much like with PDO
+    }
+
+    public function query(string $queryString): array {
+        ($this->initializer)();
+
+        // irrelevant from here on
+        return ['query' => $queryString, 'dsn' => $this->dsn];
+    }
+
+    public static function lazyInstance(string $dsn): self {
+        $instance              = (new ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        $instance->initializer = function () use ($dsn, $instance) {
+            $instance->__construct($dsn);
+            $instance->initializer = function () {
+            };
+        };
+
+        return $instance;
+    }
+
+}
+
+$instance = DbConnection::lazyInstance('mysql://something');
+
+var_dump(
+    $instance,
+    $instance->query('SELECT * FROM foo'),
+    $instance->query('SELECT * FROM bar')
+);
+</code>
+
+The constructor is called once only in this example, hence, the call is permitted and only subsequent calls are going to result in an error.
+
+==== Other Languages ====
+  * C++, C#, and Ceylon do not have a syntax to do so in the first place.
+  * Java does not support multiple calls (compiler error).
+  * JavaScript, Python, and Ruby allow multiple calls.
+
+===== Backward Incompatible Changes =====
+Multiple calls to <html>__construct</html> will result in an error, this includes calls to it after an object was created with the new keyword.
+
+===== Proposed PHP Version(s) =====
+Next major version of PHP which would 8 at the time of writing or, if the impact is considered to be low, in the next minor version which would be 7.2 at the time of writing.
+
+===== RFC Impact =====
+==== To SAPIs ====
+None
+
+==== To Existing Extensions ====
+None unless they call the constructor of an object multiple times.
+
+==== To Opcache ====
+Unknown
+
+==== New Constants ====
+None
+
+==== php.ini Defaults ====
+None
+
+===== Open Issues =====
+  * Impact on Opcache
+  * Pull request for php-langspec
+  * Implementation
+
+===== Unaffected PHP Functionality =====
+The reflection API continues to work as it does right now, including support for multiple constructor calls. Reflection is meant to overcome other runtime limitations including breaking encapsulation in many ways and having a single API to do so is the correct approach.
+
+===== Future Scope =====
+  * Disallow returning a value from a constructor method body.
+  * Allow <html>parent::__construct()</html> calls even if parent class does not implement a constructor.
+  * Add shorthand ''parent()'' as alternative to <html>parent::__construct()</html>.
+
+===== Proposed Voting Choices =====
+This project requires 2/3 majority as it changes the language. There will be two voting polls:
+  - Accept for PHP 7.2 with Yes or No.
+  - Accept for PHP 8.0 with Yes or No.
+
+===== Patches and Tests =====
+TBD
+
+===== Implementation =====
+TBD
+
+===== References =====
+  * [[http://news.php.net/php.internals/97713|php internals thread]] for the initial proposal and discussion.
+  * [[https://github.com/php/php-langspec/blob/master/spec/14-classes.md#constructors|php language specification: constructors]]
