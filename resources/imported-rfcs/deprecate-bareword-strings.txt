@@ -1,0 +1,142 @@
+====== PHP RFC: Deprecate and Remove Bareword (Unquoted) Strings ======
+  * Version: 0.1
+  * Date: 2017-01-28
+  * Author: Rowan Collins rowan.collins@gmail.com
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/deprecate-bareword-strings
+
+===== Introduction =====
+
+When PHP encounters an unquoted token such as ''FROB_ACTIVE'', it tries to resolve it as a built-in or user-defined constant, but if no such constant exists, it treats it as equivalent to the quoted string '''FROB_ACTIVE''', and issues an E_NOTICE message. This behaviour has been around since very early versions of PHP, but is inconsistent with the rest of the language, and can lead to serious bugs. This RFC proposes three things: to raise the level of the message to E_WARNING; to document this behaviour as deprecated; and to remove it in PHP 8.0.
+
+The current behaviour appears to have been added as an attempt to guess the user's intention, and continue gracefully. This is inconsistent with other behaviour in current versions of PHP, which include many features designed to assert the correctness of a program. Most relevantly, referencing an undefined class constant (e.g. ''Foo::FROB_ACTIVE'') or namespaced constant (e.g. ''\Foo\FROB_ACTIVE'') produces a fatal error, as does an unambiguous attempt to reference a global constant, such as ''\FROB_ACTIVE''.
+
+This alone would not be sufficient argument to change the behaviour; there are many inconsistencies in PHP, as with any language which has evolved over a period of decades, and we must weigh the cost of changing them with the cost of keeping them.
+
+===== The Problem =====
+
+The argument for keeping the current behaviour is that some programs might be written to deliberately take advantage of it. For instance, code such as ''$_GET[bar]'' where ''bar'' is taken to be the string key ''bar''. However:
+
+  * As far as I can see, this has never been documented behaviour, or appeared in any official examples.
+  * There is [[http://php.net/manual/en/language.types.array.php#language.types.array.foo-bar|an entire heading in the manual]] discussing why it is wrong to write code like this. This [[http://svn.php.net/viewvc?view=revision&revision=48201|was added to the manual in May 2001]], due to [[https://bugs.php.net/bug.php?id=7387|a bug raised 7 months earlier]] whose discussion makes clear this was considered a common mistake, not a supported feature.
+  * Old tutorials or examples that use this syntax are likely to also rely on features that have already been removed, such as "register globals" functionality, or the ''mysql_'' family of functions.
+
+The argument for changing it is that **this behaviour can mask serious bugs**. Leaving aside a deliberately unquoted string, this message might be caused by:
+
+  * using a constant which is defined in another file, which hasn't been included at that point in the code
+  * mis-typing the name of a constant, e.g. ''STATE_DISALBED'' instead of ''STATE_DISABLED''
+  * using a built-in constant which is not defined in the current version of PHP, e.g. a ''CURLOPT_'' constant documented on [[http://php.net/curl_setopt]] as added in a later release
+  * mis-typing a keyword usable as a value, such as ''true'', ''false'', or ''null''
+  * mis-typing a keyword used as a standalone statement, such as ''break'', ''continue'', ''return'', or ''yield''
+
+Here are just a few examples of how allowing the program to continue with a substituted value in each of these cases can lead to serious unintended logic.
+
+A typo for ''false'' results in a truthy value:
+
+<code php>
+$foo = flase; // typo!
+// ...
+if ( $foo ) {
+   var_dump($foo); // string(5) "flase"
+}
+</code>
+
+A string on a line of its own is a valid statement, which does nothing. Consequently, the typo ''braek'' is not a syntax error, making a loop continue unexpectedly:
+
+<code php>
+$found = false;
+foreach ( $list as $item ) {
+   $found = some_test($item);
+   if ( $found ) {
+       braek; // this statement issues a notice and does nothing
+   }
+}
+</code>
+
+Similar problems can arise with ''continue'':
+
+<code php>
+$found = false;
+foreach ( $list as $item ) {
+   if ( is_null($item) ) {
+       contniue; // this statement issues a notice and does nothing
+   }
+   // lines assuming $item is not null
+}
+</code>
+
+===== Proposal =====
+
+There are four parts to this proposal.
+
+  - In PHP 7.2, raise the severity of the message "Use of undefined constant" from E_NOTICE to E_WARNING
+  - Immediately document the fallback from bareword to string as deprecated in the manul
+  - In PHP 7.2, change the text of the message from ''Use of undefined constant %s - assumed '%s''' to ''Use of undefined constant %s; assumed '%s', but this will change in a future version of PHP''
+  - In PHP 8.0, remove the fallback, and replace the ''E_WARNING'' with a thrown ''Error'' with message ''Use of undefined constant %s''
+
+It might seem surprising to raise an ''E_WARNING'' with text suggesting deprecation, rather than an ''E_DEPRECATED''. However, we need to balance two conflicting aims:
+
+  * If a user is relying on the fallback to string, we should communicate that this feature is officially deprecated and slated for removal.
+  * If a user was actually intending to reference a constant or keyword, we should increase the chance they will see the message.
+
+In my opinion, the latter is more likely, and more configurations will have logging or display of ''E_WARNING'' than either ''E_NOTICE'' or ''E_DEPRECATED'', so that is the most appropriate severity.
+
+===== Backward Incompatible Changes =====
+
+This change is quite deliberately a change to current behaviour. 
+
+Browsing [[https://github.com/phplang/php-past/|the archived copies of PHP source code]], we can see that the behaviour has been present since at least PHP 3.0. Early PHP 3 betas apparently [[https://github.com/phplang/php-past/blob/PHP-3.0b4/language-parser.y#L559|treated all unknown barewords as strings]]; however, before the final release, both built-in and user-defined constants were added as a new language feature, and [[https://github.com/phplang/php-past/blob/PHP-3.0/language-parser.y#L553|the first version of the current notice was added]]. It's unclear to me whether the hand-crafted lexer and parser in PHP 2.0 treated bare words as strings or errors; if anyone has it successfully compiled and would like to check, let me know.
+
+However, the old source code also includes the documentation with which it shipped, in which I can find no mention of this behaviour, and no examples which take advantage of it.
+
+As mentioned earlier, it has been //discouraged// in the manual since 2001, so it could be argued that it is //already deprecated//. This RFC takes the conservative view that there should still be a standard period of deprecation before removing it.
+
+
+===== Proposed PHP Version(s) =====
+
+  * PHP 7.2: Change of message text and severity.
+  * PHP 8.0: Change behaviour to throw an error.
+
+
+===== RFC Impact =====
+
+This change should have no effect on SAPIs, extensions, or OpCache.
+
+
+===== Open Issues =====
+
+The exact text of the message to be used could be refined.
+
+
+===== Unaffected PHP Functionality =====
+
+  * Unquoted array keys within a double-quoted string will remain valid, e.g. ''"Item bar is $foo[bar]"''
+  * Undefined class constants, namespaced constants, and explicit constant references prefixed by ''\'' will continue to throw errors as currently.
+
+===== Future Scope =====
+
+None considered at present.
+
+
+===== Proposed Voting Choices =====
+
+A single yes/no vote requiring a 2/3 majority.
+
+In PHP 7.2, replace the "Undefined constant" ''E_NOTICE'' with an ''E_WARNING'' stating that the fallback is deprecated; and in PHP 8.0, remove the fallback and replace the ''E_WARNING'' with an ''Error''.
+
+
+===== Patches and Tests =====
+
+None yet.
+
+===== Implementation =====
+
+None yet.
+
+===== References =====
+
+TODO
+
+===== Rejected Features =====
+
+None yet.
