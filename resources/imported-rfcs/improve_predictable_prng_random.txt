@@ -1,0 +1,181 @@
+====== PHP RFC: Improve predictable PRNG random ======
+  * Version: 0.9
+  * Date: 2017-02-01
+  * Author: Yasuo Ohgaki <yohgaki@ohgaki.net>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/improve_predictable_prng_random
+
+
+===== Introduction =====
+Current predictable PRNG, i.e. mt_rand() and rand(), produces very weak random values even produces non random values. 
+
+==== Non random value ====
+
+<code php>
+// We need the same random numbers here
+mt_srand(1234); 
+for ($i=0; $i < 10; $i++) {
+   // Use my PRNG state
+   $my_rand[] = mt_rand(); 
+}
+
+// Somewhere later in code AND/OR even other requests
+
+// We need somewhat random numbers for non CS purpose
+for ($i=0; $i < 10; $i++) {
+   // following mt_rand() is NOT RANDOM at all
+   $my_other_rand[] = mt_rand(); 
+}
+</code>
+
+**This is not limited to specific request that calls mt_srand($some_value), but applies to consecutive requests.**
+
+PHP should have system and user PRNG state to resolve this behavior.
+
+==== Weak seeding = Weak random ====
+
+MT rand has 2^19937−1 cycle. This makes MT rand much stronger than older predictable PRNG. However, PHP initializes MT rand by 32 bit int value for both system and user seed, thus only 2^32 initial states. As a result, PHP's MT rand cannot not use more than 99% of MT rand cycle. This behavior is extremely weaker than MT rand could be.
+
+To resolve this issue, PHP should initialize MT rand with more seed value and have API allows large seed value.
+
+
+==== Rack of Reseeding ====
+
+Reseeding is important for PRNG to mitigate guessed random value. Since MT rand is predictable PRNG, using the same PRNG state allows to guess random value. Current PHP only supports very weak initialization and keeps using the same PRNG state once it is initialized. This behavior makes trivial to guess  MT rand generated random numbers.
+
+To resolve this issue, PHP should reseed MT rand when state is used certain number of times.
+
+===== Proposal =====
+
+==== Return PRNG state object from mt_srand()/srand() ====
+
+<code php>
+  RandomState mt_srand([int|string $seed]);
+  RandomState srand([int|string $seed]);
+</code>
+
+Returned RandomeState object is used for PRNG. Unless PRNG state object is specified, functions that use MT rand uses internal system PRNG state. When $seed is string, all bits are used for PRNG state initialization upto MT rand state buffer max. Internal PRNG state uses php_random_bytes() and randomize state.
+
+Note: srand() is alias of mt_rand(). Python initializes MT rand state by string data like this proposal.
+
+Example
+<code php>
+  $state = mt_srand(random_bytes(2000));
+  $rand = mt_rand($state); // User PRNG state is used
+  
+  $rand = mt_rand(); // System PRNG state is used
+</code>
+
+==== Add optional PRNG object parameter for functions ====
+
+<code php>
+  int mt_rand([RandomState $seed_object])
+  int mt_rand(int $min, int $max [, RandomState $seed_object])
+  int rand([RandomState $seed_object])
+  int rand(int $min, int $max [, RandomState $seed_object])
+  bool shuffle(array &$arr [, RandomSatate $seed_object]);
+</code>
+
+When user initialized PRNG state object is specified, specified state is used to generate random values.
+
+==== RandomState object ====
+
+<code php>
+class RandomState {
+    private int $count = 0; // Number of this state is used to generate random value
+    private int $reseed = 100; // Max number of count to reseed automatically
+    private string $state; // Binary PRNG state
+    
+    public function getCount() {
+       return $this->count;
+    }
+    
+    public function Reseed([int $count = NULL]) {
+      if ($count) {
+         $this->reseed = $count;
+         return TRUE;
+      }
+      return $this->reseed;
+   }
+}
+</code>
+
+==== Add automatic reseeding for system PRNG state ====
+
+Add BG(mt_rand_reseed) global default to 100.
+
+<code php>
+   ini_set('mt_rand_reseed', 10); // Change system reseed cycle to 10
+   ini_get('mt_rand_reseed'); // Get system reseed cycle
+</code>
+
+uint32_t BG(mt_rand_is_seeded) is used for already seeded flag and counter. Upper 16 bits are used for seeded flag, lower 16 bits are used for counters. Therefore, max reseed count is 2^16.
+
+
+===== Backward Incompatible Changes =====
+
+Basically, none.
+
+mt_srand()/srand() returned nothing previously.
+
+===== Proposed PHP Version(s) =====
+
+Next PHP 7.x
+
+===== RFC Impact =====
+==== To SAPIs ====
+None.
+
+==== To Existing Extensions ====
+Modules uses MT rand RPNG.
+
+==== To Opcache ====
+None.
+
+==== New Constants ====
+None.
+
+==== php.ini Defaults ====
+
+New
+  * mt_rand_reseed = 10 for compiled/php.ini-*.
+
+
+===== Open Issues =====
+
+Research internal MT rand usage and adjust them.
+
+===== Unaffected PHP Functionality =====
+
+Patch uses CSPRNG, php_random_bytes(), which could raise exception in case of CSPRNG failure. However, raised exception is not a matter that PHP should took care of.
+
+  - php_random_bytes() abstracts access to CSPRNG. PHP cannot compile without CSPRNG now.
+  - modern/usable system should provide CSPRNG as system service. 
+  - CSPRNG is system service and error is very unlikely unless serious hardware and/or OS error.
+  - CSPRNG access error is system error that PHP should not try to recover or workaround. 
+
+CSPRNG exception should be raised when it is necessary, but it is not a real BC issue. 
+
+===== Future Scope =====
+
+Add object based predictable PRNG API.
+
+===== Proposed Voting Choices =====
+
+
+===== Patches and Tests =====
+
+TBD
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+  - a link to the language specification section (if any)
+
+===== References =====
+Links to external references, discussions or RFCs
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
