@@ -117,22 +117,22 @@ Other way to encrypt per user
   - Generate HKDF hash value 1 and 2. <nowiki>hash_hkdf('sha256', $ikm, 0, $info)</nowiki>
 
 
-Note that both method uses "secret" information for $ikm. However, there is notable difference between these 2. This method uses only 1 secret key (encryption key) and info (user ID) is known to public, 1 stolen key allows attackers to decrypt all encrypted data while previous method requires 2 secret information(password hash and secret salt) to attack. (In addition, attackers have to steal all users password hash)
+Note that both method uses "secret" information for $ikm. However, there is notable difference between these 2. This method uses only 1 secret key (encryption key) and info (user ID) is known to public, one stolen key allows attackers to decrypt all encrypted data while previous method requires 2 secret information(password hash and secret salt) to attack. (In addition, attackers have to steal all users password hash)
 
-In fact, latter example is considered as bad HKDF usage. See 'Other Use Cases' section for better.
+In fact, latter example is considered as bad HKDF usage because it does not use "salt". See 'Other Use Cases' section for better.
 
 
 
 === CSRF token ===
 
-When session ID is used for CSRF token, there is risk that session ID can leak to others by saving & sending HTML page, by malware web browser plugins that read page content, etc. Therefore, session ID should not be used as CSRF token. HKDF can be used to generate CSRF token belong to specific session with salt.
+When session ID is used for CSRF token, there is risk that session ID can leak to others by saving & sending HTML page, by malware web browser plugins that read page content, etc. Therefore, session ID should not be used as CSRF token. HKDF can be used to generate CSRF token belongs to specific session with "salt".
 
 Setting up CSRF token
   - Get expiration timestamp. ($salt)
   - Generate HKDF value with 1 and session ID ($ikm).  <nowiki>hash_hkdf('sha256', $ikm, 0, '', $salt)</nowiki>
   - Send key from 2 and timestamp from 1 to browser as CSRF token.
 
-Note: Optimal salt is random value with used hash length. However, as the RFC states weak/low entropy salt is enough. For better security, users may concatenate known random value to timestamp.
+Note: The RFC states weak/low entropy salt could be enough.
 
 Verifying CSRF token
   - Get HKDF key and timestamp($salt) value from request.
@@ -148,7 +148,7 @@ Users must regenerate session ID periodically regardless of SSL usage for securi
 <blockquote>Common idle timeouts ranges are 2-5 minutes for high-value applications and 15- 30 minutes for low risk applications.</blockquote>
 https://www.owasp.org/index.php/Session_Management_Cheat_Sheet#Session_Expiration
 
-Therefore, use of session ID as CSRF token key source is not recommended. You are better to use separate key for CSRF token generation in $_SESSION. e.g. $_SESSION['CSRF_TOKEN_IKM'] = session_create_id(); Use secret $_SESSION['CSRF_TOKEN_IKM'] for HKDF key generation where above example uses session ID. With this method, you can generate secure HKDF CSRF token even when session ID is regenerated with your defined token expiration time. 
+Therefore, use of session ID as CSRF token key source is not recommended. You are better to use separate key for CSRF token generation in $_SESSION. e.g. $_SESSION['CSRF_TOKEN_IKM'] = session_create_id(); Use secret $_SESSION['CSRF_TOKEN_IKM'] for HKDF key generation where above example uses session ID. With this method, you can generate secure HKDF CSRF token with your defined token expiration time even when session ID is regenerated in short period. 
 
 ==Use of info parameter==
 
@@ -176,21 +176,26 @@ string hash_hkdf(string algo, string ikm, string salt [, string info = '' [, int
  - length: Output length. If omitted, default output size of specified hash function. 
 </code>
 
-Note: Parameter order and internal salt parameter handling is changed, i.e. Type and salt length check, is changed. Make return HEX string by default by considering PHP use case and consistency for existing hash functions.
+Note: Parameter order and internal salt parameter handling is changed. i.e. Type and salt length check is changed. Make return HEX string by default by considering PHP use case and consistency for existing hash functions.
 
-From user perspective, "salt" and "info" parameters can be used interchangeably when compatibility with other systems is not considered. However, it would be good idea to follow RFC 5869 semantics. 
+From user perspective, "salt" and "info" parameters could be used interchangeably. However, it would be good idea to follow RFC 5869 semantics. 
 Unlike "info" which could be an optional in many cases, "salt" cannot be an optional with expiration enabled keys for instance. This kind of expiration is common. e.g. Amazon AWS S3 uses HKDF with expiration to allow access to objects. 
 
-Typical PHP applications that need HKDF can use (or should use) salt for security reasons as examples above. Users should consider if salt can be used or not. If salt could be secret, it should be kept as secret. Users shouldn't omit salt blindly. It could lead serious security issue. i.e. When input key is weak and no/weak salt, input key can be guessed from hash_hkdf() output. HKDF with salt makes derived keys considerably stronger. Salt is better to be required parameter because typical PHP applications can supply salt. Salt should set to be empty only when salt cannot be used.
+Typical PHP applications that need HKDF can use (or should use) salt for security reasons as examples above. Users should consider if salt can be used or not. If salt could be secret, it should be kept as secret. Users shouldn't omit salt blindly. It could lead serious security issue. i.e. When input key is weak, input key can be guessed from hash_hkdf() output without salt. Salt makes derived keys considerably stronger. 
+
+Salt is better to be required parameter because typical PHP applications can supply salt. Salt should set to be empty only when salt cannot be used.
 
 Salt summary for typical PHP HKDF usage:
+
   * Use salt always when it is possible.
   * Use strong salt if possible.
   * Use secret salt if possible.
   * When input key is weak, must use strong secret salt.
   * Omit salt only when salt cannot be used.
+  * Omitting salt is likely to result in weaker implementation, see 'Other Use Cases' section.
 
 Return value:
+
   * Most use cases with PHP will require string return values. Make it default.
   * HEX string return value and "raw" flag parameter is required to be consistent with existing hash functions. 
 
@@ -236,18 +241,16 @@ The only thing that we may want to discuss is whether we should swap the $info a
 
 a) When deriving keys, "salt" should be supplied whenever it's possible. Simply deriving other key w/o salt would not be typical, not recommended at least, usage with PHP because PHP is not used to implement basic cryptographic algorithms.
 
-b) For per-session encryption/etc, simple choice for secret input key("ikm") would be session ID, random string as "salt" which is a part of final key, optional "info" could be used for additional information such as "confidential"/"public". 
+b) If I assume 'user identity' is used "info", then it wouldn't be "per session", but "per user". So assuming session ID is used as "info", while it works, the RFC states "info" as are public information, i.e. "a protocol number, algorithm identifiers, user identities, etc.". Session ID is secret key. We don't have to follow RFC recommendations always, but storing secret key in "info" violates the RFC.
 
-Other way is to use session ID as "info" like Nikita suggested. The RFC states identities as "info" value example. Session ID is secret key by definition, but it could be used as identity. 
-
-While it works, the RFC states "info" as are public information, i.e. "a protocol number, algorithm identifiers, user identities, etc.". We don't have to follow RFC recommendations always, but this usage violates the RFC recommendation.
+For per-session encryption/etc, simple choice for secret input key("ikm") would be per-session master key stored in session, random string as "salt" which is a part of final key, optional "info" could be used for additional information such as "confidential"/"public". 
 
 We are implementing RFC 5689. Not following the RFC recommendation does not make sense.
 
 
-c) True.
+c) True, but "salt" is not only good for generating strong key from weak key according to the RFC.
 
-d) True.
+d) True, but you seems to be missed "non secret salt" usage. 'Other Use Cases' section includes many "non secret salt" usages.
 
 
 "**the extract step (which uses the salt) is only necessary if the input keying material is weak**", this is not what RFC states. 
