@@ -7,7 +7,7 @@
 
 ===== Introduction =====
 
-HKDF is informational internet standard defined by [[https://tools.ietf.org/html/rfc5869|RFC 5869]]. HKDF is designed to generate secure keys for encryption/validation/authentication/etc from other key information such as secret strong encryption key, API key, weak password, etc. The RFC states "**designers of applications are therefore encouraged to provide salt values to HKDF if such values can be obtained by the application.**", but current PHP implementation discourages "salt" parameter use by signature. i.e. "salt" is the last optional parameter.
+HKDF is informational internet standard defined by [[https://tools.ietf.org/html/rfc5869|RFC 5869]]. HKDF is designed as general purpose key derivation function that derives secure keys for encryption/validation/authentication/etc from other work/strong key information such as secret strong encryption key, API key, master key, password, etc. Although HKDF is designed for general purpose key derivation, current hash_hkdf() signature is heavily optimized for specialized cryptographic operation((Current hash_hkdf() signature and behavior is specialized to derive certain output key length for strong input key. This is not a common use case with PHP.)). This PHP RFC proposes more generic and suitable signature/behavior to use HKDF with PHP.
 
 This PHP RFC will not explain HKDF in detail, please refer to RFC 5869 or other references for details.
 
@@ -17,29 +17,40 @@ This PHP RFC will not explain HKDF in detail, please refer to RFC 5869 or other 
 
 In short, HKDF is a general purpose hash function that is designed to create key(s) for encryption/validation/authentication.
 
-Terms
+== Terms ==
 
   * IKM - Input Key Material which is secret.
+  * OKM - Output Key Material which is derived by HKDF function.
   * salt - Some entropy value which could be both secret and non secret. Poor entropy like timestamp is acceptable when IKM is strong. Ideally random value of used hash size. Poor IKM example is user defined plain password.
   * info - Context and application specific information such as a protocol number, algorithm identifiers, user identities, etc. These are non secret values by definition.
   * length - Controls HKDF result length.
   * strong key - Cryptographically secure(true) random bytes. Example 256 bit strong key is random_bytes(64). 
   * weak key - Anything not cryptographically secure(true) random bytes. Example 256 bit weak key is hash('sha256', 'myrandompassword', FALSE). This key is extremely weak key.
 
-Typical HKDF usage with PHP would be:
+== Absolute requirement for safe HKDF usage ==
 
-  * Generate new encryption keys for user, session, domain, groups, etc, from "IKM", "salt" and "info".
+  * Either IKM or salt must be strong.
+
+== Typical HKDF usage with PHP ==
+
   * Generate security tokens for CSRF protection, Object Access, etc, from "IKM", ""salt" and "info".
+  * Generate new encryption keys for user, session, domain, groups, etc, from "IKM", "salt" and "info".
+  * Generate secure URL that could be access with password without stored key nor user information in server.
+
+== Current Status ==
 
 hash_hkdf() is added to master without PHP RFC already. It has following signature currently.
 
 <code>
   string hash_hkdf(string algo, string ikm [, int length = 0 [, string info = '' [, string salt = '']]])
+  Return value: "Binary" hash value
 </code>
 
-"salt" is the last optional parameter that user would be omitted blindly even if salt is often used as pre shared **key** or to secure IKM. 
+In general, "salt" is mandatory or usable in most cases and improves security, "length" is optional mostly, "info" is what HKDF makes useful but it is optional. The RFC states "**designers of applications are therefore encouraged to provide salt values to HKDF if such values can be obtained by the application.**", but current PHP implementation discourages "salt" parameter use by signature. i.e. "salt" is the last optional parameter.
 
-In most use cases, IKM is strong key. However, in real world, IKM could be user defined poor plain text password. 
+== RFC 5869 Notes for HKDF users==
+
+In many use cases, IKM could be strong key. However, in real world, IKM could be user defined poor plain text password. 
 
 RFC 5869 "Notes for HKDF Users" states,
 
@@ -72,15 +83,15 @@ is only usable to specific context. i.e. Users should not use secret value for
 
 ==== Summary of ikm, salt and info parameter ====
 
+  * Either IKM or salt must be strong key.
   * IKM could be weak or strong key, strong key is preferred but it's not mandatory requirement.
-  * salt could be weak or strong key, secret or non secret key, often used as pre-shared key.
-  * Either IKM or salt must be strong HKDF to work as designed.
+  * salt could be weak or strong key, secret or non secret, often used as pre-shared key such as nonce.
   * info is non secret optional value, shouldn't use secret value while it could be used as combined key like salt.
   * length is optional unless you need to change existing key(IKM) length.
 
-==== hash_hkdf() behavior ====
+==== hash_hkdf() behavior and other hash functions ====
 
-md5() is used to obtains shorter result from hash_hkdf().
+md5() is used to obtains shorter result from hash_hkdf(). In practice, developers should consider SHA2 or better.
 
 <blockquote>
 [yohgaki@dev PHP-master]$ ./php-bin -r 'var_dump(bin2hex(hash_hkdf("md5","123456")));'
@@ -100,32 +111,32 @@ string(40) "d0d1bbee08810d08a1e54f3a401308353cedd30b"
 string(40) "ca16de591ad40f02e599428bf9f50772ebead3ff"
 </blockquote>
 
-The result is affected by both "salt" and "info" parameters.  Although hash_hkdf() does some hash calculations (HMAC) to derive secure key from IKM, salt and info, it could be understood as simple hash calculation by using separate parameters from user point of view. "length" parameter works in a way that weaken derived key.
+Both "salt" and "info" parameters affect hash_hkdf() result.  Although hash_hkdf() does some hash calculations (HMAC with specified hash) to derive secure key from IKM, salt and info, it could be understood as simple hash calculation by using separate parameters with hash_hmac(string $algo, string $data, string $key), i.e. $key is devided into $salt (secret or non secret) and $info (non secret) from user point of view. "length" parameter works in a way that weaken derived key.
 
-hash_hkdf() uses HMAC to compute output hash. Following code is equivalent. 
+Therefore, following code is equivalent. 
 
 <code>
 // Although the value returned differs due to algorithm difference, they are equivalent
 $key = hash_hmac('sha256', $ikm, $salt);
-$key = hash_hkdf('sha256', $ikm, 0, '', $salt);
+$key = bin2hex(hash_hkdf('sha256', $ikm, 0, '', $salt)); // Need bin2hex() because hash_hkdf() return binary result always
 </code>
 
 Although followings are supposed to be equivalent if hash is truly cryptographic, but 
-they aren't because hash functions has some characteristics that allows analysis. 
+they aren't because hash functions have some characteristics that allows analysis. 
 
 <code>
 // Trying to add 'Admin' only context information to derived $key
 $key = hash('sha256', $ikm . $salt . 'Admin'); // This should work in theory, but has greater risks than blow
 $key = hash_hmac('sha256', $ikm, $salt . 'Admin'); // Better, but involves risk by string concatenation 
-$key = hash_hkdf('sha256', $ikm, 0, 'Admin', $salt); // More secure than aboves because $info parameter('Admin') is designed for non secret
+$key = bin2hex(hash_hkdf('sha256', $ikm, 0, 'Admin', $salt)); // More secure than aboves because $info parameter('Admin') is designed for non secret
 </code>
 
 
 ==== hash_hkdf() applications with PHP =====
 
-Typical PHP HKDF application can be used with "salt". Application can provide better security with "salt" in many cases. This PHP RFC only describes 4 examples here, but there are many PHP HKDF usages that can/should/must use with salt. Developers must consider salt use for better security rather than omitting salt without proper consideration. Salt is often a part of final key, sometimes key for users to access resources. If it is possible, developers should use strong salt. When IKM is weak, developer must use strong salt to keep IKM security.
+Typical PHP HKDF application can be used with "salt". Application can provide better security with "salt", strong salt is mandatory in many cases. This PHP RFC only describes 4 examples here, but there are many PHP HKDF usages that can/should/must use with salt. Developers must consider salt use for better security rather than omitting salt without proper consideration. Salt is often a part of final key, combined key for users to access resources. Developers should use strong salt if it is possible. When IKM is weak, developer must use strong salt to keep IKM and OKM security.
 
-There are more usages for low level crypto, but these would not be common for average PHP developers, so these are not covered. Crypto specialists should be able to use HKDF hash properly regardless of examples here.
+There are more usages for low level crypto, but these would not be common for average PHP developers/applications, so these are not covered. Crypto specialists should be able to use HKDF hash properly regardless of examples here.
 
 === Example #1: Generating strong encryption key from weak key (password) ===
 
