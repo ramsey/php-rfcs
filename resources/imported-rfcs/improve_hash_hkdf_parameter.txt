@@ -364,11 +364,11 @@ Salt is optional because RFC 5869 allows it to be optional. There's a reason for
 
 - Salt is ... while recommended, the only thing actually optional.</blockquote>
 
-Incorrect argument. Salt could be optional, but as the RFC describes "salt" as "**salt adds significantly to the strength of HKDF**" and "**designers of applications are therefore encouraged to provide salt values to HKDF if such values can be obtained by the application.**", "info" is actually optional.  "Salt" should be used always whenever it is possible as the RFC recommends.
+Salt cannot be optional to derive strong key(s) when IKM is weak. In order to obtain strong output key, either input key or salt must be cryptographically strong. i.e. When input key is weak, strong salt is mandatory by HKDF definition.
 
-In order to obtain strong output key, either input key or salt must be cryptographically strong. i.e. When input key is weak, strong salt is mandatory by HKDF definition.
+While salt could be optional for strong IKM, but as the RFC describes "salt" as "**salt adds significantly to the strength of HKDF**" and "**designers of applications are therefore encouraged to provide salt values to HKDF if such values can be obtained by the application.**", "info" is actually optional.  "Salt" should be used always whenever it is possible as the RFC recommends.
 
-In any cases, 'info'(context) has less importance than 'salt'(entropy) at least.
+In any cases, "info"(context) has less importance than "salt"(entropy or pre-shared key/combined key) at least. With PHP, length is not needed for most HKDF applications.
 
 <blockquote>On Mon, Jan 16, 2017 at 8:08 PM, Nikita Popov <nikita.ppv@gmail.com> wrote:
 
@@ -389,9 +389,9 @@ Remember that HKDF is an extract-and-expand algorithm, and the extract step (whi
 The only thing that we may want to discuss is whether we should swap the $info and the $salt parameters. This depends on which usage (b or c) we consider more likely.
 </blockquote>
 
-a) When deriving keys, "salt" should be supplied whenever it's possible. Simply deriving other key w/o salt would not be typical, not recommended at least, usage with PHP because PHP is not used to implement basic cryptographic algorithms.
+a) When deriving keys, "salt" should be supplied whenever it's possible in general. Simply deriving other key w/o salt would not be typical, not recommended at least, usage with PHP because PHP is not used to implement basic cryptographic algorithms. i.e. a) statement only applicable to specific application. Unless weaker encryption/etc is required, e.g. generate 128 bit AES key from 256 bit AES key, modified length results in weaker output key than it could be as described in this PHP RFC.
 
-b) If I assume 'user identity' is used for "info", then derived key wouldn't be "per session" key, but "per user" key. So assuming session ID is used as "info". While it works, the RFC states "info" as are non secret information, i.e. "a protocol number, algorithm identifiers, user identities, etc.". Session ID is secret key. We don't have to follow RFC recommendations always, but storing secret key in "info"(context) violates the RFC.
+b) If I assume 'user identity' is used for "info", then derived key wouldn't be "per session" key, but "per user" key. So assuming session ID is used as "info". While it works, the RFC states "info" as are non secret information, i.e. "a protocol number, algorithm identifiers, user identities, etc.". Session ID is secret key. We don't have to follow the RFC recommendations always, but storing secret key in "info"(context) violates the RFC.
 
 For per-session encryption/etc, simple choice for secret input key(IKM) would be per-session master key stored in $_SESSION, random string as "salt" which is a part of final key, optional "info"(context) could be used for additional information such as "confidential","public", etc. 
 
@@ -401,7 +401,6 @@ We are implementing RFC 5869. Not following the RFC recommendation does not make
 c) True, but "salt" is not only good for generating strong key from weak key according to the RFC. "salt" can be used as part of final key just like crypt() calculates password hash by "salt and password".
 
 d) True, but you seems to be missed "non secret salt" usage. 'Other Use Cases' section includes many "non secret salt" that are used as final key. Like examples in this PHP RFC, there are valid use cases with very weak IKM. 
-
 
 "**the extract step (which uses the salt) is only necessary if the input keying material is weak**", this cannot be true by the RFC.
 
@@ -413,7 +412,7 @@ size or with limited entropy) may still make a significant
 contribution to the security of the output keying material
 </blockquote>
 
-It does not say salt is only good for weak input keys, but generated key will have significantly better security. 
+It does not say salt is only good for weak input keys, but generated output key will have significantly better security. 
 
 
 === Should not be used with weak key. - It is ok by HKDF definition. ===
@@ -422,14 +421,18 @@ It does not say salt is only good for weak input keys, but generated key will ha
 The salt defends against certain attacks on predictable input key material, i.e. weak passwords. But HKDF should not normally be used for passwords because it is unsuitable.
 </blockquote>
 
-Strong key is prefered, but input key shouldn't not have to be strong. For weak keys, strong salt should be used though.
+Strong input key is prefered, but input key shouldn't not have to be strong. For weak input keys, strong salt should be used though.
+
+There are valid usages with weak input keys as this PHP RFC examples illustrated. Weak input key is perfectly OK when it is used properly.
 
 
 ===== Other Use Cases =====
 
-Following use case examples are using new hash_hkdf() signiture. $ikm could be any valid keys. Secret master key is assumed for convenience. Generally speaking, secret master key is difficult to maintain, developers are better to avoid it if it is possible.
+Following use case examples are using new hash_hkdf() signiture. $ikm could be any valid keys. Secret master key is assumed for convenience. Generally speaking, secret master key for all derived keys is difficult to maintain, developers are better to avoid it if it is possible.
 
-As you can understand from bad examples, omitting salt is as optional parameter results in optimal implementation.
+As you can understand from bad examples, omitting salt as an optional parameter results in nonoptimal implementations.
+
+Following examples use proposed hash_hkdf() function signature.
 
 ==== Create Strong Key From Weak Key For a User====
 
@@ -447,7 +450,7 @@ Correct way is
   - Get secret random string to make strong password. ($salt) 
   - Generate encryption key. hash('sha256', $ikm, $salt);
 
-Note: "salt" is intended to be secret or non secret as per the RFC, but salt should be secret.
+Note: "salt" is intended to be secret or non secret as per the RFC, but salt should be secret for this application.
 Since $ikm is very weak, salt must be strong. 
 
 
@@ -459,18 +462,18 @@ Bad example first
   - Get user ID. ($info)
   - Generate encryption key. hash('sha256', $ikm, NULL, $info);
 
-Developers shouldn't do this because once encryption key is stolen, they cannot issue new encryption key.
+Developers shouldn't do this unless they have no choice because once encryption key is stolen, they cannot issue new encryption key.
 
 Correct way is
 
   - Get secure secret master key. ($ikm)
-  - Generate secret or non secret random slat. ($salt) Save salt and provide salt as part of key to user also if it is needed.
+  - Generate secret or non secret random slat. ($salt) Save salt and provide salt as part of key to user if it is needed.
   - Get user ID. ($info)
   - Generate encryption key. hash('sha256', $ikm, $salt, $info);
 
-Developers can issue new encryption keys as many as they needed with this way for user.
+Developers can issue new encryption keys as many as they need with this way for user.
 
-Combined key, output key and salt, may be disclosed to user as encryption key.
+Combined key, output key and salt, may be disclosed to user as encryption key. Key disclosure is not necessary for many web applications because encryption and decryption will be done by servers.  
 
 ==== Per Session Encryption Key ====
 
@@ -485,7 +488,7 @@ Although it works, developers shouldn't do this because $info is intended for co
 Correct way is
 
   - Get secure secret master key. ($ikm)
-  - Set secret random salt to session, get it as salt. ($salt) 
+  - Set secret random salt to session, use it as salt. ($salt) 
   - Generate encryption key. hash('sha256', $ikm, $salt);
 
 ==== URL access key ====
@@ -501,13 +504,11 @@ Developers shouldn't do this unless they are absolutely sure that URL is accessi
 Better way is
 
   - Get secure secret master key. ($ikm)
-  - Get random salt. ($salt) Save salt and provide salt as a part of key to user.
+  - Get random salt. ($salt) Save salt and provide salt as a part of key. i.e. pre-shared key.
   - Get URL should be protected. ($info)
-  - Generate encryption key. hash('sha256', $ikm, $salt, $info);
+  - Generate access key. hash('sha256', $ikm, $salt, $info);
 
-By keeping track valid $salt values, developers can control key validity.
-
-Combined key, output key and salt, may be disclosed to user as encryption key.
+By keeping track valid $salt values, developers can control key validity. 
 
 
 ==== Limited URL access key ====
@@ -526,8 +527,10 @@ Any keys that have timeout can build similarly.
 Good example only
 
   - Get secure secret master key. ($ikm)
-  - Get timestamp + random string for access control as non secret salt. ($salt) Provide salt as a part of key.
-  - Generate access key. hash('sha256', $ikm, $salt);
+  - Get random string for access control as non secret salt. ($salt) Provide salt as a part of key.
+  - Get timestamp for timeout. ($info)
+  - Generate access key. hash('sha256', $ikm, $salt, $info);
+
 
 ==== Generate Key Whatever Purpose For a User ==== 
 
@@ -555,30 +558,19 @@ By keeping track salt values, developers can control key validity.
 Bad example first
 
   - Get secret master key. ($ikm) 
-  - Get ID. ($info) Could be non secret ID like group ID display in URL.
+  - Get ID. ($info) Could be non secret ID like group ID displayed in URL.
   - Generate access key. hash('sha256', $ikm, NULL, $info);
 
 Developers shouldn't do this because developers cannot issue new key for the user, cannot revoke keys. Since input is weak, there must be strong salt also.
 
   - Get secret master key. ($ikm)
-  - Get random secret salt for ID ($salt)
+  - Get and save random secret salt for ID ($salt)
   - Get ID ($info) Could be non secret ID like group ID display in URL.
   - Get key version ($info)
   - Generate key. hash('sha256', $ikm, $salt, $info);
 
-Use output key, ID and key version as combined key. Users may revoke keys by checking ID and/or key version.
+Use output key, ID and key version as combined key. Developers may revoke keys by key version.
 
-
-==== Generate Key for Group ====
-
-Good example only
-
-  - Get secure secret master key. ($ikm)
-  - Get random salt. ($salt) Save salt and provide salt as a part of key.
-  - Get group ID. ($info)
-  - Generate access key. hash('sha256', $ikm, $salt, $info);
-
-By keeping track valid $salt values, developers can control key validity and can issue as many as new keys as needed.
 
 
 ===== Backward Incompatible Changes =====
