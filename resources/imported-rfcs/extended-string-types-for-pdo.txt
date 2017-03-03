@@ -1,25 +1,36 @@
 ====== PHP RFC: Extended String Types For PDO ======
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2017-02-16
   * Author: Adam Baratz adambaratz@php.net
   * Status: Under Discussion
   * First Published at: https://wiki.php.net/rfc/extended-string-types-for-pdo
 
 ===== Introduction =====
-[[https://dev.mysql.com/doc/refman/5.7/en/charset-national.html|MySQL]] and [[https://msdn.microsoft.com/en-GB/library/ms186939.aspx|Microsoft SQL Server]] define special column types for storing Unicode strings. There is a different format for literals of this type.
+The "national character" type was introduced in [[http://www.contrib.andrew.cmu.edu/~shadow/sql/sql1992.txt|SQL-92]] (section 4.2.1). It's an open-ended type. The spec indicates that its meaning is defined by the implementation. [[https://dev.mysql.com/doc/refman/5.7/en/charset-national.html|MySQL]] and [[https://msdn.microsoft.com/en-GB/library/ms186939.aspx|Microsoft SQL Server]] use it to store Unicode data.
 
-When using emulated prepared statements -- the default behavior for pdo_mysql, the only one for pdo_dblib -- it's not possible to quote parameters using this format. By not doing this, queries become more expensive because of an implicit cast.
+There is a different format for literals of this type. Instead of simply surrounding strings with quotes, an N is added as a prefix (e.g., N'string' instead of 'string'). When using emulated prepared statements -- the default behavior for pdo_mysql, the only one for pdo_dblib -- it's not possible to quote parameters using this format. This means that queries involving these columns will trigger implicit casts, which makes them more expensive.
 
 There aren't many pdo_dblib users who comment regularly on the internals list, but the presence of a [[https://bugs.php.net/bug.php?id=60818|feature request]] and a [[https://github.com/php/php-src/pull/2017|pull request]] suggests that this is an impactful omission.
 
 ===== Proposal =====
 Three constants would be added to the pdo extension:
-  - **PDO::PARAM_STR_UNICODE.** A new type, to be applied as a bitwise-OR to ''PDO::PARAM_STR''. It would indicate that the value should be quoted with the N-prefix.
-  - **PDO::ATTR_UNICODE_STRINGS.** This bool driver attribute would indicate whether all ''PDO::PARAM_STR'' values should be treated like ''PDO::PARAM_STR | PDO::PARAM_STR_UNICODE'' by default.
-  - **PDO::PARAM_STR_ASCII.** A new type, to be applied as a bitwise-OR to ''PDO::PARAM_STR''. It would indicate that the value should be quoted without the N-prefix. This would be intended to be used as an exception for when the ''PDO::ATTR_UNICODE_STRINGS'' attribute is set to true.
+  - **PDO::PARAM_STR_NATL.** A new type, to be applied as a bitwise-OR to ''PDO::PARAM_STR''. It would indicate that the value should be quoted with the N-prefix.
+  - **PDO::PARAM_STR_CHAR.** A new type, to be applied as a bitwise-OR to ''PDO::PARAM_STR''. It would indicate that the value should be quoted without the N-prefix. This would be used as an exception for when the ''PDO::ATTR_DEFAULT_STR_PARAM'' attribute is set to ''PDO::PARAM_STR_NATL''.
+  - **PDO::ATTR_DEFAULT_STR_PARAM.** This driver attribute would indicate a value to bitwise-OR to ''PDO::PARAM_STR'' by default.
+
+The parameter constants are more like ''PDO::PARAM_INPUT_OUTPUT'' than ''PDO::PARAM_STR''. They're flags to be applied to other parameters. This would also mean that code portability would be preserved. Drivers that don't need the hints for true prepared statements would ignore them.
+
+Example:
+
+  $db->quote('über', PDO::PARAM_STR | PDO::PARAM_STR_NATL); // N'über'
+  $db->quote('A'); // 'A'
+  
+  $db->setAttribute(PDO::ATTR_DEFAULT_STR_PARAM, PDO::PARAM_STR_NATL);
+  $db->quote('über'); // N'über'
+  $db->quote('A', PDO::PARAM_STR | PDO::PARAM_STR_CHAR); // 'A'
 
 ===== Backward Incompatible Changes =====
-Since this functionality would be opt-in, existing code would continue to work as it does. The bitmasked values would be ignored by other drivers, or pdo_mysql toggling off prepared statement emulation, so the portability valued for PDO code would be preserved.
+This functionality would be strictly additive. Existing code would continue to work as it does. These constants wouldn't affect anything related to the character set used for connections.
 
 ====== Impact To Existing Extensions ======
 Drivers outside of php-src might have to be modified if they make assumptions about the structure of ''enum pdo_param_type''. They would have to be rebuilt since the ''PDO_DRIVER_API'' macro would be updated.
