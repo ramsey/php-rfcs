@@ -1,0 +1,85 @@
+====== PHP RFC - Deprecation of fallback to root scope: ======
+
+- Version: 0.1
+- Date: 2017-03-05
+- Author: Levi Morrison, Marco Pivetta, WesNetmo@Twitter
+- Status: Under Discussion
+- First Published at: @TODO
+
+## Introduction:
+
+Fallback to root scope was implemented to facilitate the transition of existing classes to namespaced ones.
+
+It made possible to easily convert existing code to their namespaced equivalent by simply replacing `class Vendor_Lib_Type{}` with `namespace Vendor\Lib; class Type{}`. Their users then just needed (pretty much) to replace `_` with `\` to match them. No other change was required for the upgrade, as PHP redirected unqualified function calls and constant references to the root scope automatically.
+
+While this helped the transition to namespaces a lot, it created several problems. It forces PHP to constantly re-check what a symbol actually is every time it is accessed ([demo](https://3v4l.org/C0ZLq)); it prevents PHP to implement function and constant autoloading in a sensible manner and consequently denies all the ramifications that would be possible if this feature existed. More and more people would use functions these days, but the prospect of having to maintain a list of `require()`s nauseate them. @TODO more reasoning?
+
+## Proposal:
+
+This RFC proposes to deprecate the fallback to root scope, by emitting a `Notice`, e.g.:
+
+```
+Undefined function \My\NS\strlen(), assumed \strlen()
+Undefined constant \My\NS\PHP_VERSION, assumed \PHP_VERSION
+```
+
+It also proposes, considered the entity of the change, that the "fallback to root scope" feature **must be removed through the RFC process and thus only when the community think is appropriate doing so** (RFC author's prediction: no less than PHP 8 but more likely 9). Finally, it proposes that the "fallback to root scope" feature **must be removed only in conjunction of the introduction of the "function and constant autoloading" feature**. 
+
+## Impact to users, before and after the removal:
+
+### PHPStorm:
+
+PHPStorm is a very valuable tool and it is worth mentioning it as it's the de-facto standard PHP IDE. Thanks to JetBrains and the PHP community, PHPStorm 2017 will have a good support of function and constant completion.
+
+Depending on a per-project customizable setting, users will have either `\strlen()` or `use function strlen;` automatically added as soon they type in `strlen` (@TODO link to the bug reports).
+
+The PHPStorm's Inspections extension (@TODO add link) will also show a warning when unqualified symbols are used.
+
+As such, **users can avoid the `Notice` without changing their habits**.
+
+### Roave's FQN replacer:
+
+Another valuable tool is [Roave's FunctionFQNReplacer](https://github.com/Roave/FunctionFQNReplacer); allows us to automatically replace unqualified identifiers with their qualified counterpart in seconds.
+
+### Fixing broken code after the removal:
+
+Since this feature will be removed in conjunction with the introduction of "function and constant autoloading", broken code may be (temporarily) fixed by appending an autoloader that aliases the root scope's symbol in the current namespace, e.g.:
+
+<code php>
+register_autoloader(
+    AUTOLOAD_FUNCTION | AUTOLOAD_CONST,
+    function(string $QN, int $type){
+        
+        $start = strrpos($QN, "\\");
+        if($start === false){ return; }
+        
+        // e.g. "My\Full\NS"
+        $sourceNS = substr($QN, 0, $start);
+        
+        // e.g. "strlen"
+        $rootSymbol = substr($QN, $start + 1);
+        
+        if(
+            ($type & AUTOLOAD_FUNCTION) &&
+            function_exists($rootSymbol)
+        ){
+            eval('
+                namespace ' . $sourceNS . ';
+                function ' . $rootSymbol . '(...$args){
+                    return \\' . $rootSymbol . '(...$args);
+                }
+            ');
+        }elseif(
+            ($type & AUTOLOAD_CONST) &&
+            defined($rootSymbol)
+        ){
+            eval('
+                namespace ' . $sourceNS . ';
+                const ' . $rootSymbol . ' = \\' . $rootSymbol . ';
+            ');
+        }
+    }
+);
+</code>
+
+This would provide a decent enough solution for nearly the totality of the existing code, thus covering those users that failed to update their code in time, as this fix is basically doing what PHP currently does in core.
