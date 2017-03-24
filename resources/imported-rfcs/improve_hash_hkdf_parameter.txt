@@ -8,13 +8,127 @@
 
 ===== Introduction =====
 
+Even cryptographic hashes have secret information disclosure/analysis risks with string concatenations. For example,
+
+Example 1:
+<code php>
+  $new_key = hash('sha256', $secret_key . $derivation_key);
+</code>
+
+To reduce this risk, HMAC was invented. HMAC is known to be more secure compare to previous example.
+
+Example 2:
+<code php>
+  $new_key = hash_hmac('sha256', $secret_key, $derivation_key);
+</code>
+
+Note that HMAC divide keys as distinct parameters for better security. 
+
+There are many cases that developers need additional application- and context-specific information such as a protocol number, algorithm identifiers, user identities, etc. For the same reason that Example 1 being weak, following code is weak.
+
+Example 3: 
+<code php>
+  $new_key = hash_hmac('sha256', $secret_key, $derivation_key . $proto_version . $algo . $user_id);
+</code>
+
+To reduce risk, keys and additional information should be divided.
+
+Example 4:
+<code php>
+  $prk = hash_hmac('sha256', $secret_key, $derivation_key);
+  $new_key = hash_hmac('sha256', $prk, $proto_version . $algo . $user_id);
+  // Note: protocol version, algorithm, user ID are not secret. Therefore, $new_key is secured.
+</code>
+
+This is the basic HKDF (HMAC based Key Derivation Function) operation. HKDF additionally supports shorting/extending key length for certain crypto tasks. Therefore, natural HKDF function signature would be
+
+<code php>
+  string HKDF(string $hash_algo, string $secret_key, string $derivation_key, string $info [, int $length]);
+</code>
+
+Newly introduced HKDF function has different signature currently.
+
+Please read "Detailed Rationale" section for more details and real world HKDF applications.
+
+===== Proposal =====
+
+Change hash_hkdf() signature from
+
+<code php>
+string hash_hkdf(string $algo, string $ikm [, int $length = 0 [, string $info = '' [, string $salt = '' ]]])
+Return value: Binary hash value ONLY.
+</code>
+  * $algo: Hash algorithm. e.g. "sha1", "sha256"
+  * $ikm: Secret or non secret Input Key Material. Some kind of key. e.g. Super secret master key, password, API key, etc.
+  * $length: Optional Output length. If omitted, default output size of specified hash function. 
+  * $info: Optional Generated key context. e.g Protocol number, user ID, group ID, applicable URI, etc.
+  * $salt: Optional secret or non secret salt value. e.g Random value such as nonce, timestamp, etc.
+
+to
+
+<code php>
+string hash_hkdf(string $algo, string $ikm, string $salt , string $info [, int $length = 0 [, bool $raw_output = FALSE]])
+Return value: HEX string hash value by default.
+</code>
+  * $salt: Required. Set empty string to use without salt. More precedence over $info because HKDF security depends on $salt or $ikm strength.
+  * $info: Required. Set empty string to use without salt. Optional context but user should use hash_hmac() without $info.
+  * $length: Optional. Mostly needless unless users need key derivations for low level crypto operations.
+  * $raw_output: Optional. Added for hash API consistency. Specify return value format, raw(binary) or HEX. Majority of PHP use cases would require non binary output and HEX is good enough.
+
+Note: Only changed/added parts are described.
+
+Insecure usage is easily possible with current signature.
+<code php>
+$key = hash_hkdf('sha256', $weak_key); // Generate secure $key!! <= This isn't secure at all w/o strong salt.
+$key = hash_hkdf('sha256', $weak_key, 80); // Generate even more secure $key!! <= Length does not add strength to OKM.
+$key = hash_hkdf('sha256', $weak_key, 80, 'Admin'); // Generate even more secure $key only usable in 'Admin' context!! <= info does not add strength to OKM because it supposed to be non secret.
+</code>
+
+$salt is described as more important parameter than "info" in RFC 5869, and it recommends there should be appropriate $salt whenever it is possible. $info makes HKDF more valuable because simpler and faster hash_hmac(string $algo , string $data , string $key [, bool $raw_output = false ] ) could be used instead when $info could be omitted. hash_hkdf() could be viewed as hash_hmac() extension. (It is HMAC extension indeed) It should be better to have compatible signatures for API consistency. 
+
+i.e.
+hash_hmac(), as well as hash(), already has optional $raw_output parameter
+<code php>
+string hash_hmac(string $algo, string $data, string $key [, bool $raw_output = FALSE ])
+Return value: HEX string hash value by default.
+</code>
+
+Compatible hash_hkdf() signature would be
+<code php>
+string hash_hkdf(string $algo, string $ikm, string $salt , string $info [, int $length = 0 [, bool $raw_output = FALSE ]])
+Return value: HEX string hash value by default.
+</code>
+
+For these reasons, $salt and $info are made to required parameters and made return to HEX hash value by default.
+
+
+=== Rationale behind salt as required parameter ===
+
+  * Salt is responsible for IKM and output key security. Other parameters are not.
+  * Salt is required as pre-shared key in most cases. Key parameter should have more precedence.
+  * Users should use salt always when it is possible as per the RFC.
+    * Must use strong salt if it is possible.
+    * Must use secret salt if it is possible.
+    * Must use strong secret salt when input key is weak.
+  * Omitting salt is usually a bad(weak) design. See 'hash_hkdf() applications with PHP' and 'Other Use Cases' section.
+
+=== Rationale behind info as required parameter ===
+
+  * hash_hmac() could be used when info has no use.
+  * info has well defined purpose, derive key(s) for specific context by non secret information. 
+
+=== Rationale behind changed return value ===
+
+  * HEX string return value and "raw" flag parameter is required to be consistent with existing hash functions.  
+  * Most use cases with PHP will require string return values.
+
+hash('sha256', something) and hash_hmac('sha256', something) returns HEX. hash_hkdf() which is HMAC returns "binary" breaks API consistency and disturbs common usage with PHP.
+
+===== Detailed Rationale =====
+
 HKDF (HMAC based KDF) is [[https://en.wikipedia.org/wiki/Key_derivation_function|KDF]] (Key Devivation Function) defined by [[https://tools.ietf.org/html/rfc5869|RFC 5869]]. Although the RFC describes HKDF in low level crypto context, HKDF is designed as general purpose key derivation function. It derives secure keys for encryption/validation/authentication/etc from other weak/strong key information such as encryption key, API key, master key, password, etc. However, current hash_hkdf() signature is overly optimized for specialized cryptographic operation. (i.e. To derive "binary" output key with "specified length" for "strong input key". This is hardly be common/most used use case with PHP. In addition, it violates what the RFC recommends.) This PHP RFC proposes more generic HKDF behavior to use with PHP and consistent signature with other PHP hash functions.
 
 In short, HKDF is a general purpose hash function that is designed to create new key(s) from certain key using cryptographic hash function and HMAC. However, newly introduced hash_hkdf() is optimized for very limited usage.
-
-TL;DR; 
-
-Please read "[[#current_status|Current Status]]" section for the issue. Please keep in mind HKDF is simple HMAC extension also.
 
 == Terms ==
 
@@ -309,80 +423,6 @@ Since this CSRF token in valid only for specific URL, the token cannot be used f
 
 You can create expiration enabled URL for limited use with similar steps. This could be used to allow anonymous storage object access with relatively secure manner. Example is AWS S3 presigned URL.
 
-
-===== Proposal =====
-
-Change hash_hkdf() signature from
-
-<code php>
-string hash_hkdf(string $algo, string $ikm [, int $length = 0 [, string $info = '' [, string $salt = '' ]]])
-Return value: Binary hash value ONLY.
-</code>
-  * $algo: Hash algorithm. e.g. "sha1", "sha256"
-  * $ikm: Secret or non secret Input Key Material. Some kind of key. e.g. Super secret master key, password, API key, etc.
-  * $length: Optional Output length. If omitted, default output size of specified hash function. 
-  * $info: Optional Generated key context. e.g Protocol number, user ID, group ID, applicable URI, etc.
-  * $salt: Optional secret or non secret salt value. e.g Random value such as nonce, timestamp, etc.
-
-to
-
-<code php>
-string hash_hkdf(string $algo, string $ikm, string $salt , string $info [, int $length = 0 [, bool $raw_output = FALSE]])
-Return value: HEX string hash value by default.
-</code>
-  * $salt: Required. Set empty string to use without salt. More precedence over $info because HKDF security depends on $salt or $ikm strength.
-  * $info: Required. Set empty string to use without salt. Optional context but user should use hash_hmac() without $info.
-  * $length: Optional. Mostly needless unless users need key derivations for low level crypto operations.
-  * $raw_output: Optional. Added for hash API consistency. Specify return value format, raw(binary) or HEX. Majority of PHP use cases would require non binary output and HEX is good enough.
-
-Note: Only changed/added parts are described.
-
-Insecure usage is easily possible with current signature.
-<code php>
-$key = hash_hkdf('sha256', $weak_key); // Generate secure $key!! <= This isn't secure at all w/o strong salt.
-$key = hash_hkdf('sha256', $weak_key, 80); // Generate even more secure $key!! <= Length does not add strength to OKM.
-$key = hash_hkdf('sha256', $weak_key, 80, 'Admin'); // Generate even more secure $key only usable in 'Admin' context!! <= info does not add strength to OKM because it supposed to be non secret.
-</code>
-
-$salt is described as more important parameter than "info" in RFC 5869, and it recommends there should be appropriate $salt whenever it is possible. $info makes HKDF more valuable because simpler and faster hash_hmac(string $algo , string $data , string $key [, bool $raw_output = false ] ) could be used instead when $info could be omitted. hash_hkdf() could be viewed as hash_hmac() extension. (It is HMAC extension indeed) It should be better to have compatible signatures for API consistency. 
-
-i.e.
-hash_hmac(), as well as hash(), already has optional $raw_output parameter
-<code php>
-string hash_hmac(string $algo, string $data, string $key [, bool $raw_output = FALSE ])
-Return value: HEX string hash value by default.
-</code>
-
-Compatible hash_hkdf() signature would be
-<code php>
-string hash_hkdf(string $algo, string $ikm, string $salt , string $info [, int $length = 0 [, bool $raw_output = FALSE ]])
-Return value: HEX string hash value by default.
-</code>
-
-For these reasons, $salt and $info are made to required parameters and made return to HEX hash value by default.
-
-
-=== Rationale behind salt as required parameter ===
-
-  * Salt is responsible for IKM and output key security. Other parameters are not.
-  * Salt is required as pre-shared key in most cases. Key parameter should have more precedence.
-  * Users should use salt always when it is possible as per the RFC.
-    * Must use strong salt if it is possible.
-    * Must use secret salt if it is possible.
-    * Must use strong secret salt when input key is weak.
-  * Omitting salt is usually a bad(weak) design. See 'hash_hkdf() applications with PHP' and 'Other Use Cases' section.
-
-=== Rationale behind info as required parameter ===
-
-  * hash_hmac() could be used when info has no use.
-  * info has well defined purpose, derive key(s) for specific context by non secret information. 
-
-=== Rationale behind changed return value ===
-
-  * HEX string return value and "raw" flag parameter is required to be consistent with existing hash functions.  
-  * Most use cases with PHP will require string return values.
-
-hash('sha256', something) and hash_hmac('sha256', something) returns HEX. hash_hkdf() which is HMAC returns "binary" breaks API consistency and disturbs common usage with PHP.
 
 ===== Discussions =====
 
