@@ -1,8 +1,8 @@
 ====== PHP RFC: PDO Float Type ======
-  * Version: 0.2
+  * Version: 0.3
   * Date: 2017-04-05
   * Author: Adam Baratz adambaratz@php.net
-  * Status: Under Discussion
+  * Status: Voting
   * First Published at: http://wiki.php.net/rfc/pdo_float_type
 
 ===== Introduction =====
@@ -12,6 +12,8 @@ Queries formed this way produce the correct results, but with some inefficiencie
 
 ===== Proposal =====
 A new type, ''PDO::PARAM_FLT'', will be added. It will indicate that a parameter should be interpreted as and presented to the database server as a floating point value. This name was selected to correspond to the PHP type system. PDO is meant to be a generic layer, so it shouldn't hew closely to any one database. The implication is that these values will be represented internally using the double C type. When emulated prepared statements are enabled, these values would be interpolated in decimal form. Beyond that, implementation details will vary with each PDO driver. Several will require no modifications to start benefiting from the new type.
+
+Due to the mechanics of each supported driver, this type should also be used for fixed-precision values. Since all APIs involved use C types, double is the most precise option available. The following section goes into more detail on why this is appropriate for each driver.
 
 ===== Changes To Supported PDO Drivers =====
 
@@ -43,11 +45,20 @@ select * from numbers where number = 0.1234
 
 This test was repeated using the ''numeric'' type for the number column.
 
+The addition of ''PDO::PARAM_FLT'' will ensure numbers are quoting as numbers in queries.
+
 ==== pdo_firebird ====
 
-The API comes with two types, ''SQL_DOUBLE'' and ''SQL_FLOAT'', that represent floating point values. They correspond directly to the C types of the same names. Since zvals store floating point values as doubles, PDO should pass all floating point values as ''SQL_DOUBLE''.
+This database offers these types:
+  * ''DOUBLE PRECISION''. These should be passed using the double C type.
+  * ''FLOAT''. These should be passed using the float C type.
+  * ''DECIMAL'' and ''NUMERIC''. Depending on the specified precision, they are stored internally as ''SMALLINT'' (int), ''INTEGER'' (long), ''DOUBLE PRECISION'' (double), or 64-bit integer (ISC_INT64) types.
 
-The ''PDO_PARAM_EVT_EXEC_PRE'' hook (see ''ext/pdo_firebird/firebird_statement.c:firebird_stmt_param_hook'') will check for double zvals. They will be prepared as a ''SQL_DOUBLE''. However, this code won't be reached because any zval doubles will be cast to other types before they reach this hook.
+It would work correctly enough of the time to use ''PDO::PARAM_FLT'' with each of these. That type would ensure pdo_firebird passes a double value to the InterBase API. Since zvals store floating point values as doubles, any type coercion performed by the API would result in the same loss of precision involved in converting a double to a float anywhere else.
+
+There is already code in the ''PDO_PARAM_EVT_EXEC_PRE'' hook (see ''ext/pdo_firebird/firebird_statement.c:firebird_stmt_param_hook'') to check for double zvals. They will be prepared as a ''SQL_DOUBLE''. However, this code won't be reached because any zval doubles will be cast to other types before they reach this hook.
+
+The addition of ''PDO::PARAM_FLT'' will prevent numbers from being unnecessarily cast to strings before binding them as parameters.
 
 ==== pdo_mysql ====
 
@@ -84,17 +95,19 @@ $db->query('DROP TABLE IF EXISTS test');
 
 MySQL has two formats for [[https://dev.mysql.com/doc/refman/5.7/en/number-literals.html|number literals]]: decimal form and scientific notation. A test similar to the one used with MSSQL showed that an index will be hit for decimal and float columns using decimal form values. Meaning, there would be no impact to query performance with emulated prepared statements.
 
+The MySQL native driver [[https://dev.mysql.com/doc/apis-php/en/apis-php-mysqlnd.html|documentation]] doesn't go into detail on its API. It appears that the types used to bind values should correspond to the value you pass. In this case, ''MYSQL_TYPE_DOUBLE'' is appropriate for double zvals. While there's a ''MYSQL_TYPE_DECIMAL'' type, it's not clear what C type it maps to. A misuse of ''PDO::PARAM_FLT'' for a fixed-precision column may result in type coercion by the database, but it will avoid a potentially unnecessary string cast in PDO.
+
 ==== pdo_oci ====
 
 The APIs for binding values, [[https://docs.oracle.com/cd/B10501_01/appdev.920/a96584/oci15r29.htm|OCIBindByName]] and [[https://docs.oracle.com/cd/B10501_01/appdev.920/a96584/oci15r30.htm|OCIBindByPos]], take a ''dty'' parameter to describe the data type. The existing implementation treats any parameter that doesn't use ''PDO::PARAM_LOB'' as a string.
 
-A ''PDO::PARAM_FLT'' type could ensure that a value was formatted like a double. The rest of the existing code would handle everything correctly.
+A ''PDO::PARAM_FLT'' type could ensure that a value was formatted like a double. The rest of the existing code would handle everything correctly. There could be a future optimization to remove this string cast. OCI only has single- and double-precision [[https://docs.oracle.com/cd/B19306_01/appdev.102/b14250/oci03typ.htm||types]].
 
 ==== pdo_odbc ====
 
 All parameters that don't use ''PDO::PARAM_LOB'' are converted to strings. This is handled by the ''PDO_PARAM_EVT_EXEC_PRE'' hook (see ''ext/pdo_odbc/odbc_stmt.c:odbc_stmt_param_hook'').
 
-A ''PDO::PARAM_FLT'' type could ensure that a value was formatted like a double. The rest of the existing code would handle everything correctly.
+A ''PDO::PARAM_FLT'' type could ensure that a value was formatted like a double. The rest of the existing code would handle everything correctly. There could be a future optimization to remove this string cast. Similarly to the InterBase API, ODBC maps ''DECIMAL'' and ''NUMERIC'' columns to [[https://docs.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-data-conversion-examples||one of several C types]] depending on the specified precision.
 
 ==== pdo_pgsql ====
 
@@ -104,7 +117,7 @@ The [[https://www.postgresql.org/docs/9.6/static/libpq-exec.html|APIs for execut
   * Value: A null-terminated text string (for text format) or binary data in the format expected by the server (for binary format).
   * Length: The actual data lengths of binary-format parameters.
 
-A ''PDO::PARAM_FLT'' type could ensure that a value was formatted like a double. The rest of the existing code would handle everything correctly.
+A ''PDO::PARAM_FLT'' type could ensure that a value was formatted like a double. The rest of the existing code would handle everything correctly. Since the value is always presented as a string, there would be no meaningful different to adding different handling for fixed-precision values.
 
 PostgreSQL has two formats for [[https://www.postgresql.org/docs/9.6/static/sql-syntax-lexical.html#SQL-SYNTAX-CONSTANTS-NUMERIC|numeric constants]]: decimal form and scientific notation. A test similar to the one above showed that an index will be hit for double and numeric columns using decimal form values. Meaning, there would be no impact to query performance with emulated prepared statements.
 
@@ -116,9 +129,6 @@ A single ''PDO::PARAM_FLT'' type would fully represent floating point types for 
 
 ===== Backward Incompatible Changes =====
 This is entirely new functionality. Existing code will work as is.
-
-===== Future Scope =====
-There could be possible confusion with fixed-precision types (''DECIMAL'', ''NUMERIC'', etc.). The documentation should state that ''PDO::PARAM_STR'' should continue to be used for those types. It would be a future project to add a fixed-precision type to PDO.
 
 ===== Proposed PHP Version(s) =====
 Next PHP 7.x.
