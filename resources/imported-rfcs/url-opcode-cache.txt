@@ -22,23 +22,35 @@ the scripts provided by such a system cannot be opcode-cached, the system looses
 Historically, the issue was addressed using different workarounds : either every
 URL is considered as opcode-cacheable (APC), whatever wrapper it is coming from, or
 a list of 'cacheable' protocols is declared explicitely in the code. opcache is using the second solution : 'file' and 'phar' are explicitely
-declared as the only 'cacheable' stream wrappers. It also implies that every 'phar://' and 'file://' paths are cacheable.
+declared as the only 'cacheable' stream wrappers. It also implies that every 'phar:%%//%%' and 'file:%%//%%' paths are cacheable.
 
 I consider that we need a more generic system, which must allow any PHP code handled via a stream wrapper ('core' or 'userspace') to be opcode-cached.
 
 My previous RFC proposed the implementation of an 'is_cacheable' operation, returning a boolean value. This implied that the cache key to use would always be the URL itself. Some users expressed concerns that the stream wrapper should also have the power to determine the cache key. So, this is what I am now proposing :
 
-  * An operation named 'stream_cache_key' is added at the end of the php_stream_wrapper_ops structure. This is an optional pointer to a function able to determine if a given URL is cacheable or not and, if this is the case, to return the (string) key to use to chache this data. 
+  * An operation named 'stream_cache_key' is added at the end of the php_stream_wrapper_ops structure. This is an optional pointer to a function able to determine if a given URL is cacheable or not and, if this is the case, to return the (string) key to use to cache this data. 
 
   * A new C function named php_stream_cache_key(zend_string *path, int options, php_stream_context *context) is defined. It determines the right wrapper from the path it receives and forwards the request to the corresponding stream_cache_key() function, if it exists. If the stream_cache_key() element is not defined, NULL is returned.
 
-  * Userspace stream wrappers can define a method named cache_key(path [,options]). This method determines if the input path is cacheable and the key to use. If the path is not cacheable, the function should return null. Any other value is converted to string and considered as the key to use. If the method is not defined, every path for this wrapper are non-cacheable. For security reasons, the returned key must start with the same '<scheme>://' prefix as the input path. If it not the case, an error is raised and the key is ignored.
+  * Userspace stream wrappers can define a method named cache_key(path [,options]). This method determines if the input path is cacheable and the key to use. If the path is not cacheable, the function should return null. Any other value is converted to string and considered as the key to use. If the method is not defined, every path for this wrapper are non-cacheable. For security reasons, the returned key must start with the same '<scheme>:%%//%%' prefix as the input path. If it not the case, an error is raised and the key is ignored.
 
   * For completeness, a new PHP function named file_cache_key(path [, options [, context]]) is defined. It allows to call the 'cache_key' operation from a PHP script.
 
-Using a (zend_string *) for input and output allows the mechanism to be very fast because, in most cases, when an URL is cacheable, the key to use will be the path itself. In this case, the function will just increment the reference count (zend_string_addref(path)) and return the input path. See the phar_wrapper_cache_key() function in the PR for a basic example of a stream wrapper whose URLs are all cacheable using the URL as key.
+Using a (zend_string *) for input and output allows the mechanism to be very fast because, in most cases, when an URL is cacheable, the key to use will be the path itself. Look at the phar example :
 
-In order to ensure key unicity, the returned string must start with a '<wrapper-scheme>://' prefix. For performance reasons, this is checked in debug mode only.
+  /**
+   * Called by the opcode cache to get the key to use when caching this URL
+   */
+  static zend_string *phar_wrapper_cache_key(php_stream_wrapper *wrapper
+      , zend_string *url, int options, php_stream_context *context) /* {{{ */
+  {
+  	/* Phar URLs are always cacheable */
+  	zend_string_addref(url);
+  	return url;
+  }
+  /* }}} */
+
+In order to ensure key unicity, the returned string must start with a '<wrapper-scheme>:%%//%%' prefix. For performance reasons, this is checked in debug mode only on C-level wrappers.
 
 The stream wrapper has the responsibility to ensure that the data associated with a given key will always be the same.
 
@@ -67,9 +79,9 @@ Both changes are included in the PR below.
 
 Opcode cache must implement the following logic :
 
-* If the received path is a 'stream' path, call php_stream_cache_key.
-* If the returned value is null, path is non cacheable.
-* If the returned value is non null, use this value as key to search or register the data. 
+  * If the received path is a 'stream' path, call php_stream_cache_key.
+  * If the returned value is null, path is non cacheable.
+  * If the returned value is non null, use this value as key to search or register the data. 
 
 These changes are NOT included in the PR below because opcache code is a performance-critical part of the core. As the change is not trivial and requires some re-organizations in the way functions call themselves, I would prefer someone more familiar with this code to implement these changes.
 
