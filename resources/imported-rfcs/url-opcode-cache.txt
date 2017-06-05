@@ -1,6 +1,6 @@
 ====== PHP RFC: Add support for stream-wrapped URLs in opcode cache ======
-  * Version: 1.1
-  * Date: 2017-06-025-25
+  * Version: 1.2
+  * Date: 2017-06-05
   * Author: François Laupretre, francois@tekwire.net
   * Status: Under discussion
   * First Published at: http://wiki.php.net/rfc/url-opcode-cache
@@ -11,28 +11,26 @@ This RFC proposes a way to opcode-cache the PHP code generated via a stream wrap
 
 It is an extension of the 'is_cacheable' concept developed [[https://wiki.php.net/rfc/streams-is-cacheable|in a previous RFC]].
 
-===== Proposal =====
-
 When stream wrappers were introduced in PHP, their relationship with opcode
 caches was not a problem, as they were mostly used to access remote data. The
 need for a better interaction arose with package systems, like phar and phk, as
-these stream wrappers manage a virtual PHP source tree through stream URLs. If
-the scripts provided by such a system cannot be opcode-cached, the system looses a great part of its value.
+these sytems use stream wrappers to expose virtual trees of PHP code. If the scripts distributed by such systems cannot be opcode-cached, they loose a great part of their value.
 
-Historically, the issue was addressed using different workarounds : either every
-URL is considered as opcode-cacheable (APC), whatever wrapper it is coming from, or
-a list of 'cacheable' protocols is declared explicitely in the code. opcache is using the second solution : 'file' and 'phar' are explicitely
-declared as the only 'cacheable' stream wrappers. It also implies that every 'phar:%%//%%' and 'file:%%//%%' paths are cacheable.
+Historically, the issue was addressed using different workarounds :
+  - every URL may be considered as opcode-cacheable, whatever wrapper it is coming from. This approach is wrong because most URLs are intrinsically dynamic and NOT cacheable.
+  - In order to avoid this, opcache implements another workaround : 'file' and 'phar' are hardcoded in the opcache code as the only 'cacheable' stream wrappers. Obviously, such tight coupling cannot be considered as a satisfactory solution.
 
-I consider that we need a more generic system, which must allow any PHP code handled via a stream wrapper ('core' or 'userspace') to be opcode-cached.
+So, I consider that we need a more generic system, which must allow any PHP code handled via a stream wrapper ('core' or 'userspace') to be opcode-cached.
+
+===== Proposal =====
 
 My previous RFC proposed the implementation of an 'is_cacheable' operation, returning a boolean value. This implied that the cache key to use would always be the URL itself. Some users expressed concerns that the stream wrapper should also have the power to determine the cache key. So, this is what I am now proposing :
 
-  * An operation named 'stream_cache_key' is added at the end of the php_stream_wrapper_ops structure. This is an optional pointer to a function able to determine if a given URL is cacheable or not and, if this is the case, to return the (string) key to use to cache this data. 
+  * An operation named 'stream_cache_key' is added at the end of the php_stream_wrapper_ops structure. This is an optional pointer to a function able to determine whether a given URL is cacheable or not and, if this is the case, to return the (string) key to use when caching this data. 
 
   * A new C function named php_stream_cache_key(zend_string *path, int options, php_stream_context *context) is defined. It determines the right wrapper from the path it receives and forwards the request to the corresponding stream_cache_key() function, if it exists. If the stream_cache_key() element is not defined, NULL is returned.
 
-  * Userspace stream wrappers can define a method named cache_key(path [,options]). This method determines if the input path is cacheable and the key to use. If the path is not cacheable, the function should return null. Any other value is converted to string and considered as the key to use. If the method is not defined, every path for this wrapper are non-cacheable. For security reasons, the returned key must start with the same '<scheme>:%%//%%' prefix as the input path. If it not the case, an error is raised and the key is ignored.
+  * Userspace stream wrappers can define a method named cache_key(path [,options]). This method determines if the input path is cacheable and the key to use. If the path is not cacheable, the function should return null. Any other value is converted to string and considered as the key to use. If the method is not defined, every path associated to this wrapper are non-cacheable. In order to avoid key value conflicts, the returned key must start with the same '<scheme>:%%//%%' prefix as the input path. If it not the case, an error is raised and the key is ignored.
 
   * For completeness, a new PHP function named file_cache_key(path [, options [, context]]) is defined. It allows to call the 'cache_key' operation from a PHP script.
 
@@ -50,9 +48,9 @@ Using a (zend_string *) for input and output allows the mechanism to be very fas
   }
   /* }}} */
 
-In order to ensure key unicity, the returned string must start with a '<wrapper-scheme>:%%//%%' prefix. For performance reasons, this is checked in debug mode only on C-level wrappers.
+In order to ensure key unicity, the returned string must start with the same '<scheme>:%%//%%' prefix as the input URL. For performance reasons, this is checked in debug mode only on C-level wrappers.
 
-The stream wrapper has the responsibility to ensure that the data associated with a given key will always be the same.
+The stream wrapper has the responsibility to ensure that the data associated with a given key will always be the same. If this is not the case (e.g. if a 'non-cacheable' URL is declared as 'cacheable'), PHP won't fail but, from a user's point of view, the behavior will be unpredictable.
 
 ===== Backward Incompatible Changes =====
 
@@ -69,11 +67,15 @@ None
 
 ==== To Existing Extensions ====
 
-Phar needs to implement a cache_key() function, always returning the input path.
+Phar implements a new cache_key() operation, always returning the input path.
 
 The same for the plain files wrapper.
 
-Both changes are included in the PR below.
+No other core extension needs to be modified.
+
+When 3rd-party extensions decide to have the benefit of the new feature, they will just implement an additional 'cache_key' operation. This is not mandatory and only stream wrappers distributing PHP source code have a reason to do that. In order to remain compatible with previous PHP versions, the declaration for this operation must be enclosed in an appropriate '#if PHP_API_VERSION >= 20160731' block.
+
+Userspace stream wrappers may just define a new 'cache_key()' method. On previous PHP versions, this method will never be called, but won't harm.
 
 ==== To Opcache ====
 
@@ -83,15 +85,13 @@ Opcode cache must implement the following logic :
   * If the returned value is null, path is non cacheable.
   * If the returned value is non null, use this value as key to search or register the data. 
 
-These changes are NOT included in the PR below because opcache code is a performance-critical part of the core. As the change is not trivial and requires some re-organizations in the way functions call themselves, I would prefer someone more familiar with this code to implement these changes.
+These changes are NOT included yet in the PR below, but will be soon.
 
 ==== New Constants ====
 
 None
 
 ===== Open Issues =====
-
-  * Security check on the key returned by userspace wrappers is not implemented yet. I'll add it ASAP.
 
 ===== Unaffected PHP Functionality =====
 
