@@ -1,25 +1,48 @@
 ====== PHP RFC: Retry keyword in catch blocks ======
-  * Version: 0.9
-  * Date: 2015-11-03
+  * Version: 1.0
+  * Date: 2016-06-19
   * Author: Sammy Kaye Powers, me@sammyk.me
   * Status: Under Discussion
 
 ===== Introduction =====
 
-The ''retry'' keyword will make it easier to re-execute code blocks that failed due to recoverable errors.
+The ''retry'' keyword will make it easier to re-execute code blocks that failed due to recoverable errors by jumping to the **top** of the ''try'' block.
 
-PHP is primarily used for web apps, and many times these apps need to communicate with third-party services or data stores that can temporality fail with recoverable errors. Failures typically throw exceptions which can be captured in a ''try/catch'' block. Once a recoverable error reaches a ''catch'' block, it's not always trivial in user-land to retry the ''try'' block.
+PHP is primarily used for web apps, and many times these apps need to communicate with third-party services or data stores that can temporality fail with recoverable errors. Failures typically throw exceptions which can be captured in a ''try/catch/finally'' block. Once a recoverable error reaches a ''catch'' block, it's not always trivial in user-land to retry the ''try'' block.
 
-This RFC proposes adding the ''retry'' keyword in the ''catch'' block to re-execute the ''try'' block.
+This RFC proposes adding two implementations of the ''retry'' keyword to a ''try/catch/finally'' block with a separate vote for each implementation.
+
+==== Block-level implementation example ====
+
+The ''retry'' block allows a developer to:
+
+  * Retry the ''try'' block ''n'' times or forever (in this example 3 times)
+  * Execute arbitrary code before each retry (to sleep, log, check exception code, etc)
+  * Access to the number of times the try block has been executed (with '$attempt')
+  * Use the ''break'' keyword to break out of retry attempts for reasons other than the 1) exception not being thrown or 2) running out of retry attempts; (more on this later)
+
+<code php>
+try {
+    somethingSketchy();
+} retry 3 (RecoverableException $e, $attempt) {
+    echo "Failed doing sketchy thing on try #{$attempt}. Retrying...\n";
+    sleep(1);
+} catch (RecoverableException $e) {
+    echo $e->getMessage().PHP_EOL;
+}
+</code>
+
+==== Keyword implementation example ====
+
+The ''retry'' keyword implementation offers a very light-weight syntax for retrying the ''try'' block.
 
 <code php>
 try {
     somethingSketchy();
 } catch (RecoverableException $e)
-    retry;
+    retry; // Go to top of try block
 }
 </code>
-
 
 ===== Proposal =====
 
@@ -61,7 +84,6 @@ There are currently a few ways to implement a feature that will retry a failed b
 
 === Recursive Functions ===
 
-
 <code php>
 function myRetryFunction($maxTries) {
 	try {
@@ -83,6 +105,7 @@ Wrapping recoverable failures in functions/closures is less than ideal. Let's tr
 
 <code php>
 $maxTries = 5;
+
 for ($x=0; $x<=$maxTries; $x++) {
 	try {
 		somethingSketchy();
@@ -93,40 +116,229 @@ for ($x=0; $x<=$maxTries; $x++) {
 }
 </code>
 
-Wrapping the recoverable code in ''for'' loops is also less than ideal.
-
-With the ''retry'' keyword, the code becomes both easier to read and write.
+Wrapping the recoverable code in ''for'' loops is also less than ideal as it make the code less readable.
 
 === Use Goto ===
-
-No.
-
-=== Retry Keyword ===
 
 <code php>
 $maxTries = 5;
 
+retryTheThing:
 try {
 	somethingSketchy();
 } catch (RecoverableException $e) {
 	if (--$maxTries > 0) {
+		goto retryTheThing;
+	}
+	die('Tried a bunch but failed.');
+}
+</code>
+
+This is arguably the cleanest option for retrying but is blanketed with the negative stigma of using a ''goto''.
+
+=== Use Retry ===
+
+Using the ''retry'' keyword implementation allows a developer to use her own method of tracking the number of attempts as well as a way to execute any arbitrary code before trying again.
+
+<code php>
+const MAX_TRIES = 5;
+$attempts = 0;
+try {
+	somethingSketchy();
+} catch (RecoverableException $e) {
+	if ($attempt < MAX_TRIES) {
+		sleep(1);
+		// And log stuff maybe
 		retry;
 	}
 	die('Tried a bunch but failed.');
 }
 </code>
 
-This really does simplify quite a few workflows, that many PHP developers have just learned to accept, and could be improved greatly. 
+Alternatively using the block-level implementation of ''retry'' keeps the developer from having to write her own boilerplate to both 1) track the number of attempts and 2) execute arbitrary code before retying.
 
-It's important not to confuse the use of this feature, with developers just not using enough methods. More and more and more methods is quite popular with the OOP mindset, but a) more methods are not in fact always a superior alternative to retry, and b) PHP is not just an OOP language.
+<code php>
+try {
+    somethingSketchy();
+} retry 5 (RecoverableException $e, $attempt) {
+    sleep(1);
+    // And maybe log stuff when $attempt > 3 or something
+} catch (RecoverableException $e) {
+    die('Tried a bunch but failed.');
+}
+</code>
 
-This is also not unheard of in other languages.
+The code becomes quite a bit more readable because it removes the nested structures one's eyes has to jump through while scanning the code.
+
+Both the ''retry'' keyword and block-level implementations really do simplify quite a few workflows, that many PHP developers have just learned to accept, and could be improved greatly.
+
+=== Catching multiple exceptions ===
+
+As the ''retry'' block is basically a fancy ''catch'' block, it also supports catching multiple recoverable exceptions.
+
+<code php>
+try {
+	throw new RecoverableException("FAILED");
+} retry 3 (RecoverableException | AnotherRecoverableException $e, $attempt) {
+    echo "Failed on try #{$attempt}. Retrying...\n";
+	sleep(1);
+} catch (RecoverableException $e) {
+    echo $e->getMessage().PHP_EOL;
+}
+
+// AnotherRecoverableException bubbles up after 3 retries
+</code>
+
+=== Bubbling up exceptions  ===
+
+When a ''retry'' block exists on a ''try/catch/finally'' structure, the ''catch'' block is optional allowing the exception to bubble up for another part of the application to catch it.
+
+<code php>
+try {
+	throw new RecoverableException("FAILED");
+} retry 10 (RecoverableException $e, $attempt) {
+    echo "Retrying...";
+}
+
+// After 10 times RecoverableException is still thrown & uncaught
+</code>
+
+=== Implicit infinite retries ===
+
+The number of retries can be defined with an int literal or a constant. If omitted, ''retry'' will assume infinite retries.
+
+<code php>
+try {
+	throw new RecoverableException("FAILED");
+} retry (RecoverableException $e, $attempt) {
+    echo "Retrying forever...";
+} catch (RecoverableException $e) {
+    echo $e->getMessage();
+}
+</code>
+
+Alternatively the ''INF'' math constant can be used to specify infine retries.
+
+<code php>
+try {
+	throw new RecoverableException("FAILED");
+} retry INF (RecoverableException $e, $attempt) {
+    echo "Retrying forever...";
+} catch (RecoverableException $e) {
+    echo $e->getMessage();
+}
+</code>
+
+=== Breaking out of retry ===
+
+It is sometimes necessary to have some logic that would abort any more retry attempts, like in the case of retrying forever. That can be done using the ``break`` keyword.
+
+<code php>
+try {
+	throw new RecoverableException("FAILED");
+} retry INF (RecoverableException $e, $attempt) {
+	if (42 === $e->getCode()) {
+		break;
+	}
+    echo "Retrying forever...";
+} catch (RecoverableException $e) {
+    echo $e->getMessage();
+}
+</code>
+
+=== A full example ===
+
+Below is a full example that illustrates the full potential of the ''retry'' block and all of its features.
+
+<code php>
+class RecoverableException extends Exception {}
+class AnotherRecoverableException extends Exception {}
+class NonRecoverableException extends Exception {}
+
+$id = 42;
+try {
+	throw new RecoverableException("FAILED getting ID #{$id}");
+} retry 3 (RecoverableException | AnotherRecoverableException $e, $attempt) {
+	if (42 === $e->getCode()) {
+		break;
+	}
+    echo "Failed getting ID #{$id} on try #{$attempt}. Retrying...";
+	sleep(1);
+} catch (RecoverableException | AnotherRecoverableException $e) {
+    echo $e->getMessage();
+} catch (NonRecoverableException $e) {
+    echo $e->getMessage();
+}
+</code>
+
+In order to illustrate just how much boilerplate the ''retry'' block removes, check out a full userland implementation that covers all the features of the example above with a fully-featured ''retry()'' function.
+
+<code php>
+class RecoverableException extends Exception {}
+class AnotherRecoverableException extends Exception {}
+class NonRecoverableException extends Exception {}
+
+function retry(int $retryCount, callable $tryThis, callable $beforeRetry = null, array $targetExceptions = ['Exception'])
+{
+	$attempts = 0;
+    tryCode:
+    try {
+        return $tryThis();
+    } catch (\Throwable $e) {
+    	$isTargetException = false;
+    	foreach ($targetExceptions as $targetException) {
+    		if ($e instanceof $targetException) {
+    			$isTargetException = true;
+    			break;
+    		}
+    	}
+        if (!$retryCount || !$isTargetException) {
+            throw $e;
+        }
+        $retryCount--;
+        $shouldRetry = true;
+        if ($beforeRetry) {
+        	$shouldRetry = $beforeRetry($e, ++$attempts);
+        }
+        if ($shouldRetry) {
+        	goto tryCode;
+        }
+        throw $e;
+    }
+}
+
+$id = 42;
+try {
+	$result = retry(3, function () use ($id) {
+    	throw new AnotherRecoverableException("FAILED getting ID #{$id}");
+	}, function ($e, $attempt) use ($id) {
+		if (42 === $e->getCode()) {
+			return false;
+		}
+    	echo "Failed getting ID #{$id} on try #{$attempt}. Retrying...";
+		sleep(1);
+		return true;
+	}, [RecoverableException::class, AnotherRecoverableException::class]);
+} catch (RecoverableException | AnotherRecoverableException $e) {
+    echo $e->getMessage();
+} catch (NonRecoverableException $e) {
+    echo $e->getMessage();
+}
+</code>
+
+When comparing the readability of those two code snippets one can see the amount of cognitive overhead that the ''retry'' feature can reduce.
+
+It's important not to confuse the use of this feature, with developers just not using enough methods. More and more and more methods is quite popular with the OOP mindset, but 1) more methods are not in fact always a superior alternative to retry, and 2) PHP is not just an OOP language.
+
+=== Retry in the wild ===
+
+A retry feature is also not unheard of in other languages.
 
   * Ruby has the ''retry'' keyword, highlighted nicely in [[http://ruby.bastardsbook.com/chapters/exception-handling/#retry-section|Bastards Book of Ruby: Exception and Error Handling]]
   * Spring does [[http://docs.spring.io/spring-batch/reference/html/retry.html|some really weird stuff]] to make retry possible
   * Python third party library offers [[https://pypi.python.org/pypi/retrying|annotations to allow methods retry]]
 
-Other languages seem to lack retry logic directly, but Google is full of people trying to work out how to do it with a whole range of complex approaches. We'd make a lot of lives easier if the keyword existed, instead of forcing people to loop and break and count and recurse.
+Other languages seem to lack retry logic directly, but Google is full of people trying to work out how to do it with a whole range of complex approaches. We'd make a lot of lives easier if the keyword existed, instead of forcing people to loop and break and count and recurse and... goto.
 
 ===== Use Cases =====
 
@@ -136,25 +348,40 @@ A) A popular use case would be with temporary failed TCP/IP connections which ar
 
 B) Attempting to make an OAuth 2.0-based API request, getting a 401 due to an expired token, refreshing that token then retrying to original request.
 
-C) Find/Create logic. This is used in the Rails world, when their ActiveRecord "ORM" does SELECT...INSERT. There is a chance that a race condition will flair up between the SELECT returning 0 rows and the INSERT happening, leading to a unique index exception being thrown. Catch that specific exception and fire out a retry, there is no way it can keep happening unless you are deleting it super quickly and timing those race conditions perfectly.
+C) Temporarily locked I/O.
+
+D) Find/Create logic. This is used in the Rails world, when their ActiveRecord "ORM" does SELECT...INSERT. There is a chance that a race condition will flair up between the SELECT returning 0 rows and the INSERT happening, leading to a unique index exception being thrown. Catch that specific exception and fire out a retry, there is no way it can keep happening unless you are deleting it super quickly and timing those race conditions perfectly.
 
 Ideally apps would attempt to retry recoverable failures far more often than we see in the wild, but it's currently not trivial to do so. This scares off a lot of developers from adding the retry logic, and if it were easier, we may well see more stable apps as more developers adopt the easy-to-use syntax.
 
 ===== Backward Incompatible Changes =====
 
-This RFC would not introduce and BC breaks.
+This RFC would not introduce any BC breaks.
 
 ===== Proposed PHP Version =====
 
-Next PHP 7.1.
+Next PHP 7.2.
 
 ===== Proposed Voting Choices =====
 
 Requires a 2/3 majority.
 
+<doodle title="Add block-level retry?" auth="sammyk" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+<doodle title="Add retry keyword?" auth="sammyk" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
 ===== Patches and Tests =====
 
-There is no patch yet, but if approved, Sammy Kaye Powers will submit one.
+There are a few WIP implementations of ''retry'':
+
+  * [[https://github.com/php/php-src/compare/master...SammyK:retry-block-2017|WIP patch: retry block]]
+  * [[https://github.com/php/php-src/compare/master...SammyK:retry-keyword|WIP patch: retry keyword]]
 
 ===== Credits =====
 
