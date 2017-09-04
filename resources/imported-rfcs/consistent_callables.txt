@@ -265,14 +265,46 @@ In this example, although `$fn` is not a callable that can be passed around to a
 
 Currently in PHP a callable can be defined using one of these words in place of a classname in a colon separated string like "self::methodName". When something tries to either call that callable, or check if it is callable with is_callable(), the keyword is replaced with the class name depending on the scope that is active. That means that the real value of the callable depends on where it is called from.
 
-Because of this
-
 By replacing the run time evaluation of these with the compile time scope resolution, the variable meaning of the values is removed and replaced with a consistent meaning.
-
 
 To be clear, self::class, parent::class and static::class will still be used as part of array based callable e.g. [self::class, 'foo'] or if we keep string based static class method callables `self::class . "::foo"
 
 
+==== Add a is_callable_type() function ====
+
+A previous version of the RFC proposed modifying the parameters and meaning of the is_callable() function. This RFC now proposes leaving that function alone(, except for making it more accurately report whether something is callable), and instead adding a separate function to determine if a parameter can be passed as a callable type.
+
+To be clear the meaning of the two functions will be:
+
+is_callable() - returns true if a the first parameter is callable in the current scope.
+
+is_callable_type() - returns true if the first parameter can be passed as a callable type, and is callable in any scope.
+
+
+<code php>
+
+class Foo {
+ 
+    private function bar() {}
+ 
+    public function test($param) {
+        var_dump(is_callable($param));
+        var_dump(is_callable_type($param));
+    }
+}
+ 
+$foo = new Foo();
+$param = [$foo, 'bar'];
+var_dump(is_callable($param));
+$foo->test($param);
+
+output will be:
+
+false // as the private method cannot be called from the global scope
+true  // as the private method can be called from within the class scope
+false // as the private method cannot be passed as a parameter with callable type 
+
+</code>
 
 ==== Instance methods are no longer reported as callable for class names ====
 
@@ -299,99 +331,18 @@ $instanceCallable = [$foo, 'bar'];
 var_dump(is_callable($callable));
 </code>
 
-==== Private and protected functions no longer report as callable for is_callable ====
 
-As they are not callable from all scopes, private and protected functions will not be valid methods for the is_callable test, or pass as acceptable for functions that have a parameter that has a callable type.
+==== Any additional is_callable cleanup ====
 
-It is currently possible using the reflection methods to generate a closure of the private method to allow it to be returned as a callable. If the 'callable' RFC passes and is added to PHP, it will be possible to use a nicer syntax.
+Any other errors in is_callable() will be fixed so that if is_callable($fn) returns true, trying to invoke the function directly or through call_user_func() will not fail due to the callable not being actually callable.
 
 <code php>
-class Foo {
-
-    //This generates a closure to the private method with ugly syntax.
-    public function getCallbackWithCurrentReflection() {
-        $reflection = new ReflectionMethod($this, 'somePrivateMethod');        
-        $callback = $reflection->getClosure($this);
-
-        return $callback;
-    }
-    
-    //This will generate a closure to the private method if the 'callable'
-    //RFC passes
-    public function getCallbackWithCallableRFC() {
-        $callback = callable($this, 'somePrivateMethod');
-
-        return $callback;
-    }
-    
-    private function somePrivateMethod() {
-        echo "This is private.";
-    }
+if (is_callable($fn) === true) {
+    $fn(); 
+    call_user_func($fn);
+    // given a zero argument, both of these will be guaranteed to work.
 }
-
-$foo = new Foo();
-$callback = $foo->getCallback();
-$callback();
 </code>
-
-This will allow a class to return a private method bound to an instance as a callback, without having to have the private method be exposed to the public API of the class.
-
-
-==== is_callable function change ====
-
-Currently the function is_callable has the signature:
-
-<code php>
-bool is_callable ( callable $name [, bool $syntax_only = false [, string &$callable_name ]] )
-</code>
-
-which allows users to do this:
-
-<code php>
-class Foo {
-    function bar() {
-
-    }
-}
-
-
-$obj = new Foo();
-is_callable([$obj, "bar"], true, $name);
-echo $name; //output is Foo::bar
-</code>
-
-The signature will be changed to be:
-
-<code php>
-bool is_callable ( callable $name [, bool $syntax_only = false [, bool $current_scope = false]])
-</code>
-
-The `$current_scope` flag will allow users to test whether a parameter is actually invokable in the current scope, even if it is not a parameter that is universally callable. e.g. for private functions.
-
-<code php>
-class Foo {
-
-    private function bar() {}
-
-    public function test($param) {
-        var_dump(is_callable($param));
-        $syntaxOnly = false;
-        var_dump(is_callable($param, $syntaxOnly, true));
-    }
-}
-
-$foo = new Foo();
-$param = [$foo, 'bar'];
-
-$foo->test($param);
-//output will be:
-//false
-//true
-
-</code>
-
-
-To allow detection of code that uses the 3rd parameter to indicate the callable_name should be set, in the last PHP 7.x release we can deprecate (with a warning notice) that using the 3rd parameter is going to be removed in PHP 8. 
 
 
 ==== call_user_func equivalence to direct invocation ====
