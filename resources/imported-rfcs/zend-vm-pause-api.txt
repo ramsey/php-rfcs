@@ -1,0 +1,167 @@
+====== PHP RFC: Zend VM Pause API ======
+  * Version: 0.9
+  * Date: 2017-11-01
+  * Author: Haitao Lv php@lvht.net
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/zend-vm-pause-api
+
+===== Introduction =====
+There is no API for change the Zend VM's execute flow. The only approach to change the Zend VM's execute flow is
+introducing a new keyword and making a new opline, and use ZEND_VM_RETURN/ZEND_VM_CONTINUE macro in its handler.
+
+So it is impossible to change the Zend VM's execute flow in an zend extension. As a result, any feature, like Fiber,
+related to Zend VM's execute flow cannot be implemented by a standalone.
+
+===== Proposal =====
+This PRFC propose a new zend_vm_pause API and an new EG(pause_op), by which some zend extension could make the
+zend vm execution paused.  As a result, we can implement feature like Fiber in a standalone extension.
+
+We need introduce a new vm global EG(pause_op) as zend_op and init it by the following code
+<code c>
+static void zend_init_pause_op(void)
+{
+	memset(&EG(pause_op), 0, sizeof(zend_op));
+
+	EG(pause_op).opcode = ZEND_HANDLE_PAUSE;
+	EG(pause_op).op1_type = IS_UNUSED;
+ 	EG(pause_op).op2_type = IS_UNUSED;
+ 	EG(pause_op).result_type = IS_UNUSED;
+
+	ZEND_VM_SET_OPCODE_HANDLER(&EG(pause_op));
+}
+</code>
+
+A new opcode ZEND_HANDLE_PAUSE will also be need, and its handle looks like
+<code c>
+ZEND_VM_HANDLER(198, ZEND_HANDLE_PAUSE, ANY, ANY)
+{
+	void (*fn)(const zend_op *opline, zend_execute_data *execute_data);
+
+	USE_OPLINE;
+
+	// use pause_op's result to save a function pointer as callback
+	// so we can do something in extension before paused
+	fn = *((void**)&opline->result);
+	
+	// restore the opline pointer
+	opline = *((const zend_op**)&opline->op1);
+
+	// execute the callback function
+	if (EXPECTED(fn != NULL)) {
+		fn(opline, execute_data);
+	}
+
+	SAVE_OPLINE();
+
+	// make vm paused here
+	ZEND_VM_RETURN();
+}
+</code>
+
+The zend_vm_pause API is like this
+<code c>
+ZEND_API ZEND_COLD void zend_vm_pause(void (*fn)(const zend_op*, zend_execute_data*)) /* {{{ */
+{
+	zend_execute_data *execute_data = EG(current_execute_data);
+
+	// use EG(paused_op).op1 and EG(paused_op).op2 to save the next opline pointer
+	// and the ZEND_HANDLE_PAUSE will resume opline to this
+	*((const zend_op**)&EG(pause_op).op1) = EX(prev_execute_data)->opline + 1;
+	
+	// use EG(paused_op).result and EG(paused_op).extended_value to save the callback function pointer
+	*((void**)&EG(pause_op).result) = fn;
+
+	// make the next opline point to EG(pause_op)
+	// so that Zend VM will execute it after the DO_FCALL opline
+	EX(prev_execute_data)->opline = (&EG(pause_op)) - 1; /* zend_vm will do opline++ */
+}
+</code>
+
+You will see that we want to make the Zend VM execute the EG(pause_op) by changing the EX(prev_execute_data)->opline pointer.
+
+<code c>
+ZEND_VM_HOT_HANDLER(60, ZEND_DO_FCALL, ANY, ANY, SPEC(RETVAL))
+{
+        // ...
+
+        // load opline from EG(current_execute_data).opline
+        LOAD_OPLINE();
+
+        if (EXPECTED(fbc->type == ZEND_USER_FUNCTION)) {
+                // ...
+        } else if (EXPECTED(fbc->type < ZEND_USER_FUNCTION)) {
+                // ...
+                // the extension's method will enter this branch
+                // after its execution, we changed the EG(current_execute_data).opline
+                // However, as the value of EG(current_execute_data).opline has already been loade into the opline
+                // We need to reload the opline
+                
+                LOAD_OPLINE(); // load the opline again
+
+                // ...
+        } else {
+                // ...
+        }
+
+        // ...
+
+        // so the opline + 1 will point to our EG(pause_op)
+        ZEND_VM_SET_OPCODE(opline + 1);
+        ZEND_VM_CONTINUE();
+}
+</code>
+
+===== Backward Incompatible Changes =====
+None
+
+===== Proposed PHP Version(s) =====
+PHP 7.3
+
+But I would like this patch could be backported to PHP 7.1 and PHP 7.2.
+
+===== RFC Impact =====
+Any internal function call will LOAD_OPLINE() twice. And this will make slow the execution, theoretically.
+==== To SAPIs ====
+None
+
+==== To Existing Extensions ====
+None
+
+==== To Opcache ====
+None
+
+==== New Constants ====
+None
+
+==== php.ini Defaults ====
+None
+
+===== Open Issues =====
+Make sure there are no open issues when the vote starts!
+
+===== Unaffected PHP Functionality =====
+List existing areas/features of PHP that will not be changed by the RFC.
+
+This helps avoid any ambiguity, shows that you have thought deeply about the RFC's impact, and helps reduces mail list noise.
+
+===== Future Scope =====
+This sections details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
+
+===== Proposed Voting Choices =====
+50%+1
+
+===== Patches and Tests =====
+https://github.com/php/php-src/pull/2886
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged to
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+  - a link to the language specification section (if any)
+
+===== References =====
+Links to external references, discussions or RFCs
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
