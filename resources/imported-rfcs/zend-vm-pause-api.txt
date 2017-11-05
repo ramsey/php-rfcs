@@ -5,6 +5,7 @@
   * Status: Draft
   * First Published at: http://wiki.php.net/rfc/zend-vm-pause-api
 
+
 ===== Introduction =====
 There is no API for change the Zend VM's execute flow. The only approach to change the Zend VM's execute flow is
 introducing a new keyword and making a new opline, and use ZEND_VM_RETURN/ZEND_VM_CONTINUE macro in its handler.
@@ -13,104 +14,35 @@ So it is impossible to change the Zend VM's execute flow in an zend extension. A
 related to Zend VM's execute flow cannot be implemented by a standalone extension.
 
 ===== Proposal =====
-This PRFC propose a new zend_vm_pause API, by which some zend extension could make the zend vm execution paused.
-As a result, we can implement feature like Fiber in a standalone extension.
+This PRFC propose a new vm_interrupt type, by which some zend extension could make the zend vm execution pause and return.
+So we can implement feature like Fiber in a standalone extension.
 
-We need introduce a new vm global EG(pause_op) as zend_op and init it by the following code
 <code c>
-static void zend_init_pause_op(void)
-{
-	memset(&EG(pause_op), 0, sizeof(zend_op));
-
-	EG(pause_op).opcode = ZEND_HANDLE_PAUSE;
-	EG(pause_op).op1_type = IS_UNUSED;
- 	EG(pause_op).op2_type = IS_UNUSED;
- 	EG(pause_op).result_type = IS_UNUSED;
-
-	ZEND_VM_SET_OPCODE_HANDLER(&EG(pause_op));
-}
-</code>
-
-A new opcode ZEND_HANDLE_PAUSE will also be need, and its handle looks like
-<code c>
-ZEND_VM_HANDLER(198, ZEND_HANDLE_PAUSE, ANY, ANY)
-{
-	void (*fn)(const zend_op *opline, zend_execute_data *execute_data);
-
-	USE_OPLINE;
-
-	// use pause_op's result to save a function pointer as callback
-	// so we can do something in extension before paused
-	fn = *((void**)&opline->result);
-	
-	// restore the opline pointer
-	opline = *((const zend_op**)&opline->op1);
-
-	// execute the callback function
-	if (EXPECTED(fn != NULL)) {
-		fn(opline, execute_data);
-	}
-
-	SAVE_OPLINE();
-
-	// make vm paused here
-	ZEND_VM_RETURN();
-}
-</code>
-
-The zend_vm_pause API is like this
-<code c>
-ZEND_API ZEND_COLD void zend_vm_pause(void (*fn)(const zend_op*, zend_execute_data*)) /* {{{ */
-{
-	zend_execute_data *execute_data = EG(current_execute_data);
-
-	// use EG(paused_op).op1 and EG(paused_op).op2 to save the next opline pointer
-	// and the ZEND_HANDLE_PAUSE will resume opline to this
-	*((const zend_op**)&EG(pause_op).op1) = EX(prev_execute_data)->opline + 1;
-	
-	// use EG(paused_op).result and EG(paused_op).extended_value to save the callback function pointer
-	*((void**)&EG(pause_op).result) = fn;
-
-	// make the next opline point to EG(pause_op)
-	// so that Zend VM will execute it after the DO_FCALL opline
-	EX(prev_execute_data)->opline = (&EG(pause_op)) - 1; /* zend_vm will do opline++ */
-}
-</code>
-
-You will see that we want to make the Zend VM execute the EG(pause_op) by changing the EX(prev_execute_data)->opline pointer.
-
-However, it does not work out of box. The reason is under the ZEND_DO_FCALL's handler.
-<code c>
-ZEND_VM_HOT_HANDLER(60, ZEND_DO_FCALL, ANY, ANY, SPEC(RETVAL))
-{
-        // ...
-
-        // load opline from EG(current_execute_data).opline
-        LOAD_OPLINE();
-
-        if (EXPECTED(fbc->type == ZEND_USER_FUNCTION)) {
-                // ...
-        } else if (EXPECTED(fbc->type < ZEND_USER_FUNCTION)) {
-                // ...
-                
-                // the extension's method will enter this branch
-                // after its execution, we changed the EG(current_execute_data).opline
-                // However, as the value of EG(current_execute_data).opline has already been loade into the opline
-                
-                // We need to reload the opline
-                LOAD_OPLINE(); // load the opline again
-
-                // ...
-        } else {
-                // ...
-        }
-
-        // ...
-
-        // so the opline + 1 will point to our EG(pause_op)
-        ZEND_VM_SET_OPCODE(opline + 1);
-        ZEND_VM_CONTINUE();
-}
+diff --git a/Zend/zend_vm_def.h b/Zend/zend_vm_def.h
+index 183072033607..bd7408e824fc 100644
+--- a/Zend/zend_vm_def.h
++++ b/Zend/zend_vm_def.h
+@@ -8893,13 +8893,19 @@ ZEND_VM_DEFINE_OP(137, ZEND_OP_DATA);
+ 
+ ZEND_VM_HELPER(zend_interrupt_helper, ANY, ANY)
+ {
++	int8_t interrupt_type = EG(vm_interrupt);
++
+ 	EG(vm_interrupt) = 0;
+ 	if (EG(timed_out)) {
+ 		zend_timeout(0);
+ 	} else if (zend_interrupt_function) {
+ 		SAVE_OPLINE();
+ 		zend_interrupt_function(execute_data);
+-		ZEND_VM_ENTER();
++		if (UNEXPECTED(interrupt_type == 2)) {
++			ZEND_VM_RETURN();
++		} else {
++			ZEND_VM_ENTER();
++		}
+ 	}
+ 	ZEND_VM_CONTINUE();
+ }
 </code>
 
 ===== Backward Incompatible Changes =====
@@ -122,7 +54,7 @@ PHP 7.3
 But I would like this patch could be backported to PHP 7.1 and PHP 7.2.
 
 ===== RFC Impact =====
-Any internal function call will LOAD_OPLINE() twice. And this will make slow the execution, theoretically.
+None
 ==== To SAPIs ====
 None
 
@@ -153,7 +85,7 @@ This sections details areas where the feature might be improved in future, but t
 50%+1
 
 ===== Patches and Tests =====
-https://github.com/php/php-src/pull/2886
+https://github.com/php/php-src/pull/2902
 
 ===== Implementation =====
 After the project is implemented, this section should contain 
