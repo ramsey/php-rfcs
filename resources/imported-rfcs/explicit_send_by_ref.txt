@@ -1,0 +1,157 @@
+====== PHP RFC: Explicit call-site pass-by-reference ======
+  * Date: 2017-12-02
+  * Author: Nikita Popov <nikic@php.net>
+  * Proposed for: PHP 7.3
+  * Implementation: https://github.com/php/php-src/pull/2958
+  * Status: Draft
+
+===== Introduction =====
+
+Currently parameters that are passed by reference are only declared when defining a function, while the call-site does not distinguish between by-value and by-reference arguments. This RFC proposes to allow marking by-reference arguments at the call-site as well.
+
+Consider the following example, of an ''inc'' function, which accepts a number by reference and increments it:
+
+<code php>
+function inc(&$num) { $num++; }
+
+$i = 0;
+inc($i);
+var_dump($i); // int(1)
+</code>
+
+The function declaration uses ''inc(&$num)'' to specify that this parameter is accepted by reference. However, the call ''inc($i)'' does not contain any indication that the variable ''$i'' is passed by reference and may be modified by the function.
+
+This proposal allows to use the following syntax instead, which makes the use of pass-by-reference clear:
+
+<code php>
+function inc(&$num) { $num++; }
+
+$i = 0;
+inc(&$i);
+var_dump($i); // int(1)
+</code>
+
+Importantly, if this syntax is used, the by-reference pass is declared **both** at the definition-site and the call-site. As such, the following code will generate an error:
+
+<code php>
+function inc($num) { return $num + 1; }
+
+$i = 0;
+inc(&$i); // Cannot pass reference to by-value parameter 1
+var_dump($i);
+</code>
+
+The requirement that the reference is marked at both the definition- and call-site makes this feature different from the call-site pass-by-reference that was used in PHP 4.
+
+Of course, it remains possible to not explicitly mark reference-passing at the call-site. We may wish to deprecate and remove this ability in the future, but this RFC does not propose this.
+
+===== Motivation =====
+
+The motivation for this proposal boils down to making it simpler to understand code, both for programmers and for static analyzers.
+
+As a simple example, consider the following two calls, which look deceptively similar:
+
+<code php>
+$ret = array_slice($array, 0, 3);
+$ret = array_splice($array, 0, 3);
+</code>
+
+In both cases ''$ret'' will have the same result (the first three elements of the array). However, in the latter case these elements are also removed from the original array. Looking just at the call-site, it's not possible to see that ''array_splice'' actually performs an in-place modification of the array.
+
+Under this proposal, this example would look as follows instead:
+
+<code php>
+$ret = array_slice($array, 0, 3);
+$ret = array_splice(&$array, 0, 3);
+</code>
+
+Here it's clearly visible that ''array_splice'' is going to modify the input array, while ''array_slice'' does not.
+
+Beyond this, arguments that are passed by-reference fundamentally change the way in which the argument is accessed. A by-value argument will read as usual, while a by-reference argument is treated similar to an assignment. Notably, by-reference arguments do not need to be initialized prior to use. The probably most common example of this is the use of the ''preg_match'' function:
+
+<code php>
+$ip = "127.0.0.1";
+if (preg_match('/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/', $ip, $matches)) {
+    var_dump($matches);
+}
+</code>
+
+The ''$matches'' variable does not need to be initialized in this case, because the by-reference pass will initialize it implicitly. The proposed syntax makes the by-reference and the associated change in access semantics explicit:
+
+<code php>
+$ip = "127.0.0.1";
+if (preg_match('/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/', $ip, &$matches)) {
+    var_dump($matches);
+}
+</code>
+
+It should come as no surprise that understanding code that uses implicit by-reference passing is hard to understand not only for humans, but also for static analysis tools. Consider the following basic example:
+
+<code php>
+function test($obj) {
+    $obj->method($x);
+    return $x;
+}
+</code>
+
+Does this code use an uninitialized variable ''$x''? Unless it's possible to infer the type of ''$obj'' and determine which method is being called and whether it uses by-reference passing, it's impossible to answer this question. In all likelihood the method uses by-value passing and this is a programming error, but it might also be an intentional use of the by-reference automatic initialization.
+
+While static analyzers in IDEs and CI systems will make reasonable assumptions in this case, the PHP implementation itself does not have this luxury. In fact, our inability to determine at compile-time whether a certain argument is passed by-value or by-reference is one of the most significant obstacles in our ability to analyze and optimize compiled code. The runtime dispatch between by-value and by-reference passing also adds significant complexity to the Zend VM, with at least 7 opcodes dedicated to only this task.
+
+This proposal does not resolve this issue, because it introduces an entirely optional feature. The previous syntax where pass-by-reference is not explicitly marked will continue to work. We may want to deprecate and remove it in the future, but this RFC does not propose this, as it is a quite significant change.
+
+===== Detailed proposal =====
+
+This proposal adds the ability to mark function call arguments as by-reference, by prefixing them with a ''&'' sigil. A function call argument can only be marked by-reference if the corresponding function parameter is also marked as a reference.
+
+<code php>
+function func($byVal, &$byRef) {}
+
+func($byVal, &$byRef);
+</code>
+
+This syntax requires the ''&'' sigil to be followed by a (syntactical) variable. The following code yields a parse error:
+
+<code php>
+func(&42); // Parse error
+</code>
+
+If an call argument is marked by-reference, but the corresponding declaration parameter is not a reference, an error is generated. The error will be either a compile error, or an ''Error'' exception, depending on whether it is detected at compile-time or runtime:
+
+<code php>
+function func($val) {}
+func(&$var);
+// Fatal error: Cannot pass reference to by-value parameter 1 [compile-time]
+// Uncaught Error: Cannot pass reference to by-value parameter 1 [run-time]
+</code>
+
+Function calls are syntactical variables. As such, the following code is legal:
+
+<code php>
+function &passthruRef(&$ref) { return $ref; }
+function inc(&$num) { $num++; }
+
+$i = 0;
+inc(&passthruRef(&$i));
+var_dump($i); // int(1)
+</code>
+
+If the function does not return by-reference an error is thrown:
+
+<code php>
+function passthruVal($val) { return $val; }
+function inc(&$num) { $num++; }
+
+$i = 0;
+inc(&passthruVal($i));
+// Fatal error: Cannot pass result of by-value function by reference [compile-time]
+// Uncaught Error: Cannot pass result of by-value function by reference [run-time]
+</code>
+
+===== Backward Incompatible Changes =====
+
+None. This use of this feature is optional.
+
+===== Vote =====
+
+This proposal is a language-change and requires a 2/3 supermajority to pass.
