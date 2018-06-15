@@ -1,0 +1,736 @@
+====== PHP RFC: Typed Properties 2.0 ======
+  * Date: 2018-06-15 (use today's date here)
+  * Author: Bob Weinand <bwoebi@php.net>, Nikita Popov <nikic@php.net>
+  * Based on previous RFC by: Joe Watkins <krakjoe@php.net>, Phil Sturgeon <philstu@php.net>
+  * Proposed PHP version: PHP 7.3
+  * Status: Draft
+
+===== Introduction =====
+
+With the introduction of scalar types and return types, PHP 7 greatly increased the power of PHP's type system. However, it is currently not possible to declare types for class properties, forcing developers to instead use getter and setter methods to enforce type contracts. This requires unnecessary boilerplate, makes usage less ergonomic and hurts performance. This RFC resolves this issue by introducing support for first-class property type declarations.
+
+Under this RFC, code like
+
+<code php>
+class User {
+    /** @var int $id */
+    private $id;
+    /** @var string $name */
+    private $name;
+    
+    public function __construct(int $id, string $name) {
+        $this->id = $id;
+        $this->name = $name;
+    }
+    
+    public function getId(): int {
+        return $this->id;
+    }
+    public function setId(int $id): void {
+        $this->id = $id;
+    }
+    
+    public function getName(): string {
+        return $this->name;
+    }
+    public function setName(string $name): void {
+        $this->name = $name;
+    }
+}
+</code>
+
+might be written as
+
+<code php>
+class User {
+    public int $id;
+    public string $name;
+    
+    public function __construct(int $id, string $name) {
+        $this->id = $id;
+        $this->name = $name;
+    }
+}
+</code>
+
+without sacrificing any type-safety.
+
+===== Main differences to previous proposal =====
+
+Typed properties have been [[typed-properties|proposed]] previously and were declined at the time. The new proposal comes with two major differences, which we believe address most of the concerns regarding the previous proposal:
+
+  * Types on static properties are supported. Support for static property types was not included in the previous RFC due to implementation issues, creating an inconsistency in the language. Under the new proposal type declarations may be added to static properties, with the same semantics as for normal properties.
+  * References to typed properties are supported. The previous proposal did not permit references to typed properties, due to the difficulty of enforcing the type if the property is modified indirectly through the reference. The new proposal allows taking references to typed properties and will enforce the declared type even if the modification happens through a reference.
+
+===== Proposal =====
+
+This RFC adds support for runtime-enforced type annotations for declared properties. The following example illustrates the basic syntax:
+
+<code php>
+class Example {
+    // All types with the exception of "void" are supported
+    public int $scalarType;
+    protected Type $type;
+    private ?Type $nullableType;
+    
+    // Types are also legal on static properties
+    public static iterable $staticProp;
+    
+    // Types can also be used with the "var" notation
+    var bool $flag;
+    
+    // Typed properties may have default values (more below)
+    public string $str = "foo";
+    public ?string $nullableStr = null;
+    
+    // The type applies to all properties in one declaration
+    public float $x, $y;
+    // equivalent to:
+    public float $x;
+    public float $y;
+}
+</code>
+
+For a discussion of the syntax choice, see the Alternatives section.
+
+The fundamental invariant that is maintained by property type hints, is that a property read will always either return a value that satisfies the typehint, or throw. While this sounds straightforward, the idiosyncrasies of the PHP language make enforcing this invariant non-trivial.
+
+In the following, the semantics of property type declarations are laid out in detail.
+
+==== Supported Types ====
+
+Property type declarations support all type declarations supported by PHP, with the exception of ''void'' and ''callable''.
+
+The ''void'' type is not supported, because it is not useful and has unclear semantics. Under a strict interpretation, properties of type ''void'' could be neither read from nor written to, as there is no way to construct a value of type ''void'' in PHP. Under a looser interpretation (consistent with the fact that we allow using the return values of void functions) a property of type ''void'' could only hold the value ''null''. As both variants do not appear to be useful, we do not allow ''void'' properties. This is consistent with parameter type annotations.
+
+The ''callable'' type is not supported, because it's behavior is context dependent. The following example illustrates the issue:
+
+<code php>
+class Test {
+    public callable $cb;
+
+    public function __construct() {
+        // $this->cb is callable here
+        $this->cb = [$this, 'method'];
+    }
+
+    private function method() {}
+}
+
+$obj = new Test;
+// $obj->cb is NOT callable here
+($obj->cb)();
+</code>
+
+This means that it is possible to write a legal value to a property and then proceed to read an illegal value from the same property. This fundamental problem of the ''callable'' pseudo-type is laid out in much more detail in the [[consistent_callables|consistent callables RFC]].
+
+The recommended workaround is to instead use the ''Closure'' type, in conjunction with ''Closure::fromCallable()''. This ensures that the callable will remain callable independent of scope. For a discussion of alternative ways to handle the ''callable'' issue, see the Alternatives section.
+
+The following list contains all types supported at the time of this writing:
+
+<code php>
+bool, int, float, string, array, object
+iterable
+self, parent
+ClassOrInterface
+?type // where "type" may be any of the above
+</code>
+
+The ''parent'' type may be used in classes that do not have a parent, consistent with parameter and return type declarations.
+
+==== Strict and Coercive Typing Modes ====
+
+Just like parameter and return type declarations, property types are affected by the ''strict_types'' directive. If ''strict_types=1'' at the location of a property write, then the assigned value must satisfy the declared type exactly, with the usual exception of implicit int to float casts. If ''strict_types=0'' at the location of the property write, then the usual rules for coercive type checks are followed. In both cases, the final value stored inside the property will always satisfy the declared type.
+
+As the following example illustrates, only the ''strict_types'' mode at the write-site of the property is relevant. The ''strict_types'' mode at the declaration-site of the property has no impact on behavior.
+
+<code php>
+// file1.php
+declare(strict_types=1);
+class Test {
+    public int $val;
+}
+$test = new Test;
+$test->val = "42"; // Throws TypeError
+
+// file2.php
+declare(strict_types=0);
+$test = new Test;
+$test->val = "42";
+var_dump($test->val); // int(42)
+</code>
+
+Consistent with the handling of parameter and return types, code inside internal functions is always considered to be in coercive mode:
+
+<code php>
+declare(strict_types=1);
+class Test {
+    public int $val;
+}
+
+$test = new Test;
+$rp = new ReflectionProperty(Test::class, 'val');
+$rp->setValue($test, "42"); // Property set by internal code
+var_dump($test->val); // int(42)
+</code>
+
+The property assignment inside ''ReflectionProperty::setValue()'' occurs inside internal code, which uses coercive mode. As such, the assignment is permitted, even though the code invoking ''ReflectionProperty::setValue()'' uses strict typing.
+
+[TODO What is the return value of the assignment?]
+
+<code php>
+class Test {
+    public int $val;
+}
+
+$test = new Test;
+var_dump($test->val = "42"); // string(2) "42"
+var_dump($test->val); // int(42)
+</code>
+
+==== Inheritance and Variance ====
+
+Property types are invariant. This means that the type of a (non-private) property is not allowed to change during inheritance. If the parent property is private, then the type may be changed arbitrarily.
+
+<code php>
+class A {
+    private bool $a;
+    public int $b;
+    public ?int $c;
+}
+class B extends A {
+    public string $a; // legal, because A::$a is private
+    public ?int $b;   // ILLEGAL
+    public int $c;    // ILLEGAL
+}
+</code>
+
+The reason why property types are invariant is that they can be both read from and written to. The change from ''int'' to ''?int'' implies that reads from the property may now also return ''null'' in addition to integers. The change from ''?int'' to ''int'' implies that it is no longer possible to write ''null'' to the property. As such, neither contravariance nor covariance are applicable to property types.
+
+In the future, should an additional modifier such as ''readonly'' be introduced, it may be possible to relax this restriction for such properties, depending of the exact semantics of the modifier.
+
+It is worth noting that the ''self'' and ''parent'' types are (as always) resolved relative to the class they are declared in, or, in the case of traits, the class they were imported into. As such, the following code is illegal:
+
+<code php>
+class A {
+    public self $prop;
+}
+class B extends A {
+    public self $prop;
+}
+</code>
+
+While textually the property types are the same, the resolved property types for both classes would be ''A'' and ''B'' respectively, which differ.
+
+[TODO: The following is not true in the current implementation. We may also want to reconsider this in light of https://bugs.php.net/bug.php?id=76451.]
+
+If two different type hints to aliased classes are used, they are considered equal if the alias is known at the time of inheritance checking. Depending on the usual early-binding rules, this may either be at compile-time or at run-time. The following code is legal:
+
+<code php>
+// file1.php
+class Foo {}
+class_alias('Foo', 'Bar');
+
+// file2.php
+class A {
+    public Foo $prop;
+}
+// file3.php
+class B extends A {
+    public Bar $prop;
+}
+</code>
+
+==== Default Values ====
+
+Default values for typed properties have to match the type of the property. The only exception is that ''float'' properties also accept integer default values, consistent with the handling for parameter types.
+
+Typed properties cannot have a ''null'' default value, unless the type is explicitly nullable (''?Type''). This is in contrast to parameter types, where a ''null'' default value automatically implies a nullable type. We consider this to be a legacy behavior, which we do not wish to support for newly introduced syntax.
+
+The following code illustrates legal and illegal default values:
+
+<code php>
+class Test {
+    // Legal default values
+    public bool     $a = true;
+    public int      $b = 42;
+    public float    $c = 42.42;
+    public float    $d = 42;    // Special exemption
+    public string   $e = "str";
+    public array    $f = [1, 2, 3];
+    public iterable $g = [1, 2, 3];
+    public ?int     $h = null;
+    public ?object  $i = null;
+    public ?Test    $j = null;
+    
+    // These have *no* legal default values
+    public object   $k;
+    public Test     $l;
+    
+    // ILLEGAL default values
+    public bool     $m = 1;
+    public int      $n = null;
+    public Test     $o = null;
+}
+</code>
+
+If the default value is a non compile-time evaluable initializer expression, the default value is not checked at compile-time. Instead it will be checked during constant-updating, which most commonly will occur when an object of the class is instantiated. As such, the following code is legal:
+
+<code php>
+class Test {
+    public int $prop = FOO;
+}
+
+define('FOO', 42);
+new Test;
+</code>
+
+If the constant held an illegal type, a ''TypeError'' exception would be generated during the ''new Test'' instantiation.
+
+==== Uninitialized and Unset Properties ====
+
+If a typed property does not have a default value, no implicit ''null'' default value is implied. Instead, the property is considered to be uninitialized. Reads from uninitialized properties will generate a ''TypeError'' (unless ''%%__get()%%'' is defined, see next section).
+
+<code php>
+class Test {
+    public int $val;
+    
+    public function __construct(int $val) {
+        $this->var = $val; // Ooops, typo
+    }
+}
+
+$test = new Test(42);
+var_dump($test->val); // TypeError
+</code>
+
+Uninitialized typed properties are indicated in ''var_dump'' output as follows:
+
+<code>
+object(Test)#1 (0) {
+  ["val"]=>
+  uninitialized(int)
+}
+</code>
+
+This behavior ensures that uses of uninitialized properties can be caught quickly, without enforcing overly strict initialization requirements, such as requiring all properties to be initialized in the constructor. For a discussion of other approaches to handle initialization, see the Alternatives section.
+
+If a typed property is ''unset()'', then it returns to the uninitialized state. While we would love to remove support for the unsetting of properties, this functionality is currently used for lazy initialization by Doctrine, in combination with the functionality described in the following section.
+
+==== Overloaded Properties ====
+
+If a typed property is in uninitialized state, either because it has not yet been initialized, or because it has been explicitly ''unset()'', then reads from this property will invoke the ''%%__get()%%'' method if it exists, consistently with the behavior of ordinary properties.
+
+This allows for the following lazy initialization pattern:
+
+<code php>
+class Test {
+    public $untyped;
+    public int $typed;
+    
+    public function __construct() {
+        unset($this->untyped);
+        unset($this->typed); // Not strictly necessary, uninitialized by default
+    }
+    
+    public function __get($name) {
+        if ($name === 'untyped') {
+            return $this->untyped = $this->computeValue1();
+        } else if ($name === 'typed') {
+            return $this->typed = $this->computeValue2();
+        } else {
+            throw new Exception("Unknown property \"$name\"");
+        }
+    }
+}
+
+$test = new Test;
+var_dump($test->typed); // This calls __get()
+var_dump($test->typed); // This doesn't, as property now initialized
+</code>
+
+In this case, the return value of ''%%__get()%%'' for a typed property must still satisfy the declared type of the property. As such, the following code produces a TypeError:
+
+<code php>
+class Test {
+    public int $val;
+    
+    public function __get($name) {
+        return "not an int";
+    }
+}
+
+$test = new Test;
+var_dump($test->val); // TypeError
+</code>
+
+Not verifying the return value of ''%%__get()%%'' would allow the integer property ''$val'' to return a string value on read, which violates our fundamental invariant.
+
+When checking the return type of ''%%__get()%%'' for a typed property, the strictness mode at the point of the ''%%__get()%%'' declaration is relevant, not the point where the property is read:
+
+<code php>
+// file1.php
+declare(strict_types=1);
+class Test {
+    public int $val;
+
+    public function __get($name) {
+        return "42";
+    }
+}
+
+// file2.php
+declare(strict_types=0);
+$test = new Test;
+var_dump($test->val); // TypeError, as __get() is in strict mode code
+</code>
+
+This behavior is used, because it is the ''%%__get()%%'' method that determines the (apparent) value of the property, not the read-site.
+
+==== Indirect Modifications ====
+
+Properties can be indirectly modified in a number of ways (not counting the use of references, which are discussed in the next section). Such indirect modifications are also subject to property to checks. For example:
+
+<code php>
+class Test {
+    public int $x;
+}
+
+$test = new Test;
+$test->x = PHP_INT_MAX;
+$test->x++; // TypeError
+</code>
+
+The ''$test->x++'' line is roughly equivalent to ''$this->x = $this->x + 1'' and the final assignment is type-checked as usual. Note that the above code will error also in coercive mode, because overflowing coercions from floats to integers are prohibited.
+
+[TODO Indirect modifications involving array promotion are not handled correctly yet]
+
+==== References ====
+
+Unlike the previous typed properties RFC, this RFC allows acquiring references to typed properties. While references in PHP are nowadays considered to be something of an antipattern and avoidance of their use is advisable, there are still many instances where their use cannot easily be avoided. For example, a blanket prohibition of references to typed properties would not allow the following code:
+
+<code php>
+class Test {
+    public array $ary = [3, 2, 1];
+}
+$test = new Test;
+sort($test->ary);
+</code>
+
+The ''sort()'' function accepts the parameter by reference and modifies the array in place. Without support for references, one would be forced to write the following instead:
+
+<code php>
+$test = new Test;
+$ary = $test->ary;
+sort($ary);
+$test->ary = $ary;
+</code>
+
+While support for references may be desirable, it also poses a significant implementation challenge. Without special support a modification of a reference could change the type of a property, resulting in a violation of the type contract.
+
+This RFC resolves this issue by introducing the concept of a typed reference (see Implementation section for technical details). If a reference to a typed property is acquired, the type of the property is stored in the reference and will be enforced whenever the reference is assigned to.
+
+<code php>
+class Test {
+    public int $x = 42;
+}
+
+$test = new Test;
+$x =& $test->x;
+$x = "foobar"; // TypeError
+</code>
+
+As the semantics of references in PHP are somewhat involved, the following subsections will describe some special cases. The Alternatives section discusses different approaches to reference handling.
+
+=== Dangling References ===
+
+Acquiring a reference to a typed property will create a typed reference, which is not bound to the lifetime of the property. This means that the reference will retain its type even if the typed property is removed from the reference set.
+
+<code php>
+class Test {
+    public int $x = 42;
+}
+$test = new Test;
+$x =& $test->x; // Reference created with type int
+$y =& $x;
+// Here $x, $y, $test->x are part of the reference set
+unset($test);
+// Here $x, $y are part of the reference set
+$x = "not an int"; // TypeError
+</code>
+
+At the time of assignment, the typed property is no longer part of the reference set, but the reference will retain its type.
+
+[TODO Try to get rid of unrefs? Remove rc=1 reference type?]
+
+<code php>
+class Test {
+    public int $x = 42;
+}
+$test = new Test;
+$array = [&$test->x];
+unset($test); // $array[0] is reference with rc=1
+// var_dump($array[0]); // Toggle me
+$array[0] = "not an int";
+</code>
+
+=== By-Reference Assignments ===
+
+As by-reference assignments have reference-breaking semantics, no special behavior applies for expressions like ''$x &= $y'', as any reference stored in ''$x'' will not be modified, it will be overwritten.
+
+The only interesting case are assignments of the form ''$obj->x =& $y'', where ''$obj->x'' is a typed property. If ''$y'' is not a typed reference, and assuming the value of ''$y'' is compatible with the typed property (after possible coercion), then it will be turned into a typed reference by the assignment.
+
+If ''$y'' is already a typed reference, then we need to satisfy both the type of the property and the type of the reference. This is accomplished by setting the type of the reference to the intersection type. The assignment will throw a TypeError if either the intersection is empty (e.g. ''int'' and ''string'' have empty intersection), or if the intersection cannot be represented in PHP's current typesystem (''Countable'' and ''Traversable'' have intersection ''Countable&Traversable'', but this is currently not a legal type).
+
+Intersection types are computed as follows:
+
+  * If both types are nullable, the intersection is nullable. Otherwise it is not nullable.
+  * If both types are class types ''A'' and ''B'': If ''A'' instanceof ''B'' the type is ''A''. If ''B'' instanceof ''A'' the type is ''B''. Otherwise the intersection is not representable (''A&B'').
+  * If one type is ''array'' and the other is ''iterable'', the intersection is ''array''.
+  * If one type is ''object'' and the other is ''A'', then the intersection is ''A''.
+  * If one type is ''iterable'' and the other is ''A'' where ''A instanceof Traversable'', then the intersection is ''A''.
+  * If one type is ''iterable'' and the other is ''object'', then the intersection is ''Traversable''.
+  * Otherwise, the intersection is empty.
+
+Introduction of proper intersection types in PHP will resolve the currently not representable cases.
+
+TODO Overloaded by-ref props also use intersection type...
+
+==== TODO ====
+
+TODO Class loading for property types needs to be mentioned somewhere? Also extra requirement for reference types.
+
+===== Implementation =====
+
+TODO
+
+==== Optimization ====
+
+TODO
+
+==== Performance ====
+
+TODO
+
+===== Backward Incompatible Changes =====
+
+None.
+
+===== Alternatives =====
+
+==== Syntax ====
+
+Given PHP's existing syntax for parameter and return type annotations, there are two obvious choices of syntax for property type annotations:
+
+<code php>
+class Example {
+    public int $num;
+    public $num: int;
+}
+</code>
+
+The former follows the syntax for parameter types, the latter follows return types. The first syntax is familiar from languages such as C, C++ or Java. The latter is adopted in some more modern languages, such as TypeScript or Rust. Both syntax choices should be intuitive and familiar to modern-day programmers.
+
+If the '': Type'' notation is used, there are two potential ways to combine it with default values:
+
+<code php>
+class Example {
+    public $num: int = 42;
+    public $num = 42: int;
+}
+</code>
+
+In this case we would prefer the former syntax, as it clearer, especially if the initializer expression is complex. For example, if the initializer is a multi-line array and the second form is used, the type would only appear very far away from the property name. Additionally the combination with the ternary operator (''FOO ? BAR : BAZ : int''), while technically conflict-free, would be confusing.
+
+PHP also supports simultaneous declaration of multiple properties. In this case the syntactical implication of the '': Type'' notation would require repeating the type for each property:
+
+<code php>
+class Example {
+    // Prefix notation
+    public int $x, $y, $z;
+    // Suffix notation
+    public $x: int, $y: int, $z: int;
+}
+</code>
+
+This is somewhat inconsistent with the visibility modifier, which applies to all properties in the declaration.
+
+One case where the suffix notation seems to be clearer is when used with the legacy ''var'' syntax:
+
+<code php>
+class Example {
+    var int $num;
+    var $num: int;
+}
+</code>
+
+For the prefix notation, it would be possible to permit omitting ''var'' in this case:
+
+<code php>
+class Example {
+    int $num;
+    // would be equivalent to
+    public int $num;
+}
+</code>
+
+However, given the strong preference towards explicitly specifying the property visibility in modern PHP code, the addition of this reduced syntax does not appear worthwhile. This proposal only supports type declarations on ''var'' for syntactical consistency, but does not anticipate this form to be used to any significant degree.
+
+Overall, we hold that the prefix syntax integrates slightly more seamlessly into the existing syntax of property declarations.
+
+==== Callable Type ====
+
+This proposal for typed properties does not support the ''callable'' type due to its context-dependent behavior. Repeating the example from the "Supported Types" section:
+
+<code php>
+class Test {
+    public callable $cb;
+
+    public function __construct() {
+        // $this->cb is callable here
+        $this->cb = [$this, 'method'];
+    }
+
+    private function method() {}
+}
+
+$obj = new Test;
+// $obj->cb is NOT callable here
+($obj->cb)();
+</code>
+
+Here, the value is legal at the time of write, but not at the time of read. This RFC proposes to avoid this issue by prohibiting the ''callable'' type. ''Closure'' and ''Closure::fromCallable()'' can be used as a robust alternative, where callability is scope-independent.
+
+There are a number of possible alternative resolutions, which will be discussed in the following.
+
+The first option is to ignore the issue and simply allow a non-callable value to be returned. This is effectively the option that was implemented for return types. A method with ''callable'' return type will happily return a callable to a private method, even though the return value will not be actually callable at the call-site. In terms of overall ergonomics, this option may very well be the best, as most uses of the ''callable'' type will not run into the above issue, and ''callable'' generally only provides the weak guarantee that something is callable at the time of type-checking, but not necessarily at the time when the actual call is performed. However, we feel that taking this option would go against the fundamental invariant we are trying to establish, namely that values read from a typed property always satisfy the type constraint.
+
+The second option is to perform type-checks both when writing and reading a property, as opposed to the current situation where checks are only performed on write. This would make the behavior distinctly odd, but at least type-safe, as the ''$obj->ce'' read in the above example would generate a ''TypeError''.
+
+There are two primary arguments against this option: The first is that this carries a surprise factor, in that you can have a fully and legally initialized object, which still throws when accessing properties. The second is that this would add an unnecessary performance impact to all property reads, just to handle this special case. The current implementation goes through some effort to make sure that we only need to check types during property writes, which tend to be rarer than reads and more amenable to inference-based optimizations.
+
+The third option is to take the visibility of the property into account when performing the callability check. That is, if the property is ''public callable $cb'', then only callables that are callable from public scopes will be considered callable. If the property is ''private callable $cb'', then private methods will also be accepted.
+
+The advantage of this solution is that it is quite ergonomic and even solves a part of the overall problem of ''callable''. The disadvantage is, apart from introducing special behavior that ''callable'' does not exhibit elsewhere, that this creates a tight coupling between the visibility of the property and its type. For example, this means that increasing the visibility of a property in an inheriting class (''protected callable $cb'' to ''public callable $cb''), an operation that is otherwise always legal, would not be permissible for ''callable'' properties. Even without inheritance, changing a private callable property into a protected one could not require further code modifications, as existing assignments to the property may no longer be legal.
+
+The fourth option is to automatically wrap assignments to ''callable'' properties into ''Closure::fromCallable()''. This would ensure that any values that were callable at the time of write would remain callable at the time of read. However, if we would like to introduce such a behavior, we believe that it should be introduced for all places where the ''callable'' type may occur, not just typed properties. Furthermore, performing this automatic wrapping would further increase the cost of ''callable'' types.
+
+As there are many different options to choose from, we consider it best to go with the conservative choice of prohibiting ''callable'' types for the time being. This choice allows switching to any of the other variants at a later point in time, without introducing a backwards compatibility break.
+
+==== Property Initialization ====
+
+Under this RFC, properties that do not have a default value are considered uninitialized, with reads from uninitialized properties resulting in a ''TypeError''. There are some alternative ways in which property initialization could be handled.
+
+The first would be to mirror the behavior of untyped properties and use an implicit ''null'' default value when no explicit default is given.
+
+<code php>
+class Test {
+    public SomeClass $val;
+    // Would be equivalent to
+    public ?SomeClass $val = null;
+}
+</code>
+
+While this provides consistency with untyped properties, it has the obvious and quite disastrous disadvantage that ''null'' becomes a valid type for all properties that do not have or cannot have a meaningful default value, even though the value ''null'' will only ever occur prior to initialization. We believe that this is a very common case, and that adding implicit nullability will greatly hurt the expressibility of the type-system.
+
+Another alternative that has been proposed is to require that the constructor initializes all typed properties:
+
+<code php>
+class Point {
+    public float $x;
+    public float $y;
+    
+    public function __construct(float $x, float $y) {
+        $this->x = $x;
+        return; // Throws TypeError, because Test::$y is uninitialized
+    }
+}
+</code>
+
+The advantage of this scheme is that initialization errors are reported during object construction, rather than the first time an uninitialized property is accessed. At the same time, it imposes restrictions on the code patterns that can be used. For example, the following code using a named constructor would not be legal:
+
+<code php>
+class Point {
+    public float $x, $y;
+    
+    private function __construct() {}
+    
+    public static function fromEuclidean(float $x, float $y) {
+        $point = new Point;
+        $point->x = $x;
+        $point->y = $y;
+        return $point;
+    }
+}
+</code>
+
+Of course, this code can be rewritten to indirect through ''%%__construct()%%'' instead.
+
+Another issue is that this does not really solve the problem of uninitialized properties, as they can still be uninitialized inside the constructor. While we can statically detect this in some cases, this is not possible in others:
+
+<code php>
+class Point {
+    public float $x, $y;
+    
+    public function __construct(float $x, float $y) {
+        $this->doSomething();
+        $this->x = $x;
+        $this->y = $y;
+    }
+</code>
+
+Here, we will not generally know whether ''$this->doSomething()'' accesses the typed properties. We would either have to restrict the functionality usable in a constructor to an unreasonable degree, or else still allow (throwing) reads from uninitialized properties in the constructor.
+
+Finally, because we still support unsetting of properties, we need to deal with uninitialized properties due to that, so all these measures do not really improve the situation.
+
+==== References ====
+
+TODO
+
+===== RFC Impact =====
+
+==== To Existing Extensions ====
+Will existing extensions be affected?
+
+==== To Opcache ====
+It is necessary to develop RFC's with opcache in mind, since opcache is a core extension distributed with PHP.
+
+Please explain how you have verified your RFC's compatibility with opcache.
+
+===== Open Issues =====
+Make sure there are no open issues when the vote starts!
+
+===== Unaffected PHP Functionality =====
+List existing areas/features of PHP that will not be changed by the RFC.
+
+This helps avoid any ambiguity, shows that you have thought deeply about the RFC's impact, and helps reduces mail list noise.
+
+===== Future Scope =====
+This section details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
+
+===== Proposed Voting Choices =====
+Include these so readers know where you are heading and can discuss the proposed voting options.
+
+State whether this project requires a 2/3 or 50%+1 majority (see [[voting]])
+
+===== Patches and Tests =====
+Links to any external patches and tests go here.
+
+If there is no patch, make it clear who will create a patch, or whether a volunteer to help with implementation is needed.
+
+Make it clear if the patch is intended to be the final patch, or is just a prototype.
+
+For changes affecting the core language, you should also provide a patch for the language specification.
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged into
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+  - a link to the language specification section (if any)
+
+===== References =====
+Links to external references, discussions or RFCs
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
