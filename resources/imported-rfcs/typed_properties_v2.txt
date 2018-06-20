@@ -257,7 +257,7 @@ class Test {
     public bool     $a = true;
     public int      $b = 42;
     public float    $c = 42.42;
-    public float    $d = 42;    // Special exemption
+    public float    $d = 42;        // Special exemption
     public string   $e = "str";
     public array    $f = [1, 2, 3];
     public iterable $g = [1, 2, 3];
@@ -291,7 +291,7 @@ If the constant held an illegal type, a ''TypeError'' exception would be generat
 
 ==== Uninitialized and Unset Properties ====
 
-If a typed property does not have a default value, no implicit ''null'' default value is implied. Instead, the property is considered to be uninitialized. Reads from uninitialized properties will generate a ''TypeError'' (unless ''%%__get()%%'' is defined, see next section).
+If a typed property does not have a default value, no implicit ''null'' default value is implied (even if the property is nullable). Instead, the property is considered to be uninitialized. Reads from uninitialized properties will generate a ''TypeError'' (unless ''%%__get()%%'' is defined, see next section).
 
 <code php>
 class Test {
@@ -595,7 +595,68 @@ As a technical caveat, if ''%%__get()%%'' returns by reference, but is not used 
 
 === By-reference arguments to internal functions ===
 
-TODO Strict typing mode of calling code is used. Semantics: out parameter
+Some internal functions accept parameters by reference, for the purpose of returning additional values through them ("out parameters"). Assignments to these reference parameters are subject to the usual type checks when property types are involved:
+
+<code php>
+class Test {
+    public int $x = 0;
+    public string $y = "";
+    public array $z = [];
+}
+
+$test = new Test;
+
+str_replace("foo", "bar", "foofoofoo", $test->x);
+var_dump($test->x); // int(3)
+
+str_replace("foo", "bar", "foofoofoo", $test->y);
+var_dump($test->y); // string(1) "3"
+
+str_replace("foo", "bar", "foofoofoo", $test->z); // TypeError
+</code>
+
+In this case the type checks use the strictness mode of the caller. Repeating the previous example with ''strict_types=1'' yields:
+
+<code php>
+declare(strict_types=1);
+
+$test = new Test;
+
+str_replace("foo", "bar", "foofoofoo", $test->x);
+var_dump($test->x); // int(3)
+
+str_replace("foo", "bar", "foofoofoo", $test->y);
+var_dump($test->y); // TypeError
+</code>
+
+This behavior is not entirely consistent with other type checks, in that we usually treat all internal code to be in coercive mode, independently of the strictness mode of the caller.
+
+We deviate from this behavior in this instance, based on the mental model of out parameters. Semantically an out parameter is equivalent to a function with multiple return values:
+
+<code php>
+$newStr = str_replace($a, $b, $c, $count);
+// Semantically equivalent to
+[$newStr, $count] = str_replace($a, $b, $c);
+</code>
+
+Under this desugaring, it would be expected that the assignment to ''$count'' respects the strictness mode of the caller.
+
+[TODO Slight discrepancy with arrays in current implementation]
+
+=== Automatic Initialization ===
+
+In PHP, creating a reference to an uninitialized storage location, implicitly initialized it to value ''null''. For typed properties this behavior is preserved if the property is nullable. If the property is not nullable, then a ''TypeError'' is generated, as initializing the property to ''null'' would violate the type constraint:
+
+<code php>
+class Test {
+    public ?int $x;
+    public int $y;
+}
+
+$test = new Test;
+$x =& $test->x; // Initialized to null
+$y =& $test->y; // TypeError
+</code>
 
 ==== Reflection ====
 
@@ -606,14 +667,6 @@ Two new reflection methods are added:
 ''ReflectionProperty::hasType()'' returns ''true'' if the property has a type, and ''false'' otherwise.
 
 The behavior matches that of ''getType()''/''hasType()'' for parameters and ''getReturnType()''/''hasReturnType()'' for return types.
-
-==== TODO ====
-
-TODO Class loading for property types needs to be mentioned somewhere? Also extra requirement for reference types.
-
-TODO Mention no null initialization for nullables more explicitly
-
-TODO Mention automatic null initialization when acquiring ref to uninit
 
 ===== Implementation =====
 
