@@ -1,8 +1,9 @@
 ====== PHP RFC: Typed Properties 2.0 ======
-  * Date: 2018-06-15 (use today's date here)
+  * Date: 2018-06-15
   * Author: Bob Weinand <bwoebi@php.net>, Nikita Popov <nikic@php.net>
   * Based on previous RFC by: Joe Watkins <krakjoe@php.net>, Phil Sturgeon <philstu@php.net>
   * Proposed PHP version: PHP 7.3
+  * Implementation: [TODO Submit] https://github.com/bwoebi/php-src/pull/1
   * Status: Draft
 
 ===== Introduction =====
@@ -224,7 +225,7 @@ class B extends A {
 
 While textually the property types are the same, the resolved property types for both classes would be ''A'' and ''B'' respectively, which differ.
 
-[TODO: The following is not true in the current implementation. We may also want to reconsider this in light of https://bugs.php.net/bug.php?id=76451.]
+[TODO: The following is not true in the current implementation. We may also want to punt on this in light of issues like https://bugs.php.net/bug.php?id=76451.]
 
 If two different type hints to aliased classes are used, they are considered equal if the alias is known at the time of inheritance checking. Depending on the usual early-binding rules, this may either be at compile-time or at run-time. The following code is legal:
 
@@ -405,7 +406,7 @@ $test->x++; // TypeError
 
 The ''$test->x++'' line is roughly equivalent to ''$this->x = $this->x + 1'' and the final assignment is type-checked as usual. Note that the above code will error also in coercive mode, because overflowing coercions from floats to integers are prohibited.
 
-[TODO Indirect modifications involving array promotion are not handled correctly yet]
+[TODO The implementation does not handle indirect modifications involving array promotion correctly yet.]
 
 ==== References ====
 
@@ -641,7 +642,7 @@ $newStr = str_replace($a, $b, $c, $count);
 
 Under this desugaring, it would be expected that the assignment to ''$count'' respects the strictness mode of the caller.
 
-[TODO Slight discrepancy with arrays in current implementation]
+[TODO The current implementation handles the array case slightly differently, this will be fixed.]
 
 === Automatic Initialization ===
 
@@ -670,7 +671,142 @@ The behavior matches that of ''getType()''/''hasType()'' for parameters and ''ge
 
 ===== Implementation =====
 
-TODO
+The implementation of this RFC is available at https://github.com/bwoebi/php-src/pull/1. It is based on the original typed references implementation by Joe Watkins from two years ago and has undergone quite a lot of churn in the meantime. As such, it will need more cleanup and performance work before it is ready to land.
+
+In the following some important aspects of the implementation will be discussed. A particular focus are changes that will need to be performed in 3rd party extensions.
+
+==== References ====
+
+The ''zend_reference'' structure now has two new fields, ''type'' and ''sources'', where the latter is used to store typed properties that are part of the reference set.
+
+All assignments to references may now require a type check and a coercion of the assigned value. This includes assignments performed inside internal functions. Previously, such assignments used a pattern such as the following:
+
+<code c>
+ZVAL_DEREF(zv);
+zval_ptr_dtor(zv);
+ZVAL_LONG(zv, num);
+</code>
+
+Code like this needs to be replaced by the following:
+
+<code c>
+ZEND_TRY_ASSIGN_LONG(zv, num);
+
+// Shorthand for:
+zval num_zv;
+ZVAL_LONG(&num_zv, num);
+zend_try_assign(zv, &num_zv);
+</code>
+
+The ''ZEND_TRY_ASSIGN_LONG'' will generate a ''TypeError'' if the reference assignment fails. Similar macros are available for other types as well.
+
+Typically the ''ZVAL_DEREF()'' in the above example is already performed as part of parameter parsing, in the form of a ''z/'' or ''ZEND_PARAM_ZVAL_DEREF'' argument. Examples for both are shown in the following:
+
+<code c>
+// Replace
+PHP_FUNCTION(test) {
+    zval *arg;
+    if (zend_parse_parameters("z/", &arg) == FAILURE) {
+        return NULL;
+    }
+    
+    zval_ptr_dtor(arg);
+    ZVAL_LONG(arg, 0);
+}
+
+// With
+PHP_FUNCTION(test) {
+    zval *arg;
+    if (zend_parse_parameters("z", &arg) == FAILURE) {
+        return NULL;
+    }
+    
+    ZEND_TRY_ASSIGN_LONG(arg, 0);
+}
+</code>
+
+<code c>
+// Replace
+PHP_FUNCTION(test) {
+    zval *arg;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        ZEND_PARAM_ZVAL_DEREF(arg)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    zval_ptr_dtor(arg);
+    ZVAL_LONG(arg, 0);
+}
+
+// With
+PHP_FUNCTION(test) {
+    zval *arg;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        ZEND_PARAM_ZVAL(arg)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    ZEND_TRY_ASSIGN_LONG(arg, 0);
+}
+</code>
+
+For arrays in particular, a shortcut in the parameter parsing API is provided. The ''t'' and ''ZEND_PARAM_ARRAY_ASSIGNABLE'' types will verify that the provided reference can be assigned an array.
+
+<code c>
+// Replace
+PHP_FUNCTION(test) {
+    zval *arg;
+    if (zend_parse_parameters("z/", &arg) == FAILURE) {
+        return NULL;
+    }
+    
+    zval_ptr_dtor(arg);
+    array_init(arg);
+    // Lots of array operations here
+}
+
+// With
+PHP_FUNCTION(test) {
+    zval *arg;
+    if (zend_parse_parameters("t", &arg) == FAILURE) {
+        return NULL;
+    }
+    
+    zval_ptr_dtor(arg);
+    array_init(arg);
+    // Lots of array operations here
+}
+</code>
+
+<code c>
+// Replace
+PHP_FUNCTION(test) {
+    zval *arg;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        ZEND_PARAM_ZVAL_DEREF(arg)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    zval_ptr_dtor(arg);
+    array_init(arg);
+    // Lots of array operations here
+}
+
+// With
+PHP_FUNCTION(test) {
+    zval *arg;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        ZEND_PARAM_ARRAY_ASSIGNABLE(arg)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    zval_ptr_dtor(arg);
+    array_init(arg);
+    // Lots of array operations here
+}
+</code>
+
+Places where such replacements are necessary can be detected by searching for ''z/'', ''ZEND_PARAM_ZVAL_DEREF'' and ''ZVAL_DEREF'' in the extension. Alternatively or additionally, function parameters that are declared as by-reference in arginfo can be reviewed.
 
 ==== Optimization ====
 
@@ -879,11 +1015,24 @@ var_dump($test->x); // TypeError
 
 The advantage of this approach is that it reduces the technical complexity, as there is essentially only a single place where we have to perform an additional type check. This proposal generally avoids type checks on reads in part for performance reasons, but in this specific case (where the extra type check would only be necessary if the property contains a reference) the performance issue would be less critical.
 
-The main disadvantage is that the point where the ''TypeError'' is generated is now removed from the point where the illegal value has been assigned. While it error is obvious in the above example, the time of assignment and the time of access could be far removed from one another.
+The main disadvantage is that the point where the ''TypeError'' is generated is now removed from the point where the illegal value has been assigned. One of the main motivating reasons for having any kind of type checks in the first place, is to detect errors early and pinpoint their cause: Passing an invalid value to a parameter will quite likely result in an error at //some// point, but determining the cause may not be easy. If the parameter is typed, then the error occurs directly at the point where the mistake was made.
 
-One of the main motivating reasons for having any kind of type checks in the first place, is to detect errors early and pinpoint their cause: Passing an invalid value to a parameter is quite likely to result in an error at //some// point, but determining the cause may not be easy. If the parameter is typed, then the error occurs directly at the point where the mistake was made.
+The same also applies to references to typed properties, maybe even to a higher degree, as references perform "spooky action at a distance". For this reason, we believe it is important to report errors as early as possible, instead of delaying them until the next read.
 
-The same also applies to references to typed properties, maybe even to a higher degree, as references are quite literally "spooky action at a distance". For this reason, we believe it is important to report errors as early as possible, instead of delaying them until the next read.
+Additionally, checking types on read has unfortunate interactions with coercive typing:
+
+<code php>
+class Test {
+    public int $x = 42;
+}
+$test = new Test;
+$x =& $test->x;
+$x = "24";
+var_dump($x); // string(1) "24"
+var_dump($test->x); // int(24)
+</code>
+
+In this case ''%%$test->x%%'' and ''$x'' point to the same reference, but reads from them would produce different values.
 
 === Reference types independent of property lifetime ===
 
@@ -979,7 +1128,7 @@ $test->x = 1; // Current RFC: string(1) "1". No intrinsic type: TypeError
 $test->y = 1; // Current RFC: string(1) "1". No intrinsic type: TypeError
 </code>
 
-Under the current RFC, the value of ''$test->x'' and ''$test->y'' would become ''string(1) "1"'', which does not match the value either of the properties would take in isolation. Without intrinsic reference type, the assignment would be instead checked against the types ''int|string'', producing value ''int(1)'', and ''float|string'', producing value ''float(1)''. While both type constraints are satisfied, the resulting coerced values are inconsistent, so a ''TypeError'' is generated.
+Under the current RFC, the value of ''%%$test->x%%'' and ''%%$test->y%%'' would become ''string(1) "1"'', which does not match the value either of the properties would take in isolation. Without intrinsic reference type, the assignment would be instead checked against the types ''int|string'', producing value ''int(1)'', and ''float|string'', producing value ''float(1)''. While both type constraints are satisfied, the resulting coerced values are inconsistent, so a ''TypeError'' is generated.
 
 ===== RFC Impact =====
 
@@ -1022,9 +1171,3 @@ After the project is implemented, this section should contain
   - a link to the git commit(s)
   - a link to the PHP manual entry for the feature
   - a link to the language specification section (if any)
-
-===== References =====
-Links to external references, discussions or RFCs
-
-===== Rejected Features =====
-Keep this updated with features that were discussed on the mail lists.
