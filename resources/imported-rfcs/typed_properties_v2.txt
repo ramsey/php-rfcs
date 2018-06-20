@@ -444,49 +444,75 @@ $x = "foobar"; // TypeError
 
 As the semantics of references in PHP are somewhat involved, the following subsections will describe some special cases. The Alternatives section discusses different approaches to reference handling.
 
+=== References in PHP ===
+
+There are some common misunderstandings about how references in PHP work, which need to be clarified before we can discuss the interaction with typed properties.
+
+Firstly, references in PHP are undirectional. There is no concept of a "reference to". References work by providing a shared storage location to which other storage locations may point. We will use the term "reference set" to refer to all storage locations which point to the same reference.
+
+<code php>
+$a = 1;
+$b =& $a;
+$c =& $b;
+</code>
+
+In the above code, ''$a'', ''$b'' and ''$c'' are part of one reference set. An assignment to any variable inside the reference set will affect the value of all the variables.
+
+A reference set may contain only a single variable:
+
+<code php>
+$a = 1;
+$b =& $a;
+unset($b);
+</code>
+
+After the ''unset()'' operation, the reference set only contains ''$a''. PHP semantics follow the general principle, that unitary reference sets should have no impact on behavior. Based on this, the PHP implementation may replace a unitary reference set with the contained variable ("unref") during certain operations, which are not well-specified. In practice, unitary reference sets are not fully transparent.
+
 === Dangling References ===
 
-[TODO This is no longer true in the current implementation, instead the reference looses the type when it no longer references the property]
-
-Acquiring a reference to a typed property will create a typed reference, which is not bound to the lifetime of the property. This means that the reference will retain its type even if the typed property is removed from the reference set.
+Acquiring a reference to a typed property will create a typed reference, whose type is bound to the property. In particular, this means that the reference type will only be enforced as long as the typed property is part of the reference set:
 
 <code php>
 class Test {
     public int $x = 42;
 }
+
 $test = new Test;
 $x =& $test->x; // Reference created with type int
 $y =& $x;
+
 // Here $x, $y, $test->x are part of the reference set
+// $x = "not an int" would be a TypeError at this point
+
 unset($test);
+
 // Here $x, $y are part of the reference set
-$x = "not an int"; // TypeError
+$x = "not an int"; // legal, no TypeError
 </code>
 
-At the time of assignment, the typed property is no longer part of the reference set, but the reference will retain its type.
+At the time of assignment, the typed property is no longer part of the reference set, so the reference no longer enforces a type.
 
-[TODO Try to get rid of unrefs? Remove rc=1 reference type?]
+This behavior preserves the general principle that unitary reference sets are transparent. If the type would continue to be enforced after the typed property is removed from the reference set, unref operations would be very directly observable. For more information, see the Alternatives section.
+
+=== Multiple Typed Properties ===
+
+A reference set may contain any number of storage locations, and as such may also contain more than one typed property. The following example shows the simplest case of two typed properties:
 
 <code php>
 class Test {
-    public int $x = 42;
+    public array $a;
+    public iterable $b;
 }
 $test = new Test;
-$array = [&$test->x];
-unset($test); // $array[0] is reference with rc=1
-// var_dump($array[0]); // Toggle me
-$array[0] = "not an int";
+$test->a = [1, 2, 3];
+$test->b =& $test->a;
+$test->b = []; // legal
+$test->b = new ArrayIterator; // TypeError
 </code>
 
-=== By-Reference Assignments ===
+In this case, the value of the reference must satisfy the type of all typed properties contained in the reference set. This is handled by computing the intersection type. A TypeError is generated if either the intersection is empty (e.g., ''int'' and ''string'' have empty intersection), or if the intersection cannot be represented in PHP's current type system (''Countable'' and ''Traversable'' have intersection ''Countable&Traversable'', but this is currently not a legal type).
 
-As by-reference assignments have reference-breaking semantics, no special behavior applies for expressions like ''$x &= $y'', as any reference stored in ''$x'' will not be modified, it will be overwritten.
-
-The only interesting case are assignments of the form ''$obj->x =& $y'', where ''$obj->x'' is a typed property. If ''$y'' is not a typed reference, and assuming the value of ''$y'' is compatible with the typed property (after possible coercion), then it will be turned into a typed reference by the assignment.
-
-If ''$y'' is already a typed reference, then we need to satisfy both the type of the property and the type of the reference. This is accomplished by setting the type of the reference to the intersection type. The assignment will throw a TypeError if either the intersection is empty (e.g. ''int'' and ''string'' have empty intersection), or if the intersection cannot be represented in PHP's current type system (''Countable'' and ''Traversable'' have intersection ''Countable&Traversable'', but this is currently not a legal type).
-
-Intersection types are computed as follows:
+Intersection types are computed as follows (through pairwise reduction):
 
   * If both types are nullable, the intersection is nullable. Otherwise it is not nullable.
   * If both types are class types ''A'' and ''B'': If ''A'' instanceof ''B'' the type is ''A''. If ''B'' instanceof ''A'' the type is ''B''. Otherwise the intersection is not representable (''A&B'').
@@ -496,9 +522,76 @@ Intersection types are computed as follows:
   * If one type is ''iterable'' and the other is ''object'', then the intersection is ''Traversable''.
   * Otherwise, the intersection is empty.
 
-Introduction of proper intersection types in PHP will resolve the currently not representable cases.
+Introduction of proper intersection types would allow to represent the ''A&B'' case. As PHP has no proper ''null'' type (in the type annotation system), the intersection of something like ''?int'' and ''?string'' is considered to be empty, even though the value ''null'' would satisfy both types. See the Alternatives section for a different approach that would allow these two cases.
 
-TODO Overloaded props by ref only have instantaneously enforced type
+If a typed property is removed from a reference set, it is necessary to recompute the intersection type. The following example shows how the intersection type of the reference changes as properties are unset:
+
+<code php>
+class Test {
+    public           $a;
+    public ?iterable $b;
+    public ?array    $c;
+    public array     $d;
+}
+
+$test = new Test;
+$test->d = [];
+$test->c =& $test->d;
+$test->b =& $test->c;
+$test->a =& $test->b;
+
+// Reference set { $test->a, $test->b, $test->c, $test->d } with intersection type array
+unset($test->d);
+// Reference set { $test->a, $test->b, $test->c } with intersection type ?array
+unset($test->c);
+// Reference set { $test->a, $test->b } with intersection type ?iterable
+unset($test->b);
+// Reference set { $test->a } with intersection type mixed
+</code>
+
+=== Future Interaction with Union Types ===
+
+While PHP currently does not support union types, there is an interesting interaction with union types that should be pointed out.
+
+<code php>
+class Test {
+    public int|string $x;
+    public float|string $y;
+}
+$test = new Test;
+$test->x = 1; // Will be int(1)
+$test->y = 1; // Will be float(1)
+$test->x =& $test->y; // Intersection type is string
+$test->x = 1; // Will be string(1) "1"
+$test->y = 1; // Will be string(1) "1"
+</code>
+
+In this case the intersection type of ''int|string'' and ''float|string'' is ''string''. The final outcome is that with both properties part of one reference set, the the assignment will result in a different (but legal) value, that would not have been chosen for either property individually.
+
+A different approach that would make this a TypeError instead is discussed in the Alternatives section.
+
+=== By-Reference Overloaded Properties ===
+
+As described in the main section on overloaded properties, if ''%%__get()%%'' is called for an uninitialized or unset property, the returned value must still satisfy the declared property type.
+
+If ''%%__get()%%'' returns by reference, then the behavior stays the same. The type is enforced only instantaneously, the reference itself will not be assigned a type (beyond one it may already have). The reason is that no typed property is actually part of the reference set.
+
+<code php>
+class Test {
+    public int $val;
+    public $dummy = 42;
+    
+    public function &__get($name) {
+        return $this->dummy;
+    }
+}
+
+$test = new Test;
+$val =& $test->val;  // Type checked here
+$val = "not an int"; // Assignment is legal, reference itself not typed
+</code>
+
+As a technical caveat, if ''%%__get()%%'' returns by reference, but is not used by reference (''BP_VAR_R'' fetch), then the reference must be immediately unwrapped after the type check. Otherwise clever application of destructors would allow changing the value between the type check and the use of the value.
 
 === By-reference arguments to internal functions ===
 
@@ -517,6 +610,10 @@ The behavior matches that of ''getType()''/''hasType()'' for parameters and ''ge
 ==== TODO ====
 
 TODO Class loading for property types needs to be mentioned somewhere? Also extra requirement for reference types.
+
+TODO Mention no null initialization for nullables more explicitly
+
+TODO Mention automatic null initialization when acquiring ref to uninit
 
 ===== Implementation =====
 
@@ -713,6 +810,19 @@ class Test {
 }
 $test = new Test;
 sort($test->ary);
+</code>
+
+[TODO Try to get rid of unrefs? Remove rc=1 reference type?]
+
+<code php>
+class Test {
+    public int $x = 42;
+}
+$test = new Test;
+$array = [&$test->x];
+unset($test); // $array[0] is reference with rc=1
+// var_dump($array[0]); // Toggle me
+$array[0] = "not an int";
 </code>
 
 ===== RFC Impact =====
