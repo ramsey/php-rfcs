@@ -853,19 +853,57 @@ Finally, because we still support unsetting of properties, we need to deal with 
 
 ==== References ====
 
-This RFC proposes to handle references to typed properties by introducing a concept of a typed reference, which is independent of the lifetime of the typed property that originally imposed the type constraint. In the following alternative ways of handling references are discussed.
+This RFC proposes to handle references to typed properties by introducing a concept of a typed reference, whose type is the intersection of all typed properties currently contained in the reference set. In the following alternative ways of handling references are discussed.
 
 === Forbid references ===
 
+The previous RFC on typed properties, did not permit acquiring references to typed properties. This has the significant disadvantage of creating an inconsistency and segregating the language. You can have typed properties, you can have references, but you can't have both.
+
+Specifically, as already mentioned in the main section, it prevents use of internal functions that accept parameters by reference, such as ''sort''. We've also been assured that references to properties play some important and irreplacable role for proxy objects in Doctrine, though the details remain elusive.
+
+On the other hand, supporting references to typed properties makes the proposal significantly more complicated. A very large fraction of this proposal text is concerned with the behavior of references, and the large design space surrounding them. Additionally, handling of references also makes up most of the implementation complexity of the proposal.
+
+=== Check types on read ===
+
+An alternative to the general "typed references" approach pursued by this RFC would be to allow arbitrary changes to references and only validate the type when the affected property is read next:
+
 <code php>
 class Test {
-    public array $ary = [3, 2, 1];
+    public int $x = 42;
 }
 $test = new Test;
-sort($test->ary);
+$x =& $test->x;
+$x = "not an int";  // allowed
+var_dump($test->x); // TypeError
 </code>
 
-[TODO Try to get rid of unrefs? Remove rc=1 reference type?]
+The advantage of this approach is that it reduces the technical complexity, as there is essentially only a single place where we have to perform an additional type check. This proposal generally avoids type checks on reads in part for performance reasons, but in this specific case (where the extra type check would only be necessary if the property contains a reference) the performance issue would be less critical.
+
+The main disadvantage is that the point where the ''TypeError'' is generated is now removed from the point where the illegal value has been assigned. While it error is obvious in the above example, the time of assignment and the time of access could be far removed from one another.
+
+One of the main motivating reasons for having any kind of type checks in the first place, is to detect errors early and pinpoint their cause: Passing an invalid value to a parameter is quite likely to result in an error at //some// point, but determining the cause may not be easy. If the parameter is typed, then the error occurs directly at the point where the mistake was made.
+
+The same also applies to references to typed properties, maybe even to a higher degree, as references are quite literally "spooky action at a distance". For this reason, we believe it is important to report errors as early as possible, instead of delaying them until the next read.
+
+=== Reference types independent of property lifetime ===
+
+Under the current proposal, the reference type is bound the the presence of the typed property in the reference set. If a typed property is removed from a reference set, then so is the type constraint that it imposes.
+
+An alternative approach would be to not make the type of the reference independent of the typed property. If the reference was constructed with a type, it would retain that type even if the typed property is removed:
+
+<code php>
+class Test {
+    public int $x = 42;
+}
+
+$test = new Test;
+$x =& $test->x;    // Reference created with type int
+$y =& $x;
+unset($test);      // Reference still has type int
+$x = "not an int"; // TypeError
+</code>
+
+A primary issue with this approach is that the behavior becomes fragile when unary reference sets are involved, as demonstrated by the following example.
 
 <code php>
 class Test {
@@ -877,6 +915,71 @@ unset($test); // $array[0] is reference with rc=1
 // var_dump($array[0]); // Toggle me
 $array[0] = "not an int";
 </code>
+
+In this case a ''TypeError'' would be generated without the ''var_dump'', but not with it. The reason is that the access ''$array[0]'' performs an unref operation under the current implementation. Generally, this scheme violates the principle that unary reference sets are transparent.
+
+A way to resolve this problem would be to not enforce the type for unary reference sets. Even so, behavior inconsistencies could still arise. If a new reference to ''$array[0]'' is created, then behavior would differ based on whether this happened before or after the above ''var_dump'' call.
+
+One advantage of uncoupled reference types is technical in nature: To support the behavior proposed in this RFC, each reference has to keep track which typed properties are part of it. As we don't expect reference sets with multiple typed properties to be common, we don't consider this to be particularly problematic, but it does add additional overhead.
+
+Another advantage is that removal of a property from a reference set, which may occur at a distance, may no longer influence local behavior. Consider the following example:
+
+<code php>  
+class Test {
+    public int $x = 0;
+    public Test $cycle;
+}
+
+$test = new Test;
+$test->cycle = $test;
+$x =& $test->x;
+unset($test);
+
+$x = "foo"; // This proposal: TypeError. Uncoupled types: TypeError
+gc_collect_cycles();
+$x = "foo"; // This proposal: Legal.     Uncoupled types: TypeError
+</code>
+
+Under the current proposal, garbage collection (which can be triggered as a side-effect of many operations) removes the typed property from the reference set, changing assignment behavior. If reference types are uncoupled, this cannot occur. On the other hand, GC can already result in many other side-effects (in the case of destructors arbitrary ones), so this is not really new.
+
+=== References without intrinsic type ===
+
+[TODO We want to switch to this version, but it's not implemented yet]
+
+The current proposal both gives references an intrinsic (intersection) type, and tracks all typed properties contained in the reference set. An alternative would be to keep the reference itself untyped and instead check assignments against all typed properties in the reference set. This would require that both all type constraints are satisfied and all produce the same coerced value.
+
+In most cases both schemes produce identical behavior, as checking against the intersection type is essentially the same as checking against all individual types. There are however two differences:
+
+First, we are not constrained by limitations in the existing type system. For example, the following code is invalid under the current proposal, as PHP has no ''Iterator&Countable'' type at this point:
+
+<code php>
+class Test {
+    public Iterator $i;
+    public Countable $c;
+}
+$test = new Test;
+$test->c = new ArrayObject;
+$test->i =& $test->c; // TypeError. Intersection Iterator&Countable not representable
+</code>
+
+If property types are instead checked individually, an explicit representation of ''Iterator&Countable'' is not required and this example would work.
+
+Second, the behavior with regard to union types (should they be introduced) changes. Reproducing the example from the main RFC text:
+
+<code php>
+class Test {
+    public int|string $x;
+    public float|string $y;
+}
+$test = new Test;
+$test->x = 1; // Will be int(1)
+$test->y = 1; // Will be float(1)
+$test->x =& $test->y;
+$test->x = 1; // Current RFC: string(1) "1". No intrinsic type: TypeError
+$test->y = 1; // Current RFC: string(1) "1". No intrinsic type: TypeError
+</code>
+
+Under the current RFC, the value of ''$test->x'' and ''$test->y'' would become ''string(1) "1"'', which does not match the value either of the properties would take in isolation. Without intrinsic reference type, the assignment would be instead checked against the types ''int|string'', producing value ''int(1)'', and ''float|string'', producing value ''float(1)''. While both type constraints are satisfied, the resulting coerced values are inconsistent, so a ''TypeError'' is generated.
 
 ===== RFC Impact =====
 
