@@ -18,54 +18,111 @@ This RFC introduces the ability for a user to override the default comparison
 behaviour of objects in PHP, and builds heavily on the work that Adam Harvey did
 on the [[https://wiki.php.net/rfc/comparable|Comparable RFC]].
 
-: Why is this a good thing?
-: Why should PHP have it?
-: What are some clear use cases that could benefit from this? Use decimal?
-: Talk about why the default behaviour isn't ideal
+==== The problem we're trying to solve ====
 
-==== To Existing Extensions ====
+The current [[http://php.net/manual/en/language.oop5.object-comparison.php|default behaviour]] 
+was introduced in PHP 5 and compares two objects by recursively comparing their properties using ''==''. Ordering (''%%<%%'', ''%%>%%'') stops and returns at the first unequal property found. There are some potential pitfalls to this approach though:
 
-==== Other Languages ====
+  * **Changing the order of properties might change the relative ordering of an object**, because the order in which properties are inspected is the order in which they are defined in the class. This is not intuitive or transparent, and may lead to unintended behaviour. It's also not currently
+  documented anywhere.
+  * **There is no way to compare properties strictly**. This RFC will change that by giving the user the ability to compare objects based on specific properties however they require.
+  * **Recursive property comparison is unnecessarily slow in some cases**. Some classes with many properties might be an identifier that can be used to determine equality. There is currently now way to leverage that, and the engine has to compare every single property, some of which may also be objects.
+  * **Extensions can override comparison, but userland can not.** This creates an inconsistency between extensions and userland, which prevents support for polyfills.
 
-For reference, most major languages have support for this:
+==== Use cases ====
+
+It's safe to say that objects are not frequently compared in PHP today. This might be because the user can't control the behaviour, or because use cases aren't common. Most objects won't concern themselves with comparability and won't implement these methods, but those that do will find a lot of value in the ability to control comparison.
+
+Cases that might benefit from non-default comparison behaviour:
+  * Number types like decimals, big integers and fuzzy precision values.
+  * Streams or resources where a buffer or connection shouldn't be considered.
+  * Strict sets that differentiate between <php>"1"</php> and <php>1</php>.
+  * Active record models where the entity's attributes are embedded.
+  * Objects that have complex relationships between properties to determine ordering and equality.
+  * Cases where an object wants to disallow comparison entirely to guard against unintended behaviour.
+  * Cases where an equal ordering does not imply equal value, eg. Decimal(2.00) <=> int(2).
+  * Cases where ordering isn't naturally ascending or lexicographical.
+
+==== Support in other languages ====
+
+For reference, some major languages that also support user-defined comparable objects:
   * Java has a [[https://docs.oracle.com/javase/8/docs/api/java/lang/Comparable.html|Comparable]] interface.
-  * Python 2 has the //[[https://docs.python.org/2/reference/datamodel.html#object.__cmp__|%%__cmp__%%]]// magic method.
+  * Python 2 has the //[[https://docs.python.org/2/reference/datamodel.html#object.__cmp__|__cmp__]]// magic method.
   * Python 3 removed //%%__cmp__%%// in favour of [[https://docs.python.org/2/reference/datamodel.html#object.__lt__|rich comparison]] magic methods.
   * Ruby has a [[https://ruby-doc.org/core-2.4.0/Comparable.html|Comparable]] module.
   * .NET has an [[https://msdn.microsoft.com/en-us/library/system.icomparable(v=vs.110).aspx|IComparable]] interface.
 
 ===== Proposal =====
-This RFC introduces a **//%%__compareTo%%//** and an **//%%__equals%%//** magic 
-method which can be used to change the default behaviour of objects when 
-compared to other values. There's also a new object handler called "equals" that
-is the internal equivalent of //%%__equals%%//.
+This RFC introduces two new magic methods: **//%%__compareTo%%//** and **//%%__equals%%//**.
+These can be used to change the default behaviour of objects when compared to 
+other values, including scalars. There's also a new object handler called //equals// 
+that is the internal equivalent of //%%__equals%%//.
 
-When an object is compared in a context that considers natural ordering, such as
+When an object is compared in a context that considers **natural ordering**, such as
 <php>sort</php>, the //%%__compareTo%%// method is called to determine its 
-relative ordering compared to the value it received. It should return the usual
-< 0 if smaller, 0 if equal ordering, and > 0 if greater. Objects that don't 
-implement //%%__compareTo%%// will continue to use the default behaviour.
+relative ordering compared to the value it received. It should return  a value 
+< 0 if smaller, 0 if equal, and > 0 if greater. Objects that don't 
+implement //%%__compareTo%%// will continue to use the 
+[[http://php.net/manual/en/language.oop5.object-comparison.php#98725|default behaviour]]
+that was introduced in PHP 5.
 
-When an object is compared in a context that considers equality, such as 
+When an object is compared in a context that considers **equality**, such as 
 <php>in_array</php>, the //%%__equals%%// method is called to determine if 
-the object is equal to the value it received. It should return **TRUE**
-or **FALSE**. Objects that don't implement //%%__equals%%// will 
-continue to use the default behaviour.
+the object is equal to the value it received. It should return **TRUE** if equal, 
+otherwise **FALSE**. Objects that don't implement //%%__equals%%// will 
+continue to use the [[http://php.net/manual/en/language.oop5.object-comparison.php|default behaviour]].
 
-Objects that only implement //%%__equals%%// will maintain the default
-behaviour when compared for ordering. If only //%%__equals%%// is implemented
-and returns **TRUE**, it will automatically translate to an ordering of 0.
-
-Objects that want to explicitly disallow ordering can throw an exception or raise
-a warning in //%%__compareTo%%//.
-
-Objects that only implement //%%__compareTo%%// will be considered equal to
-any value for which it returns 0. 
-
-We hereby support three use cases:
-  - I want to define equality and I don't intend to compare this object (//%%__equals%%//). 
-  - I want to define ordering and I'm okay that equal ordering implies equal value (//%%__compareTo%%//). 
+We hereby support three applications:
+  - I want to define equality and I don't intend to compare this object (only //%%__equals%%//). 
+  - I want to define ordering and I'm okay that equal ordering implies equal value (only //%%__compareTo%%//). 
   - I want to define ordering but equal ordering does not mean equal value for this object (//%%__compareTo%%// and //%%__equals%%//).
+
+Notes on specific behaviour and open issues:
+  * If only //%%__equals%%// is implemented and returns **TRUE**, it will automatically translate to an ordering of 0. See [[#open_issues|issue #1]]
+  * Objects that want to explicitly disallow ordering can throw an exception or raise a warning in //%%__compareTo%%//. See [[#open_issues|issue #2]]
+  * Objects that only implement //%%__compareTo%%// will be considered equal to any value for which it returns 0. See [[#open_issues|issue #3]]
+
+==== Why should PHP support this at a language level? ====
+
+There are a few userland implementations but there is no way for them to affect
+the internals of array functions and operators. The only way that we can dictate a standard of behaviour is by implementing this at a language level.
+
+==== Why magic methods over an interface? ====
+
+Python uses magic methods because there are no interfaces. Java has a 
+Comparable interface because not all objects are comparable by default. It's 
+important to note that we're not exposing the ability to make an object comparable, but instead to change the default behaviour when compared. All 
+objects in PHP are technically already comparable.
+
+  * No risk of breaking backwards compatibility or unintended behaviour because method names that start with __ are always reserved.
+  * All objects can already be compared and tested for equality, so checking if an object implements an interface would not give you any useful information. 
+  * PHP already uses magic methods to change the default behaviour of objects.
+
+There is a case for an interface when it comes to generics. Depending on the syntax, we would be able to do something like this:
+
+<code php>
+class Example<T> implements Comparable
+{
+    public function __compareTo(T $other)
+    {
+        ...
+    }
+}
+</code>
+
+However, because magic methods aren't inherited and the only restrictions are 
+that they need to be public and non-static, there's nothing stopping you from
+doing something like this:
+
+<code php>
+class Example
+{
+    public function __compareTo(Example $other): int
+    {
+        ...
+    }
+}
+</code>
 
 ===== Effects on Existing Functions =====
 
