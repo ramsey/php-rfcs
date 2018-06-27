@@ -56,48 +56,80 @@ For reference, some major languages that also support user-defined comparable ob
 ===== Proposal =====
 
 This RFC introduces two new magic methods: **//%%__compareTo%%//** and **//%%__equals%%//**.
+
 These can be used to change the default behaviour of objects when compared to 
-other values, including scalars. There's also a new object handler called //equals// 
-that is the internal equivalent of //%%__equals%%//.
+other values, including scalars. There's also a new object handler called //equals// that is the internal equivalent of //%%__equals%%//.
 
 <code php>
 class Example
 {
-    public function __compareTo($other): int
+    /**
+     * Returns: < 0 if $this is less than $other,
+     *          > 0 if $this is greater than $other,
+     *         == 0 if $this has equal natural ordering to $other.
+     */
+    public function __compareTo($other)
     {
         ...
     }
 
-    public function __equals($other): bool
+    /**
+     * @returns bool TRUE if $this is equal to $other, FALSE otherwise.
+     */
+    public function __equals($other): true
     {
         ...
     }
 }
 </code>
 
-When an object is compared in a context that considers **natural ordering**, such as
-<php>sort</php>, the //%%__compareTo%%// method is called to determine its 
-relative ordering compared to the value it received. It should return  a value 
-< 0 if smaller, 0 if equal, and > 0 if greater. Objects that don't 
-implement //%%__compareTo%%// will continue to use the 
-[[http://php.net/manual/en/language.oop5.object-comparison.php#98725|default behaviour]]
-that was introduced in PHP 5.
+==== __compareTo ====
+
+When an object is compared in a context that considers **natural ordering**, such as <php>sort</php>, the //%%__compareTo%%// method is called to determine its relative ordering compared to the value it received. It should return  a value < 0 if smaller, 0 if equal, and > 0 if greater. Objects that don't 
+implement //%%__compareTo%%// will continue to use the [[http://php.net/manual/en/language.oop5.object-comparison.php#98725|default behaviour]] that was introduced in PHP 5. 
+
+Explicitly disallowing ordering can be done by throwing an exception in //%%__compareTo%%//.
+
+An implementor of ''%%__compareTo%%'' should ensure that:
+  * <php>$x.__compareTo($y)</php> is inversely equivalent to <php>$y.__compareTo($x)</php>.
+  * <php>$x.__compareTo($y)</php> should throw an exception if <php>$y.__compareTo($x)</php> does.
+  * <php>$x.__compareTo($y) > 0 && $y.__compareTo($z) > 0</php> requires that <php>$x.__compareTo($z) > 0</php>.
+  * <php>$x.__compareTo($y) < 0 && $y.__compareTo($z) < 0</php> requires that <php>$x.__compareTo($z) < 0</php>.
+  * <php>$x.__compareTo($y) == 0 && $y.__compareTo($z) == 0</php> requires that <php>$x.__compareTo($z) == 0</php>.
+
+While this might seem like a lot of responsibility and complexity, these requirements are easily met if the implementor
+applies the same logic consistently and sensibly.
+
+==== __equals ====
 
 When an object is compared in a context that considers **equality**, such as 
 <php>in_array</php>, the //%%__equals%%// method is called to determine if 
-the object is equal to the value it received. It should return **TRUE** if equal, 
-otherwise **FALSE**. Objects that don't implement //%%__equals%%// will 
-continue to use the [[http://php.net/manual/en/language.oop5.object-comparison.php|default behaviour]].
+the object is equal to the value it received. It should return **TRUE** if equal, or **FALSE** otherwise. 
+Objects that don't implement //%%__equals%%// will continue to use the 
+[[http://php.net/manual/en/language.oop5.object-comparison.php|default behaviour]] 
+that was introduced in PHP 5.
 
-We hereby support three applications:
-  - I want to define equality and I don't intend to compare this object (only //%%__equals%%//). 
-  - I want to define ordering and I'm okay that equal ordering implies equal value (only //%%__compareTo%%//). 
-  - I want to define ordering but equal ordering does not mean equal value for this object (//%%__compareTo%%// and //%%__equals%%//).
+An implementor of ''%%__equals%%'' should ensure that:
+  * <php>$x.__equals($y)</php> is equivalent to <php>$y.__equals($x)</php>.
+  * <php>$x.__equals($y)</php> should throw an exception if <php>$y.__equals($x)</php> does.
+  * <php>$x.__equals($y) && $y.__equals($z)</php> requires that <php>$x.__compareTo($z) == TRUE</php>.
 
-Notes on specific behaviour and open issues:
-  * If only //%%__equals%%// is implemented and returns **TRUE**, it will automatically translate to an ordering of 0. See [[#open_issues|issue #1]]
-  * Objects that want to explicitly disallow ordering can throw an exception or raise a warning in //%%__compareTo%%//. See [[#open_issues|issue #2]]
-  * Objects that only implement //%%__compareTo%%// will be considered equal to any value for which it returns 0. See [[#open_issues|issue #3]]
+==== Behaviour in combination ====
+
+Using either or both of these methods covers three common scenarios:
+  - I want to define equality but ordering doesn't make sense. (//%%__equals%%// only).
+  - I want to define ordering, and equal ordering implies equal value. (//%%__compareTo%%// only).
+  - I want to define ordering, but equal ordering does not mean equal value for this object. (//%%__compareTo%%// and //%%__equals%%//).
+
+Fallback behaviour:
+  * Objects that only implement //%%__equals%%// will have equal ordering if //%%__equals%%// returns **TRUE**. 
+  * Objects that only implement //%%__compareTo%%// will be equal to any value for which //%%__compareTo%%// returns 0.
+
+See [[#open_issues]].
+
+^ Expressions                                                                                       ^ Attempted calling order                                                                                                       ^
+| ''%%$a < $b%%'',\\ ''%%$a > $b%%'',\\ ''%%$a <= $b%%'',\\ ''%%$a >= $b%%'',\\ ''%%$a <=> $b%%''   | ''%%$a->__compareTo($b)%%'',\\ ''%%$b->__compareTo($a)%%'',\\ ''%%$a->__equals($b)%%'',\\ ''%%$b->__equals($a)%%''            |
+| ''%%$a == $b%%'',\\ ''%%$a != $b%%''                                                              | ''%%$a->__equals($b)%%'',\\ ''%%$b->__equals($a)%%'',\\ ''%%$a->__compareTo($b) == 0%%'',\\ ''%%$b->__compareTo($a) == 0%%''  |
 
 ==== Why should PHP support this at a language level? ====
 
@@ -150,15 +182,15 @@ array functions like <php>sort</php>, <php>array_search</php> and <php>in_array<
 
 These methods also overload operators. Here is a table to demonstrate this:
 
-^ Operator      ^ Methods             ^  Fallback             ^ Notes     ^
-| ''%%<%%''     | //%%__compareTo%%// |                       |           |
-| ''%%>%%''     | //%%__compareTo%%// |                       |           |
-| ''%%<=%%''    | //%%__compareTo%%// | //%%__equals%%//      | Will be **TRUE** if //%%__compareTo%%// is not implemented and //%%__equals%%// returns **TRUE** |
-| ''%%>=%%''    | //%%__compareTo%%// | //%%__equals%%//      | Will be **TRUE** if //%%__compareTo%%// is not implemented and //%%__equals%%// returns **TRUE** |
-| ''%%==%%''    | //%%__equals%%//    | //%%__compareTo%%//   | Will be **TRUE** if //%%__equals%%// is not implemented and //%%__compareTo%%// returns 0 |
-| ''%%!=%%''    | //%%__equals%%//    | //%%__compareTo%%//   | Will be **FALSE** if //%%__equals%%// is not implemented and //%%__compareTo%%// returns 0 |
-| ''%%===%%''   |                     |                       |           |
-| ''%%!==%%''   |                     |                       |           |
+^ Operator      ^ Primary               ^ Secondary             ^                                                                                                 ^
+| ''%%<%%''     | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns < 0.                                                    |
+| ''%%>%%''     | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns > 0.                                                    |
+| ''%%<=%%''    | //%%__compareTo%%//   | //%%__equals%%//      | **TRUE** if //%%__compareTo%%// is **not** implemented and //%%__equals%%// returns **TRUE**.   |
+| ''%%>=%%''    | //%%__compareTo%%//   | //%%__equals%%//      | **TRUE** if //%%__compareTo%%// is **not** implemented and //%%__equals%%// returns **TRUE**.   |
+| ''%%==%%''    | //%%__equals%%//      | //%%__compareTo%%//   | **TRUE** if //%%__equals%%// is **not** implemented and //%%__compareTo%%// returns 0.          |
+| ''%%!=%%''    | //%%__equals%%//      | //%%__compareTo%%//   | **TRUE** if //%%__equals%%// is **not** implemented and //%%__compareTo%%// returns non-zero.   |
+| ''%%===%%''   |                       |                       | No change to default behaviour.                                                                 |
+| ''%%!==%%''   |                       |                       | No change to default behaviour.                                                                 |
 
 ===== Backward Incompatible Changes =====
 
@@ -184,9 +216,57 @@ This would go in the next PHP 7.x, most likely 7.3.
 
 ===== Open Issues =====
 
-  - Should we internally enforce that ordering is ''0'' when equality is **TRUE**, or leave it up to the user to follow this convention?
-  - Should we warn the user when an object that doesn't implement //%%__compareTo%%// is compared for ordering?
-  - Should //%%__compareTo%%// returning ''0'' indicate equality when  //%%__equals%%// is not defined?
+==== 1. Should equal value imply equal ordering when ordering isn't defined? ====
+
+If a class doesn't implement ''%%__compareTo%%'' but does implement ''%%__equals%%'',
+should ''%%__equals%%'' be called when an instance of the class is compared for ordering?
+
+This comes down to whether we want to completely isolate equality and ordering, even though
+the convention is that equal value should imply equal ordering. It makes no sense that two
+values that are equal should not be ordered as such.
+
+Current decision: **Yes**, equal value implies equal ordering and is inferred internally.
+
+==== 2. Should equal ordering imply equal value when equality isn't defined? ====
+
+If a class doesn't implement ''%%__equals%%'' but does implement ''%%__compareTo%%'',
+should ''%%__compareTo%%'' be called when an instance of the class is compared for equality?
+
+This is the current behaviour of the internal //compare_function//, which is called by
+//is_equal_function//, which returns **TRUE** if //compare_function// returned 0. So PHP does 
+not currently differentiate between ordering and equality. The //compare// object handler is
+the only way to define custom comparison but its result is used for both equality and ordering. 
+
+Existing extensions will now have the option of implementing the //equals// handler if they 
+want to separate ordering from equality.
+
+Current decision: **Yes**, equal ordering implies equal value if equality is not defined.
+
+==== 3. Should __equals be restricted to instances of the same class? ====
+
+PHP's current definition of equality (when ''=='' is called on two objects) require that
+the two compared objects be instances of the same class. Even if one class is an extension
+of the other, ''=='' will be **FALSE** unless they are exactly the same class.
+
+Only internal classes and extensions can currently override this behaviour. For example, 
+GMP does not require that the other value is also a GMP number, 
+eg. <php>gmp_init(42) == 42</php> will be **TRUE**. This is because the //compare// 
+object handler allows an object to be compared to any other type.
+
+However, one major advantage of restricting operands to the same class is that equality 
+would be symmetrical by design, because both values would have the same comparison function. 
+
+Current decision: **No**, it's up to the user to do an <php>instanceof</php> check, which allows
+for greater flexibility and less inconsistency between userland and internal classes.
+
+==== 4. Should we throw an exception when a class that doesn't define ordering is ordered? ====
+
+Ordering an object that doesn't implement ''%%__compareTo%%'' is almost certainly unintended.
+However, we don't want to break existing code by failing hard when ordering isn't defined,
+but we can if ''%%__equals%%'' is implemented but ''%%__compareTo%%'' is not. 
+
+Current decision: **Yes**, we should fail hard when an object is compared for ordering when 
+ordering is not defined, but only if equality is defined.
 
 ===== Implementation =====
 See https://github.com/php/php-src/pull/3339/files
