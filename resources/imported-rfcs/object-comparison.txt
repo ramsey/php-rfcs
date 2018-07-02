@@ -1,5 +1,5 @@
 ====== PHP RFC: User-defined object comparison ======
-  * Version: 0.4
+  * Version: 0.3
   * Date: 2018-06-26
   * Author: Rudi Theunissen <rtheunissen@php.net>
   * Based on previous RFC by: Adam Harvey <aharvey@php.net>
@@ -68,7 +68,7 @@ class Example
      *          > 0 if $this is greater than $other,
      *         == 0 if $this has equal natural ordering to $other.
      */
-    public function __compareTo($other): int
+    public function __compareTo($other)
     {
         ...
     }
@@ -76,7 +76,7 @@ class Example
     /**
      * @returns bool TRUE if $this is equal to $other, FALSE otherwise.
      */
-    public function __equals($other): true
+    public function __equals($other): bool
     {
         ...
     }
@@ -129,26 +129,87 @@ Using either or both of these methods covers three common scenarios:
 | ''%%$a < $b%%'',\\ ''%%$a > $b%%'',\\ ''%%$a <= $b%%'',\\ ''%%$a >= $b%%'',\\ ''%%$a <=> $b%%''   | ''%%$a->__compareTo($b)%%'',\\ ''%%$b->__compareTo($a)%%''                                                          |
 | ''%%$a == $b%%'',\\ ''%%$a != $b%%''                                                              | ''%%$a->__equals($b)%%'',\\ ''%%$b->__equals($a)%%'',\\ ''%%$a->__compareTo($b)%%'',\\ ''%%$b->__compareTo($a)%%''  |
 
+==== Example ====
+
+Let's consider a *Fraction*, with a numerator and a denominator, that isn't automatically simplified.
+
+<code php>
+class Fraction {
+    private $num;
+    private $den;
+
+    public function __consrtuct(int $num, int $den) {
+        $this->num = $num;
+        $this->den = $den;
+    }
+
+    public function toFloat(): float {
+        return $this->num / $this->den;
+    }
+
+    /**
+     * @return bool Whether this fraction is equal in value to $other.
+     */
+    public function __equals($other): bool {
+        if ($other instanceof Fraction) {
+            return $this->toFloat() === $other->toFloat();
+        }
+
+        return $this->toFloat() === (float) $other;
+    }
+
+    /**
+     * @return Natural ordering of this fraction relative to $other.
+     */
+    public function __compareTo($other): int {
+        if ($other instanceof Fraction) {
+            return $this->toFloat() <=> $other->toFloat();
+        }
+
+        return $this->toFloat() <=> (float) $other;
+    }
+}
+
+$a = new Fraction(5,  2); // 2.5
+$b = new Fraction(10, 4); // 2.5
+
+var_dump($a == $b, $a < $b);
+
+/**
+ * The current behaviour will output:
+ * 
+ * bool(false)
+ * bool(true)
+ *
+ * The implementation of this RFC would output:
+ *
+ * bool(true)
+ * bool(false)
+ */
+</code>  
+
+The output is different because the default behaviour will compare the object's 
+properties without knowing that there's a relationship between the numerator and
+the denominator. The first instance has a numerator of 5, it will be considered 
+less than the second, which has a numerator of 10, and also therefore not equal, 
+even though both fractions represent the same numeric value.
+
 ==== Why should PHP support this at a language level? ====
 
-There are a few userland implementations but there is no way for them to affect
-the internals of array functions and operators. The only way that we can dictate a standard of behaviour is by implementing this at a language level.
+There are a few userland implementations but there is no way for them to affect the internals of array functions and operators. The only way that we can dictate a standard of behaviour is by implementing this at a language level.
 
 ==== Why magic methods over an interface? ====
 
-Python uses magic methods because there are no interfaces. Java has a 
-Comparable interface because not all objects are comparable by default. It's 
-important to note that we're not exposing the ability to make an object comparable, but instead to change the default behaviour when compared. All 
-objects in PHP are technically already comparable.
+  - Python uses magic methods because there are no interfaces, so that isn't a strong case but worth mentioning. 
+  - Java has a ''Comparable'' interface because not all objects are comparable by default, and an ''equals'' method that exists for all objects. All PHP objects are already comparable and equatable, so we're not making an object comparable or equatable, we're simply providing the ability to change the definition of that on a per-class basis.
+  - No risk of breaking BC or unintentionally overriding operators because method names that start with %%"__"%% are reserved.
+  - All objects can already be compared and equated, so "Comparable" and "Equatable" are redundant markers. 
+  - PHP already uses magic methods to change the default behaviour of objects, so this isn't something entirely new.
 
-  * No risk of breaking backwards compatibility or unintended behaviour because method names that start with %%"__"%% are always reserved.
-  * All objects can already be compared and tested for equality, so checking if an object implements an interface would not give you any useful information. 
-  * PHP already uses magic methods to change the default behaviour of objects.
-
-There is a case for an interface when it comes to generics. Depending on the syntax, we would be able to do something like this:
+There is a case for an interface with the introduction of generics. Depending on the syntax, we would be able to do something like this:
 
 <code php>
-class Example<T> implements Comparable
+class GenericObject<T> implements Comparable
 {
     public function __compareTo(T $other)
     {
@@ -157,14 +218,14 @@ class Example<T> implements Comparable
 }
 </code>
 
-However, because magic methods on a base class aren't inherited from a language-level root class, 
-the only requirements are that they are public and non-static, so there's nothing stopping you from
-using whatever parameter and return typehints you like:
+However, because magic methods aren't inherited from a root class, and the only 
+internal restrictions are that they must be public and non-static, the implementor
+is free to use any parameter and return typehints. For example:
 
 <code php>
-class Example
+class ComparableToSelf
 {
-    public function __compareTo(Example $other): int
+    public function __compareTo(ComparableToSelf $other): int
     {
         ...
     }
@@ -192,10 +253,7 @@ These methods also overload operators. Here is a table to demonstrate this:
 
 ===== Backward Incompatible Changes =====
 
-None. 
-
-Objects that do not implement //%%__compareTo%%// or //%%__equals%%// will
-continue to use the existing rules and are therefore not affected by this patch.
+None, existing code will not be affected.
 
 ==== To Existing Extensions ====
 
@@ -210,7 +268,7 @@ always used, regardless of the return value.
 
 ===== Proposed PHP Version(s) =====
 
-This would go in the next PHP 7.x, most likely 7.3.
+PHP 7.3
 
 ===== Open Issues =====
 
@@ -272,25 +330,53 @@ ordering is not defined, but only if ''%%__equals%%'' is defined.
 At first glace and as discussed in the reasoning behind magic methods, these interfaces seem
 redundant. We don't have interfaces for ''%%__get%%'', ''%%__set%%'' etc because all objects
 already support property access. <php>ArrayAccess</php> is a necessary interface because not
-all objects support array syntax by default. But comparison is supported by all objects... for now.
+all objects support array syntax by default, but comparison is supported by all objects.
 
 What happens when we decide to deprecate default object comparison? We would need to introduce
 an interface retroactively or a function like ''%%is_comparable%%'' which I'm sure we can all 
 agree is not ideal because we'd still not have a type we can work with.
 
-If we do decide that interfaces are a good addition, we would remove the magic methods and use 
-''%%compareTo%%'' and ''%%equals%%'' instead.
+Current decision: **Magic methods**, ''%%__compareTo%%'' and ''%%__equals%%''.
 
-Current decision: Only magic methods, no interface.
+==== 6. Should <=> normalize to always return -1, 0, and 1? ====
+
+Currently, the internal `compare_function` assigns either -1, 0 or 1 to the result,
+which is why ''%%<=>%%'' always evaluates to one of those three. When a class implements 
+''%%__compareTo%%'' in such a way that it returns something else, should ''%%<=>%%'' still
+normalise to return only -1, 0, and 1 based on the returned value?
+
+This is an interesting issue because calling ''%%__compareTo%%'' directly will return the raw
+value, but using the operator will evaluate to the normalized value. This opens a can of worms 
+around operator overloading, which has been a contentuous issue in PHP for a long time.
+
+The big question is whether we should overload the **operator**, or the **behaviour** of the operator.
+For example, is <php>$a < $b</php> shorthand for "is $a less than $b?" (always evaluating to a boolean), or should
+<php>$a < $b</php> not have any semantics and be allowed to evaluate to any type? Similarly, does ''%%<=>%%'' semantically
+mean "how should $a be ordered relative to $b" and should always return -1, 0 or 1, or would we someday want to overload 
+it without restriction?
+
+It's worth considering that some operations should be free to overload without restriction.
+Operators like ''+'', ''-'', ''*'', ''/'', ''|'', ''&'', etc have semantics that perform an operation, rather than ask a question. For example, adding two lists together with ''+'', a set union with ''|'', or a matrix multiplication with ''*'' all make perfectly clear semantic sense and it should be easy to guess what the operation might do. Comparison operators are different because they are defined by the questions that they ask. If <php>$a < $b</php> has the potential to be a number or an object, it would make reading and understanding code a lot more difficult: ''<'' isn't "less than", it's simply the left caret operator that happens to mean "less than" by default.
+
+That is why this RFC is strongly trying to focus on the **behaviour**, not the operators. We're providing the ability
+to define what equality and relative natural ordering is for a class, and the overloading of the operators is an unavoidable
+consequence of that. It would otherwise be very confusing if a class implements ''%%__compareTo%%'' but doesn't 
+call it for comparison operators, or implements ''%%__equals%%'' and not call it for ''=='' and '!='.
+
+The question that this all comes down is to whether comparison expressions like <php>$a < $b</php> should always evaluate to
+a certain type (boolean in this case, or -1, 0, 1 in the case of ''%%<=>%%''), or be unrestricted. 
+
+This dictates whether ''%%<=>%%'' should be normalised or whether it should return whatever ''%%__compareTo%%'' returns.
+
+Current decision: **Normalized**, ''%%<=>%%'' always returns -1, 0 or 1 regardless of what ''%%__compareTo%%'' returns.
 
 ===== Future Scope =====
 
-1. ''%%__compareTo%%'' is equivalent to ''%%<=>%%'' and ''%%__equals%%'' is 
-equivalent to ''%%==%%'', so if we want to overload specific comparison operators in the future,
-we can build on top of this patch without breaking backward compatibility. 
+1. ''%%__compareTo%%'' defines the behaviour of ''%%<=>%%'' and ''%%__equals%%'' defines the behaviour of ''%%==%%'', 
+so if we want to overload operators in the future, we can build on top of this patch without breaking backward compatibility.
 
 2. We might want to look at deprecating the current object comparison behaviour,
-so that objects that are to be compared would *have* to implement ''%%__compareTo%%'' and ''%%__equals%%''.
+so that objects that are to be compared would *have* to implement ''%%__compareTo%%''.
 
 3. When PHP gets support for generics, these functions won't be affected because
 typehints aren't defined or enforced.
