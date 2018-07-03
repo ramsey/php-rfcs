@@ -408,8 +408,6 @@ $test->x++; // TypeError
 
 The ''%%$test->x++%%'' line is roughly equivalent to ''%%$this->x = $this->x + 1%%'' and the final assignment is type-checked as usual. Note that the above code will error also in coercive mode, because overflowing coercions from floats to integers are prohibited.
 
-[TODO The implementation does not handle indirect modifications involving array promotion correctly yet.]
-
 ==== References ====
 
 Unlike the previous typed properties RFC, this RFC allows acquiring references to typed properties. While references in PHP are nowadays considered to be something of an antipattern and avoidance of their use is advisable, there are still many instances where their use cannot easily be avoided. For example, a blanket prohibition of references to typed properties would not allow the following code:
@@ -644,8 +642,6 @@ $newStr = str_replace($a, $b, $c, $count);
 
 Under this desugaring, it would be expected that the assignment to ''$count'' respects the strictness mode of the caller.
 
-[TODO The current implementation handles the array case slightly differently, this will be fixed.]
-
 === Automatic Initialization ===
 
 In PHP, creating a reference to an uninitialized storage location, implicitly initialized it to value ''null''. For typed properties this behavior is preserved if the property is nullable. If the property is not nullable, then a ''TypeError'' is generated, as initializing the property to ''null'' would violate the type constraint:
@@ -760,7 +756,7 @@ PHP_FUNCTION(test) {
 }
 </code>
 
-For arrays in particular, a shortcut in the parameter parsing API is provided. The ''t'' and ''ZEND_PARAM_ARRAY_ASSIGNABLE'' types will verify that the provided reference can be assigned an array.
+For arrays it is necessary to additionally dereference the zval after the assignment so that subsequently additional operations can be performed on the array. The ''zend_try_array_init()'' and ''zend_try_array_init_size()'' functions handle simplify this case:
 
 <code c>
 // Replace
@@ -772,18 +768,22 @@ PHP_FUNCTION(test) {
     
     zval_ptr_dtor(arg);
     array_init(arg);
+    
     // Lots of array operations here
 }
 
 // With
 PHP_FUNCTION(test) {
     zval *arg;
-    if (zend_parse_parameters("t", &arg) == FAILURE) {
+    if (zend_parse_parameters("z", &arg) == FAILURE) {
         return NULL;
     }
     
-    zval_ptr_dtor(arg);
-    array_init(arg);
+    arg = zend_try_array_init(arg);
+    if (!arg) {
+        return;
+    }
+
     // Lots of array operations here
 }
 </code>
@@ -807,14 +807,19 @@ PHP_FUNCTION(test) {
     zval *arg;
     
     ZEND_PARSE_PARAMETERS_START(1, 1)
-        ZEND_PARAM_ARRAY_ASSIGNABLE(arg)
+        ZEND_PARAM_ZVAL(arg)
     ZEND_PARSE_PARAMETERS_END();
     
-    zval_ptr_dtor(arg);
-    array_init(arg);
+    arg = zend_try_array_init(arg);
+    if (!arg) {
+        return;
+    }
+    
     // Lots of array operations here
 }
 </code>
+
+Please not that the return value of ''zend_try_array_init()'' must be checked if you plan to continue working on the array. Otherwise, there would be no guarantee that ''arg'' is actually an array.
 
 Places where such replacements are necessary can be detected by searching for ''z/'', ''ZEND_PARAM_ZVAL_DEREF'' and ''ZVAL_DEREF'' in the extension. Alternatively or additionally, function parameters that are declared as by-reference in arginfo can be reviewed.
 
