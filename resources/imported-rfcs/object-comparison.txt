@@ -1,5 +1,5 @@
 ====== PHP RFC: User-defined object comparison ======
-  * Version: 1.4
+  * Version: 1.3
   * Date: 2018-06-26
   * Author: Rudi Theunissen <rtheunissen@php.net>
   * Based on previous RFC by: Adam Harvey <aharvey@php.net>
@@ -238,116 +238,12 @@ Cases that benefit from the ability to override comparison behaviour:
 ===== Frequently Asked Questions =====
 
 
-==== 1. Does equality imply equal ordering when ordering isn't defined? ====
-
-If a class doesn't implement ''%%__compareTo%%'' but ''%%__equals%%'' returns **TRUE**,
-should that be equivalent to ''%%__compareTo%%'' returning 0?
-
-This comes down to whether we want to completely isolate equality and ordering, even though
-the convention is that equal value should imply equal ordering. It makes no sense for equal 
-values to not have equal ordering, but it might not be intuitive to call
-''%%__equals%%'' for ordering operations like ''%%>%%'', ''%%<%%'' etc.
-
-**No, equality does not automatically imply equal ordering.** When comparing an object in a context that considers natural ordering, it should not consider equality when ordering isn't defined for that object. 
-
-Consider ''$a <= $b'': what should happen when ''%%__equals%%'' returns **FALSE**? The only logical path would be to fall back to the default behaviour here. The problem with this approach is that we're mixing contexts, and therefore responsibility. We should use either user-defined behaviour or default internal behaviour, but not a mix of both. In this case, where ''%%__compareTo%%'' is not implemented, ''$a <= $b'' should use **only** the default behaviour and not consider ''%%__equals%%'' at all.
-
-
-==== 2. Does equal ordering imply equality when equality isn't defined? ====
-
-If a class doesn't implement ''%%__equals%%'' but ''%%__compareTo%%'' returns 0,
-should that be equivalent to ''%%__equals%%'' returning **TRUE**?
-
-This current behaviour of the internal [[https://github.com/php/php-src/blob/5eb1f92f31cafc48384f9096012f421b37f6d425/Zend/zend_operators.c#L2184|is_equal_function]] returns **TRUE** if the internal [[https://github.com/php/php-src/blob/5eb1f92f31cafc48384f9096012f421b37f6d425/Zend/zend_operators.c#L1933|compare_function]] returns 0. PHP therefore does not differentiate between ordering and equality. 
-
-Currently, the only way to override comparison is by using the internal //compare// and //compare_objects// handlers, where result is used for both equality and ordering.
-
-**Yes, equal ordering implies equal value, but only if equality is not defined**. This aligns with the existing behaviour of objects and extensions. It also makes ''%%__equals%%'' optional in cases where it might be redundant, for example:
-
-<code php>
-class Fraction
-{
-  ...
-
-  public function __compareTo(Fraction $other): int
-  {
-      return $this->num * $other->den <=> $other->num * $this->den;
-  }
-}
-
-</code>
-
-
-==== 3. Are the methods restricted to instances of the same class? ====
-
-PHP's current definition of equality (when ''=='' is called on two objects) require that
-both objects be instances of the same class. Even if one class extends the other, ''=='' will be **FALSE** unless they are exactly the same class.
-
-Only internal classes and extensions can currently override this behaviour. For example, GMP does not require for the other value to be a GMP instance, ie. <php>gmp_init(42) == 42</php> will be **TRUE**. This is because the //compare// object handler allows for an object to be compared to any other type.
-
-An advantage of restricting operands to the same class is that equality would be symmetrical and transitive by design, ie. <php>$a == $b</php> must mean that <php>$b == $a</php>, and <php>$a < $b && $b < $c</php> must mean that <php>$a < $c</php>.
-
-This decision comes down to power and responsibility vs. restriction and consistency. We can enforce certain rules internally at the cost of flexibility, or we can put more trust in the user in order to give them more control.
-
-**No, the methods are not restricted to instances of the same class**. It's the implementor's responsibility to consider the definition of equality and ordering against other types. This also removes the inconsistency between internal and user-defined classes by providing a hook to the //compare// handler.
-
-
-==== 4. What happens when you try to order a class that doesn't implement __compareTo? ====
-
-Ordering an object that doesn't implement ''%%__compareTo%%'' is most likely unintended, but we don't want to break existing code by failing hard when ordering isn't defined. The only viable situation to fail in is when ''%%__equals%%'' is implemented but ''%%__compareTo%%'' is not. 
-
-Ordering objects that don't implement ''%%__compareTo%%'' will use the existing rules and **will not be affected by this patch**.
-
-
-==== 5. How does <=> behave when __compareTo returns something other than -1, 0 and 1? ====
-
-Currently, the internal `compare_function` assigns either -1, 0 or 1 to the result, which is why ''%%<=>%%'' always evaluates to one of those three. When a class implements ''%%__compareTo%%'' in such a way that it returns something else, should ''%%<=>%%'' still normalize to return only -1, 0, and 1 based on the returned value?
-
-This is an interesting consideration because calling ''%%__compareTo%%'' directly will return the raw value, but using the ''%%<=>%%'' operator will evaluate to the normalized value. This leads to a bigger discussion around operator overloading, which has been a contentuous issue in PHP for a long time.
-
-This comes down to whether we should overload the **operator**, or the **behaviour** of the operator. For example, is <php>$a < $b</php> shorthand for "is $a less than $b?" (and always evaluate to a boolean), or should <php>$a < $b</php> not have any semantics and be allowed to evaluate to any type? Similarly, does ''%%<=>%%'' semantically mean "how should $a be ordered relative to $b" and always return -1, 0 or 1, or will we someday want to overload it without restriction?
-
-It's worth considering that some operations should be free to overload without restriction.
-Operators like ''+'', ''-'', ''*'', ''/'', ''|'', ''&'', etc have semantics that perform an action, rather than ask a question. For example, adding two lists together with ''+'', a set union with ''|'', or a matrix multiplication with ''*'' all make perfectly clear semantic sense and it should be easy to guess what the operation might do. Comparison operators are different because they are defined by the questions that they ask. If <php>$a < $b</php> has the potential to be a number or an object, it would make reading and understanding code a lot more difficult: ''<'' wouldn't mean "less than", it would just be the left caret operator that means "less than" by default.
-
-This RFC is focused on overriding the **behaviour**, not the operators themselves. It's providing the ability to define equality and relative natural ordering, and the overloading of the operators is an unavoidable consequence of that. It would otherwise be very confusing if a class implements ''%%__compareTo%%'' but doesn't honour it for comparison operators.
-
-Operator overloading in the future would introduce methods for each operator, such as ''%%__lt%%'' and ''%%__eq%%'' that will be invoked for the operators, but comparison and equality would still honour ''%%__compareTo%%'' and ''%%__equals%%''. This is however entirely hypothetical but demonstrates that the intention here is not to overload the operators.
-
-**The behaviour of the operator is not equivalent to invoking the method**, so ''%%<=>%%'' will normalize the return value of ''%%__compareTo%%'' to always return -1, 0 or 1. 
-
-==== 6. What happens when __compareTo returns an object? ====
-
-All non-numeric values will be converted to an integer, which may raise a warning if the object does not support this conversion.
-
-
-==== 7. For a case like $a < $b, is $b considered at all? ====
-
-Yes. In this case, <php>$a->__compareTo($b)</php> will be attempted first, then <php>$b->__compareTo($a)</php>, and finally the default behaviour of $a.
-
-
-==== 8. Is it possible for that $a < $b and $b < $a? ====
-
-Yes, comparison isn't guaranteed to be symmetrical or transitive. It's up to the implementor to ensure that cases like these do not exist. The engine honours the implementor's logic and does not attempt to make any assertions. Enforcing symmetry and transitivity would require multiple comparisons and assertions per operation or type restriction. This RFC opts for neither.
-
-
-==== 9. What is the behaviour of "$a == $b" when $a implements __compareTo and $b implements __equals? ====
-
-Order of attempt: 
-  * <php>$a->__equals($b)</php>
-  * <php>$b->__equals($a)</php>
-  * <php>$a->__compareTo($b)</php>
-  * <php>$b->__compareTo($a)</php>
-
-Because this is comparison in the context of equality, ''%%__equals%%'' takes precedence over ''%%__compareTo%%'' even if that means using the secondary operand's implementation. If both $a and $b follow sensible logic (within their domain), <php>$a->__compareTo($b)</php> should return 0 anyway. An inconsistency here indicates a logic error in the implementation of either $a or $b.
-
-
-==== 10. Why should PHP support this at a language level? ====
+==== 1. Why should PHP support this at a language level? ====
 
 There are a few user implementations out there, but there is no way for these to affect the internals of array functions and operators. The only way that we can dictate a standard of behaviour and affects internals is by implementing this at a language level.
 
 
-==== 11. Why magic methods instead of interfaces? ====
+==== 2. Why magic methods instead of interfaces? ====
 
 This is not an easy decision to make because there are strong cases for both. So in order to make a good decision we have to consider //why// interfaces exist and what benefits they might have over magic methods **for this feature**.
 
@@ -381,9 +277,114 @@ PHP already uses magic methods to change default internal behaviour, so using ma
 
 **Magic methods**, because all objects in PHP are already comparable and there isn't a strong enough case for the use of interfaces instead. If there is overwhelming support in favour of interfaces in the wake of a rejected RFC, an alternative proposal may be suggested.
 
+
+==== 3. Does equality imply equal ordering when ordering isn't defined? ====
+
+If a class doesn't implement ''%%__compareTo%%'' but ''%%__equals%%'' returns **TRUE**,
+should that be equivalent to ''%%__compareTo%%'' returning 0?
+
+This comes down to whether we want to completely isolate equality and ordering, even though
+the convention is that equal value should imply equal ordering. It makes no sense for equal 
+values to not have equal ordering, but it might not be intuitive to call
+''%%__equals%%'' for ordering operations like ''%%>%%'', ''%%<%%'' etc.
+
+**No, equality does not automatically imply equal ordering.** When comparing an object in a context that considers natural ordering, it should not consider equality when ordering isn't defined for that object. 
+
+Consider ''$a <= $b'': what should happen when ''%%__equals%%'' returns **FALSE**? The only logical path would be to fall back to the default behaviour here. The problem with this approach is that we're mixing contexts, and therefore responsibility. We should use either user-defined behaviour or default internal behaviour, but not a mix of both. In this case, where ''%%__compareTo%%'' is not implemented, ''$a <= $b'' should use **only** the default behaviour and not consider ''%%__equals%%'' at all.
+
+
+==== 4. Does equal ordering imply equality when equality isn't defined? ====
+
+If a class doesn't implement ''%%__equals%%'' but ''%%__compareTo%%'' returns 0,
+should that be equivalent to ''%%__equals%%'' returning **TRUE**?
+
+This current behaviour of the internal [[https://github.com/php/php-src/blob/5eb1f92f31cafc48384f9096012f421b37f6d425/Zend/zend_operators.c#L2184|is_equal_function]] returns **TRUE** if the internal [[https://github.com/php/php-src/blob/5eb1f92f31cafc48384f9096012f421b37f6d425/Zend/zend_operators.c#L1933|compare_function]] returns 0. PHP therefore does not differentiate between ordering and equality. 
+
+Currently, the only way to override comparison is by using the internal //compare// and //compare_objects// handlers, where result is used for both equality and ordering.
+
+**Yes, equal ordering implies equal value, but only if equality is not defined**. This aligns with the existing behaviour of objects and extensions. It also makes ''%%__equals%%'' optional in cases where it might be redundant, for example:
+
+<code php>
+class Fraction
+{
+  ...
+
+  public function __compareTo(Fraction $other): int
+  {
+      return $this->num * $other->den <=> $other->num * $this->den;
+  }
+}
+
+</code>
+
+
+==== 5. Are the methods restricted to instances of the same class? ====
+
+PHP's current definition of equality (when ''=='' is called on two objects) require that
+both objects be instances of the same class. Even if one class extends the other, ''=='' will be **FALSE** unless they are exactly the same class.
+
+Only internal classes and extensions can currently override this behaviour. For example, GMP does not require for the other value to be a GMP instance, ie. <php>gmp_init(42) == 42</php> will be **TRUE**. This is because the //compare// object handler allows for an object to be compared to any other type.
+
+An advantage of restricting operands to the same class is that equality would be symmetrical and transitive by design, ie. <php>$a == $b</php> must mean that <php>$b == $a</php>, and <php>$a < $b && $b < $c</php> must mean that <php>$a < $c</php>.
+
+This decision comes down to power and responsibility vs. restriction and consistency. We can enforce certain rules internally at the cost of flexibility, or we can put more trust in the user in order to give them more control.
+
+**No, the methods are not restricted to instances of the same class**. It's the implementor's responsibility to consider the definition of equality and ordering against other types. This also removes the inconsistency between internal and user-defined classes by providing a hook to the //compare// handler.
+
+
+==== 6. What happens when you try to order a class that doesn't implement __compareTo? ====
+
+Ordering an object that doesn't implement ''%%__compareTo%%'' is most likely unintended, but we don't want to break existing code by failing hard when ordering isn't defined. The only viable situation to fail in is when ''%%__equals%%'' is implemented but ''%%__compareTo%%'' is not. 
+
+Ordering objects that don't implement ''%%__compareTo%%'' will use the existing rules and **will not be affected by this patch**.
+
+
+==== 7. How does <=> behave when __compareTo returns something other than -1, 0 and 1? ====
+
+Currently, the internal `compare_function` assigns either -1, 0 or 1 to the result, which is why ''%%<=>%%'' always evaluates to one of those three. When a class implements ''%%__compareTo%%'' in such a way that it returns something else, should ''%%<=>%%'' still normalize to return only -1, 0, and 1 based on the returned value?
+
+This is an interesting consideration because calling ''%%__compareTo%%'' directly will return the raw value, but using the ''%%<=>%%'' operator will evaluate to the normalized value. This leads to a bigger discussion around operator overloading, which has been a contentuous issue in PHP for a long time.
+
+This comes down to whether we should overload the **operator**, or the **behaviour** of the operator. For example, is <php>$a < $b</php> shorthand for "is $a less than $b?" (and always evaluate to a boolean), or should <php>$a < $b</php> not have any semantics and be allowed to evaluate to any type? Similarly, does ''%%<=>%%'' semantically mean "how should $a be ordered relative to $b" and always return -1, 0 or 1, or will we someday want to overload it without restriction?
+
+It's worth considering that some operations should be free to overload without restriction.
+Operators like ''+'', ''-'', ''*'', ''/'', ''|'', ''&'', etc have semantics that perform an action, rather than ask a question. For example, adding two lists together with ''+'', a set union with ''|'', or a matrix multiplication with ''*'' all make perfectly clear semantic sense and it should be easy to guess what the operation might do. Comparison operators are different because they are defined by the questions that they ask. If <php>$a < $b</php> has the potential to be a number or an object, it would make reading and understanding code a lot more difficult: ''<'' wouldn't mean "less than", it would just be the left caret operator that means "less than" by default.
+
+This RFC is focused on overriding the **behaviour**, not the operators themselves. It's providing the ability to define equality and relative natural ordering, and the overloading of the operators is an unavoidable consequence of that. It would otherwise be very confusing if a class implements ''%%__compareTo%%'' but doesn't honour it for comparison operators.
+
+Operator overloading in the future would introduce methods for each operator, such as ''%%__lt%%'' and ''%%__eq%%'' that will be invoked for the operators, but comparison and equality would still honour ''%%__compareTo%%'' and ''%%__equals%%''. This is however entirely hypothetical but demonstrates that the intention here is not to overload the operators.
+
+**The behaviour of the operator is not equivalent to invoking the method**, so ''%%<=>%%'' will normalize the return value of ''%%__compareTo%%'' to always return -1, 0 or 1. 
+
+==== 8. What happens when __compareTo returns an object? ====
+
+All non-numeric values will be converted to an integer, which may raise a warning if the object does not support this conversion.
+
+
+==== 9. For a case like $a < $b, is $b considered at all? ====
+
+Yes. In this case, <php>$a->__compareTo($b)</php> will be attempted first, then <php>$b->__compareTo($a)</php>, and finally the default behaviour of $a.
+
+
+==== 10. Is it possible for that $a < $b and $b < $a? ====
+
+Yes, comparison isn't guaranteed to be symmetrical or transitive. It's up to the implementor to ensure that cases like these do not exist. The engine honours the implementor's logic and does not attempt to make any assertions. Enforcing symmetry and transitivity would require multiple comparisons and assertions per operation or type restriction. This RFC opts for neither.
+
+
+==== 11. What is the behaviour of "$a == $b" when $a implements __compareTo and $b implements __equals? ====
+
+Order of attempt: 
+  * <php>$a->__equals($b)</php>
+  * <php>$b->__equals($a)</php>
+  * <php>$a->__compareTo($b)</php>
+  * <php>$b->__compareTo($a)</php>
+
+Because this is comparison in the context of equality, ''%%__equals%%'' takes precedence over ''%%__compareTo%%'' even if that means using the secondary operand's implementation. If both $a and $b follow sensible logic (within their domain), <php>$a->__compareTo($b)</php> should return 0 anyway. An inconsistency here indicates a logic error in the implementation of either $a or $b.
+
+
 ==== 12. Why did Python 3 remove __cmp__ in favour of "Rich Comparisons"? ====
 
-This came up in discussion as something to consider. We should try to learn from the motivations behind changes in direction of other programming languages so that we don't fall for the same traps or miss important concerns. That's not to say that we should blindly follow the lead of other languages, but we can try to apply the same reasoning to our decisions in the context of PHP.
+This came up in discussion as something to consider. We should try to learn from the motivations behind decisions that change direction in other programming languages so that we don't fall into the same traps or miss important concerns.
 
 This is a relevant case because Python had a [[https://docs.python.org/2/reference/datamodel.html#object.__cmp__|__cmp__]] magic method that is similar to the proposed ''%%__compareTo%%'', but it became apparent that only allowing three cases for the relative order of objects is too limiting. This led to the [[https://www.python.org/dev/peps/pep-0207/#motivation|introduction of "rich comparison" methods]] in Python 2.1 on top of the existing ''%%__cmp__%%'' method. This allowed for classes to overload individual comparison operators without restriction so that projects like NumPy can achieve expressions like this: 
 
