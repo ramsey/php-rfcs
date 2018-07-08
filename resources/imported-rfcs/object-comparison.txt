@@ -1,5 +1,5 @@
 ====== PHP RFC: User-defined object comparison ======
-  * Version: 1.5
+  * Version: 1.6
   * Date: 2018-06-26
   * Author: Rudi Theunissen <rtheunissen@php.net>
   * Based on previous RFC by: Adam Harvey <aharvey@php.net>
@@ -145,20 +145,20 @@ new stdClass() == 1; // true, with a warning about integer conversion
 
 These methods also overload operators:
 
-^ Operator      ^ Primary               ^ Secondary             ^                                                                                                 ^
-| ''%%<%%''     | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns %%<%% 0                                                     |
-| ''%%>%%''     | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns %%>%% 0                                                     |
-| ''%%<=%%''    | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns %%<=%% 0                                                    |
-| ''%%>=%%''    | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns %%>=%% 0                                                    |
-| ''%%==%%''    | //%%__equals%%//      | //%%__compareTo%%//   | **TRUE** if //%%__equals%%// is **not** implemented and //%%__compareTo%%// returns 0.          |
-| ''%%!=%%''    | //%%__equals%%//      | //%%__compareTo%%//   | **TRUE** if //%%__equals%%// is **not** implemented and //%%__compareTo%%// returns non-zero.   |
-| ''%%===%%''   |                       |                       | No change to default behaviour.                                                                 |
-| ''%%!==%%''   |                       |                       | No change to default behaviour.                                                                 |
+^ Operator      ^ Primary               ^ Secondary             ^                                                                                               ^
+| ''%%<%%''     | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns %%<%% 0                                               |
+| ''%%>%%''     | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns %%>%% 0                                               |
+| ''%%<=%%''    | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns %%<=%% 0                                              |
+| ''%%>=%%''    | //%%__compareTo%%//   |                       | **TRUE** if //%%__compareTo%%// returns %%>=%% 0                                              |
+| ''%%==%%''    | //%%__equals%%//      | //%%__compareTo%%//   | **TRUE** if //%%__equals%%// is **not** implemented and //%%__compareTo%%// returns 0         |
+| ''%%!=%%''    | //%%__equals%%//      | //%%__compareTo%%//   | **TRUE** if //%%__equals%%// is **not** implemented and //%%__compareTo%%// returns non-zero  |
+| ''%%===%%''   |                       |                       | No change                                                                                     |
+| ''%%!==%%''   |                       |                       | No change                                                                                     |
 
 
 ==== Example Implementation ====
 
-Let's consider a simple //Fraction//, with a numerator and a denominator.
+Let's consider a simple //Fraction//, with a numerator and a denominator. For the sake of this example, fractions are not simplified and are equal if they have the same numerical value.
 
 <code php>
 class Fraction 
@@ -181,8 +181,7 @@ class Fraction
             return $this->num * $other->den == $other->num * $this->den;
         }
 
-        // Restrict equality to other fractions only.
-        return false;
+        return is_numeric($other) && $this->num == $other * $this->den;
     }
 
     /**
@@ -191,7 +190,12 @@ class Fraction
     public function __compareTo($other): int 
     {
         if ($other instanceof Fraction) {
-            return $other->den * $this->num <=> $other->num * $this->den;
+            return $this->num * $other->den <=> $other->num * $this->den;
+        }
+
+        if (!is_numeric($other)) {
+            throw new DomainException(
+                "Natural ordering relative to non-numeric values is not defined");
         }
 
         return $this->num <=> $other * $this->den;
@@ -217,6 +221,21 @@ var_dump($a == $b, $a < $b);
 </code>  
 
 The output is different because the default behaviour will compare the object's properties without knowing that there's a relationship between the numerator and the denominator. The first instance has a numerator of 5, so it will be less than the second, which has a numerator of 10. It will also therefore not be equal, even though both fractions represent the same numeric value.
+
+In this example, we support comparing for equality against any other object, regardless of type. This is because all objects can be compared for equality, ie. we can say that an apple does not equal an orange. However, we are throwing an exception if ordering is attempted against a non-numeric value, because the behaviour is undefined: should an apple come before or after an orange? %%¯\_(ツ)_/¯%%
+
+We could also return ''0'' for undefined cases, which would be okay here because we are also defining equality. A return value of ''0'' would otherwise imply "equals", so implementations should either throw for undefined behaviour in ''%%__compareTo%%'' or return ''0'' alongside ''%%__equals%%''. 
+
+**This is not good practice though, and will not be recommended in the documentation**, because it may lead to definitions that are not commutative. For example, let's assume that a ''Fraction'' throws an exception for undefined natural ordering, and a ''Decimal'' returns ''0''. <php>$fraction < $decimal</php> will throw an exception, but <php>$decimal > $fraction</php> will be **FALSE**. In fact, returning ''0'' in ''%%__compareTo%%'' for undefined natural ordering leads to all kinds of strange behaviour:
+
+<code php>
+new Decimal('1.0')   < new Fraction(1, 1)   // false
+new Decimal('1.0')   > new Fraction(1, 1)   // false
+new Decimal('1.0')  == new Fraction(1, 1)   // false
+new Decimal('1.0') <=> new Fraction(1, 1)   // 0
+</code>
+
+The documentation will therefore suggest that a <php>DomainException</php> be thrown in ''%%__compareTo%%'' when natural ordering is not defined, and return **FALSE** in ''%%__equals%%'' for the same case. The example implementation of //Fraction// follows this suggestion.
 
 
 ===== Use Cases =====
