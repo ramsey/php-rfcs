@@ -431,7 +431,7 @@ $test->ary = $ary;
 
 While support for references may be desirable, it also poses a significant implementation challenge. Without special support a modification of a reference could change the type of a property, resulting in a violation of the type contract.
 
-This RFC resolves this issue by introducing the concept of a typed reference (see Implementation section for technical details). If a reference to a typed property is acquired, the property type will be enforced whenever the reference is assigned to.
+This RFC resolves this issue by tracking which typed properties are part of a reference, and enforcing their declared types whenever the reference is assigned to.
 
 <code php>
 class Test {
@@ -469,63 +469,19 @@ unset($b);
 
 After the ''unset()'' operation, the reference set only contains ''$a''. PHP semantics follow the general principle, that singleton reference sets should have no impact on behavior. Based on this, the PHP implementation may replace a singleton reference set with the contained variable ("unref operation") during certain operations, which are not well-specified. In practice, singleton reference sets do exhibit some behavioral differences in some edge-cases.
 
-=== Dangling References ===
+=== General Semantics ===
 
-Acquiring a reference to a typed property will create a typed reference, whose type is bound to the property. In particular, this means that the reference type will only be enforced as long as the typed property is part of the reference set:
+Intuitively, assigning a value to a reference is equivalent to assigning it to all storage locations that are part of the reference set. The addition of typed properties preserves this intuition as follows:
 
-<code php>
-class Test {
-    public int $x = 42;
-}
+If typed properties are part of the reference set, then the value is checked against each property type. If a type check fails, a ''TypeError'' is generated and the value of the reference remains unchanged.
 
-$test = new Test;
-$x =& $test->x; // Reference created with type int
-$y =& $x;
+There is one additional caveat: If a type check requires a coercion of the assigned value, it may happen that all type checks succeed, but result in different coerced values. As a reference can only have a single value, this situation also leads to a ''TypeError''. (An example of this edge-case is shown later.)
 
-// Here $x, $y, $test->x are part of the reference set
-// $x = "not an int" would be a TypeError at this point
-
-unset($test);
-
-// Here $x, $y are part of the reference set
-$x = "not an int"; // legal, no TypeError
-</code>
-
-At the time of assignment, the typed property is no longer part of the reference set, so the reference no longer enforces a type.
-
-This behavior preserves the general principle that singleton reference sets are transparent. If the type would continue to be enforced after the typed property is removed from the reference set, unref operations would be very directly observable. For more information, see the Alternatives section.
+In the following, some special cases and other behavioral details are discussed. It should also be noted that there are a number of other ways in which references to typed properties could behave, which are discussed in detail in the Alternatives section.
 
 === Multiple Typed Properties ===
 
-A reference set may contain any number of storage locations, and as such may also contain more than one typed property. The following example shows the simplest case of two typed properties:
-
-<code php>
-class Test {
-    public array $a;
-    public iterable $b;
-}
-$test = new Test;
-$test->a = [1, 2, 3];
-$test->b =& $test->a;
-$test->b = []; // legal
-$test->b = new ArrayIterator; // TypeError
-</code>
-
-In this case, the value of the reference must satisfy the type of all typed properties contained in the reference set. This is handled by computing the intersection type. A TypeError is generated if either the intersection is empty (e.g., ''int'' and ''string'' have empty intersection), or if the intersection cannot be represented in PHP's current type system (''Countable'' and ''Traversable'' have intersection ''Countable&Traversable'', but this is currently not a legal type).
-
-Intersection types are computed as follows (through pairwise reduction):
-
-  * If both types are nullable, the intersection is nullable. Otherwise it is not nullable.
-  * If both types are class types ''A'' and ''B'': If ''A'' instanceof ''B'' the type is ''A''. If ''B'' instanceof ''A'' the type is ''B''. Otherwise the intersection is not representable (''A&B'').
-  * If one type is ''array'' and the other is ''iterable'', the intersection is ''array''.
-  * If one type is ''object'' and the other is ''A'', then the intersection is ''A''.
-  * If one type is ''iterable'' and the other is ''A'' where ''A instanceof Traversable'', then the intersection is ''A''.
-  * If one type is ''iterable'' and the other is ''object'', then the intersection is ''Traversable''.
-  * Otherwise, the intersection is empty.
-
-Introduction of proper intersection types would allow to represent the ''A&B'' case. As PHP has no proper ''null'' type (in the type annotation system), the intersection of something like ''?int'' and ''?string'' is considered to be empty, even though the value ''null'' would satisfy both types. See the Alternatives section for a different approach that would allow these two cases.
-
-If a typed property is removed from a reference set, it is necessary to recompute the intersection type. The following example shows how the intersection type of the reference changes as properties are unset:
+A reference set may contain any number of storage locations, and as such may also contain more than one typed property. In this case the type of each property must be satisfied. The following example illustrates the behavior of creating a reference between four properties with increasingly specific type constraints:
 
 <code php>
 class Test {
@@ -541,14 +497,60 @@ $test->c =& $test->d;
 $test->b =& $test->c;
 $test->a =& $test->b;
 
-// Reference set { $test->a, $test->b, $test->c, $test->d } with intersection type array
+// Reference set { $test->a, $test->b, $test->c, $test->d }
+// Types { mixed, ?iterable, ?array, array }
+// Effective type: array
 unset($test->d);
-// Reference set { $test->a, $test->b, $test->c } with intersection type ?array
+// Reference set { $test->a, $test->b, $test->c }
+// Types { mixed, ?iterable, ?array }
+// Effective type: ?array
 unset($test->c);
-// Reference set { $test->a, $test->b } with intersection type ?iterable
+// Reference set { $test->a, $test->b }
+// Types { mixed, ?iterable }
+// Effective type: ?iterable
 unset($test->b);
-// Reference set { $test->a } with intersection type mixed
+// Reference set { $test->a }
+// Types { mixed }
+// Effective type: mixed
 </code>
+
+The notion of an "effective type" here is illustrative only, the reference does not actually have a type itself, it is merely imposed by the typed properties which are part of it. This effective type does not necessarily have to correspond to a real type supported by PHP's type declaration system, as the following example shows:
+
+<code php>
+class Test {
+    public Countable $c;
+    public Iterator  $i;
+}
+
+$test = new Test;
+$test->c = new ArrayIterator;
+$test->i =& $test->c;
+
+// Reference set { $test->c, $test->i }
+// Types { Countable, Iterator }
+// Effective type: Countable&Iterator (satisfied by ArrayIterator)
+</code>
+
+The effective type ''Countable&Iterator'' is not currently supported by PHP, but as references operate on individual property types, this is not a problem. Another somewhat peculiar example is the following:
+
+<code php>
+class Test {
+    public ?int $i;
+    public ?string $s;
+}
+
+$r = null;
+$test->i =& $r;;
+$test->s =& $r;
+
+// Reference set { $r, $test->i, $test->s }
+// Types { mixed, ?int, ?string }
+// Effective type: null
+</code>
+
+Here there is only a single value which can satisfy both types, which is ''null''. While this makes intuitive sense (the intersection of ''?int'' and ''?string'' is ''null''), it is instructive to go through this example by following the rules outlined in "General Semantics" exactly:
+
+If we perform an assignment like ''%%$r = "42"%%'', then this passes the ''?string'' type on ''%%$test->s%%'' without coercion. It also passes the ''?int'' type on ''%%$test->i%%'' by coercing the value to ''int(42)''. However, this means that both assignments would yield different values, ''%%string(2) "42"%%'' in one case an ''int(42)'' in the other. As such, a ''TypeError'' is thrown.
 
 === Future Interaction with Union Types ===
 
@@ -560,22 +562,28 @@ class Test {
     public float|string $y;
 }
 $test = new Test;
-$test->x = 1; // Will be int(1)
-$test->y = 1; // Will be float(1)
-$test->x =& $test->y; // Intersection type is string
-$test->x = 1; // Will be string(1) "1"
-$test->y = 1; // Will be string(1) "1"
+$r = "foobar";
+$test->x =& $r;
+$test->y =& $r;
+
+// Reference set: { $r, $test->x, $test->y }
+// Types: { mixed, int|string, float|string }
+// Effective type: ???
+
+$r = 42; // TypeError
 </code>
 
-In this case the intersection type of ''int|string'' and ''float|string'' is ''string''. The final outcome is that with both properties part of one reference set, the the assignment will result in a different (but legal) value, that would not have been chosen for either property individually.
+In this case, one might think that the effective type is ''string'', which is one possible interpretation of the intersection of ''int|string'' and ''float|string''. However, under this proposal the behavior is as follows:
 
-A different approach that would make this a TypeError instead is discussed in the Alternatives section.
+The value ''42'' passes the ''int|string'' type check for ''%%$test->x%%'' without coercion. It also passes the type check ''float|string'' by coercing to ''42.0''. As both values are not the same, a ''TypeError'' is generated.
+
+The Alternatives section discusses one scheme where the assignment would be valid instead and assign the coerced value ''%%string(2) "42"%%'', which does not match the value of either property if the assignment happened independently (''42'' and ''42.0'' respectively).
 
 === By-Reference Overloaded Properties ===
 
 As described in the main section on overloaded properties, if ''%%__get()%%'' is called for an uninitialized or unset property, the returned value must still satisfy the declared property type.
 
-If ''%%__get()%%'' returns by reference, then the behavior stays the same. The type is enforced only instantaneously, the reference itself will not be assigned a type (beyond one it may already have). The reason is that no typed property is actually part of the reference set.
+If ''%%__get()%%'' returns by reference, then the behavior stays the same. The type is enforced only instantaneously, as the typed property is not actually part of the reference set.
 
 <code php>
 class Test {
@@ -589,7 +597,7 @@ class Test {
 
 $test = new Test;
 $val =& $test->val;  // Type checked here
-$val = "not an int"; // Assignment is legal, reference itself not typed
+$val = "not an int"; // Assignment is legal, reference itself has no type constraints
 </code>
 
 As a technical caveat, if ''%%__get()%%'' returns by reference, but is not used by reference (''BP_VAR_R'' fetch), then the reference must be immediately unwrapped after the type check. Otherwise clever application of destructors would allow changing the value between the type check and the use of the value.
@@ -1008,11 +1016,11 @@ Finally, because we still support unsetting of properties, we need to deal with 
 
 ==== References ====
 
-This RFC proposes to handle references to typed properties by introducing a concept of a typed reference, whose type is the intersection of all typed properties currently contained in the reference set. In the following alternative ways of handling references are discussed.
+This RFC proposes to handle references to typed properties by tracking which typed properties are part of the reference set and checking against each type individually, while making sure that value coercions do not result in inconsistent values. In the following alternative ways of handling references are discussed.
 
 === Forbid references ===
 
-The previous RFC on typed properties, did not permit acquiring references to typed properties. This has the significant disadvantage of creating an inconsistency and segregating the language. You can have typed properties, you can have references, but you can't have both.
+The previous RFC on typed properties did not permit acquiring references to typed properties. This has the significant disadvantage of creating an inconsistency and segregating the language. You can have typed properties, you can have references, but you can't have both.
 
 Specifically, as already mentioned in the main section, it prevents use of internal functions that accept parameters by reference, such as ''sort''. We've also been assured that references to properties play some important and irreplacable role for proxy objects in Doctrine, though the details remain elusive.
 
@@ -1053,11 +1061,84 @@ var_dump($test->x); // int(24)
 
 In this case ''%%$test->x%%'' and ''$x'' point to the same reference, but reads from them would produce different values.
 
+=== References with intrinsic type ===
+
+The current proposal is careful to avoid assigning an intrinsic type to references. While we have introduced the notion of an "effective type" for illustrative purposes, references simply track with typed properties are part of them without having a type themselves. This alternative (which was proposed by an earlier version of the RFC) instead gives references an intrinsic type, which is the intersection type of all property types currently contained within it.
+
+Under this approach, a ''TypeError'' is generated either if the computed intersection type is empty (e.g., ''int'' and ''string'' have empty intersection), or if the intersection cannot be represented in PHP's current type system (''Countable'' and ''Traversable'' have intersection ''Countable&Traversable'', but this is currently not a legal type).
+
+Intersection types are computed as follows (through pairwise reduction):
+
+  * If both types are nullable, the intersection is nullable. Otherwise it is not nullable.
+  * If both types are class types ''A'' and ''B'': If ''A'' instanceof ''B'' the type is ''A''. If ''B'' instanceof ''A'' the type is ''B''. Otherwise the intersection is not representable (''A&B'').
+  * If one type is ''array'' and the other is ''iterable'', the intersection is ''array''.
+  * If one type is ''object'' and the other is ''A'', then the intersection is ''A''.
+  * If one type is ''iterable'' and the other is ''A'' where ''A instanceof Traversable'', then the intersection is ''A''.
+  * If one type is ''iterable'' and the other is ''object'', then the intersection is ''Traversable''.
+  * Otherwise, the intersection is empty.
+
+Introduction of proper intersection types would allow to represent the ''A&B'' case. As PHP has no proper ''null'' type (in the type annotation system), the intersection of something like ''?int'' and ''?string'' is considered to be empty, even though the value ''null'' would satisfy both types.
+
+Under this alternative, the following two codes would no longer work:
+
+<code php>
+class Test {
+    public Countable $c;
+    public Iterator  $i;
+}
+
+$test = new Test;
+$test->c = new ArrayIterator;
+$test->i =& $test->c; // TypeError
+
+// Reference set { $test->c, $test->i }
+// Intersection type: Countable&Iterator (not representable!)
+</code>
+
+<code php>
+class Test {
+    public ?int $i;
+    public ?string $s;
+}
+
+$r = null;
+$test->i =& $r;;
+$test->s =& $r;
+
+// Reference set { $r, $test->i, $test->s }
+// Intersection type: null (not representable!)
+</code>
+
+Furthermore, the behavior with regard to union types would change. Reproducing the example from the main body of the RFC:
+
+<code php>
+class Test {
+    public int|string $x;
+    public float|string $y;
+}
+$test = new Test;
+$r = "foobar";
+$test->x =& $r;
+$test->y =& $r;
+
+// Reference set: { $r, $test->x, $test->y }
+// Intersection type: string
+
+$r = 42; // Current RFC: TypeError. This alternative: Legal!
+// Results in $test->x == $test->y == "42"
+</code>
+
+Under the current RFC, this code generates a ''TypeError'', as assigning ''42'' to ''$test->x'' would result in value ''42'', while assigning it to ''$test->y'' would yield ''42.0''. As both values are inconsistent, a ''TypeError'' is thrown.
+
+Under this alternative, we would instead compute the intersection of ''int|string'' and ''float|string'' to be ''string'' and the assigning of ''42'' would result in the coerced value ''"42"''. Note that this does not match //either// of the values that would result from direct assignment.
+
+Because this approach both carries artificial restrictions (''Countable&Iterator'' not supported) and results in this unfortunate behavior for union types, we decided to move away from this alternative.
+
 === Reference types independent of property lifetime ===
 
-Under the current proposal, the reference type is bound the the presence of the typed property in the reference set. If a typed property is removed from a reference set, then so is the type constraint that it imposes.
+While the previous alternative assigns references an intrinsic type, it also keeps track of which properties are part of the reference set. If a typed property is removed from a reference set, then so is the type constraint that it imposes. (The intersection type needs to be recomputed whenever a typed property is added or removed from the reference set.)
 
-An alternative approach would be to not make the type of the reference independent of the typed property. If the reference was constructed with a type, it would retain that type even if the typed property is removed:
+An alternative approach would be to make the type of the reference independent of the typed property. If the reference was constructed with a type, it would retain that type even if the typed property is removed from the reference set:
 
 <code php>
 class Test {
@@ -1110,45 +1191,6 @@ $x = "foo"; // This proposal: Legal.     Uncoupled types: TypeError
 
 Under the current proposal, garbage collection (which can be triggered as a side-effect of many operations) removes the typed property from the reference set, changing assignment behavior. If reference types are uncoupled, this cannot occur. On the other hand, GC can already result in many other side-effects (in the case of destructors arbitrary ones), so this is not really new.
 
-=== References without intrinsic type ===
-
-[TODO We want to switch to this version, but it is not implemented yet]
-
-The current proposal both gives references an intrinsic (intersection) type, and tracks all typed properties contained in the reference set. An alternative would be to keep the reference itself untyped and instead check assignments against all typed properties in the reference set. This would require that both all type constraints are satisfied and all produce the same coerced value.
-
-In most cases both schemes produce identical behavior, as checking against the intersection type is essentially the same as checking against all individual types. There are however two differences:
-
-First, we are not constrained by limitations in the existing type system. For example, the following code is invalid under the current proposal, as PHP has no ''Iterator&Countable'' type at this point:
-
-<code php>
-class Test {
-    public Iterator $i;
-    public Countable $c;
-}
-$test = new Test;
-$test->c = new ArrayObject;
-$test->i =& $test->c; // TypeError. Intersection Iterator&Countable not representable
-</code>
-
-If property types are instead checked individually, an explicit representation of ''Iterator&Countable'' is not required and this example would work.
-
-Second, the behavior with regard to union types (should they be introduced) changes. Reproducing the example from the main RFC text:
-
-<code php>
-class Test {
-    public int|string $x;
-    public float|string $y;
-}
-$test = new Test;
-$test->x = 1; // Will be int(1)
-$test->y = 1; // Will be float(1)
-$test->x =& $test->y;
-$test->x = 1; // Current RFC: string(1) "1". No intrinsic type: TypeError
-$test->y = 1; // Current RFC: string(1) "1". No intrinsic type: TypeError
-</code>
-
-Under the current RFC, the value of ''%%$test->x%%'' and ''%%$test->y%%'' would become ''string(1) "1"'', which does not match the value either of the properties would take in isolation. Without intrinsic reference type, the assignment would be instead checked against the types ''int|string'', producing value ''int(1)'', and ''float|string'', producing value ''float(1)''. While both type constraints are satisfied, the resulting coerced values are inconsistent, so a ''TypeError'' is generated.
-
 ===== Vote =====
 
 As this is a language change, a 2/3 majority is required.
@@ -1159,5 +1201,7 @@ Add support for typed properties as described in this RFC?
 
 Significant changes to the RFC are noted here.
 
+  * 2018-07-10: Switch reference to the "no intrinsic type" alternative.
+  * 2018-07-03: The zpp ''t'' specifier has been removed and replaced by ''zend_try_array_init()''. This is friendlier to extensions.
   * 2018-07-02: Add ''ReflectionProperty::isInitialized()'' method.
   * 2018-06-21: Explicitly mention that invariance also applies to static properties, and justify why.
