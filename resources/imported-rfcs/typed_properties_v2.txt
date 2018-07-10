@@ -1043,13 +1043,13 @@ Under the current proposal, garbage collection (which can be triggered as a side
 
 ===== Implementation =====
 
-The implementation of this RFC is available at [[https://github.com/php/php-src/pull/3313|PR #3313]]. It is based on the original typed references implementation by Joe Watkins from two years ago and has undergone quite a lot of churn in the meantime. As such, it will need more cleanup and performance work before it is ready to land.
+The implementation of this RFC is available at [[https://github.com/php/php-src/pull/3313|PR #3313]]. It is based on the original typed references implementation by Joe Watkins from two years ago and has undergone quite a lot of churn in the meantime. As such, it will need more cleanup and performance work before it is ready to land. In the following some important aspects of the implementation will be discussed.
 
-In the following some important aspects of the implementation will be discussed. A particular focus are changes that will need to be performed in 3rd party extensions.
+==== Impact on extensions ====
 
-==== References ====
+Ordinary extensions (i.e. excluding anything very tightly coupled to the engine like xdebug) will have to make two changes to properly support this RFC. One is a change to the ''write_property'' signature, which has to be made to ensure the extension compiels without warnings. The other are changes to reference assignments. These are not necessary to build against PHP 7.3, but are needed to ensure the behavior is fully correct. The follow sections contain detailed porting instructions.
 
-The ''zend_reference'' structure now has two new fields, ''type'' and ''sources'', where the latter is used to store typed properties that are part of the reference set.
+=== Assignments to references ====
 
 All assignments to references may now require a type check and a coercion of the assigned value. This includes assignments performed inside internal functions. Previously, such assignments used a pattern such as the following:
 
@@ -1189,6 +1189,43 @@ Please not that the return value of ''zend_try_array_init()'' must be checked if
 
 Places where such replacements are necessary can be detected by searching for ''z/'', ''ZEND_PARAM_ZVAL_DEREF'' and ''ZVAL_DEREF'' in the extension. Alternatively or additionally, function parameters that are declared as by-reference in arginfo can be reviewed.
 
+=== write_property handler ===
+
+Under this RFC, assignments to typed properties return the final, potentially coerced value. This requires a change to the signature of the ''write_property'' object handler:
+
+<code c>
+// OLD
+typedef void (*zend_object_write_property_t)(zval *object, zval *member, zval *value, void **cache_slot);
+// NEW
+typedef zval *(*zend_object_write_property_t)(zval *object, zval *member, zval *value, void **cache_slot);
+</code>
+
+In most cases the return value should simply be ''value'', or the return value of an inner ''zend_std_write_property()'' call. The following example shows the necessary changes for a typical extension ''write_property'' handler:
+
+<code c>
+// Replace
+void foobar_write_property(zval *object, zval *member, zval *value, void **cache_slot)
+{
+	if (special_property) {
+		do_special_handling();
+	} else {
+		zend_std_write_property(object, member, value, cache_slot);
+	}
+}
+
+// With
+zval *foobar_write_property(zval *object, zval *member, zval *value, void **cache_slot)
+{
+	if (special_property) {
+		do_special_handling();
+	} else {
+		value = zend_std_write_property(object, member, value, cache_slot);
+	}
+
+	return value;
+}
+</code>
+
 ==== Optimization ====
 
 TBD. There are various optimizations we can perform in opcache. The specified property types can be used during inference. We should also be able to elide property type checks in some common cases. However, little effort has gone into this part yet.
@@ -1201,6 +1238,7 @@ TBD. The implementation still needs some work before we can meaningfully evaluat
 
 Significant changes to the RFC are noted here.
 
+  * 2018-07-10: Note that write_property signature has changed.
   * 2018-07-10: Switch reference to the "no intrinsic type" alternative.
   * 2018-07-03: The zpp ''t'' specifier has been removed and replaced by ''zend_try_array_init()''. This is friendlier to extensions.
   * 2018-07-02: Add ''ReflectionProperty::isInitialized()'' method.
