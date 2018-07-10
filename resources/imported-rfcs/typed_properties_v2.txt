@@ -683,165 +683,15 @@ class ReflectionProperty {
 
 ''isInitialized()'' returns whether the property is initialized. It will return ''false'' for typed properties prior to initialization and for properties that have been explicitly ''unset()''. For all other properties ''true'' will be returned. Otherwise this method has the same error conditions as ''ReflectionProperty::getValue()''. In particular ''$object'' must be passed for non-static properties and must be an instance of the class on which the property was declared, otherwise a ''ReflectionException'' is thrown. If the property is non-public and ''setAccessible(true)'' has not been called, a ''ReflectionException'' is thrown. 
 
-===== Implementation =====
-
-The implementation of this RFC is available at [[https://github.com/php/php-src/pull/3313|PR #3313]]. It is based on the original typed references implementation by Joe Watkins from two years ago and has undergone quite a lot of churn in the meantime. As such, it will need more cleanup and performance work before it is ready to land.
-
-In the following some important aspects of the implementation will be discussed. A particular focus are changes that will need to be performed in 3rd party extensions.
-
-==== References ====
-
-The ''zend_reference'' structure now has two new fields, ''type'' and ''sources'', where the latter is used to store typed properties that are part of the reference set.
-
-All assignments to references may now require a type check and a coercion of the assigned value. This includes assignments performed inside internal functions. Previously, such assignments used a pattern such as the following:
-
-<code c>
-ZVAL_DEREF(zv);
-zval_ptr_dtor(zv);
-ZVAL_LONG(zv, num);
-</code>
-
-Code like this needs to be replaced by the following:
-
-<code c>
-ZEND_TRY_ASSIGN_LONG(zv, num);
-
-// Shorthand for:
-zval num_zv;
-ZVAL_LONG(&num_zv, num);
-zend_try_assign(zv, &num_zv);
-</code>
-
-The ''ZEND_TRY_ASSIGN_LONG'' will generate a ''TypeError'' if the reference assignment fails. Similar macros are available for other types as well.
-
-Typically the ''ZVAL_DEREF()'' in the above example is already performed as part of parameter parsing, in the form of a ''z/'' or ''ZEND_PARAM_ZVAL_DEREF'' argument. Examples for both are shown in the following:
-
-<code c>
-// Replace
-PHP_FUNCTION(test) {
-    zval *arg;
-    if (zend_parse_parameters("z/", &arg) == FAILURE) {
-        return NULL;
-    }
-    
-    zval_ptr_dtor(arg);
-    ZVAL_LONG(arg, 0);
-}
-
-// With
-PHP_FUNCTION(test) {
-    zval *arg;
-    if (zend_parse_parameters("z", &arg) == FAILURE) {
-        return NULL;
-    }
-    
-    ZEND_TRY_ASSIGN_LONG(arg, 0);
-}
-</code>
-
-<code c>
-// Replace
-PHP_FUNCTION(test) {
-    zval *arg;
-    
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        ZEND_PARAM_ZVAL_DEREF(arg)
-    ZEND_PARSE_PARAMETERS_END();
-    
-    zval_ptr_dtor(arg);
-    ZVAL_LONG(arg, 0);
-}
-
-// With
-PHP_FUNCTION(test) {
-    zval *arg;
-    
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        ZEND_PARAM_ZVAL(arg)
-    ZEND_PARSE_PARAMETERS_END();
-    
-    ZEND_TRY_ASSIGN_LONG(arg, 0);
-}
-</code>
-
-For arrays it is necessary to additionally dereference the zval after the assignment so that subsequently additional operations can be performed on the array. The ''zend_try_array_init()'' and ''zend_try_array_init_size()'' functions handle simplify this case:
-
-<code c>
-// Replace
-PHP_FUNCTION(test) {
-    zval *arg;
-    if (zend_parse_parameters("z/", &arg) == FAILURE) {
-        return NULL;
-    }
-    
-    zval_ptr_dtor(arg);
-    array_init(arg);
-    
-    // Lots of array operations here
-}
-
-// With
-PHP_FUNCTION(test) {
-    zval *arg;
-    if (zend_parse_parameters("z", &arg) == FAILURE) {
-        return NULL;
-    }
-    
-    arg = zend_try_array_init(arg);
-    if (!arg) {
-        return;
-    }
-
-    // Lots of array operations here
-}
-</code>
-
-<code c>
-// Replace
-PHP_FUNCTION(test) {
-    zval *arg;
-    
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        ZEND_PARAM_ZVAL_DEREF(arg)
-    ZEND_PARSE_PARAMETERS_END();
-    
-    zval_ptr_dtor(arg);
-    array_init(arg);
-    // Lots of array operations here
-}
-
-// With
-PHP_FUNCTION(test) {
-    zval *arg;
-    
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        ZEND_PARAM_ZVAL(arg)
-    ZEND_PARSE_PARAMETERS_END();
-    
-    arg = zend_try_array_init(arg);
-    if (!arg) {
-        return;
-    }
-    
-    // Lots of array operations here
-}
-</code>
-
-Please not that the return value of ''zend_try_array_init()'' must be checked if you plan to continue working on the array. Otherwise, there would be no guarantee that ''arg'' is actually an array.
-
-Places where such replacements are necessary can be detected by searching for ''z/'', ''ZEND_PARAM_ZVAL_DEREF'' and ''ZVAL_DEREF'' in the extension. Alternatively or additionally, function parameters that are declared as by-reference in arginfo can be reviewed.
-
-==== Optimization ====
-
-TBD. There are various optimizations we can perform in opcache. The specified property types can be used during inference. We should also be able to elide property type checks in some common cases. However, little effort has gone into this part yet.
-
-==== Performance ====
-
-TBD. The implementation still needs some work before we can meaningfully evaluate performance.
-
 ===== Backward Incompatible Changes =====
 
 None.
+
+===== Vote =====
+
+As this is a language change, a 2/3 majority is required.
+
+Add support for typed properties as described in this RFC?
 
 ===== Alternatives =====
 
@@ -1191,11 +1041,161 @@ $x = "foo"; // This proposal: Legal.     Uncoupled types: TypeError
 
 Under the current proposal, garbage collection (which can be triggered as a side-effect of many operations) removes the typed property from the reference set, changing assignment behavior. If reference types are uncoupled, this cannot occur. On the other hand, GC can already result in many other side-effects (in the case of destructors arbitrary ones), so this is not really new.
 
-===== Vote =====
+===== Implementation =====
 
-As this is a language change, a 2/3 majority is required.
+The implementation of this RFC is available at [[https://github.com/php/php-src/pull/3313|PR #3313]]. It is based on the original typed references implementation by Joe Watkins from two years ago and has undergone quite a lot of churn in the meantime. As such, it will need more cleanup and performance work before it is ready to land.
 
-Add support for typed properties as described in this RFC?
+In the following some important aspects of the implementation will be discussed. A particular focus are changes that will need to be performed in 3rd party extensions.
+
+==== References ====
+
+The ''zend_reference'' structure now has two new fields, ''type'' and ''sources'', where the latter is used to store typed properties that are part of the reference set.
+
+All assignments to references may now require a type check and a coercion of the assigned value. This includes assignments performed inside internal functions. Previously, such assignments used a pattern such as the following:
+
+<code c>
+ZVAL_DEREF(zv);
+zval_ptr_dtor(zv);
+ZVAL_LONG(zv, num);
+</code>
+
+Code like this needs to be replaced by the following:
+
+<code c>
+ZEND_TRY_ASSIGN_LONG(zv, num);
+
+// Shorthand for:
+zval num_zv;
+ZVAL_LONG(&num_zv, num);
+zend_try_assign(zv, &num_zv);
+</code>
+
+The ''ZEND_TRY_ASSIGN_LONG'' will generate a ''TypeError'' if the reference assignment fails. Similar macros are available for other types as well.
+
+Typically the ''ZVAL_DEREF()'' in the above example is already performed as part of parameter parsing, in the form of a ''z/'' or ''ZEND_PARAM_ZVAL_DEREF'' argument. Examples for both are shown in the following:
+
+<code c>
+// Replace
+PHP_FUNCTION(test) {
+    zval *arg;
+    if (zend_parse_parameters("z/", &arg) == FAILURE) {
+        return NULL;
+    }
+    
+    zval_ptr_dtor(arg);
+    ZVAL_LONG(arg, 0);
+}
+
+// With
+PHP_FUNCTION(test) {
+    zval *arg;
+    if (zend_parse_parameters("z", &arg) == FAILURE) {
+        return NULL;
+    }
+    
+    ZEND_TRY_ASSIGN_LONG(arg, 0);
+}
+</code>
+
+<code c>
+// Replace
+PHP_FUNCTION(test) {
+    zval *arg;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        ZEND_PARAM_ZVAL_DEREF(arg)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    zval_ptr_dtor(arg);
+    ZVAL_LONG(arg, 0);
+}
+
+// With
+PHP_FUNCTION(test) {
+    zval *arg;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        ZEND_PARAM_ZVAL(arg)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    ZEND_TRY_ASSIGN_LONG(arg, 0);
+}
+</code>
+
+For arrays it is necessary to additionally dereference the zval after the assignment so that subsequently additional operations can be performed on the array. The ''zend_try_array_init()'' and ''zend_try_array_init_size()'' functions handle simplify this case:
+
+<code c>
+// Replace
+PHP_FUNCTION(test) {
+    zval *arg;
+    if (zend_parse_parameters("z/", &arg) == FAILURE) {
+        return NULL;
+    }
+    
+    zval_ptr_dtor(arg);
+    array_init(arg);
+    
+    // Lots of array operations here
+}
+
+// With
+PHP_FUNCTION(test) {
+    zval *arg;
+    if (zend_parse_parameters("z", &arg) == FAILURE) {
+        return NULL;
+    }
+    
+    arg = zend_try_array_init(arg);
+    if (!arg) {
+        return;
+    }
+
+    // Lots of array operations here
+}
+</code>
+
+<code c>
+// Replace
+PHP_FUNCTION(test) {
+    zval *arg;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        ZEND_PARAM_ZVAL_DEREF(arg)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    zval_ptr_dtor(arg);
+    array_init(arg);
+    // Lots of array operations here
+}
+
+// With
+PHP_FUNCTION(test) {
+    zval *arg;
+    
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        ZEND_PARAM_ZVAL(arg)
+    ZEND_PARSE_PARAMETERS_END();
+    
+    arg = zend_try_array_init(arg);
+    if (!arg) {
+        return;
+    }
+    
+    // Lots of array operations here
+}
+</code>
+
+Please not that the return value of ''zend_try_array_init()'' must be checked if you plan to continue working on the array. Otherwise, there would be no guarantee that ''arg'' is actually an array.
+
+Places where such replacements are necessary can be detected by searching for ''z/'', ''ZEND_PARAM_ZVAL_DEREF'' and ''ZVAL_DEREF'' in the extension. Alternatively or additionally, function parameters that are declared as by-reference in arginfo can be reviewed.
+
+==== Optimization ====
+
+TBD. There are various optimizations we can perform in opcache. The specified property types can be used during inference. We should also be able to elide property type checks in some common cases. However, little effort has gone into this part yet.
+
+==== Performance ====
+
+TBD. The implementation still needs some work before we can meaningfully evaluate performance.
 
 ===== Changelog =====
 
