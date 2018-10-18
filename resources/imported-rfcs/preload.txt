@@ -1,0 +1,108 @@
+====== PHP RFC: Preloading ======
+  * Version: 0.9
+  * Date: 2018-10-18
+  * Author: Dmitry Stogov, dmitry@zend.com
+  * Status: Draft (or Under Discussion or Accepted or Declined)
+  * First Published at: http://wiki.php.net/rfc/preload
+
+===== Introduction =====
+PHP uses opcode caches for ages (APC, Turck MMCache, Zend Opcahce). They achieve significant performance boost by **ALMOST** complete elimination of PHP script recompilation. Actually, scripts are compiled once (on first HTTP request, that use them), and are stored in shared memory. All the following HTTP requests use cached in shared memory representation.
+
+This proposal is about the "**ALMOST**", mentioned above. Despite, caching significantly reduces PHP script load time, it doesn't eliminate this phase completely. We still have to check if the script source was modified, copy "variable" parts of classes and functions from shared memory to process memory, re-linking, etc. Also, each script is compiled and cached separately (because each one may be changed), so we can't keep dependencies between classes stored in different files, and have to link them at run-time on each request.
+
+The idea of proposal inspired by "Class Data Sharing" technology designed for Java HotSpot VM. On server startup, we may load a bunch of PHP scripts and make all the functions and classes defined there as "permanent". They will be available to all HTTP requests out of the box, like internal entities (e.g. strlen() or Exception). In this way, we may **preload** whole frameworks (or their parts) or even most application classes or just introduce "standard" functions written in PHP (similar to HHVM's sytemlib).
+
+===== Proposal ===== 
+Preloading is going to be controlled by just a single new php.ini directive - **opcache.preload**. Using this directive we will specify just a single PHP script to preload, but this script may be just a "root" of preloading. It's not just loaded but executed, and simple may preload other script, including them or using opcache_compile_file() function. Previously, I tried to implement a reach DSL to specify, which files to load, which ignore, using pattern matching etc, but then realised, that writing the preloading scenarios in PHP itself much simple and much more flexible.
+
+For example the following script introduces a helper function, and uses it to preload the whole Zend Framework.
+
+<code php>
+<?php
+function _preload($preload, string $pattern = "/\.php$/", array $ignore = []) {
+  if (is_array($preload)) {
+    foreach ($preload as $path) {
+      _preload($path, $pattern, $ignore);
+    }
+  } else if (is_string($preload)) {
+    $path = $preload;
+    if (!in_array($path, $ignore)) {
+      if (is_dir($path)) {
+        if ($dh = opendir($path)) {
+          while (($file = readdir($dh)) !== false) {
+            if ($file !== "." && $file !== "..") {
+              _preload($path . "/" . $file, $pattern, $ignore);
+            }
+          }
+          closedir($dh);
+        }
+      } else if (is_file($path) && preg_match($pattern, $path)) {
+        if (!opcache_compile_file($path)) {
+          trigger_error("Preloading Failed", E_USER_ERROR);
+        }
+      }
+    }
+  }
+}
+
+set_include_path(get_include_path() . PATH_SEPARATOR . realpath("/var/www/ZendFramework/library"));
+_preload(["/var/www/ZendFramework/library"]);
+</code>
+
+Preloaded scripts cached in opcache SHM forever. Modification of their sources won't make effect without another server restart. All functions and most classes, defined in these scripts, are permanently loaded into PHP function and class tables and become always available. During preloading, PHP also resolves class dependencies and links with parent, interfaces and traits. It also removes useless includes and performs other optimizations.
+
+==== Preloading Limitation ====
+Only top-level classes without unresolved parent, interfcaes, traits and constant values may be preloaded. If a class doesn't satisfy to this condition, it's stored in opcache SHM as a part of corresponding PHP script in the same way as without preloading.
+
+==== Implementation Details ====
+Preloading is implemented as a part of opcache on top of another (already committed) patch that introduces "immutable" classes and functions. They assume that immutable part is stored in shared memory once (for all processes) and never copied to process memory, but variable part is specific for each process. The patch introduced MAP_PTR pointer data structure, that allows pointers from SHM to process.
+
+===== Backward Incompatible Changes =====
+Preloading doesn't affect any functionality, if not used. However, if used, it may break some application behavior, because preloaded classes and functions are always available, and function_exists() or class_exists() checks would return TRUE, preventing execution of expected code paths.
+
+===== Proposed PHP Version(s) =====
+PHP 7.4
+
+===== RFC Impact =====
+==== To Opcache ====
+Preloading is implemented as a part of opcache.
+
+==== php.ini Defaults ====
+  * opcache.preload - specifies a PHP script that is going to be compiled and executed at server start-up.
+
+===== Open Issues =====
+  * preloading in ZTS build is not supported yet
+
+===== Performance =====
+Using preloading without any code modification I got ~30% speed-up on ZF1_HelloWorld (3620 req/sec vs 2650 req/sec) and ~50% on ZF2Test (1300 req/sec vs 670 req/sec) reference applications.
+However, I expect lower impact on heavy real-life apps.
+
+===== Future Scope =====
+  * preloading may be used as systemlib in HHVM to define "standard" functions/classes in PHP
+  * it might be possible to pre-compile the preload script and use a binary-form (may be even native .so or .dll) to speed-up server start-up.
+  * in conjunction with ext/FFI (dangerous extension), we may allow FFI functionality only in preloaded PHP files, but not in regular ones
+  * it's possible to perform more aggressive optimizations and generate better JIT code for preloaded function and classes (similar to HHVM Repo Authoritative mode in HHVM)
+
+===== Proposed Voting Choices =====
+The RFC requires 50%+1 majority
+
+===== Patches and Tests =====
+The pull request for RFS is at: [[https://github.com/php/php-src/pull/3538]]
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged into
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+  - a link to the language specification section (if any)
+
+===== References =====
+Links to external references, discussions or RFCs
+  * [[https://docs.oracle.com/javase/8/docs/technotes/guides/vm/class-data-sharing.html|Java HotSpot Class Data Sharing]]
+  * [[https://simonis.github.io/JBreak2018/CDS/cds.xhtml|Class Data Sharing Presentation by Volker Simonis]]
+  * [[http://www.inf.usi.ch/faculty/nystrom/papers/cdn02-ecoop.pdf|Code Sharing among Virtual Machines]]
+  * [[https://docs.hhvm.com/hhvm/advanced-usage/repo-authoritative|Repo Authoritative mode in HHVM]]
+  * [[https://github.com/php/php-src/commit/d57cd36e47b627dee5b825760163f8e62e23ab28|Immutable Classes implementation in PHP]]
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
