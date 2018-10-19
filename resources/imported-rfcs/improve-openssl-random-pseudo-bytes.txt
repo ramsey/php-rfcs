@@ -1,0 +1,100 @@
+====== PHP RFC: Improve openssl_random_pseudo_bytes() ======
+  * Version: 0.1
+  * Date: 2018-10-19
+  * Author: Sammy Kaye Powers <sammyk@php.net>
+  * Status: Draft
+
+===== Introduction =====
+The ''openssl_random_pseudo_bytes()'' function is a wrapper for OpenSSL's [[https://www.openssl.org/docs/man1.0.2/crypto/RAND_bytes.html|''RAND_bytes'' CSPRNG]]. CSPRNG implementations should always fail closed, but ''openssl_random_pseudo_bytes()'' fails open pushing critical fail checks into userland. It also has an unnecessary second parameter that confuses the usage of the API.
+
+===== The Fail-Open Problem =====
+The ''openssl_random_pseudo_bytes()'' function fails open which means code like this:
+
+<code php>
+function genCsrfToken(): string
+{
+    return bin2hex(openssl_random_pseudo_bytes(32));
+}
+</code>
+
+...could return an empty string. This forces the developer to do their own checks and fail closed in userland.
+
+<code php>
+function genCsrfToken(): string
+{
+    $bytes = openssl_random_pseudo_bytes(32);
+    if (false === $bytes) {
+        throw new \Exception('CSPRNG error');
+    }
+    return bin2hex($bytes);
+}
+</code>
+
+A [[https://github.com/search?l=PHP&q=openssl_random_pseudo_bytes&type=Code|quick search in GitHub]] reveals very little checking of the return value of ''openssl_random_pseudo_bytes()'' in the wild.
+
+CSPRNG implementations should always fail closed.
+
+===== The Confusing API Problem =====
+There is also a confusing pass-by-reference param ''$crypto_strong''. According to [[http://php.net/manual/en/function.openssl-random-pseudo-bytes.php|the docs]]:
+
+<blockquote>It also indicates if a cryptographically strong algorithm was used to produce the pseudo-random bytes, and does this via the optional crypto_strong parameter.</blockquote>
+
+This forces yet another check in userland to determine if the bytes are strong enough for crypto. The usage of this parameter is unnecessary since ''openssl_random_pseudo_bytes()'' already returns false on failure and the implementation doesn't allow returning a string of bytes while also setting ''$crypto_strong'' to false.
+
+The API is unnecessarily confusing making it easy to get it wrong. The above userland example isn't even correct according to the docs. The correct usage in userland would actually be:
+
+<code php>
+function genCsrfToken(): string
+{
+    $strong = false;
+    $bytes = openssl_random_pseudo_bytes(32, $strong);
+    if (false === $bytes || false === $strong) {
+        throw new \Exception('CSPRNG error');
+    }
+    return bin2hex($bytes);
+}
+</code>
+
+This redundant check is confusing for developers and the documentation does not properly describe the behavior of the implementation.
+
+===== Proposal =====
+To fix the fail-open problem, we simply throw an ''\Error'' exception (just like [[https://github.com/php/php-src/blob/8d3f8ca12a0b00f2a74a27424790222536235502/ext/standard/random.c#L179|''random_bytes()'' does]]). This is the Correct Behavior™️ for any CSPRNG implementation.
+
+To fix the the confusing-api problem, we should deprecate the usage of the second ''$crypto_strong'' parameter and just make it always set the value to true. In PHP 8.0 we'd completely remove the second parameter and upgrade the function's ZPP to ''ZEND_PARSE_PARAMS_THROW'' causing the following fatal error when attempting to send in the second argument.
+
+<blockquote>PHP Fatal error:  Uncaught ArgumentCountError: openssl_random_pseudo_bytes() expects exactly 1 parameter, 2 given</blockquote>
+
+===== Backward Incompatible Changes =====
+False-checks on the return value of ''openssl_random_pseudo_bytes()'' will do nothing since the function fails closed. Usage of ''$crypto_strong'' will generate errors.
+
+===== Proposed PHP Version(s) =====
+PHP 7.4
+
+===== RFC Impact =====
+===== Unaffected PHP Functionality =====
+The ''openssl_random_pseudo_bytes()'' function will continue to use OpenSSL's ''RAND_bytes'' CSPRNG.
+
+===== Proposed Voting Choices =====
+Requires a 2/3 majority
+
+===== Patches and Tests =====
+Links to any external patches and tests go here.
+
+If there is no patch, make it clear who will create a patch, or whether a volunteer to help with implementation is needed.
+
+Make it clear if the patch is intended to be the final patch, or is just a prototype.
+
+For changes affecting the core language, you should also provide a patch for the language specification.
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged into
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+  - a link to the language specification section (if any)
+
+===== References =====
+  - [[https://externals.io/message/103331|Initial discussion]]
+
+===== Rejected Features =====
+The original ping to @internals suggested aliasing ''openssl_random_pseudo_bytes()'' to ''random_bytes()'', but this was not received well so that idea got put in the bin.
