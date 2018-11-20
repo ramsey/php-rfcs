@@ -1,5 +1,5 @@
 ====== PHP RFC: Covariant Returns and Contravariant Parameters ======
-  * Version: 0.2
+  * Version: 0.3
   * Date: 2018-09-20
   * Author: Levi Morrison <levim@php.net>
   * Status: Draft
@@ -82,7 +82,9 @@ interface Collection extends Countable, IteratorAggregate {
 }
 
 class Vector implements Collection {
-  function getIterator(): VectorIterator;
+  function getIterator(): VectorIterator {
+    /* . . . */
+  }
 }
 
 class VectorIterator implements Iterator {
@@ -90,35 +92,22 @@ class VectorIterator implements Iterator {
 }
 </PHP>
 
-Just after the definition of the ''class Vector'' the engine emits an opcode to verify the newly defined class. It does a few things, but relevant to this RFC it will need to verify that ''VectorIterator'' is a subtype of ''Iterator''. When return types were initially proposed this would trigger an auto-load of ''VectorIterator'', which will fail as ''VectorIterator'' is defined later on in the file. This behavior was unacceptable to me (the RFC author) and so I pulled that functionality.
+All three types will need runtime variance checks because they extend or implement another type. To prevent issues with autoloading and order-of-definition issues, the implementation delays the variance verification until after the last consecutive type declaration. Here is what the relevant opcodes looked like from a preliminary implementation (output from ''phpdbg''):
 
-To solve this, I plan to delay the verification of multiple consecutive type definitions until after the last type definition. There are a few ways to implement this. My current approach groups multiple type declarations at the grammar level. I think this can be extended to include any declaration statements, but any expressions would create a break point. The engine will emit opcodes to load the necessary types used in variance just before it emits the type verification opcodes.
+<code>
+L1-13 {main}() /tmp/rfc_autoload.php - 0x7f6b49a89000 + 7 ops
+ L2    #0     DECLARE_CLASS           "collection"                                                  
+ L6    #1     DECLARE_CLASS           "vector"                                                      
+ L10   #2     DECLARE_CLASS           "vectoriterator"                                              
+ L12   #3     VERIFY_VARIANCE         "collection"                                                  
+ L12   #4     VERIFY_VARIANCE         "vector"                                                      
+ L12   #5     VERIFY_VARIANCE         "vectoriterator"                                              
+ L13   #6     RETURN<-1>              1   
+</code>
 
-For our example above, no types will need to be auto-loaded as all involved types have been declared in the file. Therefore the engine emits something like this:
+Note that all 3 types are declared, then all 3 are verified in the same order they were written in.
 
-<PHP>
-interface Collection extends Countable, IteratorAggregate {
-  function getIterator(): Iterator;
-}
-// Collection did not need any runtime variance checks,
-// so emit its verification instead of delaying it
-// verify Collection
-
-class Vector implements Collection {
-  function getIterator(): VectorIterator;
-}
-// Needs a runtime check on VectorIterator <: Iterator
-// so delay its verification
-
-class VectorIterator implements Iterator {
-  /* . . . */
-}
-
-// auto-load any types needed for variance checks that
-// weren't defined (none in this case)
-// verify Vector
-// verify VectorIterator
-</PHP>
+At the moment the implementation will tolerate consecutive class and function definitions.
 
 ===== Backward Incompatible Changes =====
 There are no intended incompatibilities. All incompatibilities should be reported and treated as bugs.
