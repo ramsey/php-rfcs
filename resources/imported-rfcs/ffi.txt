@@ -112,6 +112,7 @@ The returned **FF\CData** object may be used in a number of ways as a regular PH
   * C pointers may be increment/decrement using regular +/-/++/-- operation. **''$cdata += 5''**
   * C pointers may be subtracted one from another using regular **-** operation.
   * C pointer to function may be called as a regular PHP closure. **''$cdata()''**
+  * Any C data may be duplicated by **clone** operator. **''$cdata2 = clone $cdata;''**
   * Any C data may be visualized using **var_dump()**, **print_r()**, etc.
   * It's possible to pass PHP functions as C callbacks
 
@@ -193,7 +194,38 @@ This function may be used to instantiate **FFI** object, containing C declaratio
 
 ===== PHP Callbacks =====
 
-...
+It's possible to assign PHP closure to native variable of function pointer type (or pass it as a function argument).
+
+<code php>
+$zend = new FFI("
+	typedef int (*zend_write_func_t)(const char *str, size_t str_length);
+	extern zend_write_func_t zend_write;
+");
+
+echo "Hello World 1!\n";
+
+$orig_zend_write = clone $zend->zend_write;
+$zend->zend_write = function($str, $len) {
+	global $orig_zend_write;
+	$orig_zend_write("{\n\t", 3);
+	$ret = $orig_zend_write($str, $len);
+	$orig_zend_write("}\n", 2);
+	return $ret;
+};
+echo "Hello World 2!\n";
+$zend->zend_write = $orig_zend_write;
+echo "Hello World 3!\n";
+</code>
+
+<code>
+Hello World 1!
+{
+	Hello World 2!
+}
+Hello World 3!
+</code>
+
+This work, but this functionality is not supported on all libffi platforms, it is not efficient and leaks resources by the end of request. It's recommended to minimize the usage of PHP callbacks.
 
 ===== Owned and Not-Owned CData =====
 
@@ -201,7 +233,13 @@ This function may be used to instantiate **FFI** object, containing C declaratio
 
 ===== PHP FFI API Restriction =====
 
-...
+FFI API opens all the C power, and therefore enormous ability to make something wrong, crash PHP, or even worse. By default FFI API may be used only in CLI scripts and preloaded PHP files. The may be changed through **ffi.enable** INI directive.
+
+  * **ffi.enable=false** completely disables PHP FFI API
+  * **ffi.enable=true** enables PHP FFI API without any restrictions
+  * **ffi.enable=preload** (the default value) enables FFI but restrict its usage to CLI and preloaded scripts
+
+PHP FFI API restriction makes effect only to **FFI** class, but not to overloaded functions of **FFI\CData** object. This means, it's possible to create some **FFI\CData** objects in preloaded files, and then use them directly in "user" code.
 
 ===== A Complete PHP/FFI/preloading example =====
 
@@ -251,7 +289,38 @@ $d->printf("Hello %s!\n", "world");
 
 ===== PHP FFI Performance =====
 
-...
+Accessing FFI data structures is significantly (about 2 times) slower, than accessing native PHP arrays and objects. It makes no sense to use them for speed, but may make sense to reduce memory consumption. This is true for all similar FFI implementations in interpretative mode. However, LuaJIT achieves improvement providing special support for FFI in its JIT.
+
+The following table shows time of execution of **ary3** benchmark from bench.php. 
+
+<code php>
+<?php
+function ary3($n, bool $use_ffi = false) {
+  if ($use_ffi) {
+    $X = FFI::new("int[$n]");
+    $Y = FFI::new("int[$n]");
+  }
+  for ($i=0; $i<$n; $i++) {
+    $X[$i] = $i + 1;
+    $Y[$i] = 0;
+  }
+  for ($k=0; $k<1000; $k++) {
+    for ($i=$n-1; $i>=0; $i--) {
+      $Y[$i] += $X[$i];
+    }
+  }
+  $last = $n-1;
+  print "$Y[0] $Y[$last]\n";
+}
+</code>
+
+^             ^ Native ^ FFI   ^
+|Python	      | 0.212  | 0.343 |
+|PyPy         | 0.010  | 0.081 |
+|LuaJit -joff | 0.037  | 0.412 |
+|LuaJit -jon  | 0.003  | 0.002 |
+|PHP          | 0.040  | 0.093 |
+|PHP + jit    | 0.016  | 0.087 |
 
 ===== Backward Incompatible Changes =====
 None, except of introduced **FFI** class and namespace.
@@ -270,6 +339,10 @@ allows enabling or disabling FFI API usage, or restricting it only to preloaded 
 
 ===== Open Issues =====
 Make sure there are no open issues when the vote starts!
+
+===== Related Work =====
+
+...
 
 ===== Future Scope =====
 Currently, the performance of C data structures access is worst, then access of native PHP data structures (arrays and objects). This is a common problem of LuaJIT (in interpretator mode) and Python as well. However, LuaJIT may also compile these access code in very efficient way (almost as C compiler), and produce highly efficient machine code. It's planned to try similar things, implementing JIT for PHP.
