@@ -1,5 +1,5 @@
 ====== PHP RFC: Non-Nullable Property Checks ======
-  * Version: 0
+  * Version: 0.1
   * Date: 2019-01-23
   * Author: Rowan Collins [IMSoP], rowan.collins@gmail.com
   * Status: Draft
@@ -7,20 +7,90 @@
 
 ===== Introduction =====
 
-The [[typed_properties_v2|Typed Properties 2.0 RFC]] adds support for typed properties to the language, including non-nullable properties. However, failing to assign a value to a non-nullable property is not an error; instead, the property remains unset, and raises an error only when it is accessed. This RFC proposes additional checks to raise the error closer to the cause of the problem in certain situations.
+The [[typed_properties_v2|Typed Properties 2.0 RFC]] adds support for typed properties to the language, including non-nullable properties. However, failing to assign a value to a non-nullable property is not an error; instead, the property remains unset, and raises an error only when it is accessed. This RFC proposes additional checks to raise the error closer to the cause of the problem in common situations such as incorrectly written constructors.
 
-As [[https://externals.io/message/103148#103208|pointed out by Larry Garfield]], there are two ways of considering type annotations on properties: one is to assert that a value **is a given type**, the other is to assert that a value **can only be set to a given type**. The implementation currently accepted for PHP 7.4 guarantees only the first.
+Specifically, it proposes a validation check be performed at the end of the constructor, and after deserialization, which throws a TypeError if any property has been left in an uninitialized state.
 
-With a property which is declared as a nullable type, or assigned a static default value, the distinction rarely matters: in normal use, the property starts life with a valid value, and can only be set to a valid value; therefore, it will always have a valid value. However, if null is not a valid value, and there is no static default, it is trivial to leave the property in an invalid state, simply by forgetting to assign any value in the constructor.
+===== Problem Description ======
 
+As [[https://externals.io/message/103148#103208|pointed out by Larry Garfield]], there are two ways of considering type annotations on properties: 
+
+  * a contract asserting that the property will *always be* a value of the given type
+  * a simpler contract, that the property *can only be set to* the given type
+
+When a property has a static default value, or allows nulls, the distinction rarely matters: in normal use, the property starts life with a valid value, and can only be set to a valid value; therefore, it will always have a valid value. However, if null is not a valid value, and there is no static default, the property must start in an invalid state, and it is easy to write code which leaves it in that state.
+
+The stronger contract requires extremely careful language design, as there must be some defined point in the program where the asserted state first becomes true; for instance, in [[https://docs.swift.org/swift-book/LanguageGuide/Initialization.html|Swift's two-phase initialization]], all introduced properties must be in a valid state before the parent initializer is called. This is difficult if not impossible to add to an existing, highly-dynamic, language such as PHP.
+
+The current implementation therefore concentrates mainly on the simpler contract, and accepts uninitialized properties as a necessary evil. Whenever an uninitialized property is read from, an Error is thrown, avoiding the propagation of invalid data; however, this error is likely to be thrown a long way from the cause of the actual bug.
+
+Consider this example:
+
+<code php>
+namespace VendorOne\LowLevelLib {
+    class ImplementationDetail {
+        public string $mode;
+        public int $value;
+        
+        public function __construct(string $mode) {
+            switch ( $mode ) {
+                case 'dev':
+                case 'development':
+                    $this->mode = 'dev';
+                break;
+                case 'prod':
+                case 'production':
+                    $this->mode = 'prod';
+                    $this->value = 42;
+                break;
+            }
+        }
+    }
+}
+
+namespace VendorTwo\FrameworkPackage {
+    class UsefulTool {
+        private \VendorOne\LowLevelLib\ImplementationDetail $util;
+        
+        public function __construct() {
+            $this->util = new \VendorOne\LowLevelLib\ImplementationDetail('dev');
+            # Proposed TypeError: "Typed property $value must be initialized before end of constructor ... in ImplementationDetail::__construct()"
+        }
+        
+        public function getScore() {
+            return random_int(1, 6) * $this->util->value;
+        }
+    }
+}
+
+namespace EndUser\Application {
+    $tool = new \VendorTwo\FrameworkPackage\UsefulTool;
+    
+    echo $tool->getScore();
+    # Current TypeError: "Typed property $value must not be accessed before initialization ... in UsefulTool->getScore()"
+}
+</code>
+
+Here, the bug is clearly in the constructor of the low-level library class, in an untested scenario inadvertently used by the library's consumer. But the current error cannot tell the user that, and doesn't even show up until an even later section of the code happens to access the affected property.
+
+The proposed change would see the error reported as soon as the constructor exits, making it much clearer where the problem lies.
 
 ===== Proposal =====
 
+Two internal functions will be created (names subject to bikeshedding):
+
+  * ''zend_check_properties_initialized'' which will iterate all the typed properties of an object, and return ''false'' if any are currently uninitialized
+  * ''zend_assert_properties_initialized'' which will perform the above check, and raise a TypeError if the result is ''false''
+
+The following places will call ''zend_assert_properties_initialized'', resulting in more user-friendly errors:
+
+  * Immediately after an object is constructed (to catch errors in ''%%__construct%%'')
+  * Immediately after an object is deserialized (to catch errors in ''%%__sleep%%'' / ''Unserialize'' / [[https://wiki.php.net/rfc/custom_object_serialization|__unserialize]])
 
 ===== Backward Incompatible Changes =====
 If this change is added before the release of PHP 7.4.0, no existing code will be affected, as previous versions do not support typed properties.
 
-If it is for some reason delayed, there is the possibility that code which runs under PHP 7.4 will start raising errors, but such code will almost certainly have been incorrect or buggy anyway.
+If it is for some reason delayed, there is the possibility that code which runs under PHP 7.4 will start raising errors due to the new checks.
 
 ===== Proposed PHP Version(s) =====
 PHP 7.4
