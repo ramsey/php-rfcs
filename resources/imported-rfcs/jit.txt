@@ -1,0 +1,347 @@
+====== PHP RFC: JIT ======
+  * Version: 0.9
+  * Date: 2019-01-28
+  * Author: Dmitry Stogov, dmitry@zend.com
+  * Status: Draft (or Under Discussion or Accepted or Declined)
+  * First Published at: https://wiki.php.net/rfc/jit
+
+===== Introduction =====
+It's not a secret, that PHP-7 performance jump was initiated by attempts to implement JIT for PHP. They were started at 2011 and since that time we tried at least 3 different implementations, but we never harried to release them, because JIT might make serious troubles for big engine changes. Today, we implemented almost all interpretative performance improvement ideas, and we can achieve the next boost only with JIT.
+
+===== Proposal =====
+I propose to include JIT into PHP-8 and provide additional efforts to increase its performance and usability.
+
+In addition, I propose to include JIT into PHP-7.4 as an experimental feature (disabled by default).
+
+PHP JIT is implemented as almost independent part of opcache. It may be enabled/disabled at PHP compile time and at run-time.
+Native code of PHP scripts is stored in additional region of opcache shared memory and op_array->opcodes[].handler(s) keep pointers to the JIT-ed code. This approach doesn't require engine modification at all.
+
+To generate native code we use DynAsm (developed for LuaJIT project). It's very lightweight and smart tool, but it assumes very low-level development and good knowledge of target assembler language. In the past we tried LLVM, but it was almost 100 times slower. Currently we support only x86 and x86_64 on posix platforms. Windows support shouldn't be a big problem, but it's a low priority for me. DynAsm also supports ARM. ARM64, MIPS, MIPS64 and PPC, so in general we may support all popular platforms.
+
+
+The quality of the JIT may be demonstrated on Mondelbrot benchmark published at https://gist.github.com/dstogov/12323ad13d3240aee8f1, where it makes 4 times improvement (0.011 sec vs 0.046 sec on PHP-7.4).
+
+<code php>
+    function iterate($x,$y)
+    {
+        $cr = $y-0.5;
+        $ci = $x;
+        $zr = 0.0;
+        $zi = 0.0;
+        $i = 0;
+        while (true) {
+            $i++;
+            $temp = $zr * $zi;
+            $zr2 = $zr * $zr;
+            $zi2 = $zi * $zi;
+            $zr = $zr2 - $zi2 + $cr;
+            $zi = $temp + $temp + $ci;
+            if ($zi2 + $zr2 > BAILOUT)
+                return $i;
+            if ($i > MAX_ITERATIONS)
+                return 0;
+        }
+    
+    }
+</code>
+
+Following is the complete assembler code generated to the PHP function above, but the main loop code is between .L5 and .L7
+
+<code asm>
+JIT$Mandelbrot::iterate: ; (/home/dmitry/php/bench/b.php)
+	sub $0x10, %esp
+	cmp $0x1, 0x1c(%esi)
+	jb .L14
+	jmp .L1
+.ENTRY1:
+	sub $0x10, %esp
+.L1:
+	cmp $0x2, 0x1c(%esi)
+	jb .L15
+	mov $0xec3800f0, %edi
+	jmp .L2
+.ENTRY2:
+	sub $0x10, %esp
+.L2:
+	cmp $0x5, 0x48(%esi)
+	jnz .L16
+	vmovsd 0x40(%esi), %xmm1
+	vsubsd 0xec380068, %xmm1, %xmm1
+.L3:
+	mov 0x30(%esi), %eax
+	mov 0x34(%esi), %edx
+	mov %eax, 0x60(%esi)
+	mov %edx, 0x64(%esi)
+	mov 0x38(%esi), %edx
+	mov %edx, 0x68(%esi)
+	test $0x1, %dh
+	jz .L4
+	add $0x1, (%eax)
+.L4:
+	vxorps %xmm2, %xmm2, %xmm2
+	vxorps %xmm3, %xmm3, %xmm3
+	xor %edx, %edx
+.L5:
+	cmp $0x0, EG(vm_interrupt)
+	jnz .L18
+	add $0x1, %edx
+	vmulsd %xmm3, %xmm2, %xmm4
+	vmulsd %xmm2, %xmm2, %xmm5
+	vmulsd %xmm3, %xmm3, %xmm6
+	vsubsd %xmm6, %xmm5, %xmm7
+	vaddsd %xmm7, %xmm1, %xmm2
+	vaddsd %xmm4, %xmm4, %xmm4
+	cmp $0x5, 0x68(%esi)
+	jnz .L19
+	vaddsd 0x60(%esi), %xmm4, %xmm3
+.L6:
+	vaddsd %xmm5, %xmm6, %xmm6
+	vucomisd 0xec3800a8, %xmm6
+	jp .L13
+	jbe .L13
+	mov 0x8(%esi), %ecx
+	test %ecx, %ecx
+	jz .L7
+	mov %edx, (%ecx)
+	mov $0x4, 0x8(%ecx)
+.L7:
+	test $0x1, 0x39(%esi)
+	jnz .L21
+.L8:
+	test $0x1, 0x49(%esi)
+	jnz .L23
+.L9:
+	test $0x1, 0x69(%esi)
+	jnz .L25
+.L10:
+	movzx 0x1a(%esi), %ecx
+	test $0x496, %ecx
+	jnz JIT$$leave_function
+	mov 0x20(%esi), %eax
+	mov %eax, EG(current_execute_data)
+	test $0x40, %ecx
+	jz .L12
+	mov 0x10(%esi), %eax
+	sub $0x1, (%eax)
+	jnz .L11
+	mov %eax, %ecx
+	call zend_objects_store_del
+	jmp .L12
+.L11:
+	mov 0x4(%eax), %ecx
+	and $0xfffffc10, %ecx
+	cmp $0x10, %ecx
+	jnz .L12
+	mov %eax, %ecx
+	call gc_possible_root
+.L12:
+	mov %esi, EG(vm_stack_top)
+	mov 0x20(%esi), %esi
+	cmp $0x0, EG(exception)
+	mov (%esi), %edi
+	jnz JIT$$leave_throw
+	add $0x1c, %edi
+	add $0x10, %esp
+	jmp (%edi)
+.L13:
+	cmp $0x3e8, %edx
+	jle .L5
+	mov 0x8(%esi), %ecx
+	test %ecx, %ecx
+	jz .L7
+	mov $0x0, (%ecx)
+	mov $0x4, 0x8(%ecx)
+	jmp .L7
+.L14:
+	mov %edi, (%esi)
+	mov %esi, %ecx
+	call zend_missing_arg_error
+	jmp JIT$$exception_handler
+.L15:
+	mov %edi, (%esi)
+	mov %esi, %ecx
+	call zend_missing_arg_error
+	jmp JIT$$exception_handler
+.L16:
+	cmp $0x4, 0x48(%esi)
+	jnz .L17
+	vcvtsi2sd 0x40(%esi), %xmm1, %xmm1
+	vsubsd 0xec380068, %xmm1, %xmm1
+	jmp .L3
+.L17:
+	mov %edi, (%esi)
+	lea 0x50(%esi), %ecx
+	lea 0x40(%esi), %edx
+	sub $0xc, %esp
+	push $0xec380068
+	call sub_function
+	add $0xc, %esp
+	cmp $0x0, EG(exception)
+	jnz JIT$$exception_handler
+	vmovsd 0x50(%esi), %xmm1
+	jmp .L3
+.L18:
+	mov $0xec38017c, %edi
+	jmp JIT$$interrupt_handler
+.L19:
+	cmp $0x4, 0x68(%esi)
+	jnz .L20
+	vcvtsi2sd 0x60(%esi), %xmm3, %xmm3
+	vaddsd %xmm4, %xmm3, %xmm3
+	jmp .L6
+.L20:
+	mov $0xec380240, (%esi)
+	lea 0x80(%esi), %ecx
+	vmovsd %xmm4, 0xe0(%esi)
+	mov $0x5, 0xe8(%esi)
+	lea 0xe0(%esi), %edx
+	sub $0xc, %esp
+	lea 0x60(%esi), %eax
+	push %eax
+	call add_function
+	add $0xc, %esp
+	cmp $0x0, EG(exception)
+	jnz JIT$$exception_handler
+	vmovsd 0x80(%esi), %xmm3
+	jmp .L6
+.L21:
+	mov 0x30(%esi), %ecx
+	sub $0x1, (%ecx)
+	jnz .L22
+	mov $0x1, 0x38(%esi)
+	mov $0xec3802b0, (%esi)
+	call rc_dtor_func
+	jmp .L8
+.L22:
+	mov 0x4(%ecx), %eax
+	and $0xfffffc10, %eax
+	cmp $0x10, %eax
+	jnz .L8
+	call gc_possible_root
+	jmp .L8
+.L23:
+	mov 0x40(%esi), %ecx
+	sub $0x1, (%ecx)
+	jnz .L24
+	mov $0x1, 0x48(%esi)
+	mov $0xec3802b0, (%esi)
+	call rc_dtor_func
+	jmp .L9
+.L24:
+	mov 0x4(%ecx), %eax
+	and $0xfffffc10, %eax
+	cmp $0x10, %eax
+	jnz .L9
+	call gc_possible_root
+	jmp .L9
+.L25:
+	mov 0x60(%esi), %ecx
+	sub $0x1, (%ecx)
+	jnz .L26
+	mov $0x1, 0x68(%esi)
+	mov $0xec3802b0, (%esi)
+	call rc_dtor_func
+	jmp .L10
+.L26:
+	mov 0x4(%ecx), %eax
+	and $0xfffffc10, %eax
+	cmp $0x10, %eax
+	jnz .L10
+	call gc_possible_root
+	jmp .L10
+</code>
+
+===== Backward Incompatible Changes =====
+none
+
+===== Proposed PHP Version(s) =====
+PHP-8 and PHP-7.4 (separate votes)
+
+===== RFC Impact =====
+==== To SAPIs ====
+none
+
+==== To Existing Extensions ====
+none
+
+==== To Opcache ====
+JIT is implemented as a part of opcache.
+
+==== New Constants ====
+none
+
+==== php.ini Defaults ====
+If there are any php.ini settings then list:
+  * opcache.jit_buffer_size - size (in megabytes) of shared memory buffer reserved for native code generation. Default - 0 disables JIT.
+  * opcache.jit - JIT control options. It consist from 4 decimal digits - CRTO (Default 1205. Probably, better to change to 1235).
+    * O - optimization level
+      * 0 - don't JIT
+      * 1 - minimal JIT (call standard VM handlers)
+      * 2 - selective VM handler inlining
+      * 3 - optimized JIT based on static type inference of individual function
+      * 4 - optimized JIT based on static type inference and call tree
+      * 5 - optimized JIT based on static type inference and inner procedure analyses
+    * T - JIT trigger
+      * 0 - JIT all functions on first script load
+      * 1 - JIT function on first execution
+      * 2 - Profile on first request and compile hot functions on second request
+      * 3 - Profile on the fly and compile hot functions
+      * 4 - Compile functions with @jit tag in doc-comments
+    * R - register allocation
+      * 0 - don't perform register allocation
+      * 1 - use local liner-scan register allocator
+      * 2 - use global liner-scan register allocator
+    * C - CPU specific optimization flags
+      * 0 - none
+      * 1 - enable AVX instruction generation 
+  * opcache.jit_debug - JIT debug control options, where each bit enables some debuging options. Default - 0.
+      * (1<<0) - print generated assembler cede
+      * (1<<1) - print intermediate SSA form used for code generation
+      * (1<<2) - register allocation information
+      * (1<<4) - allow debugging JIT-ed code using GDB
+      * (1<<5) - generate perf.map file to list JIt-ed functions in Linux perf report
+      * (1<<6) - provide information about JIt-ed code for Linux Oprofile
+      * (1<<7) - provide information about JIt-ed code for Intel VTune
+      * (1<<8) - generate perf.dump file to show assembler code of JIT-ed functions in Linux perf peport
+
+==== Performance ====
+JIT makes bench.php more than two times faster: 0.140 sec vs 0.320 sec.
+However, in current state it doesn't improve real-life apps like Wordpress (with opcache.jit=1235 326 req/sec vs 315 req/sec).
+
+===== Open Issues =====
+Make sure there are no open issues when the vote starts!
+
+===== Future Scope =====
+In PHP-8 we are going to improve JIT and perform optimized code generation after an initial profiling of hot functions. This would allow application of speculative optimizations and generation only the code that is really executed. It's also possible to do deeper integration of JIT with preloading and FFI.
+
+===== Proposed Voting Choices =====
+This project requires a 50%+1 majority.
+
+<doodle title="Include JIT into PHP-8?" auth="user" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+As PHP-7.4 is branched and its engine is not going to be significantly changed, we may also include JIT into PHP-7.4 as an experimental feature (disabled by default).
+
+<doodle title="Include JIT into PHP-7.4 (experimental)?" auth="user" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+===== Patches and Tests =====
+https://github.com/zendtech/php-src/ - The PHP JIT branch was announced more than two years ago, and since that time was kept in consistency with PHP master.
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged into
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+  - a link to the language specification section (if any)
+
+===== References =====
+  - [[https://luajit.org/dynasm.html|DynAsm page]]
+  - [[https://corsix.github.io/dynasm-doc/|The Unofficial DynASM Documentation]]
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
