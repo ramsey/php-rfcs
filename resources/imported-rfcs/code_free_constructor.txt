@@ -1,11 +1,19 @@
 ====== PHP RFC: Code free constructor ======
-  * Version: 0.1
-  * Date: 2019-01-14
+  * Version: 0.2
+  * Date: 2019-01-29
   * Author: Andrey Gromov, andrewgrom@rambler.ru, rjhdby@php.net
   * Proposed version: PHP 8
   * Status: draft
   * First Published at: https://wiki.php.net/rfc/code_free_constructor
   * ML thread: -
+
+===== Changelog =====
+**v 0.2** 
+  * Added visibility modificators syntax.
+  * Changed behavior for parameters that need to be forwarded to parent.
+  * Added "anonymous class" section.
+  * Added "Q&A, Discussion" section.
+  * Improved description of realization.
 
 ===== Introduction =====
 "Code free" constructor is constructor with only purpose to directly set object properties from received parameters and, optionally, call parent constructor.
@@ -20,74 +28,79 @@ Unfortunately, php syntax enforces to write unnecessary boilerplate.
 ===== Proposal =====
 Proposal is to add alternate syntax for "code free" constructors.
 
+There is two generals parts of proposal.
+
+=== First. Automatic property initialization ===
+
 Current syntax:
 <code php>
 class MotorCycle {
-    public $vendor;
-    public $cc;
-    public $whells = 2;
+    protected $vendor;
+    public $driver;
+    private int $cc;
     
-    public function __construct($vendor, $cc) {
+    public function __construct(string $vendor, Person $driver, int $cc = 600) {
         $this->vendor = $vendor;
+        $this->driver = $driver;
         $this->cc     = $cc;
-    }
-    
-    //other methods
-}
-
-class MyCustomMotorCycle extends MotorCycle {
-    public function __construct($cc, $whells) {
-        parent::__construct("Custom", $cc);
-     // $this->cc = $cc;  this statement will be added within proposed realisation
-        $this->whells = $whells;
     }
 }
 </code>
 
 Proposed syntax:
 <code php>
-class MotorCycle($vendor, $cc){
-    public $whells = 2;
-    
-    //other methods
-};
-
-class MyCustomMotorCycle($cc, $whells) extends MotorCycle("Custom", $cc){ };
+class MotorCycle(protected string $vendor, Person $driver, private int $cc = 600){ };
 </code>
+If no visibility modifier defined it casts as "public".
+
+Under the hood, at AST-creation phase, will be silently created right properties declaration and added "_ _ construct" method similar to showed above. So following compilation and runtime will work standard way.
+
+=== Second. Automatic passing args to parent constructor ===
+For this example I will use class "MotorCycle" from previous section.
+
+Current syntax:
+<code php>
+class MyCustomMotorCycle extends MotorCycle {
+    public $passenger;
+    
+    public function __construct(Person $driver, Person $passenger) {
+        parent::__construct("Custom", $driver);
+        $this->passenger = $passenger;
+    }
+}
+</code>
+
+Proposed syntax:
+<code php>
+class MyCustomMotorCycle(Person $driver, Person $passenger) 
+    extends MotorCycle("Custom", $driver) { };
+</code>
+In this case, if some params must be forwarded to parent then they will not be declared and set in child. This behavior is disputable.
+
+Realisation is similar to described above with additional checks and parent call.
+
+Note that you can use all standard syntax constructions like default parameters and splat operator ("...")
 
 {{:rfc:joined.png?400|}}
 
-By the way, current realization simply add "_ _construct" method into class via AST injection. 
-Another words, code "($cc, $whells)" considered  as zend_ast node "parameter_list" and accordingly processed by standart way. You can declare property type like you declare them inside standard method. Also you can declare defaults for parameters, use "..." notation (there is a nuance) and do everything else.
+===== Anonymous classes =====
+Since the syntax for declaring an anonymous class is what it is, the only option that I can imagine is not very beautiful.
 
 <code php>
-class MyCustomMotorCycle(int $cc, int $whells = 3, ...$otherParams) extends MotorCycle("Custom", $cc){ };
-</code>
-
-===== Restrictions =====
-This syntax can't be used with anonymous classes because those classes instantiated at once they declared and same syntax is used for forwarding parameters directly into constructor.
-
-===== Possible Issue =====
-
-Child constructor will silently rewrite parent's properties with same name.
-<code php>
-class Parent{
-    public function __construct($prop){
-        $this->prop = $prop * 2;
+$a = new class($mDriver, $mPassenger) extends MotorCycle {
+    private $passenger;
+    public function __construct(Person $driver, Person $passenger) {
+        parent::__construct("Custom", $driver);
+        $this->passenger = $passenger;
     }
-}
-class Child($prop) extends Parent($prop) {};
+};
 
-$child = new Child(5);
-
-var_dump($child);
-
-----------------
-
-object(Child) {
-    ["prop"] => 5 // instead expected 10
-}
+//            |------arguments------||-----------constructor params------------|
+$a = new class($mDriver, $mPassenger)(Person $driver, private Person $passenger) 
+        extends MotorCycle("Custom", $driver){};
 </code>
+
+{{:rfc:anon.png}}
 
 ===== Backward Incompatible Changes =====
 Do not know. Looks like no BI.
@@ -98,21 +111,29 @@ PHP 8.x
 ===== RFC Impact =====
 Not thinking so
 
-===== Future Scope =====
-
-Maybe simplified "destructuring declaration" for those class types? Not sure.
-
-<code php>
-class A($first, $second) {};
-$a = new A(1,2);
-[$first, $second] = $a;
-</code>
-
 ===== Implementation =====
-Implemented via injecting generated "__construct"'s ast node into class statements list. So it will be compiled with all checks.
 
-Draft implementation, need to be reviewed.
+Draft implementation, need to be reviewed. **Outdated!**
 https://github.com/rjhdby/php-src/compare/master...rjhdby:constructor
 
+===== Q&A, Discussion =====
+**Stanislav Malyshev**<blockquote>This looks like unobvious magic. PHP approach has traditionally been to avoid unobvious magic, and be explicit about what is happening. This functionality does not seem no be enabling anything different, and seems to be pretty obscure as to what is going on. Also, $prop can not be documented this way, and assigning default value to it may be a bit weird too. I am all for paving the walkways, but this particular case seems to be a bit too narrow to have a special language syntax for, and the syntax seems to be not exactly obvious as to what's going on there.</blockquote>
+
+**Nikita Popov**<blockquote>Two alternatives you might want to consider:
+
+https://wiki.php.net/rfc/automatic_property_initialization 
+=> Proposed function public function _ _ construct(int $this->x, int $this->y) {}, which avoids the need for explicit property assignments in the ctor. However, the property still needs to be declared separately.
+
+https://docs.hhvm.com/hack/other-features/constructor-parameter-promotion
+=> Uses public function _ _ construct(public int $x, public int $y) {} to declare properties in-line in the constructor.
+
+I think that *if* we want to add some kind of sugar of this type, then I'd strongly prefer the syntax used by Hack than the one proposed here. It makes a lot more sense to me intuitively, probably because the property declarations still looks like normal property declarations, they just occur in-line in the ctor.</blockquote>
+A matter of habit and documentation. There is a lot of really strange and magical behavior in the language. It seems to me that the proposed concept is quite simple and transparent for understanding.
+
+**Dan Ackroyd**<blockquote>If this RFC solves a big problem for you, I would strongly recommend
+looking at solving it with a preprocessor first:
+
+https://preprocess.io/</blockquote>
+Not sure if I understood the advice correctly.
 ===== References =====
 
