@@ -272,7 +272,11 @@ PHP 8 and PHP 7.4 (separate votes)
 none
 
 ==== To Existing Extensions ====
-none
+JIT is going to affect third party debuggers (e.g. xdebug) and profilers (e.g. XHProf, Blackfire, Tideways).
+
+For debugging a particular request, it's possible to disable JIT (together with opcache) changing "opcache.enable" through C API (zend_alter_ini_entry) at RINIT stage.
+
+Run-time profiling should work even with JIT-ed code, but this might require development of additional tracing API and corresponding JIT extension, to generate tracing callbacks.
 
 ==== To Opcache ====
 JIT would be implemented as a part of OPcache.
@@ -323,6 +327,73 @@ According to Nikita, PHP-Parser became ~1.3 times faster with JIT. Amphp hello-w
 However, like the previous attempts - it currently doesn't seem to significantly improve real-life apps like WordPress (with opcache.jit=1235 326 req/sec vs 315 req/sec).
 
 It's planned to provide additional effort, improving JIT for real-life apps, using profiling and speculative optimizations.
+
+==== JIT Debugging ====
+As any complication, JIT increases risk of bugs in JIT itself. They may be caused by inaccurate analyses, bugs in code-generator or register-allocator. Fixing these new kind of bugs is going to be more difficult, because we'll have to catch the place of the failure, get and analyse the assemble code generated for bogus function, find the mistake and understand why it was done by JIT compiler.
+
+In case of crash, we may just run app under gdb until the crash, check that JIT is involved in crash backtrace and find the place:
+
+<code>
+$ gdb php 
+
+(gdb) r app.php
+
+...
+
+(gdb) bt
+
+#1  0xe960dc11 in ?? ()
+#2  0x08689524 in zend_execute (op_array=0xf4074460, return_value=0x0) at Zend/zend_vm_execute.h:69122
+#3  0x085cb93b in zend_execute_scripts (type=8, retval=0x0, file_count=3) at Zend/zend.c:1639
+#4  0x0855a890 in php_execute_script (primary_file=0xffffcbfc) at main/main.c:2607
+#5  0x0868ba25 in do_cli (argc=2, argv=0x9035820) at sapi/cli/php_cli.c:992
+#6  0x0868c65b in main (argc=2, argv=0x9035820) at sapi/cli/php_cli.c:1384
+</code>
+
+Unknown function "??" called from zend_execute() is a JIT-ed code. We may determine the failure location analysing execution context.  
+
+<code>
+(gdb) p (char*)executor_global.current_execute_data.func.op_array.filename.val
+(gdb) p executor_global.current_execute_data.opline.lineno 
+</code>
+
+Line number may be inaccurate, because JIT doesn't keep "opline" in consistency.
+We may disassemble the code around the bogus instruction to understand the real "opline".
+
+<code>
+(gdb) disassemble 0xe960dc00,0xe960dc30
+</code>
+
+Also, it may be useful to analyse bytecode and assembler dump of the bogus JIT-ed function.
+
+<code>
+$ php --opcache.jit_debug=1 app.php
+$ php --opcache.jit_debug=2 app.php
+</code>
+
+To catch the mistake, we might need to trace the JIT code generator (when it generates the bogus code), or instrument it to generate breakpoint (int3 x86 instruction) and then trace the generated code.
+
+PHP JIT may use GDB API to provide information about generated code to debugger. However, it works only for reasonable small scripts. In case of big amount of JIT-ed code, GDB just stuck registering functions. In case we can isolate the bogus code, we may debug JIT in more comfortable way.
+
+<code>
+$ gdb php 
+
+(gdb) r -dopcache.jit_debug=0x100 test.php
+...
+
+(gdb) bt
+
+#1  0xe960dc11 in JIT$foo () at test.php:2
+#2  0x08689524 in zend_execute (op_array=0xf4074460, return_value=0x0) at Zend/zend_vm_execute.h:69122
+#3  0x085cb93b in zend_execute_scripts (type=8, retval=0x0, file_count=3) at Zend/zend.c:1639
+#4  0x0855a890 in php_execute_script (primary_file=0xffffcbfc) at main/main.c:2607
+#5  0x0868ba25 in do_cli (argc=2, argv=0x9035820) at sapi/cli/php_cli.c:992
+#6  0x0868c65b in main (argc=2, argv=0x9035820) at sapi/cli/php_cli.c:1384
+
+(gdb) disassemble
+...
+(gdb) layout asm
+</code>
 
 ===== Open Issues =====
 Make sure there are no open issues when the vote starts!
