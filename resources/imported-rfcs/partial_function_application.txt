@@ -1,65 +1,220 @@
 ====== PHP RFC: Partial Function Application ======
-  * Version: 0.9
-  * Date: 2016-08-10
-  * Author: Levi Morrison <levim@php.net>
+  * Version: 1.0
+  * Date: 2019-02-05
+  * Author: Paul Crovella, Levi Morrison
   * Status: Draft
-  * First Published at: http://wiki.php.net/rfc/partial_function_application
+  * First Published at: https://wiki.php.net/rfc/partial_function_application
 
 ===== Introduction =====
 Partial function application is the process of binding only some of the arguments to a function call and leaving the remainder to be bound a later point. In PHP this would be done by a closure.
 
 ===== Proposal =====
-Partial function application is done by using the underscore symbol (''_'') as a parameter to a function or method call. Instead of calling the function instead a closure will be created and the parameters which are not underscores will be bound. The arity of the closure is the number of underscores used. Underscores can be used in any parameter position. The way the arguments and closed-over variables are bound is determined by the definition of the function that is partially applied; if the function takes that position by reference then the closure will also take that position by reference (or use by reference if applicable). The return type of the closure is also the same as that of the function call it is mirroring.
+Support partial function application via the argument placeholders ''?'' and ''...''. Any function or method call in which one or more of the arguments is an argument placeholder instead results in a closure being returned which wraps the called function, fixing the given (non-placeholder) arguments.
+
+Type declarations, parameter names, reference parameters, optional defaults, variadics are all taken on by the closure from the function definition. All arguments given to a closure, including those beyond what are specified in the signature, get passed along to the underlying function.
+
+The basic idea is to use a partial function call to stamp out a copy of the function, sans parameters where fixed arguments have already been given.
+
+==== Types ====
+
+Type declarations are retained, as are parameter names (e.g. for reflection.)
+
+<PHP>
+function f(int $x, int $y): int {}
+
+$partialFoo = f(?, 42);
+</PHP>
+
+is equivalent to
+
+<PHP>
+$partial = function(int $x): int {
+    return f($x, 42);
+};
+</PHP>
+
+
+==== Variables/References ====
+
+Variable arguments are ''use''d, and done so by reference if specified in the called function definition.
 
 <PHP>
 function f($value, &$ref) {}
-
+ 
 $array = ['arg' => 0];
 
-// the following two groups of statements are equivalent
-f(_, $array['arg']);
+$f = f(?, $array['arg']);
+</PHP>
 
+is equivalent to
+
+<PHP> 
 $ref = &$array['arg'];
-function($value) use(&$ref) {
+$f = function($value) use (&$ref) {
     return f($value, $ref);
 };
 </PHP>
 
-==== Backward Incompatible Changes ====
-A constant of the name "_" will now be a redefinition, which will emit a warning and leave the original value intact. This effectively means you can no longer declare a constant with that name.
 
-==== Open Issues ====
-Make sure there are no open issues when the vote starts!
+==== Optional Parameters ====
 
-==== PHP Version ====
-This RFC targets 7.2 or 8.0.
-
-==== Voting ====
-This RFC requires a 2/3 vote in the affirmative to pass. It will be a simple yes/no vote on whether to include partial function application.
-
-===== Future Scope =====
-This feature would be particularly useful if we ever created a [[rfc:pipe-operator|piping operator]]. Instead of requiring the ''$$'' symbol for the location of the left-hand side of the ''|>'' to be sent to we can instead create a closure and send the result as the only parameter:
+Optional parameters remain optional, inheriting defaults.
 
 <PHP>
-// this
-$ret = scandir($arg)
-    |> array_filter($$, function($x) { return $x !== '.' && $x != '..'; })
-    |> array_map(function ($x) use ($arg) { return $arg . '/' . $x; }, $$)
-    |> getFileArg($$)
-    |> array_merge($ret, $$);
+function f($a = 0, $b = 1) {}
 
-// becomes:
-$ret = scandir($arg)
-    |> array_filter(_, function($x) { return $x !== '.' && $x != '..'; })
-    |> array_map(function ($x) use ($arg) { return $arg . '/' . $x; }, _)
-    |> getFileArg(_)
-    |> array_merge($ret, _);
+$f = f(?, 2);
 </PHP>
 
-This makes the ''|>'' much easier to explain and understand when compared with the current version that uses ''$$''.
+is equivalent to
 
-===== Patches and Tests =====
-Currently no patch.
+<PHP>
+$partial = function($a = 0) {
+    return f($a, 2);
+};
+</PHP>
 
-===== References =====
-Links to external references, discussions or RFCs
+
+==== func_num_args et al. ====
+
+In order to keep ''func_num_args'' and friends happy, the arguments passed through will only be those up to and including the right-most actually given - whether at call time or during partial application. In other words, trailing optional parameters in the closure will not have their resolved defaults sent to the underlying function.
+
+<PHP>
+function f($a = 0, $b = 0, $c = 0, $d = 0) {
+    echo func_num_args();
+}
+
+$f = f(?, 1, ?, ?);
+$f(0, 2); // prints 3
+$f(); // prints 2
+</PHP>
+
+
+==== Extra Arguments ====
+
+You can pass as many additional arguments as you like when calling a function in PHP, beyond what's specified in the signature. When you pass extra arguments to the closure, or during partial application, they are passed along to the wrapped function.
+
+<PHP>
+function f($a, $b) {
+    print_r(func_get_args());
+}
+
+$f = f(?, 2);
+</PHP>
+
+is actually akin to:
+
+<PHP>
+$f = function($a, ...$extraArgs) {
+    return f($a, 2, ...$extraArgs);
+};
+</PHP>
+
+(Though without unnecessary packing/unpacking, or ''$extraArgs'' appearing in reflection.)
+
+So calling: ''$f(1, 3, 4)'' results in:
+
+<PHP>
+Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+)
+</PHP>
+
+
+==== Trailing Placeholders ====
+
+Continuing on that, it is not required to include placeholders for trailing arguments, though at least one placeholder somewhere is necessary to indicate partial application. This is primarily to ease partial application of functions with long lists of optional parameters.
+
+<PHP>
+function f($m, $n, $o, $x = 0, $y = 0, $z = 0) {}
+
+$f = f(1, ?);
+</PHP>
+
+is roughly (minding the ''func_num_args'' section above) equivalent to
+
+<PHP>
+$f = function($n, $o, $x = 0, $y = 0, $z = 0) {
+    return f(1, $n, $o, $x, $y, $z);
+};
+</PHP>
+
+In order to better convey to a reader that more arguments are expected, a trailing ''...'' may be used in addition to or in lieu of ''?'' placeholders.
+
+So these are equivalent:
+
+<PHP>
+$f = f(?, 1);
+$f = f(?, 1, ...);
+</PHP>
+
+As are these:
+
+<PHP>
+$f = f(1, ?);
+$f = f(1, ?, ...);
+$f = f(1, ...);
+</PHP>
+
+
+==== Extra Trailing Placeholders ====
+
+Additional placeholders beyond a function's signature do not cause an error and have no additional impact, though effectively allow you to apply all arguments to a function to be called later.
+
+<PHP>
+$n = 1000000;
+
+$log10ofn = log10($n, ?);
+</PHP>
+
+is equivalent to
+
+<PHP>
+$log10ofn = function() use ($n) {
+    return log10($n);
+}
+</PHP>
+
+
+==== Variadic Functions ====
+
+Variadic functions retain their signatures. Placeholders in a variadic position remain optional in the closure (there are no defaults, places not filled are simply not included in what's sent to the underlying function.) Fixed and placeholder arguments can be interleaved together.
+
+<PHP>
+function f(...$args) {
+    print_r($args);
+}
+
+$f = f(?, 2, ?, 4, ?, 6);
+$f(1, 3);
+</PHP>
+
+Would output:
+
+<PHP>
+Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+    [3] => 4
+    [4] => 6
+)
+</PHP>
+
+===== Backward Incompatible Changes =====
+
+None.
+
+===== Proposed PHP Version(s) =====
+
+7.4 or 8
+
+===== Vote =====
+
+Yes or no, requiring a 2/3 majority to pass.
+
