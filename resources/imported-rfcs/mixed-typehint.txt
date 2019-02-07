@@ -1,87 +1,163 @@
 ====== PHP RFC: Mixed typehint ======
-  * Version: 1.1
+  * Version: 1.2
   * Date: 2017-07-19
+  * Revived: 2019-02-07
   * Author: Michael Moravec (php.net@majkl578.cz)
-  * Status: Under Discussion
+  * Status: In Draft
   * First Published at: http://wiki.php.net/rfc/mixed-typehint
 
 ===== Introduction =====
-With the addition of scalar types in PHP 7, nullables in 7.1 and recently object in 7.2, it's now possible to explicitly declare accepted types for most of the parameters and return types. Unfortunately without mixed type it's still not possible to achieve a fully type hinted and consistent code using simple types.
+
+With the addition of scalar types in PHP 7, nullables in 7.1 and ''object'' in 7.2, it's now possible to explicitly declare accepted types for most of the parameters and return types. Unfortunately without ''mixed'' type it's still not possible to achieve a fully type hinted and consistent code using simple types.
 
 ===== Proposal =====
 
-This RFC proposes to add the ''mixed'' type to be used for parameter and return types to explicitly declare desired type, instead of being forced to not declare anything.
+This RFC proposes to add the ''mixed'' type to be used for parameter and return types when the function or method returns any value.
 
-Primary motivation for having explicit mixed type is consistence and easier static analysis.
-In PHP 7.2, mixed types are unfortunately the only type that could not be type hinted upon (and resource as well, but its future is unclear). Having mixed type would allow a code with 100% type coverage in most cases.
+===== Motivation =====
 
-The behavior of the ''mixed'' type fully matches the behavior when nothing is specified for parameter or return type (thus being implicitly mixed), effectively being an alias for previous behavior.
+When no native type is present, it is unclear what type is expected - it could mean one of the following:
+  - the value is mixed, and since ''mixed'' type does not exist, no native type was specified;
+  - the value is of specific type, but native type is omitted due to compatibility with older PHP version;
+  - the value is of specific type, but the native type was forgotten.
+
+At the time of writing it is not possible between the abovementioned scenarios.
+
+Additionally, as values of mixed type cannot be typehinted upon, it is not possible to achieve full native type coverage.
+
+The behaviour of the ''mixed'' type fully matches the behaviour when nothing is specified for parameter or return type (thus being implicitly mixed), effectively being an alias for previous behaviour.
+
+===== Mixed and Void =====
+
+As of PHP 7.1, PHP has a special ''void'' type - it is not a value type and is only valid for return types to specify that //nothing is returned//.
+
+The difference between ''mixed'' and ''void'' is as follows:
+  - Mixed means **any** value is returned.
+  - Void means **no** value is returned.
+
+Due to this difference, ''void'' is not a subtype of ''mixed''.
+
+===== Type system hiearchy =====
+
+<code>
+                                                                *
+                                                                |
+                                    |---------------------------|---------------------------|
+                                    |                                                       |
+                                 <mixed>                                                  <void>
+                                    |
+   |-------------------------------------------------------------------|
+   |        |     |      |        |         |       |         |        |
+<string> <bool> <int> <float> <resource> <array> <object> <callable> <null>
+</code>
 
 ===== Nullability =====
 
-As the ''mixed'' is a //union type// that accepts //any type//, including null, nullable mixed type (''?mixed'') is disabled at compile time as ''null'' is implied.
+As the ''mixed'' is a //union type// that accepts //any value type//, including null, nullable mixed type (''?mixed'') is forbidden at compile time. This behaviour also conforms to the current usage in documentation.
 
 <code php>
-function foo() : ?mixed {}
-// Fatal error
+function foo(?mixed $arg) {} // Fatal error: Mixed types cannot be nullable, null is already part of the mixed type.
+
+function bar() : ?mixed {} // Fatal error: Mixed types cannot be nullable, null is already part of the mixed type.
+</code>
+
+===== Mixed vs. Void vs. no return type =====
+
+When a function does not have a native return type, it means it //either// returns some value //or// does not return any value. More formally, this would be expressed as ''mixed|void''. This behaviour is fully backward compatible.
+
+====== Inheritance ======
+
+======= Parameters =======
+
+As parameters cannot be ''void'', when no native type is present, it is equivalent to ''mixed'' type and are interchangeable.
+
+The following code is valid:
+<code php>
+class A
+{
+    public function foo($value) // no type is specified, mixed type is assumed
+    {}
+}
+
+class B extends A
+{
+    public function foo(mixed $value) // mixed type is explicitly specified, conforming to parent declaration
+    {}
+}
+
+class C extends B
+{
+    public function foo($value) // no type is specified, mixed type is assumed and conforms to parent declaration
+    {}
+}
+</code>
+
+======= Return types =======
+
+Since return types may be either ''mixed'' or ''void'', the behaviour is slightly more complicated compared to parameters. When no type is specified, subclass must either also declare no type, declare ''void'' or declare ''mixed'' (or any other value type which is subtype of ''mixed''). Additionally neither ''mixed'' nor ''void'' return types could be changed back to no type since this would widen the resulting type.
+
+<code php>
+class A
+{
+    public function foo() // no type is specified, mixed|void is assumed
+    {}
+}
+
+class B extends A
+{
+    public function foo() : mixed // mixed type is explicitly specified, function must return some value
+    {}
+}
+
+class C extends B
+{
+    public function foo() // no type is specified, mixed|void is assumed which is incompatible with mixed type only - Fatal error is thrown
+    {}
+}
+
+class D extends B
+{
+    public function foo() : void // void type is specified, as void is not subtype of mixed, Fatal error is thrown
+    {}
+}
 </code>
 
 ===== Variance =====
 
-No changes to variance needed. Exactly same rules as when no type is present apply.
+''Mixed'' type fully supports variance.
+  - Parameter type may be widened in a subclass from a specific value type to the ''mixed'' type.
+  - Specific return type could be narrowed in a subclass by using the ''mixed'' type.
 
-Since the ''mixed'' type and no type are functionally (not semantically) equivalent, the following code is functionally (but not semantically) equivalent as well:
 <code php>
-function foo($arg) {
-    return $arg;
+class A
+{
+    public function foo(int $value)
+    {}
+    
+    public function bar() : mixed
+    {}
+}
+
+class B extends A
+{
+    public function foo(mixed $value) // parameter type was widened from int to mixed, this is allowed
+    {}
+    
+    public function bar() : int // return type was narrowed from mixed to int, this is allowed
+    {}
 }
 </code>
-and
-<code php>
-function foo(mixed $arg): mixed {
-    return $arg;
-}
-</code>
-
-Same rules apply to inheritance, where mixed type and no type could be interchanged without any error. This code would work just fine:
-<code php>
-class Foo {
-    public function test(mixed $arg): mixed {
-        return $arg;
-     }
-}
-class Bar extends Foo {
-    public function test($arg) {
-        return parent::test($arg);
-    }
-}
-class Baz extends Bar {
-    public function test(mixed $arg): mixed {
-        return parent::test($arg);
-    }
-}
-</code>
-
-===== Mixed vs. Void =====
-
-As of PHP 7.1, PHP has a special ''void'' type. ''Void'' is not a regular type and is only valid for return types to specify that //nothing is returned//.
-
-In some other languages like C/C++ ''void*'' can also be used as a //type// that accepts //any// type.
-This essentially matches the behavior of ''mixed'' in PHP.
-
-As void is not a real type in PHP, it is not part of ''mixed'' type.
-Should there ever be a type that includes all types //and// ''void'', it would be supertype of ''mixed'' and ''void'', i.e. ''any''.
 
 ===== Backward Incompatible Changes =====
 
-None, ''mixed'' is already reserved word since PHP 7.0.
-Variance behavior is same as when no type is specified.
+None, ''mixed'' is already a reserved word since PHP 7.0.
 
 ===== Proposed PHP Version(s) =====
 
-7.3
+7.4
 
 ===== RFC Impact =====
+
 ==== To SAPIs ====
 
 None.
@@ -92,7 +168,7 @@ None.
 
 ==== To Opcache ====
 
-Not analyzed, likely none (no changes to current language behavior).
+Not analyzed, likely none (no changes to current language behaviour).
 
 ===== Unaffected PHP Functionality =====
 
