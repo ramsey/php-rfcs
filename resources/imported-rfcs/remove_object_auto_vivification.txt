@@ -1,0 +1,128 @@
+====== PHP RFC: Remove object auto-vivification ======
+  * Date: 2019-02-25
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Target Version: PHP 8.0
+
+===== Introduction =====
+
+When assigning a property to a falsy value, PHP will currently convert the falsy value into an ''stdClass'' object and emit a warning. This RFC proposes to remove this "auto-vivification" behavior, and make changes to object write semantics made possible by the removal of this functionality.
+
+An example of the current behavior is shown in the following example:
+
+<code php>
+$val = null;
+$val->foo = 42; // Warning: Creating default object from empty value
+var_dump($val); // object(stdClass)#1 (1) { ["foo"]=> int(42) }
+
+$val = "";
+$val->bar = 42; // Warning: Creating default object from empty value
+var_dump($val); // object(stdClass)#1 (1) { ["bar"]=> int(42) } 
+
+$val = "foo";
+$val->abc = 42; // Warning: Attempt to assign property 'abc' of non-object
+var_dump($val); // string(3) "foo"
+</code>
+
+In the first two cases, the value is falsy and a property assignment results in the creation of an object. In the last case, the value is truthy and no implicit conversion into an object occurs.
+
+The auto-vivification behavior places a somewhat subtle requirement on the interpretation of property assignments: Normally, when performing an ''$obj->prop = $val'' operation, this only modifies the object stored in ''$obj'', but importantly, does not modify the storage location of ''$obj'' itself. After the operation, ''$obj'' will always point to the same object, even if that object has undergone internal state changes.
+
+However, the existence of auto-vivification makes this not strictly true: If ''$obj'' is a falsy value, then it will be converted into an object, and that requires changing the storage location of ''$obj'' itself. This distinction doesn't matter in most cases, but can be observed when magic ''%%__get()%%'' (or ArrayAccess ''offsetGet'') is used:
+
+<code php>
+class Magic {
+    public $data = [];
+    public function __get($key) {
+        return $this->data[$key];
+    }
+}
+
+$magic = new Magic;
+$magic->data["arrayOfObj"] = [new stdClass];
+$magic->arrayOfObj[0]->prop = 123;
+// Notice: Indirect modification of overloaded property Magic::$arrayOfObj has no effect
+
+var_dump($magic);
+// object(Magic)#1 (1) {
+//   ["data"]=> array(1) {
+//     ["arrayOfObj"]=> array(1) {
+//       [0]=> object(stdClass)#2 (1) {
+//         "prop"]=> int(123)
+//       }
+//     }
+//   }
+// }
+</code>
+
+In this example, the assignment to ''$magic->arrayOfObj[0]->prop'' generates an "indirect modification has no effect" notice, while the object it still successfully modified. The reason for this behavior is that the assignment needs to fetch ''$magic->arrayOfObj[0]'' for-write on the off-chance that a falsy value will have to be converted into an object.
+
+===== Proposal =====
+
+==== Remove object auto-vivification ====
+
+Assigning a property to a falsy value will no longer result in an implicit creation of an object. Returning to the example from the introduction, the new behavior is consistent for the three cases:
+
+<code php>
+$val = null;
+$val->foo = 42; // Warning: Attempt to assign property 'foo' of non-object
+var_dump($val); // NULL
+
+$val = "";
+$val->bar = 42; // Warning: Attempt to assign property 'bar' of non-object
+var_dump($val); // string(0) ""
+
+$val = "foo";
+$val->abc = 42; // Warning: Attempt to assign property 'abc' of non-object
+var_dump($val); // string(3) "foo"
+</code>
+
+==== Fetch LHS of property assignments for-read ====
+
+When performing ''$a->b = $c'', fetch ''$a'' for-read rather than for-write. This means that the magic ''%%__get()%%'' example above will no longer generate a notice.
+
+The other side-effect of this change is that invalid accesses on the left hand side of the assignment will now be reported. Consider this example where ''$abc'' is an undefined variable:
+
+<code php>
+$abc["foo"]->bar = 42;
+// Before this RFC:
+// Warning: Creating default object from empty value
+
+// After this RFC:
+// Notice: Undefined variable: abc
+// Warning: Attempt to assign property 'bar' of non-object 
+</code>
+
+Previously this only generated the "creating default object" warning, because for-write fetches suppress most other types of diagnostics. With this RFC the fetch is performed for-read and the use of an undefinde variable is properly reported.
+
+=== SimpleXML ===
+
+SimpleXML, through liberal application of overloaded object handlers, allows creating deeply nested structures using a single assignment:
+
+<code php>
+$xml = new SimpleXMLElement('<collection></collection>');
+$xml->movie[]->characters->character[0]->name = 'Tom Hanks';
+echo $xml->asXml();
+</code>
+
+This snippet generates the following XML:
+
+<code>
+<?xml version="1.0"?> <collection><movie><characters><character><name>Tom Hanks</name></character></characters></movie></collection>
+</code>
+
+This functionality is currently implemented under the assumption that everything is fetched for-write, while this RFC proposes to fetch the ''$xml->movie[]->characters->character[0]'' portion of the access for-read. This will result in a "Cannot use [] for reading" compile-time error.
+
+However, even if the code is adjusted to use ''$xml->movie[0]'' rather than ''$xml->movie[]'' (which is at least legal as far as the compiler is concerned), restoring the previous behavior here will still be something of a challenge.
+
+I'm unsure what to do about this as yet.
+
+===== Backward Incompatible Changes =====
+
+The removal of object auto-vivification is a backwards compatibility break, which is why this RFC targets PHP 8. All cases where the behavior will change already generate a warning in PHP 7.4.
+
+The change to read/write semantics should be backwards compatible apart from additional warnings or notices being thrown. However, it may impact extensions that rely on the current behavior, such as the SimpleXML example given above. I'm not aware of other any specific other extension being impacted.
+
+===== Vote =====
+
+Vote might have to be split for just the auto-vivification change (which should be a no-brainer) and the write-semantics change (which has the unfortunate interaction with SimpleXML).
