@@ -1,0 +1,195 @@
+====== PHP RFC: Saner string to number comparisons ======
+  * Date: 2019-02-26
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Target Version: PHP 8.0
+
+===== Introduction =====
+
+Comparisons between strings and numbers using ''=='' and other non-strict comparison operators currently work by casting the string to a number, and subsequently performing a comparison on integers or floats. This results in many surprising comparison results, the most notable of which is that ''%%0 == "foobar"%%'' returns true. This RFC proposes to make non-strict comparisons more useful and less error prone, by using a number comparison only if the string is actually numeric. Otherwise the number is converted to a string, and a string comparison is performed.
+
+PHP supports two different types of comparison operators: The strict comparisons ''==='' and ''!=='', and the non-strict comparisons ''=='', ''!='', ''>'', ''>='', ''<'', ''%%<=%%'' and ''%%<=>%%''. The primary difference between them is that strict comparisons require both operands to be of the same type, and do not perform implicit type coercions. However, there are some additional differences:
+
+  * Strict comparison compares strings with ''strcmp()'' semantics, while non-strict comparison uses a "smart" comparison method that treats strings as numbers if they are numeric.
+  * Strict comparison requires that arrays have keys occurring in the same order, while non-strict comparison allows out-of-order keys.
+  * Strict comparison compares objects by object identity, while non-strict comparison compares their values.
+
+The current dogma in the PHP world is that non-strict comparisons should **always** be avoided, because their conversion semantics are rarely desirable and can easily lead to bugs or even security issues. The single largest source of bugs is likely the fact that ''%%0 == "foobar"%%'' returns true. Quite often this is encountered in cases where the comparison is implicit, such as ''in_array()'' or switch statements. A classic example:
+
+<code php>
+$validValues = ["foo", "bar", "baz"];
+$value = 0;
+var_dump(in_array($value, $validValues));
+// bool(true) WTF???
+</code>
+
+This is an unfortunate state of affairs, because the concept of non-strict comparisons is not without value in a language like PHP, which commonly deals with mixtures of numbers in both plain and stringified form. Considering ''42'' and ''%%"42"%%'' as the same value is useful in many contexts, in part also due to the implicit conversions performed by PHP (e.g. string array keys may be converted to integers). Additionally some constructs (such as switch) only support non-strict comparison natively.
+
+Unfortunately, while the idea of non-strict comparisons has some merit, their current semantics are blatantly wrong in some cases and thus greatly limit the overall usefulness of non-strict comparisons.
+
+This RFC intends to give string to number comparisons a more reasonable behavior: When comparing to a numeric string, use a number comparison (same as now). Otherwise, convert the number to string and use a string comparison. The following table shows how the result of some simple comparisons changes (or doesn't change) under this RFC:
+
+<code php>
+Comparison    | Before | After
+------------------------------
+ 0 == "0"     | true   | true
+ 0 == "0.0"   | true   | true
+ 0 == "foo"   | true   | false
+ 0 == ""      | true   | false
+42 == "   42" | true   | true
+42 == "42foo" | true   | false
+</code>
+
+An alternative way to view these comparison semantics is that the number operand is cast to a string, and the strings are then compared using the non-strict "smart" string comparison algorithm. Compare the above table with the following results for string to string comparisons (which are not changed by this RFC):
+
+<code php>
+Comparison      | Result
+------------------------
+ "0" == "0"     | true
+ "0" == "0.0"   | true
+ "0" == "foo"   | false
+ "0" == ""      | false
+"42" == "   42" | true
+"42" == "42foo" | false
+</code>
+
+This description of the comparison semantics is slightly simplified, and the detailed rules will be outlined in the following, but it should give an intuitive understanding of the new rules and provide a motivation for why they were chosen.
+
+===== Proposal =====
+
+This RFC applies to any operations that perform non-strict comparisons, including but not limited to:
+
+  * The operators ''%%<=>%%'', ''=='', ''!='', ''>'', ''>='', ''<'', and ''%%<=%%''.
+  * The functions ''in_array()'', ''array_search()'' and ''array_keys()'' with ''$strict'' set to false (which is the default).
+  * The sorting functions ''sort()'', ''rsort()'', ''asort()'', ''arsort()'' and ''array_multisort()'' with ''$sort_flags'' set to ''SORT_REGULAR'' (which is the default).
+
+The precise proposed comparison semantics are as follows. For the ''%%$int <=> $string%%'' case:
+
+  * If ''$string'' is a well-formed numeric string with integer value ''$string_as_int'', then return ''%%$int <=> $string_as_int%%''.
+  * If ''$string'' is a well-formed numeric string with float value ''$string_as_float'', then return ''%%(float)$int <=> $string_as_float%%''.
+  * Otherwise, return ''strcmp((string)$int, $string)'' canonicalized to ''-1'', ''0'', and ''1'' return values.
+ 
+For the ''%%$string <=> $int%%'' case:
+
+  * Return ''%%-($int <=> $string)%%''.
+
+For the ''%%$float <=> $string%%'' case:
+
+  * If ''$float'' is NAN, then return 1.
+  * If ''$string'' is a well-formed numeric string with integer value ''$string_as_int'', then return ''%%$float <=> (float)$string_as_int%%''.
+  * If ''$string'' is a well-formed numeric string with float value ''$string_as_float'', then return ''%%$float <=> $string_as_float%%''.
+  * Otherwise, return ''strcmp((string)$float, $string)'' canonicalized to ''-1'', ''0'', and ''1'' return values.
+
+For the ''%%$string <=> $float%%'' case:
+
+  * If ''$float'' is NAN, then return 1.
+  * Otherwise, return ''%%-($float <=> $string)%%''.
+ 
+There are a few subtleties involved here, which are discussed in the following.
+
+==== Well-formed numeric strings ====
+
+While a precise definition is given [[https://github.com/php/php-langspec/blob/be010b4435e7b0801737bb66b5bbdd8f9fb51dde/spec/05-types.md#grammar-str-numeric|in the language specification]], a well-formed numeric string may be briefly described as optional whitespace followed by a decimal integer or floating-point literal. A non well-formed numeric string may have additional trailing characters. All other strings are non-numeric.
+
+Under this proposal well-formed numeric strings have exactly the same comparison semantics as previously. This means that not only are trivial cases like ''%%42 == "42"%%'' true, but also cases where the numbers are given in different formats:
+
+<code php>
+// Before *and* after this RFC
+var_dump(42 == "000042");        // true
+var_dump(42 == "42.0");          // true
+var_dump(42.0 == "+42.0E0");     // true
+var_dump(0 == "0e214987142012"); // true
+</code>
+
+It should be noted that this is also consistent with performing the same (non-strict) comparisons in string form:
+
+<code php>
+// Before *and* after this RFC
+var_dump("42" == "000042");        // true
+var_dump("42" == "42.0");          // true
+var_dump("42.0" == "+42.0E0");     // true
+var_dump("0" == "0e214987142012"); // true
+</code>
+
+Different comparison semantics only appear once either non well-formed or non-numeric strings are involved:
+
+<code php>
+                         // Before | After | Type
+var_dump(42 == "   42"); // true   | true  | well-formed
+var_dump(42 == "42   "); // true   | false | non well-formed
+var_dump(42 == "42abc"); // true   | false | non well-formed
+var_dump(42 == "abc42"); // false  | false | non-numeric
+var_dump( 0 == "abc42"); // true   | false | non-numeric
+</code>
+
+A notable asymmetry under the new semantics is that ''%%"   42"%%'' and ''%%"42   "%%'' compare differently. In my opinion both of these should behave the same and ''%%42 == "42   "%%'' should return true. There is a draft RFC [[rfc:trailing_whitespace_numerics|to allow trailing whitespace]] in numeric strings, which would resolve this issue.
+
+==== Precision and locale ====
+
+The reason why the comparison semantics are not simply defined in terms of casting the number to string and performing a non-strict string comparison (even though that is a good way to think about it for most purposes), is that floating-point to string conversions in PHP are subject to two runtime settings: The ''precision'' ini directive, and the decimal separator specified by the active locale.
+
+Comparisons with well-formed numeric strings are handled separately to be independent of these runtime settings. However, these settings do have an effect for the case where we fall back to binary string comparison.
+
+An example of the effect of the ''precision'' ini directive:
+
+<code php>
+$float = 1.75;
+
+ini_set('precision', 14); // Default
+var_dump($float < "1.75abc");
+// Behaves like
+var_dump("1.75" < "1.75abc"); // true
+
+ini_set('precision', 0); // Degenerate case
+var_dump($float < "1.75abc");
+// Behaves like
+var_dump("2" < "1.75abc"); // false
+</code>
+
+An example of the effect of ''setlocale()'':
+
+<code php>
+$float = 1.75;
+
+var_dump($float < "1.6abc");
+// Behaves like
+var_dump("1.75" < "1.6abc"); // false
+
+setlocale(LC_NUMERIC, 'de_DE.UTF-8');
+var_dump($float < "1.6abc");
+// Behaves like
+var_dump("1,75" < "1.6abc"); // true
+</code>
+
+It should be mentioned that the setlocale() dependence [[https://externals.io/message/103638|may go away]] in PHP 8, but this hasn't been formally proposed yet.
+
+An alternative approach to this issue would be to define that the float to string conversion used for comparisons does not respective the locale and always uses automatically determined precision (''precision=-1'').
+
+==== Special values ====
+
+Floating-point numbers have a number of special non-finite values, which compare as follows:
+
+<code php>
+                             // Before | After
+var_dump(INF == "INF");      // false  | true
+var_dump(-INF == "-INF");    // false  | true
+var_dump(NAN == "NAN");      // false  | false
+var_dump(INF == "1e1000");   // true   | true
+var_dump(-INF == "-1e1000"); // true   | true
+</code>
+
+There are two notable behaviors here: First, infinities now compare equal to ''%%"INF"%%'' or ''%%"-INF"%%'' respectively, because these are the string representations of ''INF'' and ''-INF''.
+
+However, ''NAN'' does not compare equal to ''%%"NAN"%%'', or any other string. All two-way comparison operators involving ''NAN'' and a string will return false. The ''%%<=>%%'' operator returns ''1'' regardless of which side the ''NAN'' is on: This is PHP's internal way of signaling that a value is non-comparable.
+
+The special semantics of NAN follow IEEE-754, under which comparisons involving NAN are always false.
+
+===== Backward Incompatible Changes =====
+
+This change to the semantics of non-strict comparisons is backwards incompatible. Worse, it constitutes a silent change in core language semantics. Code that worked one way in PHP 7.4 will work differently in PHP 8.0. Use of static analysis to detect cases that may be affect is likely to yield many false positives.
+
+One possible way to mitigate the impact is to introduce an ini setting in PHP 7.4, which will perform the comparison using both the old and the new method and emit a deprecation warning if the results differ. This would allow identifying affected code based on production logs.
+
+===== Vote =====
+
+TBD
