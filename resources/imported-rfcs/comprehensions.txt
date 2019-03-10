@@ -1,0 +1,414 @@
+====== PHP RFC: Generator comprehensions ======
+
+* Version: 0.1
+* Date: 2019-03-10
+* Author: Larry Garfield, larry@garfieldtech.com
+* Status: Draft
+* First published at: http://wiki.php.net/rfc/comprehensions
+
+===== Introduction =====
+
+This RFC proposes a new syntax for compact generator creation, or "comprehensions" as they are known in many other languages.  Such a syntax offers a more compact, readable, and expressive way to define common list interactions.  As a result, it also secondarily addresses many (although not all) of the common "I can use arrays this way but not iterators" challenges around functional techniques.
+
+Many languages have comprehensions of some form or another, and the syntax varies widely between them.  The specific syntax proposed for PHP was initially inspired by Python but then modified to ease parsing in PHP.  As PHP has only a single ordered hash data structure there is only a single syntax, unlike in Python or some other languages that have distinct syntaxes for different data structure types.
+
+For example, the following comprehension:
+
+<code php>
+$gen = [for $list as $x if $x % 2 yield $x*2];
+</code>
+
+is semantically identical to this traditional syntax:
+
+<code php>
+$gen = (function() use ($list) {
+  foreach ($list as $x) {
+    If ($x % 2) {
+     yield $x * 2;
+    }
+  }
+})();
+</code>
+
+In both cases, '%%'$gen%%'' is now a generator that will produce double the odd values of $list.  However, the first case uses 38 characters (with spaces) vs 94 characters (with spaces), and is easily compacted onto a single line as opposed to 7.
+
+===== Proposal =====
+
+A comprehension is a shorthand syntax for a generator.  It is able to produce both sequential and associative generators.  The generators produced are full PHP generators and have all capabilities of generators, although in practice the ''%%send()%%'' method will be useless.
+
+The general form of a comprehension is:
+
+'[' ('for' <iterable expression> 'as' $key '=>' $value ('if' <condition>)?)+ (yield <expression>)? ']'
+
+That is, one or more for-if clauses in which the if statement is optional, optionally followed by a ''%%yield%%'' keyword and a single expression.  The entire expression is wrapped in square brackets.
+
+The comprehension evaluates to a generator object, that is, to the result of a generator function rather than a generator function itself.
+
+The ''%%<iterable expression>%%'' may be a variable from the current scope that matches the iterable pseudo-type, an iterable literal (such as an array literal), or any expression that evaluates to an iterable, including another generator or another comprehension.
+
+The ''%%$key%%'' and ''%%$value%%'' variables are produced from ''%%$list%%'' in an identical manner to a ''%%foreach()%%'' statement.  Both are made available to the ''%%<expression>%%'' and to ''%%<condition>%%''  The ''%%$key =>%%'' portion may be omitted, in which case only ''%%$value%%'' is available.
+
+''%%<expression>%%'' may be a single expression or two expressions separated by a double arrow operator (''%%=>%%'').  In the former case a sequential list will be produced by the generator.  In the latter case an associative list will be produced by the generator.  If the yield ''%%<expression>%%'' is omitted then it will default to the value produced by the iterable.  That is, the first two statements below are exactly equivalent, as are the next two;
+
+<code php>
+// Produces only the odd values from $list.
+$gen = [for $list as $x if $x % 2];
+$gen = [for $list as $x if $x % 2 yield $x];
+
+// Produces only those key/value pairs with an odd numeric key.
+$gen = [for $list as $k => $v if $k % 2];
+$gen = [for $list as $k => $v if $k % 2 yield $k => $v];
+</code>
+
+When a variable in the expression or condition is defined in the parent scope it will be captured implicitly by value.  This is the same behavior as in the arrow-function RFC (https://wiki.php.net/rfc/arrow_functions).
+
+Example:
+
+<code php>
+$list = [1, 2, 3, 4, 5];
+$factor = 4;
+$gen = [ for $list as $x if $x % 2 yield $x * $factor ];
+</code>
+
+In this case, the comprehension will produce four times the odd values of ''%%$list%%''.
+
+A comprehension is whitespace insensitive. It may be broken out to multiple lines if it aids readability with no semantic impact.
+
+The following examples show a comprehension and the equivalent inline generator.  In each case the semantic behavior of '"%%$result%%'' is identical for both versions, but the comprehension syntax is shorter and easier to comprehend (pun intended).
+
+<code php>
+// The "no op" case.
+// This also serves as a trivial way to convert an array into an iterator.
+$list = [1, 2, 3, 4, 5];
+
+$result = [for $list as $x];
+
+$result = (function() use ($list) {
+  foreach ($list as $x) {
+    yield $x;
+  }
+})();
+
+// Double each value.
+$list = [1, 2, 3, 4, 5];
+
+$result = [for $list as $x yield $x * 2 ];
+
+$result = (function() use ($list) {
+  foreach ($list as $x) {
+    yield $x * 2;
+  }
+})();
+
+// Only display odd values.
+$list = [1, 2, 3, 4, 5];
+
+$result = [for $list as $x if $x % 2];
+
+$result = (function() use ($list) {
+  foreach ($list as $x) {
+    if ($x % 2) {
+      yield $x;
+    }
+  }
+})();
+
+// Iterate a 2D array.
+$table = [
+1 => [1, 2, 3, 4, 5],
+2 => [1, 2, 3, 4, 5],
+3 => [1, 2, 3, 4, 5],
+4 => [1, 2, 3, 4, 5],
+5 => [1, 2, 3, 4, 5],
+];
+
+// Whitespace is irrelevant, so breaking it out like this is totally fine if it aids readability.
+$result = [for $table as $num => $row if $num %2 ==0 
+    for $row as $col => $value if $col >= 3
+    yield $num => $val
+ ];
+
+$result = (function() use ($table) {
+  foreach ($table as $num => $row) {
+    if ($num % 2 == 0) {
+      foreach ($row as $col => $val) {
+        if ($col >= 3) {
+          yield $num => $val;
+        }
+      }
+    }
+  }
+})();
+
+// Naive QuickSort (never do this in practice)
+function quicksort(array $list) {
+  $pivot = array_pop($list);
+  return array_merge(
+    [for $list as $x if $x <= $pivot], 
+    [$pivot], 
+    [for $list as $x if $x > $pivot]
+  );
+}
+</code>
+
+===== Why for and not foreach? =====
+
+The structure of the generator is more akin to that of a foreach statement in PHP than a for statement.  However, the ''%%for%%'' keyword is used anyway.  There are a number of reasons for that decision:
+
+  - In context the for is unambiguously being used in a foreach-style way, thus there is no confusion.
+  - The '"%%for%%'' keyword is used by both Python and Javascript, the languages with the most similar existing syntax.  (See below.)
+  - The point of comprehensions is a compact yet expressive syntax.  Given the above two points, using ''%%foreach%%'' would add nothing except four additional characters.
+
+If an alternate syntax can be offered that would allow elimination of the ''%%for%%'' keyword entirely without unduly burdening the lexer that would be even more preferable.
+
+===== Why generators? =====
+
+This RFC specifically requires that comprehensions always return a generator, never an array.  There are a number of reasons for that decision:
+
+  - In most cases it doesn't matter either way. The result will be put into a foreach() loop and that will be the end of it.
+  - Cases where it does matter are where the list is especially large, or especially expensive to generate and only selected values will be used.  In those cases a generator is superior as it minimizes the memory and CPU usage (respectively) needed to represent values.
+  - If an actual array is desired, converting a generator to an array is a trivial call to ''%%iterator_to_array()%%''.  Converting an array to an iterator, while technically easy, has no benefit aside from compatibility with other iterators.  Returning a generator, therefore, offers the most benefit with the fewest limitations.
+  - A compact syntax to produce a generator allows for some nifty functional programming techniques that until now have been verbose to implement for non-array iterators.
+
+===== Functional style coding with comprehensions =====
+
+As noted above, comprehensions allow for several common functional techniques in a very compact form, and can be used equally well on both arrays and iterators.  
+
+The following examples show the array-only form, the verbose generator form (what you have to do now to get the same effect for iterators), and the comprehension form.  In each case, we argue that the comprehension form is more expressive, easier to read, and more flexible than the alternatives.  (Note that an array is used in each case as source data, but in practice any iterator can be used for the ''%%foreach()%%'' and comprehension examples.)
+
+==== array_filter() ====
+
+<code php>
+$list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+$result = array_filter($list, function($x) { 
+  return $x % 2;
+});
+
+$result = (function() use ($list) {
+  foreach ($list as $x) {
+    If ($x % 2) {
+      yield $x;
+    }
+  }
+})();
+
+$result = [for $list as $x if $x % 2];
+</code>
+
+The common default "is truth-y" use of ''%%array_filter()%%'' with no callback specified would be easily expressed as:
+
+$result = [for $list as $x if $x];
+
+==== array_map() ====
+
+<code php>
+$list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+$result = array_map(function ($x) {
+  $x * 2;
+}, $list);
+
+$result = (function() use ($list) {
+  foreach ($list as $x) {
+    yield $x * 2;
+  }
+})();
+
+$result = [for $list as $x yield $x * 2];
+</code>
+
+==== array_map over an associative array ====
+
+<code php>
+// Build an array mapping lower-case letters to numbers.
+$list = array_combine(range('a', 'j'), range(1, 10));
+
+// array_map() itself cannot produce an array with dynamically defined keys so is omitted.
+
+$result = (function() use ($list) {
+  foreach ($list as $letter => $num) {
+    yield strtoupper($letter) => $num * 2;
+  }
+})();
+
+$result = [for $list as $letter => $num yield strtoupper($letter) => $num * 2];
+</code>
+
+==== array_map and array_filter combined ====
+
+<code php>
+$list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+// In practice you'd almost always just use a foreach() rather than this monstrosity, but I include it for completeness.
+$result = array_filter(array_map(function ($x) {
+  $x * 2;
+}, $list), function($x) { 
+  return $x % 2;
+});
+
+$result = (function() use ($list) {
+  foreach ($list as $x) {
+    If ($x % 2) {
+      yield $x * 2;
+    }
+  }
+})();
+
+$result = [for $list as $x if $x % 2 yield $x * 2];
+</code>
+
+==== first() ====
+
+A common functional operation is to retrieve the first item from a sequence that matches some condition.  PHP has no native operation of this form, so only a foreach and comprehension form are shown.
+
+<code php>
+$list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+foreach ($list as $x) {
+  if ($x > 3 && $x % 3 == 0) {
+    $result = $x;
+    break;
+  }
+}
+
+$result = [for $list as $x if $x > 3 && $x % 3 == 0]->current();
+</code>
+
+Because a generator implements Iterator, we can call '"%%current()%%'' on it to return the first/current item that would be produced.  The generator itself can be discarded with no further computation expense.
+
+==== any() ====
+
+Another common functional list operation is to determine if at least one item in a list matches some condition.  PHP has no native operation of this form, so only a foreach and comprehension form are shown.
+
+<code php>
+$list = [1, 3, 4, 5, 7, 9];
+
+$any = false;
+foreach ($list as $x) {
+  If ($x % 2 == 0) {
+    $any = true;
+    break;
+  }
+}
+
+$any = ([for $list as $x if $x % 2== 0 yield $x]->current() != null);
+</code>
+
+In this case, we create a generator for items in ''%%$list%%'' that are even.  If there is a ''%%current()%%'' element in that list, then there is at least one element that matches.  If not, ''%%current()%%'' returns null after exhausting the list.  Thus if the return value is not null then there was at least one match and the comparison returns true.  (This does assume that null is not a value matching the condition; if it's not, the developer should be aware of it and know to not to use this approach.)
+
+===== Limitations =====
+
+As with any shorthand syntax, comprehensions cover most common cases but not all.  "Full syntax" generators, defined functions or methods that are generators, and foreach loops are all still fully valid and this RFC makes no attempt to minimize their usefulness.  Developers should use their own judgment as to which style is most readable for their particular context.
+
+For instance, each return expression is limited to a single expression, period.  That precludes embedding particularly complex logic in a comprehension.  If some complex routine is needed, developers can either use more traditional methods (''%%foreach()%%'', ''%%array_map()%%'', etc.) or invoke a function (anonymous or otherwise) from within the expression.  Because the expression is evaluated directly, however, there is no need for special syntax.
+
+<code php>
+function save(Product $p) {
+  // 8 lines of SQL here, or something.
+}
+
+function createProduct(array $data) : Product { 
+  // Whatever.
+}
+
+function loadDataFromCsv() {
+  $handle = fopen("/tmp/inputfile.txt", "r");
+  while ($data = fgetcsv($handle, 1000, ',') !== false) {
+    yield $data;
+  }
+  fclose($handle);
+}
+
+$products = [ for loadDataFromCsv() as $row yield createProduct($row) ];
+// This line will run through the iterator to its end, and discard the output.
+iterator_to_array([for $products as $p yield save($p)]);
+</code>
+
+===== Similar features in other languages =====
+
+Numerous languages include a comprehension syntax of some form (https://en.wikipedia.org/wiki/Comparison_of_programming_languages_(list_comprehension)). 
+
+Two of the languages PHP developers are most likely to also use, JavaScript and Python, feature a very similar syntax.  That is not surprising as Javascript (according to Wikipedia) borrowed its syntax from Python, modifying it to the typical syntax Javascript uses for for-each constructs.  This RFC proposes to do the same, modifying the syntax to fit PHP for-each conventions instead.
+
+Note that in Python 2.x list comprehensions produce a complete list.  In Python 3.x they produce a generator that will, in turn, produce a complete list.  That change has been a source of incompatibility between Python 2.x and 3.x code.  This RFC proposes using generators exclusively for comprehensions.
+
+If a more terse syntax that is still lexer-friendly can be proposed that may be adopted instead of the syntax proposed here.
+
+===== Comparison to other proposals =====
+
+The "sort lambda" or "arrow function" RFC has also been discussed in the past.  While the authors of this RFC support both, they should not be viewed as competing but as complementary as they serve different purposes.  While arrow functions would improve the readability of the examples above over their current counterparts, they still would not offer as clean and readable a syntax for the cases where Comprehensions are well suited.  They also would not address the array-or-iterable question for ''%%array_map()%%'' and ''%%array_filter()%%''.  Consider this example from above:
+
+<code php>
+$result = array_filter(array_map(function ($x) {
+  $x * 2;
+}, $list), function($x) { 
+  return $x % 2;
+});
+
+$result = [for $list as $x if $x % 2 yield $x * 2];
+</code>
+
+The arrow function equivalent would be:
+
+<code php>
+$result = array_filter(
+   array_map(fn($x) => $x * 2, $list),
+   fn($x) => $x % 2
+);
+</code>
+
+Which, while unquestionably an improvement over the array_map/array_filter status quo, is still substantially more verbose and hard to read than the proposed Comprehension.
+
+That said, there are ample other cases where arrow functions would be useful so the adoption of this RFC should in no way be seen to detract from their benefit.
+
+===== Possible extensions (for this RFC or later) =====
+
+==== Types ====
+
+As there are no explicit function boundaries in the comprehension syntax there is nowhere to explicitly define a parameter or return type.
+
+If desired, a possible solution is to include a ''%%": <type>"%%'' at the end of the comprehension, like so:
+
+<code php>
+$gen = [for $list as $x yield $x : Product];
+</code>
+
+Which would then result in a type error if any item in the generator is not a Product.  The authors are undecided on this point.
+
+An interesting side-effect of this feature would be a way to type-enforce arbitrary arrays or iterables by wrapping them into a typed generator:
+
+<code php>
+$array = [1, 2, "3", 4];
+
+$gen = [for $array as $x : int];
+foreach ($gen as $val) {
+  // A TypeError would be thrown on the 3rd value, as it's not an int.
+}
+</code>
+
+==== Running out an iterator ====
+
+Nothing prevents the expression of a generator invoking a callable.  That is equivalent to ''%%array_map()%%'' with a non-inline function.  In some cases calling code will need only invoke the generator, and not actually care about the return value of the expression; the invocation of a callable (say, to save a result) is the desired effect.  There are two ways to achieve that goal with the proposed syntax.  Consider the example from the "Limitations" section above.  There are two ways to handle the final line:
+
+<code php>
+$run = [for $products as $p yield save($p)];
+
+// iterator_to_array() will result in an array of return values fro save_entity(). Depending on the data set this could be quite large, and must be allocated even if not saved.
+iterator_to_array($run);
+
+// An empty foreach() will simply discard the return values, but is rather clumsy.
+foreach ($run as $val);
+</code>
+
+It would be preferable to introduce a new function or language construct that can take an arbitrary generator and "run it out", discarding the results.  Such an operator would be a "nice to have" but is not a requirement of this RFC.
+
+===== Backward Incompatible Changes =====
+
+None
+
+===== Proposed PHP Version(s) =====
+
+PHP 7.4
+
+
