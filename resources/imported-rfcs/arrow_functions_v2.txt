@@ -1,0 +1,695 @@
+====== PHP RFC: Arrow Functions 2.0 ======
+  * Date: 2019-03-12
+  * Author: Nikita Popov <nikic@php.net>
+  * Author: Levi Morrison <levim@php.net>
+  * Author: Bob Weinand <bwoebi@php.net>
+  * Target PHP version: PHP 7.4
+  * Status: Draft
+
+===== Introduction =====
+
+Anonymous functions and closures can be verbose even though they perform only a simple operation.
+Additionally, importing variables into the closure's scope is manual and a painful overhead for
+single-expression closures. In practice these single-expression closures are common. This RFC
+proposes a more concise syntax for this pattern.
+
+As an example of the declaration overhead, consider this function that [[https://github.com/darkskillfr/near2u/blob/5a606fc9082c33c7270d37e4c7d29160586285f8/serveur/lib.php|I found online]]:
+
+<PHP>
+function array_values_from_keys($arr, $keys) {
+    return array_map(function ($x) use ($arr) { return $arr[$x]; }, $keys);
+}
+</PHP>
+
+The closure performs a single operation <php>$arr[$x]</php> and is 8 characters but requires 30
+other characters (excluding whitespace). This means that roughly 79% of the closure's code is
+overhead (30/38). For this RFC these extra characters are called 'boilerplate'. This RFC proposes
+arrow functions to reduce the amount of boilerplate by having a shorter syntax and importing used
+variables from the outer scope implicitly. Using arrow functions from this RFC this would reduce
+to the following:
+
+<PHP>
+function array_values_from_keys($arr, $keys) {
+    return array_map(fn($x) => $arr[$x], $keys);
+}
+</PHP>
+
+This reduces the amount of boilerplate from 30 characters down to 8.
+
+A previous [[rfc:short_closures|short closures RFC]] has been declined. This proposal tries to
+address some of the raised concerns with a different choice of syntax, that is not subject to the
+limitations of the previous proposal.
+
+Additionally, this RFC includes a lengthy discussion of different syntax alternatives as well as
+binding semantics. Unfortunately short closures are a topic where we're unlikely to find a "perfect"
+solution, due to significant constraints on the syntax and implementation. This proposal makes a
+choice that we consider "least bad". Short closures are critically overdue, and at some point we'll
+have to make a compromise here, rather than putting of the topic for another few years.
+
+===== Proposal =====
+
+Arrow functions have the following basic form:
+
+<PHP>
+fn(parameter_list) => expr
+</PHP>
+
+When a variable used in the expression is defined in the parent scope it will be implicitly captured
+by-value. In the following example the functions ''$fn1'' and ''$fn2'' behave the same:
+
+<PHP>
+$y = 1;
+
+$fn1 = fn($x) => $x + $y;
+
+$fn2 = function ($x) use ($y) {
+    return $x + $y;
+};
+</PHP>
+
+This also works if the arrow functions are nested:
+
+<PHP>
+$z = 1;
+$fn = fn($x) => fn($y) => $x * $y + $z;
+</PHP>
+
+Here the outer function captures ''$x''. The inner function then also captures ''$x'' from the outer
+function. The overall effect is that the ''$z'' from the outer scope becomes available inside the
+inner function.
+
+==== Function signatures ====
+
+The arrow function syntax allows arbitrary function signatures, including parameter and return
+types, default values, variadics, as well as by-reference passing and returning. All of the
+following are valid examples of arrow functions:
+
+<PHP>
+fn(array $x) => $x;
+fn(): int => $x;
+fn($x = 42) => $x;
+fn(&$x) => $x;
+fn&($x) => $x;
+fn($x, ...$rest) => $rest;
+</PHP>
+
+==== Static arrow functions ====
+
+For the sake of completeness, static arrow functions are supported using the syntax
+<php>static fn($x) => $x</php>. A static arrow function, just like a static closure, will not
+bind the ''$this'' variable. I believe the only way in which static closures are used in practice
+is to avoid GC cycles and make destruction behavior more predictable.
+
+==== By-value variable binding ====
+
+As already mentioned, arrow functions use by-value variable binding. This is roughly equivalent
+to performing a ''use($x)'' for every variable ''$x'' used inside the arrow function. A by-value
+binding means that it is not possible to modify any values from the outer scope:
+
+<PHP>
+$x = 1;
+$fn = fn() => $x++; // Has no effect
+$fn();
+var_dump($x); // int(1)
+</PHP>
+
+Please see the discussion section for a discussion of other possible binding modes, and their
+tradeoffs.
+
+There is a small difference between the implicitly generated uses and explicit ones: The implicit
+uses will not generate an undefined variable notice if the variable is undefined at binding time.
+This means that the following code only generates one notice (when trying to use ''$undef''),
+rather than two (when trying to bind ''$undef'' and when trying to use it):
+
+<PHP>
+$fn = fn() => $undef;
+$fn();
+</PHP>
+
+The reason for this is that we cannot (due to references) always determine whether a variable is
+read or written or both. Consider the following somewhat contrived example:
+
+<PHP>
+$fn = fn($str) => preg_match($regex, $str, $matches) && ($matches[1] % 7 == 0)
+</PHP>
+
+Here ''$matches'' is populated by ''preg_match()'' and needn't exist prior to the call. We would
+not want to generate a spurious undefined variable noticed in this case.
+
+Finally, the automatic binding mechanism only considers variables that are used literally. That is,
+the following code will generate an undefined variable notice, because ''$x'' has no literal uses
+inside the function and thus hasn't been bound:
+
+<PHP>
+$x = 42;
+$y = 'x';
+$fn = fn() => $$y;
+</PHP>
+
+Support for this could be easily added by using a more general binding mechanism (bind everything
+rather than binding what is used) when variable variables are encountered. It's excluded here
+because supporting this is a waste of opcodes, but if people don't like that, it can be supported.
+
+==== Precedence ====
+
+Arrow functions have lowest precedence. This means that the expression to the right of ''%%=>%%''
+will be consumed as far as possible:
+
+<PHP>
+fn($x) => $x + $y
+// is
+fn($x) => ($x + $y)
+// not
+(fn($x) => $x) + $y
+</PHP>
+
+==== Backward Incompatible Changes ====
+
+Unfortunately the ''fn'' keyword must be a full keyword and not just a reserved function name.
+
+Ilija Tovilo analyzed the top 1,000 PHP repositories on GitHub to find usages of ''fn''.
+[[https://gist.github.com/morrisonlevi/473a7e0cb6e59c830224b1c71b8da28c|The gist]] provides more
+information, but the rough findings are that all known existing usages of ''fn'' are in tests
+except one case where it is a namespace segment.
+
+===== Examples =====
+
+These examples are copied from the [[rfc:arrow_functions|previous version]] of the arrow functions
+RFC.
+
+Taken from [[https://github.com/silexphp/Pimple/blob/62b5d317a83b02eea42b5b785b62a29fba458bcf/src/Pimple/Container.php#L242-L244|silexphp/Pimple]]:
+
+<PHP>
+$extended = function ($c) use ($callable, $factory) {
+    return $callable($factory($c), $c);
+};
+
+// with arrow function:
+$extended = fn($c) => $callable($factory($c), $c);
+</PHP>
+
+This reduces the amount of boilerplate from 44 characters down to 8.
+
+-----
+
+Taken from [[https://github.com/doctrine/dbal/blob/master/lib/Doctrine/DBAL/Schema/PostgreSqlSchemaManager.php|Doctrine DBAL]]:
+
+<PHP>
+$this->existingSchemaPaths = array_filter($paths, function ($v) use ($names) {
+    return in_array($v, $names);
+});
+
+// with arrow function
+$this->existingSchemaPaths = array_filter($paths, fn($v) => in_array($v, $names));
+</PHP>
+
+This reduces the amount of boilerplate from 31 characters down to 8.
+
+-----
+
+The complement function as found in many libraries:
+
+<PHP>
+function complement(callable $f) {
+    return function (... $args) use ($f) {
+        return !$f(... $args);
+    };
+}
+
+// with arrow function:
+function complement(callable $f) {
+    return fn(... $args) => !$f(... $args);
+}
+</PHP>
+
+-----
+
+The following example was given to me by [[https://gist.github.com/tpunt/b4f9bf30f43b9e148b73ce18245ab472|tpunt]]:
+
+<PHP>
+$result = Collection::from([1, 2])
+    ->map(function ($v) {
+        return $v * 2;
+    })
+    ->reduce(function ($tmp, $v) {
+        return $tmp + $v;
+    }, 0);
+
+echo $result; //6
+
+// with arrow functions:
+$result = Collection::from([1, 2])
+    ->map(fn($v) => $v * 2)
+    ->reduce(fn($tmp, $v) => $tmp + $v, 0);
+
+echo $result; //6
+</PHP>
+
+===== Vote =====
+
+Simple yes/no vote.
+
+===== Discussion =====
+
+==== Syntax ====
+
+The probably most desired syntax for arrow functions is ''%%($x) => $x * $y%%'' or ''%%$x => $x * $y%%'' for short. It is very concise, and used by a number of other programming languages, including JavaScript. However, using this syntax in PHP comes with some severe technical challenges. This section will discuss a number of possible syntaxes for arrow functions and what benefits and disadvantages they have.
+
+=== ($x) => $x * $y ===
+
+This is both the most popular and the most technically infeasible syntax. The primary issue this choice has over all others is that ''%%=>%%'' is already used in PHP for the purpose of specifying key-value pairs in array declarations and yield expressions. As such, the following code is ambiguous:
+
+<PHP>
+// Array of arrow functions, or just a key-value map?
+$array = [
+    $a => $a + $b,
+    $x => $x * $y,
+];
+</PHP>
+
+This kind of ambiguity is not a problem in and of itself. Expression syntax is full of ambiguities, which are resolved by precedence, associativity or other rules. For backwards compatibility reasons, we would have to define that the array as written above is just a key-value mapping, while an array containing closures would be written as follows:
+
+<PHP>
+$array = [
+    ($a => $a + $b),
+    ($x => $x * $y),
+];
+</PHP>
+
+The same distinction would exist for yield expression:
+
+<PHP>
+yield $foo => $bar; // key-value yield
+yield ($foo => $bar); // yield of arrow function
+</PHP>
+
+In fact, this kind of ambiguity already exists without arrow functions when yield and arrays are combined:
+
+<PHP>
+$array = [yield $k => $v];
+// is interpreted as
+$array = [(yield $k => $v)];
+// but could also be interpreted as
+$array = [(yield $k) => $v];
+</PHP>
+
+Unfortunately, the ''%%$x => $y%%'' syntax is also subject to the limitation that are described in the following section, which are ultimately much more problematic.
+
+=== ($x) ==> $x * $y ===
+
+This is a category of possible syntaxes that includes ''%%($x) ==> $x * $y%%'' (used by Hack), ''%%($x) ~> $x * $y%%'' (previous short closure proposal), or any other syntax of the form ''(params) SIGIL expr''. These avoid the ambiguity with array and yield syntax.
+
+While simple forms of this syntax like ''%%($x, $y) ==> $x + $y%%'' are easy to support, permitting arbitrary function signatures to the left of ''%%==>%%'' runs into considerable challenges in the parser implementation:
+
+The fundamental problem is that the start of many function signatures looks like an ordinary expression and we may only be able to detect that we're dealing with an array function when the parser sees the ''%%==>%%'' symbol.
+
+Here are two examples of non-trivial cases where the part to the left of ''%%==>%%'' is also a valid expression in itself:
+
+<PHP>
+($x = [42] + ["foobar"]) ==> $x; // Assignment expression
+(Type &$x) ==> $x;               // Constant lookup + bitwise and
+</PHP>
+
+These cases could be handled in the parser by accepting a general ''%%expr ==> expr%%'' and later post-processing the left-hand side expression to interpret a bitwise and as a typed by-reference pass, and so on.
+
+A possibly more problematic example is the following:
+
+<PHP>
+$a ? ($b): Type ==> $c : $d;
+</PHP>
+
+While there is only one way this can be interpreted as valid code, the characters to the left of the arrow ''$a ? ($b): Type'' already form a ternary expression by themselves, which poses further challenges to a limited lookahead parser implementation.
+
+If we want to use this kind of syntax, we basically have a number of choices:
+
+1. Try to hack this into the current parser. I'm not sure if this is even possible (at least
+no one has succeeded with supporting the full syntax yet), but even if it is, it would leave us
+with a major mess, that would get worse as new syntax for types is added. For example, if we
+support generics and union types, then the LHS of ''%%(Foo<int|string> $bar) ==> $bar%%'' would be
+''%%((Foo < int) | (string > $bar))%%'' when interpreted as an expression. Dealing with more and more
+of these cases does not seem practical.
+
+2. Switch to a more powerful parser. Currently we use a LALR(1) parser, but
+the parser generator we use (bison) also supports GLR parsing. The GLR parser essentially works by
+splitting the parser state into two every time an ambiguous state is encountered, and running two
+parsers in lock-step until one yields a parse error or they recombine.
+
+Using a GLR parser comes with two big disdvantages: The first is that splitting the parser state
+and running two parsers has a performance cost. This may be managable if the non-LR(1) portions are
+restricted to uncommon parts of the grammar. However, in this case the conflict arises at most
+''('' tokens inside an expression context, each of which requires a parser split. What is more
+problematic is that these splits can occur recursively. Consider the following example:
+
+<PHP>
+($a = ($a = ($a = ($a = ($a = 42) ))))
+($a = ($a = ($a = ($a = ($a = 42) ==> $a))))
+//  looks the same until here  ---^
+</PHP>
+
+This kind of code would split the parser at each ''('', resulting in a total of 2^5 parsers running
+at the same time. Once again, we can work around this. A default value cannot actually contain
+variables, so we could determine that ''($a = ($a'' cannot be a valid start of an arrow function and
+abandon one of the parsers at that point. This would require moving the restrictions on default
+values from the compiler (where they generate an "unsupported operation" error) into the parser
+(where they would generate a parse error on the ''$a'' token). Furthermore, this would pose a
+possible hazard to future extension: It doesn't seem inconceivable to me that we'd want to relax the
+default value restrictions and allow code similar to the following at some point:
+
+<PHP>
+function str_slice($str, $from, $to = strlen($str)) { /* ... */ }
+</PHP>
+
+Once this is allowed and variables can legally be part of default values, the problem of potential
+exponential parsing complexity could no longer be avoided.
+
+The second problem with GLR parsers is that they make it much harder to ensure that our language
+grammar is in fact unambiguous. Our current implementation is conflict-free under LALR(1), which
+gives us confidence that the grammar is well-defined and is interpreted in the desired way. Using a
+GLR parser requires the intentional introduction of parser conflicts, and makes it hard to verify
+that these conflicts have no effects beyond the desired ones.
+
+3. Use lexer lookahead. Instead of solving this problem at the parser level, we can deal with it in
+the lexer (this is what HHVM does for their ''%%==>%%'' implementation). The basic idea is that we
+will replace the '''(''' token with a special ''T_ARROW_START'' token, if that parenthesis is part
+of an arrow function. To determine this, we would let the lexer run ahead and collect the tokens in
+a buffer (so we can replay them later), until we find the corresponding '')'' and can check whether
+it is followed by ''%%==>%%''. A complication (and forward-compatibiltiy hazard) is that it is not
+sufficient to check for just ''%%) ==>%%'', as we also need to handle ''%%): ?Type ==>%%'' and
+possible future extensions to the type system. 
+
+For reference, the HHVM implementation can be found here: https://github.com/facebook/hhvm/blob/50c593d591302bf1490c974dcbe0e02e6a4fc5f3/hphp/parser/scanner.cpp#L770 Most of the relevant code is in the various ''tryParse'' functions.
+
+Using lexer lookahead is in principle a viable option. It should be noted that it does not work for
+the ''%%=>%%'' based syntax, as we would not be able to distinguish between arrow functions and
+key-value pair in the lexer.
+
+4. Restrict the syntax. This is what the previous [[rfc:short_closures|short closures RFC]] did,
+which disallows the use of parameter types, return types and default values inside short closures.
+As this removes the main points of complexity, a pure-parser implementation becomes possible.
+
+While this certainly solves the technical problems, I believe that that the inability to specify
+type hints (even for short closures) was a deal-breaker for many people, and the reason why the
+previous RFC ultimately failed.
+
+While I personally think that the ability to type arrow functions is not particularly important
+from a type safety perspective, it can be important for static analysis and IDE autocomplete
+support.
+
+=== fn($x) => $x * $y ===
+
+The core problem with the previous syntax suggestions is that we need to parse the arrow function
+starting at the ''('', but only know it actually is one once we reach the ''%%==>%%''. The obvious
+solution to this problem is to modify the syntax to have a distinctive leading symbol. This RFC
+proposes ''fn'' as a short, yet readable possibility. The disadvantage is that ''fn'' must become
+a reserved keyword.
+
+There are of course also other syntax possibilities with leading symbols, especially once we open
+the can of unused unary operators:
+
+<PHP>
+function($x) => $x * $y
+fn($x) => $x * $y
+\($x) => $x * $y
+^($x) => $x * $y
+
+*($x) => $x * $y
+$($x) => $x * $y
+%($x) => $x * $y
+&($x) => $x * $y
+=($x)=> $x * $y
+
+// Not possible, because these are valid unary operators.
+!($x) => $x * $y
++($x) => $x * $y
+-($x) => $x * $y
+~($x) => $x * $y
+@($x) => $x * $y
+</PHP>
+
+I've highlighted the first four examples as the only ones I would consider somewhat viable. ''fn''
+is already proposed here. ''function'' would be the same syntax with an existing keyword. The
+disadvantage of course is that the keyword is quite long, and the big selling point of arrow
+functions is brevity. The ''%%\($x) => $x * $y%%'' syntax is included due to it's similarity to the
+Haskell lambda syntax (think of ''\'' as a poor man's ''λ''). The ''^'' sigil is supported by Clang.
+
+Once we use a syntax with a leading symbol, it is tempting to drop the arrow entirely. Instead of
+''fn($x) => $x * $y'', couldn't we just use ''fn($x) $x * $y''? Unfortunately this is not possible,
+because the interpretation of return types becomes ambiguous:
+
+<PHP>
+fn($x): T \T \T
+// could be
+fn($x): T\T (\T)
+// or
+fn($x): T (\T\T)
+</PHP>
+
+It would be possible to resolve this ambiguity by lexing namespaced names as a single token
+(removing support for whitespace inside them). This would, however, be a breaking change.
+
+=== Different parameter list separators ===
+
+Some languages like Rust use a different kind of separator for parameter likes in closures. For
+example:
+
+<PHP>
+|$x| => $x * $y
+</PHP>
+
+The use of ''|'' would serve the same purpose as a leading sigil, as ''|'' is not a legal unary
+operator. However, the use of ''|'' does have some unfortunate interactions with union types and
+use of binary or in default values:
+
+<PHP>
+|T1|T2 $x = A|B| => $x
+</PHP>
+
+While I believe that there are no actual syntactical ambiguities here, it is rather confusing to
+read. Beyond that, the use of ''|$x|'' for parameter lists would be atypical for PHP.
+
+=== Block-based syntax ===
+
+A very different possibility to the ones discussed before are block-based notations, such as those
+used by Ruby or Swift. A possible syntax would be:
+
+<PHP>
+{ ($x) => $x + $y }
+</PHP>
+
+While this syntax has a leading ''{'', it does not quite serve as a distinguishing sigil, because
+PHP supports the use of free-standing blocks. The following is legal PHP code:
+
+<PHP>
+{ ($x) + $y };
+</PHP>
+
+This means that we run into some of the same parsing issues as the syntax variants without a
+leading symbol. However, an easier workaround exists in this case: We can forbid the use of short
+closure syntax for expressions statements. This means that "free-standing" short closures would not
+be permitted, they need to be part of an expression in some way:
+
+<PHP>
+{ ($x) => $x + $y }; // ILLEGAL
+$fn = { ($x) => $x + $y }; // legal
+</PHP>
+
+This generally makes the block-based syntax a viable candidate. Personally, I think it's not better
+than the ''fn()'' notation though, and becomes somewhat noisy especially when arrow functions are
+nested:
+
+<PHP>
+fn($x) => fn($y) => $x * $y
+{ ($x) => { ($y) => $x * $y } }
+</PHP>
+
+=== C++ syntax ===
+
+C++11 uses the following syntax for lambdas (C++20 extensions omitted for your sanity):
+
+<code>
+[captures](params){body}
+</code>
+
+The captures here are similar to the ''use()'' list in PHP and additionally support ''[=]'' and
+''[&]'' to capture all variables by-value or by-reference, respectively.
+
+This syntax is not viable in PHP, because ''[$x]($y)'' is already valid syntax, so this would run
+into all the same parsing issues.
+
+=== Other ideas? ===
+
+Happy to add more to this list.
+
+==== Binding behavior ====
+
+Next to syntax, the other contentious point with regards to short closures is the binding behavior.
+Short closures automatically bind used variables from the parent scope, the question is how exactly
+that binding works. There are basically three possibilities, which we'll call by-value,
+by-reference and by-variable binding here.
+
+By-value binding corresponds to ''use($x)'' and by-reference binding to ''use(&$x)''. The advantage
+of reference binding is that it allows you to modify variables inside the arrow function:
+
+<PHP>
+$x = 1;
+$fn = () => $x++;
+$fn();
+var_dump($x); // By-value: 1
+              // By-reference: 2
+</PHP>
+
+At least for arrow functions in their single expression form, the ability to change variables from
+the outer scope seems to be of limited usefulness. This would be more useful in conjunction with
+block form.
+
+Unfortunately it cannot be said that by-reference bindings are "strictly better" than by-value
+bindings, due to two main issues: The first is that by-reference bindings have a performance cost,
+because they require the creation of reference wrapper, and their subsequent dereferencing. It
+would be rather unfortunate if the choice between using an array function and using the full
+closure syntax would also have to take into account their different performance characteristics.
+
+The second and more important issue is that by-reference binding goes both ways: While it allows
+modifying a variable from inside the closure, it also means that the variable inside the closure
+can be changed from outside. The following example illustrates why this problematic, and why the
+use of implicit by-reference binding can cause highly non-intuitive behavior:
+
+<PHP>
+$range = range(1, 5);
+$fns = [];
+foreach ($range as $i) {
+    $fns[] = fn() => $i;
+}
+foreach ($fns as $fn) {
+    echo $fn();
+}
+// By-value:     1 2 3 4 5
+// By-reference: 5 5 5 5 5
+// By-variable:  5 5 5 5 5
+</PHP>
+
+If the arrow function uses by-value binding, everything works as expected. If it uses by-reference
+binding, what happens is the following: On the first loop iteration, the ''$i'' inside the closure
+is bound by-reference to the ''$i'' of the foreach loop. On the second iteration the value inside
+this reference is overwritten, and it is additionally bound to the ''$i'' in the new closure. After
+the loop has finished, we're left with all closures sharing a single reference, that contains the
+value it was assigned last.
+
+The third binding mode which hasn't been discussed yet and which is not currently available in PHP
+is the by-variable binding. This is a true scope binding, where variables in the outer scope and
+variables in the closure scope are shared. By-reference binding is an approximation of this
+behavior, but not quite the same, as the following variation of the previous example illustrates:
+
+<PHP>
+$range = range(1, 5);
+$fns = [];      // v-- added this
+foreach ($range as &$i) {
+    $fns[] = fn() => $i;
+}
+foreach ($fns as $fn) {
+    echo $fn();
+}
+// By-value:     1 2 3 4 5
+// By-reference: 1 2 3 4 5
+// By-variable:  5 5 5 5 5
+</PHP>
+
+When iterating with foreach by-reference and using a by-reference binding the behavior now
+changes: The by-reference foreach performs a reference assignment (rather than a value assignment)
+on each iteration, which breaks the previous reference relationship. This means that each closure
+will now get it's own independent reference that refers to the corresponding array element.
+
+When using a by-variable binding, the way the assignment occurs does not matter: The ''$i'' in the
+outer code and the ''$i''s in the closures are literally the same variables, so only the final
+value of ''$i'' at the time the closure is called is relevant.
+
+By-variable bindings would be hard to implement in PHP, and it would likely not be possible to make
+them as performant as by-value bindings.
+
+Due to the issue illustrated with the foreach examples above, I believe that the only binding type
+that is a viable default for PHP is by-value binding. However, it might be valuable to also allow
+explicitly switching to a by-reference binding, especially if block closures are allowed. This
+could looks something like this:
+
+<PHP>
+$fn = fn() use(&) {
+    // ...
+};
+</PHP>
+
+This would instruct PHP to bind all used variables by-reference rather than by-value.
+
+===== Future Scope =====
+
+These are some possible future extensions, but we don't necessarily endorse them.
+
+==== Multi-statement bodies ====
+
+This RFC allows arrow functions to only have a single, implicitly returned expression. However, it
+is common in other languages to also support of form that accepts a code block with an arbitrary
+number of statements:
+
+<PHP>
+fn(params) {
+    stmt1;
+    stmt2;
+    return expr;
+}
+</PHP>
+
+This feature is omitted in this RFC, because the value-proposition of this syntax is much smaller:
+Once you have multiple statements, the relative overhead of the conventional closure syntax becomes
+small.
+
+An advantage of supporting this syntax is that it is possible to use a single closure syntax for
+all purposes (excluding cases that need to control binding behavior), rather than having to mix two
+different syntaxes depending on whether they use a single expression or multiple statements.
+
+==== Switching the binding mode ====
+
+Arrow functions use by-value binding by default, but could be extended with the possibility to
+capture variables by reference instead. This is particularly useful in conjunction with the previous
+section, as multi-statement bodies are more likely to be interested in modifying variables from the
+outer scope. A possible syntax would be:
+
+<PHP>
+$a = 1;
+$fn = fn() use(&) {
+    $a++;
+};
+$fn();
+var_dump($a); // int(2)
+</PHP>
+
+Another possibility would be to keep by-value binding as the default, but allow using some
+explicitly specified variables by reference:
+
+<PHP>
+$a = 1;
+$b = 2;
+$fn = fn() use(&$a) {
+    $a += $b;
+};
+$fn();
+var_dump($a); // int(3)
+</PHP>
+
+In this example ''$b'' is still implicitly used by-value, but ''$a'' is explicitly used by-value.
+However, this syntax may be confusing as it is very close to the normal closure syntax, which
+would **not** implicitly bind ''$b''.
+
+==== Allow arrow notation for real functions ====
+
+It would be possible to allow using the arrow notation for normal functions and methods as well.
+This would reduce the boilerplate for single-expression functions like getters:
+
+<PHP>
+class Test {
+    private $foo;
+    private $bar;
+
+    fn getFoo() => $this->foo;
+    fn getBar() => $this->bar;
+}
+</PHP>
+
+There are some possible variations of this, e.g. allow ''%%=>%%'' but not ''fn''.
