@@ -1,41 +1,138 @@
 ====== PHP RFC: Nullable Casting ======
 
-  * Version: 0.1.0-draft
-  * Date: 2018-08-07
-  * Author: David Rodrigues, david.proweb@gmail.com
+  * Version: 0.2-draft
+  * Date: 2019-03-17
+  * Author: David Rodrigues (david.proweb@gmail.com), Guilliam Xavier (guilliam.xavier@gmail.com)
   * Status: Draft
-  * Discussion at: https://externals.io/message/102997
+  * First Published at: http://wiki.php.net/rfc/nullable-casting
 
 ===== Introduction =====
 
-PHP supports expression casting by using ''(int) expression'', but it doesn't consider that the expression could be a nullable type, as introduced by PHP 7.1. Due to the lack of support for the nullable casting, is necessary to create some additional codes to keep a nullable output as nullable after a casting, for example.
+PHP supports expression casting to primitive type (like ''int'') by using "''('' //type// '')'' //expression//", but it currently doesn't allow to use a nullable type as introduced by PHP 7.1 (e.g. ''?int'').
+
+Due to the lack of support for nullable casting, it is necessary to write additional code to preserve a possible ''null'' value through the type conversion. This feature would also bring more consistency and completeness to the existing language.
 
 ===== Proposal =====
 
-The proposal is to add support to nullable casting to current casting feature. Basically, ''(int)'' is the default int casting, and ''(?int)'' will be a nullable int casting. Generally speaking, what changes is the possibility of using a ''?'' before the type of casting, turning it into a nullable cast.
+The proposal is to add support of nullable types to the current casting feature. Basically, ''(int)'' is the "plain" int cast, and ''(?int)'' will be a nullable int cast. Generally speaking, what changes is the possibility to use a leading question mark symbol (''?'') before the type of a cast, turning it into a nullable cast.
 
-The difference between casting and nullable casting is that it the expression is null, it should be keeped as null, instead to be forced to the destination cast.
+The only difference of nullable casting compared to plain casting is that if the expression value is ''null'', it will be kept as ''null'' instead of being forced to the destination plain type:
 
-^ Input                   ^ (cast) - default       ^ (?cast) - nullable     ^ Same result?          ^
-| int (123)               | int (123)              | int (123)              | Yes                   |
-| null                    | int (0)                | null                   | No                    |
-| bool (true)             | bool (true)            | bool (true)            | Yes                   |
-| bool (false)            | bool (false)           | bool (false)           | Yes                   |
-| null                    | bool (false)           | null                   | No                    |
-| float (1.23)            | float (1.23)           | float (1.23)           | Yes                   |
-| null                    | float (0.0)            | null                   | No                    |
-| string ("test")         | string ("test")        | string ("test")        | Yes                   |
-| null                    | string ("")            | null                   | No                    |
-| array ([1, 2, 3])       | array ([1, 2, 3])      | array ([1, 2, 3])      | Yes                   |
-| null                    | array ([])             | null                   | No                    |
-| object ({ a => 1 })     | object ({ a => 1 })    | object ({ a => 1 })    | Yes                   |
-| null                    | object ({})            | null                   | No                    |
+^                //type//:^  int   ^  bool   ^  float  ^  string  ^  array   ^  object  ^
+^   ''(''//type//'')''null|  0     |  false  |  0.0    |  %%""%%  |  %%[]%%  |  %%{}%%  |
+^  ''(?''//type//'')''null|  null  |  null   |  null   |  null    |  null    |  null    |
 
-**Note:** the ''(unset)'' will not be affected, returning ''null'' in any case.
+**Notes:**
+  * The ''(unset)'' cast will not be affected (see the "Unaffected PHP Functionality" section).
+  * The PHP parser is not sensitive to spaces in e.g. "''( int )''" cast and "''? int''" type declaration, so e.g. "''( ? int )''" will be identical to "''(?int)''".
+  * The PHP parser does not distinguish between ''(integer)'' and ''(int)'' casts, so ''(?integer)'' will be identical to ''(?int)''. Likewise for ''(?boolean)'' vs ''(?bool)'', ''(?double)'' or ''(?real)'' vs ''(?float)'', and ''(?binary)'' vs ''(?string)''.
 
-==== Example ====
+If the expression value is not ''null'', nullable casting will give the same result as plain casting: e.g. (?int)false will give 0, (?array)%%""%% will give %%[""]%%.
 
+==== Additional proposal for settype() ====
 
+Additionally, it was requested on the mailing list to consider adding support of nullable types to the ''settype()'' function, e.g. <php>settype($variable, "?int")</php>, which here would be the same as <php>$variable = (?int)$variable;</php> and return <php>true</php> (but in general <php>"?int"</php> could be a dynamic string).
+
+In short, for a currently valid <php>$type</php> argument to <php>settype($variable, $type)</php>, it would enable to use <php>'?'.$type</php> to preserve nullability.
+
+=== "?null" ===
+
+In <php>"?null"</php>, the "''?''" is redundant ("nullable null"), but it could happen in dynamic code, e.g. <php>settype($x, '?' . gettype($y))</php> when <php>$y</php> is <php>null</php>.
+
+Possible options:
+  - Allow it as equivalent to plain <php>"null"</php> silently.
+  - Allow it as equivalent to plain <php>"null"</php> but emit a specific Notice.
+  - Disallow it and emit a specific Warning (like the existing "Cannot convert to resource type").
+  - Disallow it and emit the existing generic Warning "Invalid type".
+
+For demonstration, the current patch uses option 2.
+
+===== Motivating Example =====
+
+In strict type-checking mode (<php><?php declare(strict_types=1);</php>), given two functions like the following:
+
+<PHP>
+function getInt(): int
+{
+    return mt_rand();
+}
+
+function processString(string $s): void
+{
+    printf("process a string of %d byte(s)\n", strlen($s));
+}
+</PHP>
+
+then the following call:
+
+<PHP>
+processString(getInt());
+</PHP>
+
+will throw a ''TypeError'' ("Argument 1 passed to processString() must be of the type string, int given"), but here we can use a cast (''int'' to ''string'' conversion is always safe):
+
+<PHP>
+processString((string) getInt());
+</PHP>
+
+(which will print something like "process a string of 9 byte(s)").
+
+Now given two functions like the following (with //nullable// type declarations):
+
+<PHP>
+function getIntOrNull(): ?int
+{
+    $r = mt_rand();
+    return $r % 2 === 0 ? $r : null;
+}
+
+function processStringOrNull(?string $s): void
+{
+    if ($s === null) {
+        printf("process null\n");
+    } else {
+        printf("process a string of %d byte(s)\n", strlen($s));
+    }
+}
+</PHP>
+
+then the following call:
+
+<PHP>
+processStringOrNull(getIntOrNull());
+</PHP>
+
+will sometimes work (print "process null") and sometimes throw a ''TypeError'' ("Argument 1 passed to processStringOrNull() must be of the type string or null, int given"), so we would want to use a "//nullable// cast":
+
+<PHP>
+processStringOrNull((?string) getIntOrNull());
+</PHP>
+
+but currently this syntax is not supported ("Parse error: syntax error, unexpected '?'") and we must resort to something more verbose (and error-prone) like:
+
+<PHP>
+processStringOrNull(($tmp = getIntOrNull()) === null ? null : (string) $tmp);
+unset($tmp);
+</PHP>
+
+or writing custom casting functions.
+
+(Note that in //weak// type-checking mode, there is never a ''TypeError'', the ''?int'' is automatically converted to ''?string'', correctly preserving a ''null'' value. But we can prefer strict typing, to catch unintended conversions.)
+
+==== settype() ====
+
+When the desired type is not known before runtime, we cannot use a cast operator, but we can use the ''settype()'' function, for example:
+
+<PHP>
+function getIntOrNullAs(string $type)
+{
+    $x = getIntOrNull();
+    settype($x, $type);
+    return $x;
+}
+</PHP>
+
+but currently <php>$type</php> cannot contain a nullable type like <php>"?string"</php> ("Warning: settype(): Invalid type", <php>$x</php> not converted).
 
 ===== Backward Incompatible Changes =====
 
@@ -43,25 +140,43 @@ None.
 
 ===== Proposed PHP Version(s) =====
 
-PHP 7.NEXT, possibly 7.4.
+Next PHP 7.x (7.4 now).
 
 ===== RFC Impact =====
+
 ==== To SAPIs ====
 
-I need help here.
+:?: //Help needed//
 
 ==== To Existing Extensions ====
 
-I need help here, but I do not think so.
+:?: //Help needed//
 
 ==== To Opcache ====
 
-I need help here.
+:?: //Help needed//
+
+===== Unaffected PHP Functionality =====
+
+  * The ''(unset)'' cast (always returning ''null'', deprecated in PHP 7.2 and to be removed in PHP 8.0) is not affected (i.e. the "''(?unset)''" syntax is not proposed, and will continue to cause a Parse error).
+  * The <php>gettype()</php> function is not affected.
 
 ===== Proposed Voting Choices =====
 
-Voting process should requires ''2/3+1'' when available.
+  * **Accept nullable casting**: Simple vote (Yes / No), requiring a 2/3 majority to pass.
+    * **Additionally accept nullable settype()**: Simple vote (Yes / No), requiring a 2/3 majority to pass.
+      * **How to handle settype($x, "?null")**: Multi-options vote (Allow silently / Allow but Notice / Disallow with specific Warning / Disallow with the generic Warning), the option with more votes will win.
+
+(Each secondary vote result will be considered only if its parent vote passes.)
 
 ===== Patches and Tests =====
 
-I need help here.
+  * Working prototype: https://github.com/php/php-src/pull/3764
+
+===== References =====
+
+  * [[http://php.net/manual/en/language.types.type-juggling.php|PHP Manual: Type Juggling]]
+  * [[http://php.net/manual/en/function.settype.php|PHP Manual: settype() function]]
+  * [[rfc:scalar_type_hints_v5|PHP RFC: Scalar Type Declarations]]
+  * [[rfc:nullable_types|PHP RFC: Nullable Types]]
+  * Initial discussion: https://externals.io/message/102997
