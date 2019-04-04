@@ -1,100 +1,156 @@
-====== PHP RFC: Your Title Here ======
-  * Version: 0.9
-  * Date: 2013-02-24 (use today's date here)
-  * Author: Your Name, your_email_address@example.com
-  * Status: Draft (or Under Discussion or Accepted or Declined)
-  * First Published at: http://wiki.php.net/rfc/your_rfc_name
-
-This is a suggested template for PHP Request for Comments (RFCs). Change this template to suit your RFC.  Not all RFCs need to be tightly specified.  Not all RFCs need all the sections below.
-Read https://wiki.php.net/rfc/howto carefully!
-
-
-Quoting [[http://news.php.net/php.internals/71525|Rasmus]]:
-
-> PHP is and should remain:
-> 1) a pragmatic web-focused language
-> 2) a loosely typed language
-> 3) a language which caters to the skill-levels and platforms of a wide range of users
-
-Your RFC should move PHP forward following his vision. As [[http://news.php.net/php.internals/66065|said by Zeev Suraski]] "Consider only features which have significant traction to a
-large chunk of our userbase, and not something that could be useful in some
-extremely specialized edge cases [...] Make sure you think about the full context, the huge audience out there, the consequences of  making the learning curve steeper with
-every new feature, and the scope of the goodness that those new features bring."
+====== PHP RFC: Suppressed Exceptions ======
+  * Version: 0.1
+  * Date: 2019-04-04 
+  * Author: Danack
+  * Status: Draft
+  * First Published at: https://wiki.php.net/rfc/suppressed_exceptions
 
 ===== Introduction =====
-The elevator pitch for the RFC. The first paragraph of this section will be slightly larger to give it emphasis; please write a good introduction.
+
+In some scenarios it is possible for exception information to be lost, particularly when multiple exceptions occur in block of code. For example when retrying network requests.
+
+<code php>
+function fetchDataOverNetwork() {
+
+  $networkExceptions = [];
+
+  for ($i = 0; $i < MAX_ATTEMPTS; $i++) {
+    try {
+  	  // Some operation that may throw 
+	  return foo(); 
+    }
+	catch (NetworkException $ne) {
+		$networkExceptions[] = $ne;
+	}
+  }
+  
+  // Information about $networkExceptions is lost.
+  throw new FetchDataException("Failed to get data");
+}
+</code>
+
+Another example where an exception is thrown trying to release an acquired resource:
+
+<code php>
+$resource = acquireSomeResource();
+
+try {
+  foo($resource);
+}
+catch (FooException $fooException) {
+    try {
+        // try to release resource cleanly
+        $resource->close();
+        throw $fooException;
+    }
+    catch (ResourceException $resourceException) {
+        // The information about $resourceException is lost.
+        throw $fooException;
+    }
+}
+
+</code>
+
+
+Although PHP has the capability of adding a 'previous' exception when creating a new exception, it is inappropriate to do that in these examples as that is meant to be used for transforming one exception to another type.
+
+Additionally the 'previous' exception can only store information about one exception, not an arbitrary number of exceptions.
+
+
 
 ===== Proposal =====
-All the features and examples of the proposal.
 
-To [[http://news.php.net/php.internals/66051|paraphrase Zeev Suraski]], explain hows the proposal brings substantial value to be considered
-for inclusion in one of the world's most popular programming languages.
+This RFC proposes to add two methods to allow storing and retrieving of suppressed exceptions to each of the base exception classes \Exception and \Error with the signatures
 
-Remember that the RFC contents should be easily reusable in the PHP Documentation.
 
-If applicable, you may wish to use the language specification as a reference.
+<code php>
+public void addSuppressed(Throwable exception)
+
+public getSuppressed(): Throwable[];
+</code>
+
+These signatures would be similar to those in [Java](https://docs.oracle.com/javase/8/docs/api/java/lang/Throwable.html#addSuppressed-java.lang.Throwable-)
+
+
+These suppressed exceptions can be handled or logged appropriately where the exception is caught.
+
+
+
+Example when retrying network requests.
+
+<code php>
+function fetchDataOverNetwork() {
+
+  $networkExceptions = [];
+
+  for ($i = 0; $i < MAX_ATTEMPTS; $i++) {
+    try {
+  	  // Some operation that may throw 
+	  return foo(); 
+    }
+	catch (NetworkException $ne) {
+		$networkExceptions[] = $ne;
+	}
+  }
+
+  $fdException = new FetchDataException("Failed to get data");
+  
+  foreach ($networkExceptions as $networkException) {
+	  $fdException->addSuppressed($networkException);
+  }
+  
+  throw $fdException;
+}
+</code>
+
+
+Example when cleaning up resource
+<code php>
+$resource = acquireSomeResource();
+
+try {
+  foo($resource);
+}
+catch (FooException $fooException) {
+    try {
+        // try to release resource cleanly
+        $resource->close();
+        throw $fe;
+    }
+    catch (ResourceException $resourceException) {
+        $fe->addSuppressed($resourceException);        
+        throw $fooException;
+    }
+}
+</code>
+
+
+===== Why not add suppressed in constructor? =====
+
+As per the resource exception sometimes it is necessary to add suppressed exception to an exception that has been caught and is going to be re-thrown. 
 
 ===== Backward Incompatible Changes =====
-What breaks, and what is the justification for it?
+
+This has the potential to break user's custom exception serializing and deserializing. Although individually these would not be major breaks, they would still be more appropriate to have at a major release than a minor release, hence this RFC targets PHP 8.
 
 ===== Proposed PHP Version(s) =====
-List the proposed PHP versions that the feature will be included in.  Use relative versions such as "next PHP 7.x" or "next PHP 7.x.y".
 
-===== RFC Impact =====
-==== To SAPIs ====
-Describe the impact to CLI, Development web server, embedded PHP etc.
-
-==== To Existing Extensions ====
-Will existing extensions be affected?
-
-==== To Opcache ====
-It is necessary to develop RFC's with opcache in mind, since opcache is a core extension distributed with PHP.
-
-Please explain how you have verified your RFC's compatibility with opcache.
-
-==== New Constants ====
-Describe any new constants so they can be accurately and comprehensively explained in the PHP documentation.
-
-==== php.ini Defaults ====
-If there are any php.ini settings then list:
-  * hardcoded default values
-  * php.ini-development values
-  * php.ini-production values
-
-===== Open Issues =====
-Make sure there are no open issues when the vote starts!
-
-===== Unaffected PHP Functionality =====
-List existing areas/features of PHP that will not be changed by the RFC.
-
-This helps avoid any ambiguity, shows that you have thought deeply about the RFC's impact, and helps reduces mail list noise.
-
-===== Future Scope =====
-This section details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
+8
 
 ===== Proposed Voting Choices =====
-Include these so readers know where you are heading and can discuss the proposed voting options.
 
-The primary vote of an RFC requires a 2/3 majority. An RFC may have secondary votes, which may be decided by simple plurality. (see [[voting]])
+Single for requiring 2/3 majority.
+
+
+
+
+
+
+
+
 
 ===== Patches and Tests =====
-Links to any external patches and tests go here.
-
-If there is no patch, make it clear who will create a patch, or whether a volunteer to help with implementation is needed.
-
-Make it clear if the patch is intended to be the final patch, or is just a prototype.
-
-For changes affecting the core language, you should also provide a patch for the language specification.
+TODO .
 
 ===== Implementation =====
-After the project is implemented, this section should contain 
-  - the version(s) it was merged into
-  - a link to the git commit(s)
-  - a link to the PHP manual entry for the feature
-  - a link to the language specification section (if any)
-
-===== References =====
-Links to external references, discussions or RFCs
-
-===== Rejected Features =====
-Keep this updated with features that were discussed on the mail lists.
+TODO
