@@ -135,10 +135,10 @@ function match($value)
       return "double";
       break;
     case 1:
-      echo "single";
+      return "single";
       break;
     case 0:
-      echo "none";
+      return "none";
       break;
     default:
       throw new Exception("Unexpected value");
@@ -147,6 +147,27 @@ function match($value)
 
 match("foo"); // "none"
 </code>
+
+In case both the expression and the condition operands are both numeric strings, both are converted to an integer. This can be unexpected;
+
+<code php>
+function match($value)
+{
+  switch ($value) {
+    case "1e1":
+      return "1e1";
+      break;
+    case "10":
+      return "10";
+      break;
+    default:
+      throw new Exception("Unexpected value");
+  }
+}
+
+match("10"); // "1e1"
+</code>
+
 
 ==== All combinations ====
 
@@ -283,7 +304,7 @@ Bitwise operators expect both parameters to be an integer. The ''&'', ''|'', ''^
 Using strings for ''%%>>%%'' or ''%%<<%%'', mixing strings with integers or using any other type will throw a ''TypeError''.
 
 ==== String Operators ====
-The concatenation operator ''.'' will throw a ''TypeError'' if any of the operands is a boolean, array or resource. It will also throw a ''TypeError'' if the operand is an object that doesn't implement the ''__toString()'' method.
+The concatenation operator ''.'' will throw a ''TypeError'' if any of the operands is a boolean, array or resource. It will also throw a ''TypeError'' if the operand is an object that doesn't implement the ''%%__toString()%%'' method.
 
 Integers, floats, null and objects (with the ''toString()'' method) are cast to a string.
 
@@ -298,13 +319,19 @@ function match($value)
 {
   switch ($value) {
     case ["foo" => 42, "bar" => 1]:
-      echo "foobar";
+      return "foobar";
       break;
     case null:
-      echo "null";
+      return "null";
       break;
     case 0:
-      echo "zero";
+      return "zero";
+      break;
+    case "1e1":
+      return "1e1";
+      break;
+    case "10":
+      return "10";
       break;
     default:
       throw new Exception("Unexpected value");
@@ -313,6 +340,7 @@ function match($value)
 
 match(["bar" => 1, "foo" => 42]); // "foobar"
 match(0);                         // "zero"
+match("10");                      // "10"
 match("foo");                     // Exception("Unexpected value")
 </code>
 
@@ -323,54 +351,51 @@ Since the strict type-checking for operators is off by default and must be expli
 ===== Proposed PHP Version =====
 This is proposed for the next minor version of PHP, currently PHP 7.4.
 
-===== Discussion Points =====
+===== FAQ =====
 
-====  Only throwing TypeErrors is acceptable; returning a different value is not ====
-Comparing two numeric strings would not result in a ''TypeError'', but yield a different result.
+==== Why does == and != throw a TypeError instead of returning false? ====
+In other dynamically typed languages, like Python and Ruby, the ''=='' and ''!='' do a type check and always return ''false'' in case the type is different. Throwing a ''TypeError'' is more common for statically typed languages like Go.
 
-**Argument;** The proposal brings an element of surprise when copying PHP code from one place to another. Also, programmers may intentionally rely on the current semantics when comparing numeric strings.
+PHP already has the ''==='' and ''!=='' operators to check both type and value. This allows ''!='' and ''=='' to follow the same logic as the other comparison operators.
 
-**Current position;** The directive is catering towards those that find implicit casting by relational operators on two operands of the same type, purely based on the value of those operands, very undesirable. For the audience that's inclined to use the directive, any issues that come from copy/pasting code that exploits this behavior are considered acceptable and should be solved.
+==== Why does the concatenation operator cast, but arithmetic operators don't? ====
+The concatenation operator will cast any scalar and //(when ''%%__toString%%'' is defined)// objects to a string because the operator always expects both operands to be strings. For resources, arrays, and objects without ''__toString'' a ''TypeError'' is thrown because casting operands of these types to a string, doesn't give a proper representation of the value of the operand.
 
-==== When using the directive, comparison operators with string operands should always throw a TypeError ====
-The result of comparing two strings can't be known without knowing if the strict_operators directive is used. As such, comparison operators with string operands shouldn't be allowed. As alternative new operators can be introduced or strings might be compared using a function.
+For arithmetic operators, using resources, arrays, and objects as operands will throw a ''TypeError'' for the same reason. Strings aren't cast because not all strings can be properly represented as a number, and a ''TypeError'' is thrown based on the operand type only, not the value.
 
-**Current position;** Disallowing all relational operators for strings is too radical and primarily caters towards those who aren't inclined to use the directive in the first place.
+==== Will comparing a number to a numeric string work with strict operators? ====
+No, this will throw a ''TypeError''. Users that use string operators need to explicitly typecast the string to an integer. If it concerns input data, for instance from ''$_POST'', it's recommended to use the [[https://www.php.net/filter|filter functions]].
 
-==== Narrowing the scope (strict_comparison) ====
-This directive would only affect comparison operators. The behavior of other directives remains unchanged.
+==== Are build-in functions affected by strict_operators? ====
+No. Only operators (including the ''case'' statement)) in the source file that has ''declare(strict_operators=1)'' are affected. Functions defined elsewhere, including functions defined in extensions, are not affected.
 
-**Argument;** There's a difference between making a change to solve a clear problem (type-juggled comparison operators), and making a change just to be consistent.
+Specifically ''sort()'' and ''in_array()'' will perform weak comparison as usual and require the use of the ''$sort_flags'' resp. ''$strict'' arguments to change the way the values are compared.
 
-**Current position;** We should not introduce a new directive for a very narrow solution. The directive is intended to cater to those who dislike how type-juggling for operators currently work.
+==== Are there cases where a statement doesn't throw a TypeError but yield a different result? ====
+Yes, there are 3 cases where a comparison works differently in strict operators mode.
 
-==== Widening the scope (strong_types) ====
-This directive would disable type juggling all together. This includes control statements like ''if'' and ''when''.
+    * Two numeric strings will be compared as strings instead of numbers. Comparing two operands of the same type should always work. Under strict operators, the operation is only determined by the type and never by the value.
+    * When comparing two arrays (or objects) no typecasting will be performed. So ''[null] == [0]'' will result in ''false'' with strict operators and in ''true'' without the directive.
+    * With strict operators, the ''case'' a ''switch'' statement will not do type conversion. It also doesn't compare numeric strings as numbers but as strings.
+
+This may cause issues when copying PHP code from one place to another. Also, programmers may intentionally rely on the current semantics when comparing numeric strings. However, as shown in the examples, code that exploits this behavior will likely have unintended side effects. Avoiding this behavior is not a side-effect, but the purpose for using the ''strict_operators'' directive. As such, source code with this directive should not depend on this behavior.
+
+==== Is it possible to limit the effect of the directive to only throwing a TypeError? ====
+No, not in a reasonable way. Many of the motivating examples marked as //unexpected behavior// are caused by modifying the effect of a comparison based on the values of the operands. Keeping that unchanged would defeat the purpose of the RFC.
+
+An option would be to disallow strings, arrays, and objects as operands for comparison operators, require comparison to use functions like ''strcmp'' or introducing new operators. Neither is considered reasonable in respect to this RFC.
+
+==== Will this directive disable type juggling all together? ====
+No. Operators can still type juggle under the given conditions. Additionally
 
 Using non-scalar values for array keys would throw a ''TypeError'' rather than issuing a warning. Using floats and booleans like ''$array[12.34]'' also silently cast to an integer, these might also throw a ''TypeError''.
 
 **Argument;** Weak dynamic typing is criticized by a majority of software developers. Issues related to weak typing extend beyond operators. PHP would benefit from an option to disable this.
 
-==== Should == and != always a return a boolean? ====
-We could consider letting ''=='' and ''!='' do a type check and always return ''false'' in case the type is different. This would make them work similarly to some other languages like Python.
+==== Can relational operators be allowed for arrays? ====
+If both arrays must have the same keys in the same order, using ''<'' or ''>'' on two arrays can be useful. But, as shown in the examples, when this is not the case, these type of comparisons will yield unexpected results.
 
-**Current position;** PHP already has the ''==='' and ''!=='' operator to accomplish this and thus can use ''=='' and ''!='' for strict type comparison. Using ''!='' and ''=='' adds the check that you have the expected types and you don't get an unexpected (silent) ''false'' on statements like ''10 == "10"''.
-
-==== Can relation operators be allowed for arrays? ====
-There are cases where using ''<'' or ''>>'' on two arrays can be useful. Especially if both arrays have the same keys in the same order. We might allow these operators to be used in those cases.
-
-**Current position;** The RFC is about limiting the logic around operand types. An operator should either support the types or not and should not throw an error based on the values of the operands. Arrays don't yield a logical result for the ''>'' and ''<'' operator, except if... We should not add rules for such exceptions.
-
-==== Can we use the existing strict_types directive? ====
-Rather than using a new directive, we could also use ''strict_types'' with different values, e.g. ''declare(strict_types=functions,operators)'' or ''declare(strict_types=2)''.
-
-==== Switch statement should not be affected ====
-The ''switch'' statement does a non-strict comparison operation in a way that should be eliminated when using this directive. On the other hand ''switch'' is not an operator.
-
-**Current position;** Internally a ''case'' is handled as an operator, so it makes sense that the directive affects it. Ultimately, it's better to create a secondary vote for this.
-
-==== Functions that do weak comparison ====
-Functions like ''in_array'' apply weak comparison (by default). Should these functions also be affected by this directive?
+Throwing a ''TypeError'' only if the keys of the arrays don't match is not in line with this RFC. The behavior of an operator should not depend on the value of the operand, only on the type. Additionally a ''TypeError'' is misplaced here, as some arrays would be accepted but others not, whereas a type ''TypeError'' indicates no values of that type are accepted.
 
 
 ===== Unaffected PHP Functionality =====
