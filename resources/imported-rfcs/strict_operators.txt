@@ -1,5 +1,5 @@
 ====== PHP RFC: Strict operators directive ======
-  * Version: 1.0
+  * Version: 1.1
   * Date: 2019-05-25
   * Author: Arnold Daniels, jasny@php.net
   * Status: Under Discussion
@@ -207,12 +207,15 @@ declare(strict_operators=1);
 In this case, we're passing an ''int'' to a function that accepts ''float''. The parameter is converted (widened) to float.
 
 ==== Comparison operators ====
-Comparison operators work on all scalar types. The types of both values need to match.
+All comparison operators work with ''int'', ''float'' and ''bool'' type operands. The types of both operands need to match.
 
-Non-scalar types only support the ''=='', ''==='', ''!='' and ''!=='' operators.
+Strings, resources, arrays, objects and null only support the ''=='', ''==='', ''!='' and ''!=='' operators.
 
 <code php>
-"foo" > "bar";  // true
+10 > 42;        // false
+3.14 < 42;      // true
+
+"foo" > "bar";  // TypeError("Unsupported type string for comparison")
 "foo" > 10;     // TypeError("Operator type mismatch string and int for comparison")
 
 "foo" == "bar"; // false
@@ -229,13 +232,16 @@ true != 0;      // TypeError("Operator type mismatch bool and int for comparison
 The function of the ''==='' and ''!=='' operators remains unchanged.
 
 === Numeric string comparison ===
-Numeric strings are compared the same way as non-numeric strings. To compare two numeric strings as numbers, they need to be cast to floats.
+Numeric strings are compared the same way as non-numeric strings. To compare two numeric strings as numbers, they need to be cast to integers or floats.
 
 <code php>
-"120" > "99.9";               // false
+"120" > "99.9";               // TypeError("Unsupported type string for comparison")
 (float)"120" > (float)"99.9"; // true
 
-"120" <=> "99.9";             // -1
+"100" == "1e1";               // false
+(int)"100" == (int)"1e2";     // true
+
+"120" <=> "99.9";             // TypeError("Unsupported type string for comparison")
 </code>
 
 === Array comparison ===
@@ -289,14 +295,7 @@ The incrementing/decrementing operators will throw a ''TypeError'' when the oper
 The function of these operators for integers and floats remains unchanged.
 
 === Incrementing strings ===
-The ''++'' operator for strings will largely remain unchanged, but it will behave consistently for any string, including numeric string. This means that using ''++'' on a string will always result in a string.
-
-<code php>
-$a = "00";
-++$a; // "01"
-++$a; // "02"
-++$a; // "03"
-</code>
+Using the increment function on a string will throw a ''TypeError'' when strict_operators is enabled.
 
 ==== Bitwise Operators ====
 Bitwise operators expect both parameters to be an integer. The ''&'', ''|'', ''^'' and ''~'' operators also accept strings as operands.
@@ -356,7 +355,7 @@ This is proposed for the next minor version of PHP, currently PHP 7.4.
 ==== Why does == and != throw a TypeError instead of returning false? ====
 In other dynamically typed languages, like Python and Ruby, the ''=='' and ''!='' do a type check and always return ''false'' in case the type is different. Throwing a ''TypeError'' is more common for statically typed languages like Go.
 
-PHP already has the ''==='' and ''!=='' operators to check both type and value. This allows ''!='' and ''=='' to follow the same logic as the other comparison operators.
+The RFC tries to limit the cases where the behavior changes, rather than that a ''TypeError'' is thrown, as much as possible. For instance ''1 == true'' and ''null == 0'' both evaluate to ''true'' without strict_operators. Having those statements be ''false'' based on the directive could lead to unseen bugs.
 
 ==== Why does the concatenation operator cast, but arithmetic operators don't? ====
 The concatenation operator will cast integers, floats and //(when ''%%__toString%%'' is defined)// objects to a string. This is a common use case and operands are always typecasted to a string. Integers and floats always have a proper string representation. 
@@ -369,6 +368,15 @@ Using a boolean or null as operand for both concatenation and arithmetic operato
 
 ==== Will comparing a number to a numeric string work with strict operators? ====
 No, this will throw a ''TypeError''. Users that use string operators need to explicitly typecast the string to an integer. If it concerns input data, for instance from ''$_POST'', it's recommended to use the [[https://www.php.net/filter|filter functions]].
+
+==== Why aren't all comparison functions available for strings? ====
+In many other languages, using ''<'', ''>'', ''<='' and ''=>'' with string operands performs an ''strcmp'' like operation. The ''<=>'' is even described as strcmp as operators. Why do these operators throw an exception with string operands when strict_operators is enabled?
+
+It's common to use these operators when both operands are numeric strings. Having these statements return a different value based on the directive, could lead to issues, especially when source code is copy/pasted from an external codebase.
+
+In case it concerns comparing text, it's better to use ''Collator::compare()''. For non-collation related strings, like date strings, the ''strcmp'' function should be used.
+
+//Please have a look at the PHP internals mailing list for a detailed discussion and motivation.//
 
 ==== Are built-in functions affected by strict_operators? ====
 No. Only operators (including the ''case'' statement)) in the source file that has ''declare(strict_operators=1)'' are affected. Functions defined elsewhere, including functions defined in extensions, are not affected.
@@ -383,16 +391,9 @@ Throwing a ''TypeError'' only if the keys of the arrays don't match is not in li
 ==== Are there cases where a statement doesn't throw a TypeError but yields a different result? ====
 Yes, there are 3 cases where a comparison works differently in strict operators mode.
 
-    * Two numeric strings will be compared as strings instead of numbers. Comparing two operands of the same type should always work. Under strict operators, the operation is only determined by the type and never by the value.
+    * Two numeric strings will be compared on equality as strings instead of numbers. Comparing two operands of the same type should always work. Under strict operators, the operation is only determined by the type and never by the value. Comparisons like ''"100" == "1e2"'' are unlikely to be intended and will return ''false'' with strict_operators.
     * When comparing two arrays (or objects) no typecasting will be performed. So ''[null] == [0]'' will result in ''false'' with strict operators and in ''true'' without the directive.
     * With strict operators, the ''case'' in a ''switch'' statement will not do type conversion. It also doesn't compare numeric strings as numbers but as strings.
-
-This may cause issues when copying PHP code from one place to another. Also, programmers may intentionally rely on the current semantics when comparing numeric strings. However, as shown in the examples, code that exploits this behavior will likely have unintended side effects. Avoiding this behavior is not a side effect, but the purpose for using the ''strict_operators'' directive. As such, source code with this directive should not depend on this behavior.
-
-==== Is it possible to limit the effect of the directive to only throwing a TypeError? ====
-No, not in a reasonable way. Many of the motivating examples marked as //unexpected behavior// are caused by modifying the effect of a comparison based on the values of the operands. Keeping that unchanged would defeat the purpose of the RFC.
-
-An alternative would be to disallow strings, arrays, and objects as operands for comparison operators, requiring comparison to use functions like ''strcmp'', or introduce new operators. Neither is considered reasonable in respect to this RFC.
 
 ==== Will this directive disable type juggling altogether? ====
 No. Operators can still typecast under the given conditions. For instance, the concatenation (''.'') operator will cast an integer or float to a string, and boolean operators will cast any type of operand to a boolean.
@@ -421,15 +422,5 @@ This RFC
 ===== Proposed Voting Choices =====
 **Voting ended prematurely and will be reopened at a later stage targeting PHP 8.**
 
-    * Primary vote; Add the ''strict_operators'' directive to PHP 7.4? Requires a 2/3 majority
+    * Primary vote; Add the ''strict_operators'' directive to PHP 8? Requires a 2/3 majority
     * Secondary vote: Should ''strict_operators'' affect comparison done for a ''case'' operation in a ''switch'' statement? Requires a 50%+1 majority
-
-<doodle title="Add strict_operators directive?" auth="jasny" voteType="single" closed="true">
-   * Yes
-   * No
-</doodle>
-
-<doodle title="Should strict_operator affect switch/case?" auth="jasny" voteType="single" closed="true">
-   * Yes
-   * No
-</doodle>
