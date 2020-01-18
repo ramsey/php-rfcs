@@ -1,6 +1,6 @@
-====== PHP RFC: "use global functions/consts" statement ======
-  * Version: 0.4
-  * Date: 2020-01-01
+====== PHP RFC: declare(disable_ambiguous_element_lookup=1) ======
+  * Version: 0.5
+  * Date: 2020-01-18
   * Author: Tyson Andre <tandre@php.net>
   * Status: Under Discussion
   * First Published at: https://wiki.php.net/rfc/use_global_elements
@@ -35,21 +35,21 @@ This RFC proposes a new language feature which avoids those drawbacks.
 
 ===== Proposal =====
 
-Support the following statements within namespaces: ''use global functions;'' and ''use global consts;''.
-These can be used in combination with other function/global uses, inside of each namespace block.
+Support ''declare(disable_ambiguous_element_lookup=1)'' as the first statement of a PHP file (the same place as ''strict_types'').
+These can be used in combination with other function/global uses.
 
 <code php>
 namespace MyNS;
-
-use global functions;
-use function OtherNS\my_function; // can occur before or after "use global functions;"
-
-use global consts;
+declare(
+    strict_types=1,
+    disable_ambiguous_element_lookup=1
+);
+use function OtherNS\my_function;
 use const OtherNS\OTHER_CONST;
 
 // The below function and constant references now unambiguously refer to the global namespace.
 //
-// Without "use global ...", php would have checked for MyNS\version_compare
+// Without "declare(disable_ambiguous_element_lookup=1) ...", php would have checked for MyNS\version_compare
 // and MyNS\PHP_VERSION at runtime before checking the global namespace.
 if (version_compare(PHP_VERSION, '8.0.5') >= 0) {
     // ...
@@ -58,46 +58,47 @@ if (version_compare(PHP_VERSION, '8.0.5') >= 0) {
 
 ==== Implementation Details ====
 
-''use global functions'' can be thought of behaving the same way as if every possible function name and constant name was used from the global namespace (for names not used elsewhere).
+''declare(disable_ambiguous_element_lookup=1)'' can be thought of behaving the same way as if every possible function name and constant name was used from the global namespace (for names without ''use'' elsewhere).
+A difference is that it allows declaring a function or constant, but does not add the use.
 
-  * ''use global functions'' and ''use global consts;'' will have an effect on subsequent statements within the namespace block, but not on prior statements.
-  * ''use global functions'' and ''use global consts;'' can be used in the same places as ''use const/function element_name;'', and can occur before and/or after ''use const/function element_name;''
-  * The tokens ''consts'' and ''functions'' are case-insensitive, just like ''const'' and ''function'' are.
+  * Note that declaring a function or constant within a file does not add a use.
+
+<code php>
+declare(disable_ambiguous_element_lookup=1);
+
+namespace MyNS;
+
+function sprintf($msg, ...$args) {
+    // this and remaining statements still refer to \sprintf, not MyNS\sprintf
+    return sprintf("Prefix $msg", ...$args);  
+}
+
+// You must explicitly indicate that the function you want to use is in the current namespace,
+// e.g. with 'use function MyNS\factorial' or by invoking it as 'namespace\factorial()'
+use function MyNS\factorial;
+function factorial(int $n) {
+    return $n > 1 ? factorial($n - 1) * $n : 1;
+}
+</code>
 
 There is a working implementation at https://github.com/php/php-src/pull/4951
-
-==== Grammar ====
-
-Two new token types are added (and available through the tokenizer extension): ''T_FUNCTIONS ("functions")'' and ''T_CONSTS ("consts")''.
-
-The only new statements added to the language grammar are ''use global functions;'' and ''use global consts;'', i.e.
-
-<code>
-use_global: T_USE T_GLOBAL global_use_type;
-
-global_use_type: T_FUNCTIONS
-               | T_CONSTS;
-</code>
 
 ==== Error handling ====
 
 The error handling (for the first voting options) can be thought of being the same as if every possible function name and constant name was used from the global namespace (for names not used elsewhere).
 
-  * A fatal error is caused by declaring a function in a namespace block with ''use global functions;'' following that statement.
-  * A fatal error is caused by declaring a constant with ''const MY_CONST = ...'' in a namespace block with ''use global consts;'' following that statement.
+  * Declaring a function or constant in a file with disable_ambiguous_element_lookup=1 is allowed without notices or errors.
     ''define()'' is not affected.
-  * A fatal error is caused by repeating ''use global <element_type>s'' twice for the same ''<element_type>'' within the same namespace block.
-  * A warning is emitted if ''use global <element_type>s;'' and ''use <element_type> global_element_name'' are both used, due to the latter being redundant when referring to the global namespace.
-  * A warning is emitted if ''use global <element_type>s;'' is used in the global namespace.
+    
+    It does not propose triggering notices or errors, because forbidding declaring functions or constants may cause problems with future work such as https://wiki.php.net/rfc/namespace_scoped_declares
+  * A warning is emitted if ''disable_ambiguous_element_lookup=1'' and ''use <element_type> global_element_name'' are both used, due to the latter being redundant when referring to the global namespace.
+  * ''declare(disable_ambiguous_element_lookup=1)'' does not cause notices if the any of the below namespaces are the global namespace.
 
 
 ===== Backward Incompatible Changes =====
 
-The tokens "functions" and "consts" can no longer be used in the places where "function" and "const" couldn't be used (e.g. global function names and global constant names) (e.g. '''function functions() {}'' and ''const consts = 2;'' are now invalid, but they can still be used as method names)
-
-  * I assume that adding a new token is preferable to using the generic name token (T_NAME) and rejecting invalid values when parsing (e.g. easier to suggest the expected token for syntax errors). But I'm not certain of that.
-
-Apart from the impact of adding 2 new token types, this feature is opt-in and does not impact existing code.
+This version of the RFC has no backwards incompatible changes.
+The behavior of existing code is unchanged.
 
 ===== Proposed PHP Version(s) =====
 
@@ -109,16 +110,9 @@ Apart from the impact of adding 2 new token types, this feature is opt-in and do
 
 (Requires 2/3 vote to pass)
 
-=== Feature Syntax ===
-
-(The option with the most votes will be implemented. In the case of ties for these choices, the earlier option will be preferred.)
-
-  - ''use global functions;'' and ''use global consts;'' in namespace blocks.
-  - ''declare(lookup_functions_in_current_namespace = false, lookup_consts_in_global_namespace = false)'' in the file's ''declare()'' blocks. 
-
 === Severity of redundant uses ===
 
-When ''use global <element_type>s;'' and ''use <element_type> global_element_name;'' are both used in a namespace block, due to the latter being redundant when referring to the global namespace, php will do the following when the file is required:
+When ''declare(disable_ambiguous_element_lookup=1)'' and ''use <element_type> global_element_name;'' are both used in a namespace block, due to the latter being redundant when referring to the global namespace, php will do the following when the file is required:
 
   - Warning (as described in the RFC)
   - Fatal Error
@@ -128,17 +122,8 @@ If "Allow it and don't warn" has over 50% of the votes, that option wins.
 
 Otherwise, the option of "Warning" or "Fatal Error" with the most votes wins.
 
-=== Severity of "use global elements;" from the global namespace ===
+Note that explicitly adding ''use <element_type> global_element_name;'' to a php file has the effect of preventing a function/const from being declared with the same name but a different namespace (the current namespace) at compile time.
 
-  - Warning (as described in the RFC)
-  - Fatal Error
-  - Allow it and don't warn
-
-If "Allow it and don't warn" has over 50% of the votes, that option wins.
-
-Otherwise, the option of "Warning" or "Fatal Error" with the most votes wins.
-
-The motivation for warning: PHP emits a warning such as ''Warning: The use statement with non-compound name 'strlen' has no effect in %s on line %d'' for ''use function strlen;'' from the global namespace.
 
 ===== Patches and Tests =====
 
@@ -146,7 +131,7 @@ https://github.com/php/php-src/pull/4951 implements this RFC
 
 ===== Discussion =====
 
-==== Arguments for declare()  ====
+==== Arguments for declare() syntax ====
 
 From https://externals.io/message/107877#107883
 
@@ -177,11 +162,29 @@ From https://externals.io/message/107877#107894
 I'm generally not convinced that beginning the special directive with the word "use" automatically makes it easier to find or understand. Given some code mentioning "strpos", you wouldn't be able to scan the list of use statements for the word "strpos", you'd have to understand that there are two modes of execution, and look for a line that switches between those modes.
 </blockquote>
 
-=== Arguments for use global functions/consts ===
+From https://externals.io/message/107953#108132
+
+<blockquote>
+First and foremost, if we ever implement
+https://wiki.php.net/rfc/namespace_scoped_declares or some similar way of
+specifying declares on the package level, and I think it's pretty likely
+that we're going to do this in one form or another, then we're very much
+going to regret not making this a declare. Disabling the namespace
+fallback, just like the use of strict types, is something you will usually
+want to do for an entire library/project, not just for individual files.
+Going for something like "use global functions" preemptively precludes this
+for no good reason.
+</blockquote>
+
+=== Arguments for use global functions/consts syntax ===
 
   * This is similar to the ''use function ...;'' syntax. Both ''use global functions'' and ''declare(...)'' make it clear that this syntax can be used only for the global namespace.
   * ''use global functions;'' can be placed immediately adjacent to other ''use function ...;'' statements, so only one block of code needs to be checked for function/constant resolution behavior (if coding style guidelines are enforced).
   * This can be set per each namespace block, in the uncommon case of files that combine blocks from multiple namespaces. This makes it possible for a file to use this in some namespace blocks, but also declare functions/constants in different namespace blocks.
+
+(The first versions of this RFC used the syntax ''use global functions;'' and ''use global consts'')
+
+Another point is that these two directives would almost always be combined, so it would make to use a combination of these.
 
 ==== Deprecate the fallback to the root namespace instead? ====
 
@@ -230,7 +233,7 @@ It is in most cases.
 Counterarguments:
 
   * Making it easier to avoid ambiguity has benefits elsewhere - for analyzing code, future work on autoloading, helping developers avoid unexpected behavior in edge cases in applications, etc.
-  * It's much larger in some cases than others due to other opcache optimizations, frequency of calling a line of code, etc. Benchmarking and interpreting performance of applications after new features get added may take more developer time than ensuring files contain ''use global functions;'' and ''use global consts;''
+  * It's much larger in some cases than others due to other opcache optimizations, frequency of calling a line of code, etc. Benchmarking and interpreting performance of applications after new features get added may take more developer time than ensuring files contain ''declare(disable_ambiguous_element_lookup=1);''
   *-Developers may still aim to avoid ambiguity without this RFC, resulting in more verbose code.
 
 ===== Implementation =====
