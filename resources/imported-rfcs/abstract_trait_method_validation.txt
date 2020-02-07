@@ -1,0 +1,135 @@
+====== PHP RFC: Validation for abstract trait methods ======
+  * Date: 2020-02-07
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Under Discussion
+  * Target Version: PHP 8.0
+  * Implementation: https://github.com/php/php-src/pull/5068
+
+===== Introduction =====
+
+Traits can contain abstract methods, which are used to specify requirements the trait has on the using class. However, the signatures of these methods are currently only erratically enforced.
+
+This RFC proposes to verify abstract trait methods against the implementation provided in the using class, according to our usual inheritance rules. Additionally the RFC allows the declaration of abstract private methods in traits.
+
+<PHP>
+trait MyTrait {
+    abstract private function neededByTheTrait(): string;
+
+    public function doSomething() {
+        return strlen($this->neededByTheTrait());
+    }
+}
+
+class TraitUser {
+    use MyTrait;
+
+    // This is allowed:
+    private function neededByTheTrait(): string { }
+
+    // This is also allowed (relaxing visibility)
+    public function neededByTheTrait(): string { }
+    
+    // This is forbidden (non-static changed to static)
+    private static function neededByTheTrait(): string { }
+
+    // This is forbidden (incorrect return type)
+    private function neededByTheTrait(): stdClass { }
+}
+</PHP>
+
+===== Proposal =====
+
+==== Status Quo ====
+
+Abstract trait method signatures are currently not enforced in likely the most common case, where the method implementation is provided directly by using class:
+
+<PHP>
+trait T {
+    abstract public function test(int $x);
+}
+
+class C {
+    use T;
+    
+    // Allowed, but shouldn't be due to invalid type.
+    public function test(string $x) {}
+}
+</PHP>
+
+The method signature //is// enforced if the implementing method comes from a parent class:
+
+<PHP>
+trait T {
+    abstract public function test(int $x);
+}
+
+class P {
+    public function test(string $x) {}
+}
+
+class C extends P {
+    use T;
+
+    // Not allowed, because P::test() incompatible with T::test().
+}
+</PHP>
+
+The method signature is also enforced if the implementing method comes from a child class:
+
+<PHP>
+trait T {
+    abstract public function test(int $x);
+}
+
+abstract class P {
+    use T;
+}
+
+class C extends P {
+    // Not allowed, due to type mismatch.
+    public function test(string $x) {}
+}
+</PHP>
+
+Finally, if multiple traits define the same abstract method, then the signature is enforced bidirectionally between the traits (but not the implementing class):
+
+<PHP>
+trait T1 {
+    abstract public function test($x);
+}
+
+trait T2 {
+    abstract public function test($x): int;
+}
+
+class C {
+    // Invalid, because T1::test() incompatible with T2::test().
+    use T1, T2;
+    
+    public function test($x): int {}
+}
+</PHP>
+
+This enforcement is incorrect: The method implementation provided by the class is compatible with both traits. As such, this should be legal code.
+
+==== Proposal ====
+
+This RFC proposes to always validate the signature of abstract trait methods against the implementing method, independently of its origin. Additionally the incorrect bidirectional cross-trait compatibilty check from the last example is removed.
+
+Verification for abstract trait methods follows the same rules as for other methods and results in a fatal error if the methods are not compatible:
+
+  * The signature must be compatible, which includes arity compatibility, contravariant parameter type compatibility and covariant return type compatibility.
+  * The implementing method must have the same visibility as the abstract method, or be more visible. (In particular this means that a private abstract method allows an implementation of any visibility.)
+  * The static-ness of the method must match.
+
+Additionally, this RFC allows the declaration of abstract private methods in traits only. Normally abstract private methods are a contradiction in terms, because the method providing the implementation would not be visible from the class issuing the requirement. However, abstract private methods are well-defined inside traits, because trait methods have access to private methods of the using class.
+
+Private abstract methods must be implemented by the using class. Their implementation cannot be postponed by marking the class abstract, as this would once again render the implementation inaccessible.
+
+===== Backward Incompatible Changes =====
+
+Code that currently declares abstract trait methods and implements them with an incorrect signature in a using class will break. Such code can be fixed by either fixing the method signature in the using class, or by removing the abstract method from the trait.
+
+===== Vote =====
+
+Yes/No.
