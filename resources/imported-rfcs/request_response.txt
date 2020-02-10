@@ -1,62 +1,250 @@
 ====== PHP RFC: Server-Side Request and Response Objects ======
 
-  * Version: 0.2
-  * Date: 2016-12-21
-  * Author: Paul M. Jones, pmjones88@gmail.com
+  * Version: 2.0
+  * Date: 2020-02-10
+  * Author: Paul M. Jones, pmjones@pmjones.io
   * Status: Under Discussion
-  * First Published at: http://wiki.php.net/rfc/request_response
-
-Quoting [[http://news.php.net/php.internals/71525|Rasmus]]:
-
-> PHP is and should remain:
-> 1) a pragmatic web-focused language
-> 2) a loosely typed language
-> 3) a language which caters to the skill-levels and platforms of a wide range of users
-
-This RFC should move PHP forward following his vision. As [[http://news.php.net/php.internals/66065|said by Zeev Suraski]] "Consider only features which have significant traction to a large chunk of our userbase, and not something that could be useful in some extremely specialized edge cases [...] Make sure you think about the full context, the huge audience out there, the consequences of  making the learning curve steeper with
-every new feature, and the scope of the goodness that those new features bring."
+  * First Published at: [[http://wiki.php.net/rfc/request_response]]
 
 ===== Introduction =====
 
-From time to time we've all heard the complaint that PHP has no built-in request object to represent the execution environment. Userland ends up writing these themselves, and those are usually tied to a specific library collection or framework. The same is true for a response object, to handle the output going back to the web client. I've written them myself more than once, as have others here.
+This RFC proposes an object-oriented approach around request and response functionality already existing in PHP, in order to reduce the global-state problems that come with superglobals and the various response-related functions.
 
-After doing some library and framework research it looks like there is a reasonably  common subset of request/response functionality across all the userland implementations. That functionality also appears useful to non-framework users.
+The SQLite "about" page says, "Think of SQLite not as a replacement for Oracle but as a replacement for fopen()." [[https://www.sqlite.org/about.html]]
 
-I next put together a userland implementation of the common subset, which John Boehr then used as a reference point for the C version. It is PHP 7.x only. The proposal below is the result of that work.
+Likewise, think of this RFC not as a replacement for HttpFoundation or PSR-7, or as a model of HTTP messages, but as an object-oriented alternative to superglobals, header(), setcookie(), setrawcookie(), and so on.
 
 ===== Proposal =====
 
-This extension provides server-side request and response objects for PHP. These are not HTTP message objects proper. They are more like wrappers for existing global PHP variables and functions, with some limited additional convenience functionality.
+This RFC proposes an extension to declare three new classes in the root namespace:
 
-This extension defines two classes in the global namespace:
+  * ServerRequest, composed of immutable read-only copies of PHP superglobals, and some other commonly-used values parsed out from those superglobals
 
-  * ServerRequest, composed of read-only copies of PHP superglobals and some other commonly-used values, with methods for adding application-specific request information in immutable fashion.
+  * ServerResponse, a buffer for response-related PHP functions
 
-  * ServerResponse, essentially a wrapper around (and buffer for) response-related PHP functions, with some additional convenience methods, and self-sending capability.
+  * ServerResponseSender, to emit the ServerResponse using PHP functions
 
-The full extent of all functionality is described at https://github.com/pmjones/ext-request , and is available as a beta for installation and testing at https://pecl.php.net/package/request .
+The full README, working code, and all tests are available at [[https://github.com/pmjones/ext-request]], in the 2.x branch.
+
+An earlier version of the extension is in the 1.x branch of the same repository; differences from that version are discussed later this proposal.
+
+==== Summary ====
+
+<code>
+
+Instead of the superglobal ...          ... use ServerRequest:
+--------------------------------------- ---------------------------------------
+$_COOKIE                                $request->cookie
+$_ENV                                   $request->env
+$_GET                                   $request->get
+$_GET['key'] ?? 'default'               $request->get['key'] ?? 'default'
+$_FILES                                 $request->files
+$_POST                                  $request->post
+$_SERVER                                $request->server
+$_SERVER['REQUEST_METHOD']              $request->method
+$_SERVER['HTTP_HEADER_NAME']            $request->headers['header-name']
+$_SERVER['HTTP_CONTENT_LENGTH']         $request->contentLength
+$_SERVER['HTTP_CONTENT_MD5']            $request->contentMd5
+$_SERVER['HTTP_X_REQUESTED_WITH']       $request->requestedWith
+$_SERVER['PHP_AUTH_PW']                 $request->authPw
+$_SERVER['PHP_AUTH_TYPE']               $request->authType
+$_SERVER['PHP_AUTH_USER']               $request->authUser
+
+Instead of parsing ...                  ... use ServerRequest:
+--------------------------------------- ---------------------------------------
+$_FILES to look more like $_POST        $request->uploads
+$_SERVER['HTTP_CONTENT_TYPE']           $request->contentType
+                                        and
+                                        $request->contentCharset
+$_SERVER['HTTP_ACCEPT']                 $request->accept
+$_SERVER['HTTP_ACCEPT_CHARSET']         $request->acceptCharset
+$_SERVER['HTTP_ACCEPT_ENCODING']        $request->acceptEncoding
+$_SERVER['HTTP_ACCEPT_LANGUAGE']        $request->acceptLanguage
+$_SERVER['HTTP_X_HTTP_METHOD_OVERRIDE'] $request->method
+$_SERVER['PHP_AUTH_DIGEST']             $request->authDigest
+
+Instead of emitting ...                  ... buffer with ServerResponse:
+--------------------------------------- ---------------------------------------
+header('HTTP/1.1', true, 200)           $response->setVersion('1.1');
+                                        $response->setCode(200);
+header('Foo: bar', true);               $response->setHeader('Foo', 'bar');
+header('Foo: bar', false);              $response->addHeader('Foo', 'bar');
+setcookie('foo', 'bar');                $response->setCookie('foo', 'bar');
+setrawcookie('foo', 'bar');             $response->setRawCookie('foo', 'bar');
+echo $content;                          $response->setContent($content);
+
+Instead of sending with ...             ... send with ServerResponseSender:
+--------------------------------------- ---------------------------------------
+echo, header(), setcookie(), etc.       $responseSender->send($response);
+
+</code>
+
+There is more: please see the docs at [[https://github.com/pmjones/ext-request/blob/2.x/README.md]] for more information.
+
+
+==== Criticism and Objections ====
+
+=== Why Do This In PHP Itself? ===
+
+For a language as closely related to the web as it is, PHP has lacked core server-side request and response objects for its entire existence. It has date objects, database objects, XML objects, and other object-oriented extensions, but none for server-side request and response objects. This proposal fills that gap, covering a set of common functionality that has until now been available only in userland.
+
+Further, truly read-only objects in PHP userland are difficult if not impossible to achieve, especially when you take immutability of values into account. Working within an extension is the surest way of doing it, a la the request object offered here.
+
+=== What About Existing Userland Projects? ===
+
+I would prefer to discuss this proposal on its own merits, and thereby stay away from what might appear to be negative commentary on other projects. Nonetheless, prior critics of this proposal have demanded comparison between it and pre-existing projects.
+
+With all that in mind, I will present limited comparisons to two other major projects, hopefully hitting the high points without sounding overly-negative. If further comparison is desired, I will attempt to provide it.
+
+== Symfony HttpFoundation ==
+
+HttpFoundation provides a very wide range of functionality, as evidenced by its documentation at [[https://symfony.com/doc/current/components/http_foundation.html]]. It does so at a cost of necessarily greater complexity and higher code volume.
+
+As it happens, this proposal turns out to mimic a reduced subset of HttpFoundation functionality. The same subset is common to many userland implementations: Aura, Cake, CodeIgniter, Horde, Jooma, Lithium, MediaWiki, Phalcon, Yaf, Yii, and Zend/Laminas (among others). That subset is:
+
+  * a way to read the request-related superglobals such as $_GET, $_POST, etc. from an object; and,
+
+  * a way to set headers and content into an object so they can be inspected and modified before sending.
+
+So, this proposal is in some ways a distillation and summary of widely desired functionality in userland.
+
+Back to HttpFoundation specifically, an example of setting cookies provides an illustrative comparison:
+
+<code php>
+use Symfony\Component\HttpFoundation\Cookie;
+
+$response->headers->setCookie(Cookie::create('foo', 'bar'));
+</code>
+
+This is not so terrible, though it does additionally involve the HeaderBag and Cookie classes.  Whereas with this proposal, again intended only to wrap existing PHP functionality, the code would be:
+
+<code php>
+$response->setCookie('foo', 'bar');
+</code>
+
+HttpFoundation request and response objects are both fully mutable. In contrast, this proposal offers a request object with read-only properties; the class can be extended to add mutable or immutable properties. The response object offered here is fully mutable, though its methods are marked as final; this leaves the response object open for extension by frameworks and libraries, but closed for modification to its core functions.
+
+== PSR-7 ==
+
+(Full disclosure: I was one of the sponsors on PSR-7.)
+
+PSR-7 is a newer competitor to Symfony HttpFoundation. The PSR-7 interoperability interfaces, and their various competing implemementations (each with their own idiosyncrasies and additions), attempt to model HTTP messages, both for use by an HTTP client (as in Guzzle) and by server-side applications (as in Laminas).
+
+Using PSR-7 for server-side requests and responses can be challenging. For good or bad, the specification defines a way of working that is very different from implementations pre-existing it. A number of followup PSRs have been created to relieve these issues, as have other userland helper packages.
+
+Using the same example as with HttpFoundation above, setting a cookie in PSR-7 is no simple task. PSR-7 only provides a way to set headers, which generally means a helper library is necessary to set cookies properly. For examples of such libraries, see [[https://github.com/dflydev/dflydev-fig-cookies]] and [[https://github.com/hansott/psr7-cookies]], among others.
+
+Using the FigCookies project, this is how to set a cookie into a PSR-7 Response:
+
+<code php>
+use Dflydev\FigCookies\SetCookies;
+use Dflydev\FigCookies\SetCookie;
+
+$response = $response->withAddedHeader(
+  SetCookies::SET_COOKIE_HEADER,
+  SetCookie::create('foo', 'bar')
+);
+</code>
+
+As such, PSR-7 is not "batteries included": a 3rd-party helper library is needed for cookie work.
+
+In contrast, this proposal offers something much more straightforward: not to model HTTP messages, but to wrap existing PHP functionality in object properties and methods. It is as about as easy as using PHP itself.
+
+<code php>
+$response->setCookie('foo', 'bar', $options);
+</code>
+
+In a polar opposite of HttpFoundation, PSR-7 specifies immutability of both the request and the response. It turns out this is only imperfectly achievable for multiple reasons, not least of which is that the streams used for content are themselves mutable.
+
+To reiterate, this proposal offers read-only properties on the request with consistent and reliable immutability of those values. The response object remains mutable.
+
+
+=== Other Questions And Comments ===
+
+Q: Does ServerRequest hold references to the superglobals, or copies?
+
+A: Copies, made at instantiation time. Changes to `$_GET` after the ServerRequest is instantiated will not be reflected in the existing instance.
+
+Q: Since the $get, $post etc. properties are the same as $_GET and $_POST, does that mean they retain the same name mangling scheme?
+
+A: They do; that is, ServerRequest uses whatever is passed into it at construction time. If PHP changes its name mangling, or if different array values are passed in, ServerRequest will use those instead.
+
+Q: Readonly properties are unusual for PHP.
+
+A: Granted, though not unheard of. PdoStatement::$queryString is one precedent here.
+
+Q: Does this has any performance impact?
+
+A: Compared to userland, probably greater performance, but the scope is so small that I expect little end-to-end impact on applications as a whole.
+
+Q: Why is ServerRequest readonly, and ServerResponse mutable?
+
+A: It makes sense that you would not want to change what you have received as a request; however, as you are in charge of creating the response, modifying it as needed seems reasonable.
+
+Q: Why is ServerRequest composed only of properties, and ServerResponse composed only of methods?
+
+A: It's an outgrowth of an asymmetry that already exists in PHP: $_GET, $_POST, et al. are properties representing the request, whereas header(), setcookie(), et al. are all functions for sending a response.
+
+Q:  Why not write (PSR-7|HttpFoundation|OtherImplementation) in C, instead of your own version?
+
+A: This is not "my own version." This is an OO-approach to what PHP itself already does; it is representative of PHP's way of doing things, not "my" way of doing things.
+
+Q: Does it support HTTP/2?
+
+A: It supports HTTP/2 exactly as much as PHP itself does.
+
+Q: Does it support async?
+
+A: It supports async exactly as much as PHP itself does.
+
+==== Changes From The 1.x Version ====
+
+Based on user feedback over the past couple of years, this proposal differs from the earlier 1.x version in the following substantial ways:
+
+  * Some users objected on principle to the ServerRequest constructing itself using the superglobals internally. As a result, the constructor now requires a single array parameter; the corresponding argument is typically $GLOBALS but can be any array that mimics the $GLOBALS structure.
+
+  * The ServerRequest object no longer has the immutable application-related functionality represented by withInput(), withParams(), withUrl(), and their sibling methods. Some users felt this functionality was better left to application-specific implementations; other users merely did not need them and were happy to ignore them. This means ServerRequest is now only a public read-only set of properties with immutable values, while still being extensible in userland for application concerns if desired.
+
+  * The ServerResponse object no longer has setContent() convenience methods such as setContentJson() and setContentDownload(). Users found these less convenient than anticipated, and preferred to add their own application-specific convenience methods.
+
+  * ServerResponse no longer has a self-sending capability. It was noted that to customize sending logic, you needed a custom ServerResponse object. As a result, the sending logic has been extracted to a ServerResponseSender class.
+
+  * To address some concerns from an earlier round of discussion, all ServerResponse properties are now private, and all its methods are now final, though the class itself is not. This keeps the class open for extension but closed for modification.
+
+  * ServerResponse::setHeader() and addHeader() methods no longer convert array values to CSV header strings; this functionality was so rarely used as to be unnecessary. Removing it brings these methods back in line with the PHP header() signature. Likewise, the date() helper method is similarly removed. These helper methods, if ever needed, are easily added to userland implementations.
+
+In all, these removals and changes bring the proposal much closer to PHP as-it-is.
+
+==== Open Questions ====
+
+1. Are the more appropriate names other than ServerRequest, ServerResponse, and ServerResponseSender? The primary considerations here are (a) to indicate that these are the request received by PHP and the response being sent by PHP, and (b) to have as small a conflict as possible with pre-existing userland names in the global namespace.
+
+2. Should these classes go into an existing extension, rather than one of their own?
+
+3. ???
+
 
 ===== Backward Incompatible Changes =====
 
-None expected.
+Userland code that declares classes named ServerRequest, ServerResponse, or ServerReponseSender will need to rename those classes.
 
 ===== Proposed PHP Version(s) =====
 
-Next PHP 7.x.
+Next PHP 7.x or 8.0.
 
 ===== RFC Impact =====
 
 ==== To SAPIs ====
 
-None expected.
+None.
 
 ==== To Existing Extensions ====
 
-None expected.
+It would be convenient if the php_head_parse_cookie_options_array() function in ext/standard/head.c was published in head.h, so that the logic there would not need to be duplicated in php_request.c. Doing so would make it easier to keep the logic in sync, but is not a requirement.
 
 ==== To Opcache ====
 
-None known.
+None.
 
 ==== New Constants ====
 
@@ -68,28 +256,27 @@ None.
 
 ===== Open Issues =====
 
-Make sure there are no open issues when the vote starts!
+None at this time.
 
 ===== Unaffected PHP Functionality =====
 
 The remainder of PHP should remain unaffected.
 
-
 ===== Future Scope =====
 
-Possible support for HTTP/2 and server push.
+This extension acts as an object-oriented wrapper around existing PHP request and response functionality; as the scope of that PHP functionality expands, this extension should expand with it.
 
 ===== Proposed Voting Choices =====
 
-This counts as a language change, so a supermajority is required.
+For or against the proposal.
 
 ===== Patches and Tests =====
 
-The C code for the extension and tests are at https://github.com/pmjones/ext-request .
+The C code for the extension and tests are at [[https://github.com/pmjones/ext-request]] in the 2.x branch.
 
 ===== Implementation =====
 
-After the project is implemented, this section should contain 
+After the project is implemented, this section should contain
 
   - the version(s) it was merged to
   - a link to the git commit(s)
@@ -97,7 +284,21 @@ After the project is implemented, this section should contain
 
 ===== References =====
 
-Links to external references, discussions or RFCs
+==== Prior Discussions And Articles ====
+
+[[https://externals.io/message/96156]]
+
+[[https://externals.io/message/97461]]
+
+[[https://externals.io/message/97547]]
+
+[[http://paul-m-jones.com/post/2016/11/22/the-php-7-request-extension/]]
+
+[[https://www.reddit.com/r/PHP/comments/5ecfj1/the_php_7_request_extension/]]
+
+[[http://paul-m-jones.com/post/2017/01/03/rfc-serverrequest-and-serverresponse/]]
+
+[[https://www.reddit.com/r/PHP/comments/5lshko/rfc_serverrequest_and_serverresponse/]]
 
 ===== Rejected Features =====
 
