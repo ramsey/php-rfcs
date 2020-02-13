@@ -1,0 +1,111 @@
+====== PHP RFC: token_get_all() TOKEN_AS_OBJECT mode ======
+  * Date: 2020-02-13
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Under Discussion
+  * Target Version: PHP 8.0
+  * Implementation: https://github.com/php/php-src/pull/5176
+
+===== Introduction =====
+
+The ''token_get_all()'' function currently returns tokens either as a single-character string, or an array with a token ID, token text and line number. This RFC proposes to add a token_get_all() mode which returns an object instead. This reduces memory usage and makes code operating on tokens more readable.
+
+===== Proposal =====
+
+''token_get_all()'' accepts a new ''TOKEN_AS_OBJECT'' flag (which can be combined with the existing ''TOKEN_PARSE'' flag as well). If this flag is set, the return value is of type ''PhpToken[]'' declared as follows:
+
+<PHP>
+class PhpToken {
+    /** One of the T_* constants, or an integer < 256 representing a single-char token. */
+    public int $id;
+    /** The textual content of the token. */
+    public string $text;
+    /** The starting line number (1-based) of the token. */
+    public int $line;
+    /** The starting position (0-based) in the tokenized string. */
+    public int $pos;
+}
+</PHP>
+
+It should be emphasized that **all** tokens are returned as objects, including single-char tokens. While this uses more memory than returning them as strings, experience has shown that the current string/array mix is very inconvenient to work with.
+
+Returning an array of objects has the following advantages over the current approach:
+
+  * The representation of tokens is uniform, it is not necessary to continuously check whether an array or string token is being used.
+  * The using code is cleaner, because ''%%$token->text%%'' is easier to understand than ''$token[1]'' and friends.
+  * The token stores the position in the file, so that consumers don't have to compute and store it separately.
+
+Finally (and this is the real motivation here), the tokens take up signficiantly less memory, and are faster to construct as well. On a large file:
+
+<code>
+Default:
+    Memory Usage: 14.0MiB
+    Time: 0.43s (for 100 tokenizations)
+TOKEN_AS_OBJECT:
+    Memory Usage: 8.0MiB
+    Time: 0.32s (for 100 tokenizations)
+</code>
+
+==== Additional methods ====
+
+There are a few useful helper methods that could be added to the ''PhpToken'' class. Whether these should be added as part of this proposal is an **open question**.
+
+Three suggestions are given as PHP code below. The ''is()'' method is a useful helper, variations of which will be found in many libraries processing token streams. ''isIgnorable()'' helps the particularly common case of skipping whitespace-like tokens. ''getTokenName()'' avoids going through ''token_name()'' for debug output.
+
+<PHP>
+class PhpToken {
+    /** Whether the token has the given ID, the given text,
+     *  or has an ID/text part of the given array. */
+    public function is($kind): bool {
+        if (is_array($kind)) {
+            foreach ($kind as $singleKind) {
+                if (is_string($singleKind)) {
+                    if ($this->text === $singleKind) {
+                        return true;
+                    }
+                } else if (is_int($singleKind)) {
+                    if ($this->id === $singleKind) {
+                        return true;
+                    }
+                } else {
+                    throw new TypeError("Kind array must have elements of type int or string");
+                }
+            }
+            return false;
+        } else if (is_string($kind)) {
+            return $this->text === $kind;
+        } else if (is_int($kind)) {
+            return $this->id === $kind,
+        } else {
+            throw new TypeError("Kind must be of type int, string or array");
+        }
+    }
+
+    /** Whether this token would be ignored by the PHP parser. */
+    public function isIgnorable(): bool {
+        return $this->is([
+            T_WHITESPACE,
+            T_COMMENT,
+            T_DOC_COMMENT,
+            T_OPEN_TAG,
+            T_BAD_CHARACTER,
+        ]);
+    }
+
+    /** Get the name of the token. */
+    public function getTokenName(): string {
+        if ($this->id < 256) {
+            return chr($this->id);
+        } else {
+            return token_name($this->id);
+        }
+    }
+}
+</PHP>
+
+===== Backward Incompatible Changes =====
+
+There are no backwards compatibility breaks, apart from the new constant name and the new class name.
+
+===== Vote =====
+
+Yes / No.
