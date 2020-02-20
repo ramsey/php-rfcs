@@ -183,6 +183,48 @@ PHP 5 moved towards specifying by-reference passing at the declaration-site, mak
 
 This proposal differs from both in that it requires the by-reference annotation at **both** the declaration-site and the call-site. It is extremely unfortunate that this hasn't been done when the original migration of the by-reference passing system happened, as it could have avoided a lot of unnecessary code churn while arriving at a better system. Given this past mistake, the next best thing we can do is address it now.
 
+==== Open Question: Forwarding references in __call, call_user_func and similar ====
+
+The ''__call()'' and ''__callStatic()'' magic methods can be used to forward calls, but this does not work properly with by-reference arguments:
+
+<code php>
+class Incrementor {
+    public function inc(&$i) {
+        $i++;
+    }
+}
+
+class ForwardCalls {
+    private $object;
+    public function __construct($object) {
+        $this->object = $object;
+    }
+    public function __call(string $method, array $args) {
+        return $this->object->$method(...$args);
+    }
+}
+
+$forward = new ForwardCalls(new Incrementor);
+$i = 0;
+$forward->inc($i);
+var_dump($i); // int(0)
+</code>
+
+The above code silently "works", but the variable ''$i'' will not actually get passed by reference. A by-reference pass does occur at the ''$this->object->$method(...$args)'' call, but at this point the value stored in ''$args'' and the variable ''$i'' have no relation to each other.
+
+The explicit call-site annotation could be used to allow passing the variable by reference:
+
+<code php>
+$forward = new ForwardCalls(new Incrementor);
+$i = 0;
+$forward->inc(&$i);
+var_dump($i); // int(1)
+</code>
+
+This would make the corresponding element in ''$args'' be a reference, which the argument unpack would pass on to the called function. Making this work would require introducing a new internal argument passing mode like ''prefer-val'', which permits both by-value and by-reference passing, but prefers by-value passing by default (unlike the existing ''prefer-ref'').
+
+A similar problem also exists with ''call_user_func()'', which is not capable of calling functions that have by-reference parameters properly. The same mechanism could be used to support this.
+
 ===== Backward Incompatible Changes =====
 
 None. The use of this feature is optional, and the backwards-incompatible part is opt-in.
