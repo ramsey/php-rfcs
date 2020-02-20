@@ -7,7 +7,7 @@
 
 ===== Introduction =====
 
-By-reference parameters are currently only declared when defining a function, while the call-site does not distinguish between by-value and by-reference passing. This RFC proposes to allow marking by-reference arguments at the call-site as well.
+By-reference parameters are currently only declared when defining a function, while the call-site does not distinguish between by-value and by-reference passing. This RFC proposes to allow marking by-reference arguments at the call-site as well, and make this required at a future time.
 
 Consider the following example of an ''inc()'' function, which accepts a number by reference and increments it:
 
@@ -43,11 +43,11 @@ var_dump($i);
 
 The requirement that the reference is marked at both the definition- and call-site makes this feature different from the call-site pass-by-reference that was used in PHP 4.
 
-Of course, it remains possible to not explicitly mark reference-passing at the call-site. We may wish to deprecate and remove this ability in the future, but this RFC does not propose this.
+By default, the use of a call-site annotation will remain optional. However, a mode that makes it required may be introduced depending on the outcome of the [[https://github.com/php/php-rfcs/pull/2|language evolution RFC]].
 
 ===== Motivation =====
 
-The motivation for this proposal boils down to making it simpler to understand code, both for programmers and for static analyzers.
+The motivation for this proposal boils down to making it simpler to understand code: For programmers, for static analyzers and for the PHP optimizer and executor.
 
 As a simple example, consider the following two calls, which look deceptively similar:
 
@@ -96,9 +96,7 @@ function test($obj) {
 
 Does this code use an uninitialized variable ''$x''? Unless it's possible to infer the type of ''$obj'' and determine which method is being called and whether it uses by-reference passing, it's impossible to answer this question. In all likelihood the method uses by-value passing and this is a programming error, but it might also be an intentional use of the by-reference automatic initialization.
 
-While static analyzers in IDEs and CI systems will make reasonable assumptions in this case, the PHP implementation itself does not have this luxury. In fact, our inability to determine at compile-time whether a certain argument is passed by-value or by-reference is one of the most significant obstacles in our ability to analyze and optimize compiled code. The runtime dispatch between by-value and by-reference passing also adds significant complexity to the Zend VM, with at least 7 opcodes dedicated to only this task.
-
-This proposal does not resolve this issue, because it introduces an entirely optional feature. The previous syntax where pass-by-reference is not explicitly marked will continue to work. We may want to deprecate and remove it in the future, but this RFC does not propose this, as it is a quite significant change.
+While static analyzers in IDEs and CI systems will make reasonable assumptions in this case, the PHP implementation itself does not have this luxury. In fact, our inability to determine at compile-time whether a certain argument is passed by-value or by-reference is one of the most significant obstacles in our ability to analyze and optimize compiled code. The runtime dispatch between by-value and by-reference passing also adds significant complexity to the Zend VM, with at 9 (!!) opcodes dedicated to this task.
 
 ===== Detailed proposal =====
 
@@ -150,9 +148,44 @@ inc(&passthruVal($i));
 
 Apart from these additional error checks, the call-site reference-passing annotation does not affect execution semantics in any way.
 
+==== Mode with required call-site annotations ====
+
+This section depends on the outcome of the [[https://github.com/php/php-rfcs/pull/2|language evolution RFC]]. If we decide to introduce editions, then this section will only apply in the next edition. If we decide to introduce fine-grained declares, then the changes only apply if the ''require_explicit_send_by_ref'' declare is enabled. If we decide to not pursue a mechanism for opt-in backwards-incompatible changes, then this section becomes void, and the question of making call-site annotations required can be reconsidered at a later time. As a placeholder, we will assume the declare-based approach here.
+
+While optionally annotating by-reference passing already helps readability, we can only reap the full benefits outlined in the motivation section, if the use of call-site annotations is required. If the ''require_explicit_send_by_ref'' declare is enabled, then all by-reference passes must be annotated with ''&'' at the call-site, otherwise an exception will be thrown:
+
+<code php>
+declare(require_explicit_send_by_ref=1);
+
+function inc(&$num) { $num++; }
+
+$i = 0;
+inc($i);
+// Uncaught Error: Cannot pass parameter 1 by reference
+</code>
+
+If the argument is a prefer-ref argument of an internal function, then adding the ''&'' annotation will pass it by reference, while not adding it will pass it by value. Outside this mode, the passing behavior would instead be determined by the VM kind of the argument operand.
+
+==== Differences to the removed "call-time pass-by-reference" feature ====
+
+In PHP 4 (and available via deprecated ''allow_call_time_pass_reference'' option until PHP 5.4), by-reference passing was performed by adding an annotation **only** at the call-site, but not the declaration-site:
+
+<code php>
+function inc($num) { $num++; }
+
+$i = 0;
+inc(&$i);
+</code>
+
+This was very problematic, because the argument of any function could be forced into being a reference by adding a call-site annotation.
+
+PHP 5 moved towards specifying by-reference passing at the declaration-site, making by-value/by-reference passing part of the API contract of the function, as it should be.
+
+This proposal differs from both in that it requires the by-reference annotation at **both** the declaration-site and the call-site. It is extremely unfortunate that this hasn't been done when the original migration of the by-reference passing system happened, as it could have avoided a lot of unnecessary code churn while arriving at a better system. Given this past mistake, the next best thing we can do is address it now.
+
 ===== Backward Incompatible Changes =====
 
-None. The use of this feature is optional.
+None. The use of this feature is optional, and the backwards-incompatible part is opt-in.
 
 ===== Other languages =====
 
