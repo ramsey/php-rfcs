@@ -31,6 +31,20 @@ class PhpToken {
     public static function getAll(string $code, int $flags = 0): array;
     
     final public function __construct(int $id, string $text, int $line = -1, int $pos = -1);
+
+    /** Get the name of the token. */
+    public function getTokenName(): ?string;
+    
+    /**
+     * Whether the token has the given ID, the given text,
+     * or has an ID/text part of the given array.
+     * 
+     * @param int|string|array $kind
+     */
+    public function is($kind): bool;
+
+    /** Whether this token would be ignored by the PHP parser. */
+    public function isIgnorable(): bool;
 }
 </PHP>
 
@@ -73,63 +87,83 @@ $tokens[0]->getLowerText(); // works
 
 To guarantee a well-defined construction behavior, the ''PhpToken'' constructor is final and cannot be overridden by child classes. This matches the extension approach of the ''SimpleXMLElement'' class.
 
-===== Open Questions =====
-
 ==== Additional methods ====
 
-There are a few useful helper methods that could be added to the ''PhpToken'' class. Three suggestions are given as PHP code below. The ''is()'' method is a useful helper, variations of which will be found in many libraries processing token streams. ''isIgnorable()'' helps the particularly common case of skipping whitespace-like tokens. ''getTokenName()'' avoids going through ''token_name()'' for debug output.
+The ''PhpToken'' class defines a few additional methods, which are defined in terms of the reference-implementations given below.
 
 <PHP>
-class PhpToken {
-    /** Whether the token has the given ID, the given text,
-     *  or has an ID/text part of the given array. */
-    public function is($kind): bool {
-        if (is_array($kind)) {
-            foreach ($kind as $singleKind) {
-                if (is_string($singleKind)) {
-                    if ($this->text === $singleKind) {
-                        return true;
-                    }
-                } else if (is_int($singleKind)) {
-                    if ($this->id === $singleKind) {
-                        return true;
-                    }
-                } else {
-                    throw new TypeError("Kind array must have elements of type int or string");
-                }
-            }
-            return false;
-        } else if (is_string($kind)) {
-            return $this->text === $kind;
-        } else if (is_int($kind)) {
-            return $this->id === $kind,
-        } else {
-            throw new TypeError("Kind must be of type int, string or array");
-        }
-    }
-
-    /** Whether this token would be ignored by the PHP parser. */
-    public function isIgnorable(): bool {
-        return $this->is([
-            T_WHITESPACE,
-            T_COMMENT,
-            T_DOC_COMMENT,
-            T_OPEN_TAG,
-        ]);
-    }
-
-    /** Get the name of the token. */
-    public function getTokenName(): ?string {
-        if ($this->id < 256) {
-            return chr($this->id);
-        } elseif ('UNKNOWN' !== $name = token_name($this->id)) {
-            return $name;
-        } else {
-            return null;
-        }
+public function getTokenName(): ?string {
+    if ($this->id < 256) {
+        return chr($this->id);
+    } elseif ('UNKNOWN' !== $name = token_name($this->id)) {
+        return $name;
+    } else {
+        return null;
     }
 }
 </PHP>
+
+''getTokenName()'' is mainly useful for debugging purposes. For single-char tokens with IDs below 256, it returns the extended ASCII character corresponding to the ID. For known tokens, it returns the same result as ''token_name()''. For unknown tokens, it returns null.
+
+It should be noted that tokens that are not known to PHP are commonly used, for example when emulating lexer behavior from future PHP versions. In this case custom token IDs are used, so they should be handled gracefully.
+
+<PHP>
+public function is($kind): bool {
+    if (is_array($kind)) {
+        foreach ($kind as $singleKind) {
+            if (is_string($singleKind)) {
+                if ($this->text === $singleKind) {
+                    return true;
+                }
+            } else if (is_int($singleKind)) {
+                if ($this->id === $singleKind) {
+                    return true;
+                }
+            } else {
+                throw new TypeError("Kind array must have elements of type int or string");
+            }
+        }
+        return false;
+    } else if (is_string($kind)) {
+        return $this->text === $kind;
+    } else if (is_int($kind)) {
+        return $this->id === $kind,
+    } else {
+        throw new TypeError("Kind must be of type int, string or array");
+    }
+}
+</PHP>
+
+The ''is()'' method allows checking for certain tokens, while abstracting over whether it is a single-char token ''%%$token->is(';')%%'', a multi-char token ''%%$token->is(T_FUNCTION)%%'', or whether multiple tokens are allowed ''%%$token->is([T_CLASS, T_TRAIT, T_INTERFACE])%%''.
+
+While non-generic code can easily check the appropriate property, such as ''%%$token->text == ';'%%'' or ''%%$token->id == T_FUNCTION%%'', token stream implementations commonly need to be generic over different token kinds and need to support specification of multiple token kind. For example:
+
+<PHP>
+public function findRight($pos, $findTokenKind) {
+    $tokens = $this->tokens;
+    for ($count = \count($tokens); $pos < $count; $pos++) {
+        if ($tokens[$pos]->is($findTokenKind)) {
+            return $pos;
+        }
+    }
+    return -1;
+}
+</PHP>
+
+These kinds of search/skip/check APIs benefit from having an efficient native implementation of ''is()''.
+
+<PHP>
+public function isIgnorable(): bool {
+    return $this->is([
+        T_WHITESPACE,
+        T_COMMENT,
+        T_DOC_COMMENT,
+        T_OPEN_TAG,
+    ]);
+}
+</PHP>
+
+As a special case, it is very common that whitespace and comments need to be skipped during token processing. The ''isIgnorable()'' method determines whether a token is ignored by the PHP parser.
 
 ===== Rejected Features =====
 
