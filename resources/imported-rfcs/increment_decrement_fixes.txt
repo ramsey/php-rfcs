@@ -1,50 +1,38 @@
 ====== PHP RFC: Increment/Decrement Fixes ======
-  * Version: 1.0
-  * Date: 2020-03-01
+  * Version: 1.1
+  * Date: 2020-03-08
   * Author: Rowan Tommins [IMSoP], rowan.collins@gmail.com
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/increment_decrement_fixes
 
 ===== Introduction =====
 
-The increment and decrement operators (<php>++$a</php>, <php>$a++</php>, <php>--$a</php>, <php>$a--</php>) mostly behave the same as adding 1 to the variable. However, because they are implemented separately, there are a handful of anomalies regarding non-integer values, whose behaviour is not consistent with an integer cast. In particular, this RFC focuses on null, boolean, and array values.
+Intuitively, the <php>++</php> and <php>--</php> operators are equivalent to "add 1 to variable" and "subtract 1 from variable", respectively. As such, it would be expected that <php>$a=$a+1</php>, <php>$a+=1</php>, and <php>++$a</php> would end up with the same value in <php>$a</php>; and likewise, <php>$a=$a-1</php>, <php>$a-=1</php>, and <php>--$a</php>. However, because they are implemented separately, this is not always the case. This RFC proposes changes to the handling of null and array values.
 
-Intuitively, the <php>++</php> and <php>--</php> operators are equivalent to "add 1 to variable" and "subtract 1 from variable", respectively. As such, it would be expected that <php>$a=$a+1</php>, <php>$a+=1</php>, and <php>++$a</php> would end up with the same value in <php>$a</php>; and likewise, <php>$a=$a-1</php>, <php>$a-=1</php>, and <php>--$a</php>.
+Most arithmetic operators, including <php>+</php> and <php>+=</php> are implemented for non-numeric types by implicitly casting to integer, then performing the requested operation. However, <php>++</php> and <php>--</php> are implemented separately for each type via a switch statement in the engine; rather than coercing the current value to an integer, the default case in this switch statement is to silently leave the value unchanged.
 
-This is currently not the case, because <php>++</php> and <php>--</php> are implemented separately for each type via a switch statement in the engine. Rather than coercing the current value to an integer, the default case in this switch statement is to silently leave the value unchanged.
-
-For null and boolean, addition and subtraction are based on casting to integer; for arrays, they throw an error; this RFC aims to make increment and decrement consistent in all three cases.
+On top of this, the <php>++</php> operator has a specific implementation for <php>null</php>, but the <php>--</php> operator does not, leading to an even more surprising inconsistency.
 
 
-===== Proposal 1: Decrementing Null =====
+===== Fix or remove? =====
 
-The behaviour of null with <php>++</php> is consistent with it being coerced to int(0); however, with <php>--</php> the null remains unchanged.
+A common concern is that fixing these inconsistencies would imply "endorsing" or even "encouraging" the use of these operators with non-numeric types. It would perhaps be better to make these operations into errors, either immediately in PHP 8.0, or plan ahead to doing so in future. If this is likely to happen, then changing the behaviour in any backwards incompatible way would mean users having to change code twice, which would be undesirable.
 
-This behaviour has been raised as a bug at least three times ([[https://bugs.php.net/bug.php?id=20548|#20548]], [[https://bugs.php.net/bug.php?id=25674|#25674]], [[https://bugs.php.net/bug.php?id=41690|#41690]]). All three are closed, and it is [[https://www.php.net/manual/en/language.operators.increment.php|documented in the manual]], but there is no evidence that it is intentional behaviour rather than an entrenched bug retained for compatibility.
+The position of this RFC is that arithmetic operators should either be consistently allowed or consistently disallowed on a particular type. In particular, if <php>$a+=1</php> and <php>$a-=1</php> do not error, then <php>$a++</php> and <php>$a--</php> should not error either.
 
-Discrepancies in behaviour of null are particularly problematic, since undefined variables, array items, and object properties are currently treated as having a value of null.
+The balance of these factors is assessed for each type below, but in summary:
 
-This RFC proposes to change the behaviour, so that <php>$a=null; $a--;</php> or <php>$a=null; --$a;</php> will result in $a holding -1. This brings it into line with all other mathematical operations, including <php>$a++</php>, which treat null as equivalent to 0.
+  * For arrays, throw an error in 8.0, because most operators already do
+  * For objects, resources, and booleans, assume that an error will be proposed in a future RFC
+  * For null, continue to allow arithmetic operators, and fix the missing implementation of <php>--</php>
 
-^ ^ Initial Value ^ %%$a = $a + 1%% ^ %%$a += 1%% ^ %%++$a%%, %%$a++%% ^ %%$a = $a - 1%% ^ %%$a -= 1%% ^ %%--$a%%, %%$a--%% ^
-^ Current ^ null | 1 | 1 | 1 | -1 | -1 | null |
-^ Proposed ^ null | 1 | 1 | 1 | -1 | -1 | -1 |
+===== Strings =====
 
-===== Proposal 2: Incrementing and Decrementing Booleans ======
+Strings overload the <php>++</php> and <php>--</php> operators with complex behaviour which mixes text and arithmetic logic. Improving this deserves its own discussion, so will not be discussed further in this RFC.
 
-The behaviour of booleans with most mathematical operations is to treat false as 0 and true as 1. However, the <php>++</php> and <php>--</php> operators currently leave boolean values unchanged.
+===== Arrays =====
 
-This RFC proposes to change the behaviour so that it is in line with other mathematical contexts, as follows:
-
-^ ^ Initial Value ^ %%$a = $a + 1%% ^ %%$a += 1%% ^ %%++$a%%, %%$a++%% ^ %%$a = $a - 1%% ^ %%$a -= 1%% ^ %%--$a%%, %%$a--%% ^
-^ Current ^ true | 2 | 2 | true | 0 | 0 | true |
-^ Proposed ^ true | 2 | 2 | 2 | 0 | 0 | 0 |
-^ Current ^ false | 1 | 1 | false | -1 | -1 | false |
-^ Proposed ^ false | 1 | 1 | 1 | -1 | -1 | -1 |
-
-===== Proposal 3: Error when incrementing or decrementing an array =====
-
-Adding an integer to an array throws an Error with the message "Unsupported operand types"; but incrementing or decrementing an array leaves it unchanged, with no Notice, Warning, or Error.
+Adding an integer to an array throws an Error with the message "Unsupported operand types", as do most other arithmetic operators. However, incrementing or decrementing an array leaves it unchanged, with no Notice, Warning, or Error.
 
 This RFC proposes to change the behaviour so that <php>$a=[]; $a++;</php> (or <php>++$a</php>) and <php>$a=[]; $a--;</php> (or <php>--$a</php>) raise the same error as <php>$a = [] + 1;</php>.
 
@@ -52,10 +40,121 @@ This RFC proposes to change the behaviour so that <php>$a=[]; $a++;</php> (or <p
 ^ Current ^ any array | Error | Error | no effect | Error | Error | no effect |
 ^ Proposed ^ any array | Error | Error | Error | Error | Error | Error |
 
+===== Objects, resources, and booleans =====
+
+Most arithmetic operations will implicitly cast non-numeric types to integer as follows:
+
+  * Objects (other than internal objects with operator overloading) are cast to 1, and an E_NOTICE is raised
+  * Resources are cast to their internal ID
+  * false is cast to 0
+  * true is cast to 1
+
+The <php>++</php> and <php>--</php> operators currently have no implementation for these types, so silently leave the value unchanged. This leads to the following inconsistent behaviour:
+
+^ Initial Value ^ %%$a = $a + 1%% ^ %%$a += 1%% ^ %%++$a%%, %%$a++%% ^ %%$a = $a - 1%% ^ %%$a -= 1%% ^ %%--$a%%, %%$a--%% ^
+^ any object | 2 (with E_NOTICE) | 2 (with E_NOTICE) | no effect | 0 (with E_NOTICE) | 0 (with E_NOTICE) | no effect |
+^ resource#1 | 2 | 2 | no effect | 0 | 0 | no effect |
+^ resource#5 | 6 | 6 | no effect | 4 | 4 | no effect |
+^ false | 1 | 1 | false | -1 | -1 | false |
+^ true | 2 | 2 | true | 0 | 0 | true |
+
+Possible options:
+
+  * A: Implement <php>++</php> and <php>--</php> with an implicit cast, to match other arithmetic operators.
+  * B: Raise an error for <php>++</php> and <php>--</php>, but leave other operators unchanged.
+  * C: Raise an error for all arithmetic operators.
+
+The position of this RFC is that option A brings very little benefit for these types, because the resulting values aren't particularly intuitive or useful. On the other hand, option B simply swaps one inconsistency for another. Option C has the added benefit of bringing the behaviour of these types in line with the behaviour of arrays.
+
+The implications of introducing such an error deserve their own RFC. For instance, it was mentioned in [[rfc/engine_warnings]] that the <php>==</php> operator currently falls back to an integer cast for cases such as <php>$a == 1</php> which should not constitute a Type Error.
+
+The position of this RFC is to leave these types unchanged, in the expectation of a further RFC implementing option C.
+
+===== Null =====
+
+Nulls deserve special consideration for two reasons:
+
+  * The implicit coercion to int is significantly more useful than for other types
+  * The <php>++</php> operator already works, leaving just <php>--</php> as an anomaly
+
+==== Current inconsistency ====
+
+For nearly all arithmetic operators, <php>null</php> is silently coerced to <php>0</php>. Unlike the other types mentioned in this RFC, this applies equally to the <php>++</php> operator. Oddly, however, the <php>--</php> operator is not implemented for null, and leaves the variable unchanged. 
+
+This behaviour has been raised as a bug at least three times ([[https://bugs.php.net/bug.php?id=20548|#20548]], [[https://bugs.php.net/bug.php?id=25674|#25674]], [[https://bugs.php.net/bug.php?id=41690|#41690]]). All three are closed, and it is [[https://www.php.net/manual/en/language.operators.increment.php|documented in the manual]], but no evidence has been put forward that this is intentional behaviour, rather than a very old bug retained for compatibility.
+
+Consider the following patch, which looks like a straight-forward simplification:
+
+<code diff>
+  function foo($bar) {
+-     $bar -= 1;
++     $bar--;
+      // more code here
+  }
+</code>
+
+The old code always results in an integer in <php>$bar</php> after the first line of the function; the new code does not do so if a null value is passed, because of the missing <php>--</php> implementation. 
+
+The asymmetry of <php>++</php> and <php>--</php> is even more confusing. Consider this patch:
+
+<code diff>
+  function repeatThing($extraTimes) {
+-      for ( $i = 0; $i <= $extraTimes; $i++ ) {
++      for ( $i = $extraTimes; $i >= 0; $i-- ) {
+           doThing($i);
+       }
+  }
+</code>
+
+Again, this looks like a safe change, reversing the order of the loop; but if passed a value of NULL, the old code will call doThing() once, and the new code will enter an infinite loop.
+
+==== Options ====
+
+There are four main options to improve the situation:
+
+  * A: Implement <php>--</php> with an implicit cast, to match other arithmetic operators including <php>++</php>.
+  * B1: Raise an error for <php>--</php>, but leave other operators including <php>++</php> unchanged.
+  * B2: Raise an error for both <php>++</php> and <php>--</php>, but leave other operators unchanged.
+  * C: Raise an error for all arithmetic operators.
+
+Option B1 is in some ways the safest, because it makes the change immediately visible, and most cases affected are probably already buggy. However, it is hard to justify raising an error for <php>$a--</php> without at least a plan to deprecate the obvious counterpart <php>$a++</php>. A similar argument applies to option B2, which would introduce a breaking change for <php>$a++</php>, but users could simply switch to <php>$a+=1</php> and get no error.
+
+==== Removing null to int coercion ====
+
+Should we then go with Option C, as proposed for other types? That is, should we introduce, either immediately, or via a staged deprecation, a Type Error for arithmetic operations where either argument is null?
+
+An important consideration is that undefined variables, array items, and object properties are currently treated as having a value of null. While it has been suggested to change this to an error in a future version, there is no clear consensus to do so. This means operations on null are more common than the other types we have discussed, and are likely to remain so. 
+
+Furthermore, the value when coerced to int is more intuitive, and more likely to be useful. It is fairly reasonable that <php>$price * $_GET['quantity']</php> will result in zero if no quantity was provided; or that <php>$price -= $discount</php> leaves the value unchanged if there is no discount defined.
+
+Even the increment operator itself can be useful with null / unitialised values, for instance in this common implementation of "count items in each category":
+
+<code php>
+$counts = [];
+foreach ( $items as $item ) {
+    $counts[$item->getCategory()]++;
+}
+</code>
+
+If there was no implicit default of zero, an extra line such as <php>$counts[$item->getCategory()] ??= 0;</php> would need to be added, but this neither expresses the intent (a count of zero is never returned) nor avoids any bugs (we know that the array has been initialised empty).
+
+Since the case for removing null to int coercion is much less decisive than for other types, this RFC makes the assumption that no such removal is likely in the short term. As such, waiting for that removal does not solve the immediate problem of inconsistency between <php>++</php> and <php>--</php>.
+
+==== Fixing the decrement case ====
+
+As mentioned above, no evidence has been put forward that the missing definition of decrement for null is intentional.
+
+This RFC therefore proposes to fix this bug, so that <php>$a=null; $a--;</php> or <php>$a=null; --$a;</php> will result in $a holding -1. This brings it into line with all other mathematical operations, including <php>$a++</php>, which treat null as equivalent to 0.
+
+^ ^ Initial Value ^ %%$a = $a + 1%% ^ %%$a += 1%% ^ %%++$a%%, %%$a++%% ^ %%$a = $a - 1%% ^ %%$a -= 1%% ^ %%--$a%%, %%$a--%% ^
+^ Current ^ null | 1 | 1 | 1 | -1 | -1 | null |
+^ Proposed ^ null | 1 | 1 | 1 | -1 | -1 | -1 |
+
 ===== Backward Incompatible Changes =====
 
-All of the proposed changes are explicit breaks in compatibility. The justification is that the current behaviour is neither intuitive nor useful. It is unlikely that code is deliberately relying on it, and it is likely that users would expect the behaviour to be consistent with adding 1.
+The additional error on increment and decrement for arrays is likely to mostly affect code which already contains bugs, and as a fatal will be easily detected. 
 
+The fix to decrement on nulls is harder to detect. While it's unlikely that any code is deliberately relying on the current behaviour, it may inadvertently be doing so. It would be sensible to provide links in official upgrading documentation to static analysis tools which can point out potentially affected code.
 
 ===== Proposed PHP Version(s) =====
 
@@ -64,6 +163,10 @@ All of the proposed changes are explicit breaks in compatibility. The justificat
 
 ===== RFC Impact =====
 
+==== On OpCache ====
+
+If there is currently any optimisation based on the non-implementation of decrement for nulls, or the behaviour of increment and decrement for arrays, this will need to be amended if the respective votes pass. 
+
 ===== Open Issues =====
 
 None at time of initial discussion.
@@ -71,29 +174,17 @@ None at time of initial discussion.
 
 ===== Unaffected PHP Functionality =====
 
-**Undefined variables, array items, and object properties** are currently treated as null for most purposes, including the <php>++</php> and <php>--</php> operators. Changing this behaviour is out of scope of this RFC, and the behaviour of variables explicitly set to null would still need to be defined even without this.
+As mentioned above, this RFC proposed no changes to handling of strings, booleans, objects, or resources. 
 
-Similarly, most mathematical contexts will coerce null and false to 0, and true to 1; this RFC does not seek to change any cases where that logic is followed. Changes to that general principle might render this RFC obsolete, but might require a period of deprecation, so consistency within the current approach may still be valuable.
-
-**Strings** overload the <php>++</php> and <php>--</php> operators with complex behaviour not discussed here. Improving this deserves its own discussion, so has been left out of this RFC.
-
-**Objects and resources** are also left unchanged with <php>++</php> and <php>--</php>; it would be consistent with the aim of this RFC to propose harmonising those with their behaviour when adding 1. However, in both cases, the current behaviour is of dubious value, so it may be better to leave this to a separate RFC tackling the general issue, e.g. raising an Error in line with arrays.
-
-For reference, the current behaviour for most operations is that objects are coerced to int(1), and resources to their internal ID, giving this table:
-
-^ Initial Value ^ %%$a = $a + 1%% ^ %%$a += 1%% ^ %%++$a%%, %%$a++%% ^ %%$a = $a - 1%% ^ %%$a -= 1%% ^ %%--$a%%, %%$a--%% ^
-^ any object | 2 (with E_NOTICE) | 2 (with E_NOTICE) | no effect | 0 (with E_NOTICE) | 0 (with E_NOTICE) | no effect |
-^ resource#1 | 2 | 2 | no effect | 0 | 0 | no effect |
-^ resource#5 | 6 | 6 | no effect | 4 | 4 | no effect |
+It also does not directly propose any changes to operators other than <php>++</php> and <php>--</php>, although it recommends that a future RFC does so for the above types.
 
 
 ===== Proposed Voting Choices =====
 
-The three proposed changes can be implemented independently, so three separate votes are proposed, each requiring the standard 2/3 super-majority to be accepted:
+The two proposed changes can be implemented independently, so two separate votes are proposed, each requiring the standard 2/3 super-majority to be accepted:
 
-  * Should decrementing null result in -1? (Yes / No)
-  * Should incrementing and decrementing booleans act the same as addition and subtraction? (Yes / No)
-  * Should incrementing or decrementing an array throw an "Unsupported operand types" error? (Yes / No)
+  * Should decrementing null be fixed in line with incrementing and with subtraction, so that <php>$a=null; $a--;</php> results in <php>-1</php>? (Yes / No)
+  * Should incrementing or decrementing an array throw an "Unsupported operand types" error, in line with other arithmetic operations? (Yes / No)
 
 
 ===== Patches and Tests =====
@@ -112,4 +203,4 @@ TODO
 
 ===== Rejected Features =====
 
-TODO
+A previous version of the RFC proposed fixing the implementation for booleans to match integer coercion followed by adding or substracting 1. The current draft instead groups booleans with objects and resources, as warranting a separate RFC proposing an error.
