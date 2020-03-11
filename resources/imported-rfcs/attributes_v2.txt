@@ -1,6 +1,6 @@
 ====== PHP RFC: Attributes v2 ======
 
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2020-03-09
   * Author: Benjamin Eberlei, beberlei@php.net
   * Status: Under Discussion
@@ -82,6 +82,14 @@ function foo() {}
 It is not allowed to use the same attribute name more than once on the same
 declaration and a compile error is thrown when this detected.
 
+Attributes have to be declared **after** the doc-block or otherwise
+they are not attached to the following declaration.
+
+<nowiki>As the "<<" and ">>" characters are used in an expression prefix
+position here, there is no potential conflict for them being used in a
+potential generics proposal, where "<T>" is the syntax commonly used in other
+languages.</nowiki>
+
 ==== Attribute Names Resolve to Classes ====
 
 The name of an attribute is resolved against the currently active namespace
@@ -104,7 +112,7 @@ function foo() {}
 // sample attribute class:
 namespace My\Attributes;
 
-class SingleArgument implements \Php\Attribute {
+class SingleArgument implements PhpAttribute {
     public $argumentValue;
     
     public function __construct($argumentValue) {
@@ -120,7 +128,7 @@ This would happen only when accessing attributes as objects in the Reflection AP
 Thanks to class name resolving, IDEs or static analysis tools
 can perform this validation for the developer.
 
-Attribute classes must extend the marker interface //Php\Attribute//
+Attribute classes must extend the marker interface //PhpAttribute//
 and an error is thrown if they don't. This is again
 done to reduce the potential for developers to make mistakes
 when using attributes.
@@ -180,6 +188,11 @@ This proposed API aims to be a compromise for previous conflicting opinions, whe
 one faction preferred to have access to only arrays and build their solution on
 top in userland and the faction that preferred PHP to already convert to
 attribute object instances.
+
+With this approach we can also guarantee that a call to //getAttributes()//
+doesn't throw errors when attributes are invalid according to their userland
+implementations. This could potentially cause problems when conflicting libraries
+have attributes on the same declaration.
 
 ===== Use Cases =====
 
@@ -295,72 +308,86 @@ HashTable *zend_attribute_get(HashTable *attributes, char *name, size_t name_len
 zval *zend_attribute_all(HashTable *attributes, char *name, size_t name_len);
 </code>
 
-==== Userland Use-Case: Declaring Validation Rules on Objects ===
+==== Userland Use-Case: Declaring Event Listener Hooks on Objects ===
 
 In userland attributes provide the benefit of putting declaration
 and additional configuration directly close to each other.
 
-As an example I show the potential of a validation library using attributes:
+This is an example of refactoring Symfony EventSubscribers to use
+attributes instead. The //EventSubscriberInterface// requires
+users to declare which event is handled by which method on the class
+in the //getSubscribedEvents()// method.
+
+This can be changed to just look for attributes on methods
+to declare which event they listen to.
 
 <code php>
-use Validator\Attributes\Email;
-use Validator\Attributes\NotEmpty;
-use Validator\Attributes\Maxlenth;
-
-class User
+// current code without attributes
+class RequestSubscriber implements EventSubscriberInterface
 {
-    <<NotEmpty>>
-    <<Maxlength(255)>>
-    public $username;
-
-    <<Email>>
-    public $email;
-}
-
-class Validator
-{
-    public function validateObject(object $object)
+    public static function getSubscribedEvents(): array
     {
-        $reflection = new ReflectionObject($object);
-
-        foreach ($reflection->getProperties() as $property) {
-            $this->validateProperty($object, $property);
-        }
+        return [RequestEvent::class => 'onKernelRequest'];
     }
 
-    private function validateProperty($object, ReflectionProperty $property)
+    public function onKernelRequest(RequestEvent $event)
     {
-        $value = $property->getValue($object);
+    }
+}
 
-        $validationAttributes = $property->getAttributes(\Validator\Attributes\Attribute::class);
+// refactor to:
+class Listener implements \PhpAttribute
+{
+    public $event;
 
-        foreach ($validationAttributes as $validationAttribute) {
-            switch ($validationAttribute->getName()) {
-                case Email::class:
-                    // validate $value as email
-                    break;
+    public function __construct(string $event)
+    {
+        $this->event = $event;
+    }
+}
 
-                case NotEmpty::class:
-                    if (empty($value)) {
-                        throw new ValidationException();
-                    }
-                    break;
+class RequestSubscriber
+{
+    <<Listener(RequestEvent::class)>>
+    public function onKernelRequest(RequestEvent $event)
+    {
+    }
+}
 
-                case Maxlength::class:
-                    $maxlength = $validationAttribute->getAsObject();
+// and the potential EventDispatcher to register listeners based on attributes:
 
-                    if (strlen($value) > $maxlength->value) {
-                        throw new ValidationException();
-                    }
-                    break;
+class EventDispatcher
+{
+    private $listeners = [];
+
+    public function addSubscriber(object $subscriber)
+    {
+        $reflection = new ReflectionObject($subscriber);
+
+        foreach ($reflection->getMethods() as $method) {
+            $attributes = $method->getAttributes(Listener::class);
+
+            foreach ($attributes as $listenerAttribute) {
+                /** @var $listener Listener */
+                $listener = $listenerAttribute->getAsObject();
+
+                $this->listeners[$listener->event][] = [$subscriber, $method->getName()];
             }
         }
     }
+
+    public function dispatch($event, $args...)
+    {
+        foreach ($this->listeners[$event] as $listener) {
+            $listener(...$args);
+        }
+    }
 }
 
-$user = new User();
-$user->username = $request->get('username');
-$user->email = $request->get('email');
+$dispatcher = new EventDispatcher();
+$dispatcher->addSubscriber(new RequestSubscriber());
+$dispatcher->dispatch(RequestEvent::class, $payload);
+
 </code>
 
 ==== Userland Use-Case: Migrating Doctrine Annotations from Docblocks to Attributes ====
@@ -408,13 +435,15 @@ namespace App\Entity {
     <<ORM\Table("users")>>
     class User
     {
-        <<ORM\Id, ORM\Column, ORM\GeneratedValue>>
+        <<ORM\Id>>
+        <<ORM\Column>>
+        <<ORM\GeneratedValue>>
         public int $id;
 
         <<ORM\Column(["unique" => true])>>
         public string $email;
 
-        <<ORM\ManyToOne()>>
+        <<ORM\ManyToOne>>
         public ?Address $address;
     }
 }
@@ -585,7 +614,7 @@ None
 
   * Should we allow constant expressions or are basic type declarations (bool, int, string, array, float) already enough for arguments of attributes?
   * Is the naming of ReflectionAttribute methods ok?
-  * Should attribute classes be required to implement an interface //Php\Attribute//? Or the built-in attribute //<<\Php\Attribute>>//? Or no requirement?
+  * Should attribute classes be required to implement an interface //PhpAttribute//? Or the built-in attribute //<<\PhpAttribute>>//? Or no requirement?
   * Should attributes already provide a way to specify which declarations they target and throw errors on wrong placement? Example: //<<Target(["class", "function", "property"])>>//
   * When to autoload the attributes and validate the constructor? Immediately at compile time (possible?) or only when Reflection::getAttributes() is called?
   * Should there be an alternative "short" syntax to declare attributes in one enclosing? //<<SingleArgument("foo"), MultiArgument("bar", "baz")>>//
@@ -622,3 +651,12 @@ Previously failed or abandoned RFCs
   * [[https://wiki.php.net/rfc/simple-annotations|Simple Annotations]]
   * [[https://wiki.php.net/rfc/annotations-in-docblock|Annotations in DocBlock RFC]]
   * [[https://wiki.php.net/rfc/annotations|Class Metadata RFC]]
+
+===== Changelog =====
+
+0.2:
+
+  * Added new, hopefully more simple userland example
+  * Changed //Php\Attribute// to //PhpAttribute// because the PHP namespace has not been reserved for PHP and is currently "empty"
+  * Clarify necessary order of docblocks, attributes and function declarations
+  * Clarify no conflict with potential generics syntax
