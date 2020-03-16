@@ -13,7 +13,7 @@ This RFC proposes to add support for a new property modifier that would allow pr
 
 ==== Run-time behaviour ====
 
-"Write-once" properties in PHP (the actual keyword is to be decided) could be initialized either by an explicit default value, or by an assignment operation. Contrary to how ''final'' properties in Java work, this RFC proposes to allow the initialization of object properties after object construction. The main purpose of choosing this approach is to make lazy loading possible - which is an important aspect for many PHP applications. In addition to object properties, class properties can also use the modifier in question with the same rules.
+"Write-once" properties in PHP (the actual keyword is to be decided) could be initialized by an assignment operation. Contrary to how ''final'' properties in Java work, this RFC proposes to allow the initialization of object properties after object construction. The main purpose of choosing this approach is to make lazy loading possible - which is an important aspect for many PHP applications. In addition to object properties, class properties can also use the modifier in question with the same rules.
 
 As soon as initialization is done, any other attempt to assign a value to "write-once" properties results in an exception. Besides assignment, the increment, decrement, and unset operations are also forbidden. As arrays are an immutable data structure in PHP, any attempt to mutate a property of array type (adding/removing/changing items) is forbidden. However, properties that have an object type still remain mutable internally (see example below). In order to avoid possible problems, references on "write-once" properties are forbidden as well.
 
@@ -21,30 +21,29 @@ As soon as initialization is done, any other attempt to assign a value to "write
 
 class Foo
 {
-    <keyword> public int $a = 1;
-    <keyword> public string $b;
-    <keyword> public array $c = ["foo"];
-    <keyword> public object $d;
+    <keyword> public int $a;
+    <keyword> public array $b;
+    <keyword> public object $c;
 
     public function __construct()
     {
-        $this->b = "foo";
+        $this->a = 1;
+        $this->b = ["foo"];
     }
 }
 
 $foo = new Foo();
 
 $foo->a = 2;		// EXCEPTION: property a has already been initialized
-$foo->b = "bar";	// EXCEPTION: property b has already been initialized
 $foo->a++;		// EXCEPTION: incrementing/decrementing is forbidden
-unset($foo->c);		// EXCEPTION: unsetting is forbidden
-$foo->c[] = "bar";	// EXCEPTION: array values can't be modified
-next($foo->c);		// EXCEPTION: internal pointer of arrays can't be modified as well
-$var = &$this->c;	// EXCEPTION: reference isn't allowed
-$this->c; = &$var;	// EXCEPTION: reference isn't allowed
+unset($foo->b);		// EXCEPTION: unsetting is forbidden
+$foo->b[] = "bar";	// EXCEPTION: array values can't be modified
+next($foo->b);		// EXCEPTION: internal pointer of arrays can't be modified as well
+$var = &$this->b;	// EXCEPTION: reference isn't allowed
+$this->b; = &$var;	// EXCEPTION: reference isn't allowed
 
-key($foo->c);		// SUCCESS: internal pointer of arrays is possible to read
-$foo->d = new Foo();	// SUCCESS: property d hasn't been initialized before
+key($foo->b);		// SUCCESS: internal pointer of arrays is possible to read
+$foo->c = new Foo();	// SUCCESS: property d hasn't been initialized before
 $foo->d->foo = "foo";	// SUCCESS: objects are still mutable internally
 
 </code>
@@ -53,9 +52,22 @@ Furthermore, cloning objects with "write-once" properties is supported, in which
 
 ==== Compile-type restrictions ====
 
-As untyped properties have an implicit default value (''null'') in the absense of an explicit one, their usefulness would be very limited. In order to avoid the introduction of unintiutive workarounds, this RFC proposes to disable the property modifier in question for them. Contrarily to untyped properties, typed properties are in uninitialized state by default, so they play well with the write-once semantics.
+As untyped properties have an implicit default value (''null'') in the absense of an explicit one, their usefulness would be very limited. In order to avoid the introduction of unintiutive workarounds, this RFC proposes to disable the property modifier in question for them. Contrarily to untyped properties, typed properties are in uninitialized state by default (meaning, they don't have a value yet), so they play well with the write-once semantics.
 
 This choice has a slightly inconvenient implication of not being able to use "write-once" properties together with resources - since PHP doesn't have the ''resource'' type declaration. Currently, a possible workaround is to wrap resources in objects, but another way to solve the issue could be provided from PHP's side by adding support for a ''mixed'' type.
+
+Another restriction of "write-once" properties is that they can't have a default value. Thus, the following syntax is forbidden:
+
+<code php>
+
+class Foo {
+    public int $a = 0;
+}
+
+</code>
+
+Instead, property ''$a'' should be initialized via an assignment either in the constructor or somewhere else. The purpose of this restriction is to avoid offering two syntaxes for declaring class constants as well as keeping our freedom to add new features to PHP that would otherwise have the possibility to interfere with the semantics of default values of "write-once" properties.
+
 
 Furthermore, the introduction of "write-once" properties impose slight changes to property variance validation. Namely, "write-once" properties must not override regular properties because the parent class expects them to be mutable. That's why the following example results in a compilation error:
 
@@ -87,10 +99,7 @@ class Bar extends Foo {
 
 ==== Serialization ====
 
-"Write-once" properties can be serialized just like other properties. However, some new restriction will apply to them:
-
-  * Malformed serialized data which sets a "write-once" property twice throws an exception
-  * Properties that have a default value are overwritten by the serialized value of the property
+"Write-once" properties can be serialized just like other properties. However, a new rule will apply to them: malformed serialized data which sets a "write-once" property multiple times throws an exception.
 
 ==== Reflection ====
 
@@ -126,9 +135,9 @@ There are no backward incompatible changes in this proposal except for the fact 
 ===== Future Scope =====
 Adding support for "write-once" properties would lay the groundwork for immutable objects - for which I'm going to create a proposal should the current RFC be accepted. I also plan to address the problem with cloning mentioned in the proposal section.
 
-Additionally, "write-once" properties could in principle support covariance. That is, a subclass would be allowed to tighten the property type that is inherited from the parent class, while other properties must stay invariant. All this would be possible because of the quasi-immutable nature of "write-once" properties: they are generally expected to be assigned to only once, in the constructor - which is exempt from LSP checks. There is a gotcha though: in practice, "write-once" properties could be written from places other than the constructor. Although there might not be many practical use-cases for it, the infamous setter injection is certainly one (as shown at https://3v4l.org/DQ3To), in which case property covariance would be a problem.
+Additionally, as mentioned in the "Compile-Type Restrictions" section, adding support for the ''mixed'' type would make it possible to use "write-once" properties together with resources. Besides this, we could allow the definition of a default values later on as soon as we have a good use-case for them.
 
-Finally, as mentioned in the "Compile-Type Restrictions" section, adding support for the ''mixed'' type would make it possible to use "write-once"  properties together with resources.
+Finally, "write-once" properties could in principle support covariance. That is, a subclass would be allowed to tighten the property type that is inherited from the parent class, while other properties must stay invariant. All this would be possible because of the quasi-immutable nature of "write-once" properties: they are generally expected to be assigned to only once, in the constructor - which is exempt from LSP checks. There is a gotcha though: in practice, "write-once" properties could be written from places other than the constructor. Although there might not be many practical use-cases for it, the infamous setter injection is certainly one (as shown at https://3v4l.org/DQ3To), in which case property covariance would be a problem.
 
 ===== Proposed Voting Choices =====
 The primary vote ("Do you want to add support for the proposed property modifier?") requires 2/3 majority, while the secondary one ("Which keyword to use"?) requires a simple majority.
