@@ -1,0 +1,203 @@
+====== PHP RFC: Constructor Property Promotion ======
+  * Date: 2020-03-26
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Target Version: PHP 8.0
+  * Implementation: https://github.com/php/php-src/pull/5291
+
+===== Introduction =====
+
+Currently, the definition of simple value objects requires a lot of boilerplate, because all properties need to be repeated at least four times. Consider the following simple class:
+
+<PHP>
+class Point {
+    public float $x;
+    public float $y;
+    public float $z;
+
+    public function __construct(
+        float $x = 0.0,
+        float $y = 0.0,
+        float $z = 0.0
+    ) {
+        $this->x = $x;
+        $this->y = $y;
+        $this->z = $z;
+    }
+}
+</PHP>
+
+The properties are repeated 1) in the property declaration, 2) the constructor parameters, and 3) two times in the property assignment. Additionally, the property type is repeated twice.
+
+Especially for value objects, which commonly do not contain anything more than property declarations and a constructor, this results in a lot of boilerplate, and makes changes more complicated and error prone.
+
+This RFC proposes to introduce a short hand syntax, which allows combining the definition of properties and the constructor:
+
+<PHP>
+class Point {
+    public function __construct(
+        public float $x = 0.0,
+        public float $y = 0.0,
+        public float $z = 0.0
+    ) {}
+}
+</PHP>
+
+This short-hand code is strictly equivalent to the previous example, but more concise. The choice of syntax is adopted from our sister language [[https://docs.hhvm.com/hack/classes/constructors#constructor-parameter-promotion|Hack]].
+
+===== Proposal =====
+
+When a method parameter is prefixed with one of the visibility keywords ''public'', ''protected'' or ''private'', it is considered to be "promoted". For each promoted parameter, a property with the same name will be added, and a forwarding assignment to that property included in the body of the constructor, according to the detailed rules outlined in the following.
+
+==== Constraints ====
+
+Promoted parameters may only occur inside non-abstract constructors. As such, all of the following are illegal:
+
+<PHP>
+// Error: Not a constructor.
+function test(private $x) {}
+
+abstract class Test {
+    // Error: Abstract constructor.
+    abstract public function __construct(private $x) {}
+}
+
+interface Test {
+    // Error: Abstract constructor.
+    public function __construct(private $x) {}
+}
+</PHP>
+
+While unusual, promoted parameters may occur inside trait constructors.
+
+Properties declared through promoted parameters are subject to the same restrictions as normal property declarations. In particular, it is not possible to declare the same property twice:
+
+<PHP>
+class Test {
+    public $prop;
+
+    // Error: Redeclaration of property.
+    public function __construct(public $prop) {}
+}
+</PHP>
+
+It is also not possible to use the ''callable'' type, even though it would ordinarily be permitted for parmaeters:
+
+<PHP>
+class Test {
+    // Error: Callable type not supported for properties.
+    public function __construct(public callable $callback) {}
+}
+</PHP>
+
+Similarly, because promoted parameters imply a property declaration, nullability must be explicitly declared, and is not inferred from a null default value:
+
+<PHP>
+class Test {
+    // Error: Using null default on non-nullable property
+    public function __construct(public Type $prop = null) {}
+
+    // Correct: Make the type explicitly nullable instead
+    public function __construct(public ?Type $prop = null) {}
+}
+</PHP>
+
+Variadic parameters cannot be promoted:
+
+<PHP>
+class Test {
+    // Error: Variadic parameter.
+    public function __construct(public string ...$strings) {}
+}
+</PHP>
+
+The reason is that in this case the type of the individual arguments (here: string), and the type of the variadic parameter into which they are collected (here: array of string) differ. While we could implicitly give the ''$strings'' property an ''array'' type for variadic parameters, this makes the transform less transparent.
+
+Explicit property declarations and properties promoted from constructor arguments may be combined. A constructor may also have both promoted and non-promoted parameters.
+
+<PHP>
+// Legal.
+class Test {
+    public string $explicitProp;
+
+    public function __construct(public int $promotedProp, int $normalArg) {
+        $this->explicitProp = (string) $normalArg;
+    }
+}
+</PHP>
+
+==== Desugaring ====
+
+Promoted properties follow a simple desugaring, where the following transformation is applied for all promoted paramaters:
+
+<PHP>
+// From:
+class Test {
+    public function __construct(public Type $prop = DEFAULT) {}
+}
+
+// To:
+class Test {
+    public Type $prop;
+
+    public function __construct(Type $prop = DEFAULT) {
+        $this->prop = $prop;
+    }
+}
+</PHP>
+
+The visibility and type of the automatically declared property match that of the promoted parameter. Notably, the property is declared without a default value (i.e. it starts out in an uninitialized state), and the default value is only specified on the constructor parameter.
+
+While repeating the default value on the property declaration would currently appear harmless, there are forward-compatibility reasons why it is preferable to only specify the default once.
+
+The first is a possible future extension to allow arbitrary expression in parameter and property defaults:
+
+<PHP>
+// From:
+class Test {
+    public function __construct(public Dependency $prop = new Dependency()) {}
+}
+
+// To:
+class Test {
+    public Dependency $prop /* = new Dependency() */;
+
+    public function __construct(Dependency $prop = new Dependency()) {
+        $this->prop = $prop;
+    }
+}
+</PHP>
+
+In this case, if the default value were duplicated to the property declaration, we would end up constructing the optional ''Dependency'' object twice, which is undesirable and violates the single-evaluation rule.
+
+Additionally, under the rules of the recent [[rfc:write_once_properties|readonly property proposal]] the assignment in the constructor would not be legal if the property declared a default value.
+
+If the promoted parameter is passed by reference, then the forwarding assignment is also performed by reference:
+
+<PHP>
+// From:
+class Test {
+    public function __construct(public array &$array) {}
+}
+
+// To:
+class Test {
+    public array $array;
+
+    public function __construct(array &$array) {
+        $this->array =& $array;
+    }
+}
+</PHP>
+
+===== Backward Incompatible Changes =====
+
+None.
+
+===== Future Scope =====
+
+Larry provided some broader vision on how this feature can be combined with other features to improve our object initialization story in https://hive.blog/php/@crell/improving-php-s-object-ergonomics.
+
+===== Vote =====
+
+Yes/No.
