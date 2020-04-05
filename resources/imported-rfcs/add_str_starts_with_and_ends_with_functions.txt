@@ -1,45 +1,65 @@
 ====== PHP RFC: Add str_starts_with() and str_ends_with() functions ======
-  * Version: 0.4
-  * Date: 2020-03-25 (**Updated**: 2020-04-04)
+  * Version: 0.5
+  * Date: 2020-03-25 (**Updated**: 2020-04-05)
   * Author: Will Hudgins, will@wkhudgins.info
   * Status: Under Discussion
   * First Published at: https://wiki.php.net/rfc/add_str_starts_with_and_ends_with_functions
 
 ===== Introduction =====
-''str_starts_with'' checks if a string, //s//, begins with another string, //s′// and returns a boolean value (''true''/''false'') if //s// starts with //s′//. 
-''str_ends_with'' checks if a a string, //s//, ends with another string, //s′// and returns a boolean value (''true''/''false'') if //s// ends with //s′//. 
+''str_starts_with'' checks if a string begins with another string and returns a boolean value (''true''/''false'') whether it does.\\
+''str_ends_with'' checks if a string ends with another string and returns a boolean value (''true''/''false'') whether it does.
 
-Typically this functionality is accomplished by repurposing existing string functions such as  '[[http://php.net/manual/en/function.substr.php|substr]]', '[[http://php.net/manual/en/function.strncmp.php|strncmp]]', '[[http://php.net/manual/en/function.strpos.php|strpos]]', or '[[http://php.net/manual/en/function.substr_compare.php|substr_compare]]'. These bespoke userland implementations have various downsides, discussed later in this RFC.
+Typically this functionality is accomplished by using existing string functions such as <php>substr</php>, <php>strpos</php>/<php>strrpos</php>, <php>strncmp</php>, or <php>substr_compare</php> (often combined with <php>strlen</php>). These bespoke userland implementations have various downsides, discussed further below.
 
-The ''str_starts_with'' and ''str_ends_with'' functionality is so important, and so problematic to leave to userland implementation, that many major PHP frameworks support it including [[https://symfony.com/doc/current/components/string.html#usage|Symfony]], [[https://laravel.com/docs/7.x/helpers#method-starts-with|Laravel]], [[https://www.yiiframework.com/doc/api/2.0/yii-helpers-basestringhelper#startsWith()-detail|Yii]], [[https://fuelphp.com/docs/classes/str.html#/method_starts_with|FuelPHP]], and [[https://docs.phalcon.io/3.4/en/api/phalcon_text|Phalcon]]. Please note, the links are for ''str_starts_with'' functionality, but the mentioned frameworks also contain ''str_ends_with'' functionality, often visible on the same web page.
+The ''str_starts_with'' and ''str_ends_with'' functionality is so commonly needed that many major PHP frameworks support it, including [[https://symfony.com/doc/5.0/components/string.html#methods-to-search-and-replace|Symfony]], [[https://laravel.com/docs/7.x/helpers#method-starts-with|Laravel]], [[https://www.yiiframework.com/doc/api/2.0/yii-helpers-basestringhelper#startsWith()-detail|Yii]], [[https://fuelphp.com/docs/classes/str.html#/method_starts_with|FuelPHP]], and [[https://docs.phalcon.io/3.4/en/api/phalcon_text|Phalcon]] ((some of those links are for ''str_starts_with'' functionality, but the mentioned frameworks also contain ''str_ends_with'' functionality, often visible on the same web page)).
 
-Checking the start and end of strings is a very common task which should be easy. Accomplishing this task is not easy now and that is why many frameworks have chosen to include it. This is also why other programming languages–diverse as JavaScript, Java, Haskell, and Matlab–have also implemented this functionality. Checking the start and end of a string should not be a task which requires pulling in a PHP framework or developing a potentially suboptimal function in userland. 
+Checking the start and end of strings is a very common task which should be easy. Accomplishing this task is not easy now and that is why many frameworks have chosen to include it. This is also why other high-level programming languages---diverse as JavaScript, Java, Haskell, and Matlab---have implemented this functionality. Checking the start and end of a string should not be a task which requires pulling in a PHP framework or developing a potentially suboptimal (or worse, buggy) function in userland.
 
-===== Downsides of Common Userland Approaches =====
-All userland implementations of this functionality suffer from being less intuitive than the proposed functions. This especially true for new PHP developers and developers who frequently switch between PHP and other languages–many of which include this functionality. Additionally, there are performance issues, shown below, with many userland implementations.
+==== Downsides of Common Userland Approaches =====
+Ad hoc userland implementations of this functionality are //less intuitive// than dedicated functions (this is especially true for new PHP developers and developers who frequently switch between PHP and other languages---many of which include this functionality natively).\\
+The implementation is also //easy to get wrong// (especially with the ''==='' comparison).\\
+Additionally, there are //performance issues// with many userland implementations.
+
+Note: the examples below are sometimes additionally guarded by "<php>$needle === "" || </php>" and/or "<php>strlen($haystack) <= strlen($needle) && </php>" to handle empty string and/or avoid warnings.
 
 === str_starts_with ===
 <PHP>
 substr($haystack, 0, strlen($needle)) === $needle
 </PHP>
-This is memory inefficient because it requires an unnecessary copy of part of ''$haystack''.
+This is memory inefficient because it requires an unnecessary copy of part of the haystack.
 
 <PHP>
-$haystack = "string";
-strncmp($subject, "prefix", 6) === 0;
+strpos($haystack, $needle) === 0
 </PHP>
-This is error prone because it has a hard-coded length for the prefix.
+This is potentially CPU inefficient because it will unnecessarily search along the whole haystack if it doesn't find the needle.
+
+<PHP>
+strncmp($haystack, $needle, strlen($needle)) === 0 // generic
+strncmp($subject, "prefix", 6) === 0 // ad hoc
+</PHP>
+This is efficient but requires providing the needle length as a separate argument, which is either verbose (repeat "''$needle''") or error prone (hard-coded number).
 
 === str_ends_with ===
 <PHP>
-strpos(strrev($haystack), strrev($needle)) === 0
+substr($haystack, -strlen($needle)) === $needle
 </PHP>
-This is CPU inefficient because it requires reversing both ''$haystack'' and ''$needle'' as well as applying ''strpos''. Also, note that if $haystack does not end in ''$needle'', this is extra inefficient because it will search the string for the position of ''$needle''. Also note that if ''$needle'' is empty a warning will be raised.
+This is memory inefficient (see above).
 
 <PHP>
-$needle ===  "" || substr_compare($haystack, $needle, -strlen($needle)) === 0)
+strpos(strrev($haystack), strrev($needle)) === 0
 </PHP>
-This is more efficient than the prior example but exceptionally verbose and not immediately intuitive. Note that ''$needle === ""'' is required in order to ensure that empty ''$needle'' values are handled appropriately.
+This is CPU inefficient because it requires reversing both the haystack and the needle as well as applying ''strpos'' (see above).
+
+<PHP>
+strrpos($haystack, $needle) === strlen($haystack) - strlen($needle)
+</PHP>
+This is verbose and also potentially CPU inefficient.
+
+<PHP>
+substr_compare($haystack, $needle, -strlen($needle)) === 0 // generic
+substr_compare($subject, "suffix", -6) === 0 // ad hoc
+</PHP>
+This is efficient but either verbose or error prone (see ''strncmp'' above).
 
 ===== Proposal =====
 Add two new basic functions: ''str_starts_with'' and ''str_ends_with'':
@@ -68,12 +88,12 @@ if (str_starts_with("", "a")) echo "not printed\n";
 if (str_ends_with("a", "")) echo "printed\n";
 if (str_ends_with("", "")) echo "printed\n";
 if (str_ends_with("", "a")) echo "not printed\n";
- </PHP>
+</PHP>
 
-Please note, the behavior concerning empty strings is in accordance with the behavior of the accepted [[rfc:str_contains|str_contains RFC]]. This behavior is also the same as is common with other languages, including Java and Python.
+Note: the behavior concerning empty strings is in accordance with what is described in the accepted [[rfc:str_contains#proposal|str_contains RFC]]. This behavior is also the same as is common with other languages, including Java and Python.
 
 ===== Backward Incompatible Changes =====
-This could break functions existing in userland with the same names. But see [[rfc:str_contains#backward_incompatible_changes|the corresponding section in the str_contains RFC]] for a discussion illustrating how this concern may be mitigated and why this concern does not justify the rejection of this RFC.
+This could break functions existing in userland with the same names. But see [[rfc:str_contains#backward_incompatible_changes|the corresponding section in the str_contains RFC]] for a discussion illustrating how this concern may be mitigated and why it does not justify the rejection of this RFC.
 
 ===== Proposed PHP Version(s) =====
 PHP 8
@@ -89,7 +109,7 @@ PHP 8
   * https://github.com/php/php-src/pull/5300
 
 ===== Implementation =====
-After the project is implemented, this section should contain 
+After the project is implemented, this section should contain
   - the version(s) it was merged to
   - a link to the git commit(s)
   - a link to the PHP manual entry for the feature
@@ -100,7 +120,7 @@ After the project is implemented, this section should contain
     * JavaScript: [[https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/startsWith|String#startsWith()]] and [[https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/endsWith|String#endsWith()]]
     * Python: [[https://docs.python.org/3/library/stdtypes.html#str.startswith|str#startswith()]] and [[https://docs.python.org/3/library/stdtypes.html#str.endswith|str#endswith()]]
     * Java: [[https://docs.oracle.com/javase/7/docs/api/java/lang/String.html#startsWith(java.lang.String)|String#startsWith()]] and [[https://docs.oracle.com/javase/7/docs/api/java/lang/String.html#endsWith(java.lang.String)|String#endsWith()]] (and Apache Commons Lang [[https://commons.apache.org/proper/commons-lang/apidocs/org/apache/commons/lang3/StringUtils.html#startsWith-java.lang.CharSequence-java.lang.CharSequence-|StringUtils.startsWith()]] and [[https://commons.apache.org/proper/commons-lang/apidocs/org/apache/commons/lang3/StringUtils.html#endsWith-java.lang.CharSequence-java.lang.CharSequence-|StringUtils.endsWith()]])
-    * Ruby: [[http://ruby-doc.org/core-2.1.1/String.html#method-i-start_with-3F|String#start_with?()]] and [[http://ruby-doc.org/core-2.1.1/String.html#method-i-end_with-3F|String#end_with?()]]
+    * Ruby: [[https://ruby-doc.org/core-2.1.1/String.html#method-i-start_with-3F|String#start_with?()]] and [[https://ruby-doc.org/core-2.1.1/String.html#method-i-end_with-3F|String#end_with?()]]
     * Go: [[https://golang.org/pkg/strings/#HasPrefix|strings.HasPrefix()]] and [[https://golang.org/pkg/strings/#HasSuffix|strings.HasSuffix()]]
     * Haskell: [[https://hackage.haskell.org/package/MissingH-1.4.0.1/docs/Data-String-Utils.html#v:startswith|Data.String.Utils.startswith]] and [[https://hackage.haskell.org/package/MissingH-1.4.0.1/docs/Data-String-Utils.html#v:endswith|Data.String.Utils.endswith]] (aliases of [[https://hackage.haskell.org/package/base-4.12.0.0/docs/Data-List.html#v:isPrefixOf|Data.List.isPrefixOf]] and [[https://hackage.haskell.org/package/base-4.12.0.0/docs/Data-List.html#v:isSuffixOf|Data.List.isSuffixOf]])
     * MATLAB: [[https://www.mathworks.com/help/matlab/ref/startswith.html|startsWith()]] and [[https://www.mathworks.com/help/matlab/ref/endswith.html|endsWith()]]
