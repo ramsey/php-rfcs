@@ -1,0 +1,251 @@
+====== PHP RFC: Match expression ======
+  * Date: 2020-04-12
+  * Author: Ilija Tovilo, tovilo.ilija@gmail.com
+  * Status: Under Discussion
+  * Target Version: PHP 8.0
+  * Implementation: https://github.com/php/php-src/pull/5371
+
+===== Proposal =====
+The ''switch'' statement is a fundamental control structure in almost every programming language. Unfortunately, in PHP it has some long-standing issues that make it hard to use correctly, namely:
+
+  * Type coercion
+  * No return value
+  * Fallthrough
+  * Inexhaustiveness
+
+This RFC proposes a new control structure called ''match'' to resolve these issues.
+
+<code php>
+match ($condition) {
+    1 => {
+        foo();
+        bar();
+    },
+    2 => baz(),
+}
+
+$expressionResult = match ($condition) {
+    1, 2 => foo(),
+    3, 4 => bar(),
+    default => baz(),
+};
+</code>
+
+===== Issues =====
+We're going to take a look at each issue and how the new ''match'' expression resolves them.
+
+==== Type coercion ====
+The ''switch'' statement loosely compares (''=='') the given value to the case values. This can lead to some very surprising results.
+
+<code php>
+switch ('foo') {
+    case 0:
+      echo "Oh no!\n";
+      break;
+}
+</code>
+
+The ''match'' expression uses strict comparison (''==='') instead.
+
+<code php>
+match ('foo') {
+    0 => {
+        echo "Never reached\n";
+    },
+}
+</code>
+
+==== No return value ====
+It is very common that the ''switch'' produces some value that is used afterwards.
+
+<code php>
+switch (1) {
+    case 0:
+        $y = 'Foo';
+        break;
+    case 1:
+        $y = 'Bar';
+        break;
+    case 2:
+        $y = 'Baz';
+        break;
+}
+
+echo $y;
+//> Bar
+</code>
+
+It is easy to forget assigning ''$y'' in one of the cases. It is also visually unintuitive to find ''$y'' declared in a deeper nested scope. ''match'' is an expression that evaluates to the result of the executed arm. This removes a lot of boilerplate and makes it impossible to forget assigning a value in an arm.
+
+<code php>
+echo match (1) {
+    0 => 'Foo',
+    1 => 'Bar',
+    2 => 'Baz',
+};
+//> Bar
+</code>
+
+==== Fallthrough ====
+The ''switch'' fallthrough has been a large source of bugs in many languages. Each ''case'' must explicitely ''break'' out of the ''switch'' statement or the execution will continue into the next ''case'' even if the condition is not met.
+
+<code php>
+switch ($pressedKey) {
+    case Key::ENTER:
+        save();
+        // Oops, forgot the break
+    case Key::DELETE:
+        delete();
+        break;
+}
+</code>
+
+This was intended to be a feature so that multiple conditions can execute the same block of code. It is often hard to understand if the missing ''break'' was the authors intention or a mistake.
+
+<code php>
+switch ($x) {
+    case 1:
+    case 2:
+        // Same for 1 and 2
+        break;
+    case 3:
+        // Only 3
+    case 4:
+        // Same for 3 and 4
+        break;
+}
+</code>
+
+The ''match'' expression resolves this problem by adding an implicit ''break'' after every arm. Multiple conditions can be comma-separated to execute the same block of code. There's no way to achieve the same result as 3 and 4 in the example above without an additional ''if'' statement. This is a little bit more verbose but makes the intention very obvious.
+
+<code php>
+match ($x) {
+    1, 2 => {
+        // Same for 1 and 2
+    },
+    3, 4 => {
+        if ($x === 3) {
+            // Only 3
+        }
+        // Same for 3 and 4
+    },
+}
+</code>
+
+==== Inexhaustiveness ====
+Another large source of bugs is not handling all the possible cases supplied to the ''switch'' statement.
+
+<code php>
+switch ($configuration) {
+    case Config::FOO:
+        // ...
+        break;
+    case Config::BAR:
+        // ...
+        break;
+}
+</code>
+
+This will go unnoticed until the program crashes in a weird way, causes strange behavior or even worse becomes a security hole. Many languages can check if all the cases are handled at compile time or force you to write a ''default'' case if they can't. For a dynamic language like PHP the only alternative is throwing an error. This is exactly what the ''match'' expression does. It throws an ''UnhandledMatchError'' if the condition isn't met for any of the arms.
+
+<code php>
+match ($x) {
+    1 => ...,
+    2 => ...,
+}
+
+// $x can never be 3
+</code>
+
+===== Blocks =====
+When the result of the ''match'' expression isn't utilized the arm body can be a list of statements. Additionally the semicolon can be omitted when discarding the expression result. This makes it more consistent with other control structures like ''if'' or ''switch''. Trying to use statement lists when utilizing the result will result in a compilation error.
+
+<code php>
+match ($x) {
+    0 => {
+        foo();
+        bar();
+        baz();
+    },
+}
+
+echo match ($x) {
+    0 => { ... },
+};
+//> Fatal error: Match expressions that utilize the result value can't contain statement lists
+</code>
+
+===== Pattern matching =====
+I have experimented with pattern matching ((https://github.com/php/php-src/compare/master...iluuu1994:pattern-matching)) for this RFC. Realistically it could sometimes save a few keystrokes. In my opinion this does not justify the significant complexity added to the langage at the moment. It would be mostly useful for algebraic data types which PHP currently does not have.
+
+<code php>
+// With pattern matching
+match ($value) {
+    let $a => ..., // Identifer pattern
+    let 0..<10 => ..., // Range pattern
+    let is string => ..., // Type pattern
+    let [1, 2, $c] => ..., // Array pattern
+    let Foo { foo: 1, getBar(): 2 } => ..., // Object pattern
+    let $str @ is string if $str !== '' => ..., // Guard
+}
+
+// Without pattern matching
+match (true) {
+    true => $value ..., // Identifer pattern
+    $value >= 0 && $value < 10 => ..., // Range pattern
+    is_string($value) => ..., // Type pattern
+    count($value) === 3
+        && isset($value[0]) && $value[0] === 1
+        && isset($value[1]) && $value[1] === 2
+        && isset($value[2]) => $value[2] ..., // Array pattern
+    $value instanceof Foo
+        && $value->foo === 1
+        && $value->getBar() === 2 => ..., // Object pattern
+    is_string($str) && $str !== '' => ..., // Guard
+}
+</code>
+
+While some patterns are significantly shorter (namely the array pattern) code like that is relatively rare. At the moment the arugment for such a big language change is pretty weak. If the situation ever changes we can always add pattern matching at a later point in time.
+
+===== "Why don't you just use x" =====
+==== if statements ====
+<code php>
+if ($x === 1) {
+    $y = ...;
+} elseif ($x === 2) {
+    $y = ...;
+} elseif ($x === 3) {
+    $y = ...;
+}
+</code>
+
+Needless to say this is incredibly verbose and there's a lot of repetition. It also can't make use of the jumptable optimization. You must also not forget to write an ''else'' statement to catch unexpected values.
+
+==== Hash maps ====
+<code php>
+$y = [
+    1 => ...,
+    2 => ...,
+][$x];
+</code>
+
+This code will execute every single "arm", not just the one that is finally returned. It will also build a hash map in memory everytime it is executed. And again, you must not forget to handle unexpected values.
+
+==== Nested ternary operators ====
+<code php>
+$y = $x === 1 ? ...
+  : ($x === 2 ? ...
+  : ($x === 3 ? ...
+  : 0));
+</code>
+
+The parentheses make it hard to read and it's easy to make mistakes and there is no jumptable optimization. Adding more cases will make the situation worse.
+
+===== Backward Incompatible Changes =====
+There are no breaking changes in this RFC.
+
+===== Proposed PHP Version(s) =====
+The proposed version is PHP 8.
+
+===== Proposed Voting Choices =====
+As this is a language change, a 2/3 majority is required. The vote is a straight Yes/No vote for accepting the RFC and merging the patch.
