@@ -1,8 +1,8 @@
 ====== PHP RFC: Attributes v2 ======
 
-  * Version: 0.2
+  * Version: 0.4
   * Date: 2020-03-09
-  * Author: Benjamin Eberlei, beberlei@php.net
+  * Author: Benjamin Eberlei (beberlei@php.net), Martin Schröder
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/attributes_v2
 
@@ -11,45 +11,42 @@ attributes is the foundation for this RFC and patch.
 
 ===== Introduction =====
 
-This RFC proposes to add a form of structured, syntactic metadata to
-declarations of classes, properties, functions, methods and constants.
+This RFC proposes Attributes as a form of structured, syntactic metadata to
+declarations of classes, properties, functions, methods, parameters and
+constants. Attributes allow to define configuration directives directly embedded
+with the declaration of that code.
 
 Similar concepts exist in other languages named **Annotations** in Java,
 **Attributes** in C#, C++, Rust, Hack and **Decorators** in Python, Javascript.
 
-PHP only offers an unstructured form of such metadata: doc-comments.  But these
-are just strings and to keep some structured information, the @-based
-pseudo-language was invented inside them by various PHP sub-communities.
+So far PHP only offers an unstructured form of such metadata: doc-comments.
+But doc-comments are just strings and to keep some structured information, the
+@-based pseudo-language was invented inside them by various PHP
+sub-communities.
 
-Attributes would provide structured meta-information as a native language
-feature that is parsed, validated and can be accessed through APIs.
+On top of userland use-cases there are many use-cases for attributes in the
+engine and extensions that could affect compilation, diagnostics,
+code-generation, runtime behavior and more. Examples are given below.
 
-This RFC primarily shows that Attributes provides benefits to the PHP core and
-extensions, even though userland developers also expressed desire for this
-feature.
-
-Attributes can help move the language forward and provide a generic way to
-selectively modify functionality that has to be kept in its original form for
-backwards compatibility reasons and to experiment with these changes in extensions
-before moving them to core.
-
-In addition the wide spread use of userland doc-comment parsing shows that this
-is a highly demanded feature by the community. As a first class citizen in PHP,
-they could:
-
-  * reduce confusion about code in comments for beginners
-  * allow language level validation at compile time
-  * <nowiki>reduce bugs caused by typos and the difference between "/*" and "/**".</nowiki>
-  * help developers migrating configuration (XML, YAML, JSON, INI) into the code, thereby reducing complexity
+The wide spread use of userland doc-comment parsing shows that this is a highly
+demanded feature by the community. 
 
 ===== Proposal =====
 
 ==== Attribute Syntax ====
 
-<nowiki>Attributes are a specially formatted text enclosed with "<<" and ">>".
-Attributes may be applied to functions, classes, interfaces, traits, methods,
-properties and class constants. In the same way as doc-comments, attributes
-must be placed before the corresponding definition.</nowiki>
+<nowiki>Attributes are a specially formatted text enclosed with "<<" and ">>".</nowiki>
+
+attributes may be applied to many things in the language:
+
+  * functions (including closures and short closures)
+  * classes (including anonymous classes), interfaces, traits
+  * class constants
+  * class properties
+  * class methods
+  * function/method parameters
+
+Attributes are added before the declaration they belong to, similar to doc-block comments. They can be declared **before** or **after** a doc-block comment that documents a declaration.
 
 <code php>
 <<...>>
@@ -57,20 +54,11 @@ must be placed before the corresponding definition.</nowiki>
 function foo() {}
 </code>
 
-See discussion about alternative syntaxes below.
+Each declaration of function, class, method, property, parameter or class
+constant may have one or more attributes.
 
-Each declaration of function, class, method, property or class constant may have one or more attributes.
-Each attribute may have no value associated with it, a single value, or multiple values.
-
-See the EBNF grammar:
-
-<code>
-<attribute> ::= "<<" <class_name_reference> [ "(" <argument> { "," <argument> } ")" ] ">>".
-<class_name_reference>      ::= STRING.
-<argument>  ::= <php-constant> | <php-expression>.
-</code>
-
-Here is an example:
+Each attribute may have values associated with it, but doesn't have to, similar
+to how a constructor of a class works.
 
 <code php>
 <<WithoutArgument>>
@@ -79,26 +67,36 @@ Here is an example:
 function foo() {}
 </code>
 
-It is not allowed to use the same attribute name more than once on the same
-declaration and a compile error is thrown when this detected.
+The same attribute name can be used more than once on the same declaration.
 
-Attributes have to be declared **after** the doc-block or otherwise
-they are not attached to the following declaration.
+Sementically the attribute declaration should be read as instantiating a class
+with the attribute name and passing arguments to the constructor.
 
-<nowiki>As the "<<" and ">>" characters are used in an expression prefix
+<nowiki>Note: As the "<<" and ">>" characters are used in an expression prefix
 position here, there is no potential conflict for them being used in a
 potential generics proposal, where "<T>" is the syntax commonly used in other
 languages.</nowiki>
 
+Since syntax is by far the most discussed point about this RFC, we also thought
+of an alternative by introducing a new token for attributes (T_ATTRIBUTE)
+defined as //@:// that the parser could look for. Choice of syntax will be a secondary
+vote on the RFC.
+
+<code php>
+@:WithoutArgument
+@:SingleArgument(0)
+@:FewArguments('Hello', 'World')
+function foo() {}
+</code>
+
+See discussion about alternative syntaxes below for more info why the most
+requested syntaxes "@" and "[]" are not possible.
+
 ==== Attribute Names Resolve to Classes ====
 
-The name of an attribute is resolved against the currently active namespace
-import scope during compilation. The resolved class names are then autoloaded
-to make sure they exist.
-
-This is done to ensure that developers don't introduce subtle bugs when
-misstyping attribute names, causing the desired behavior of the attribute
-to be silently ignored.
+The name of an attribute is resolved against all currently imported symbols
+during compilation. This is done to namespace attributes and avoid accidental re-use of the
+same attribute name by different libraries and applications.
 
 <code php>
 use My\Attributes\SingleArgument;
@@ -108,30 +106,89 @@ use My\Attributes\Another;
 <<Another\SingleArgument("World")>>
 <<\My\Attributes\FewArguments("foo", "bar")>>
 function foo() {}
+</code>
 
-// sample attribute class:
+There are also benefits to declaring this attribute class in code:
+
+  * Reflection API can directly convert an attribute to an instance of this class (see "Reflection" section below)
+  * Static analysis tools can verify attributes are correctly used in your code
+  * IDEs can add support to autocomplete attributes and their arguments
+
+Declaring an attribute classs for the above example looks like this:
+
+<code php>
 namespace My\Attributes;
 
-class SingleArgument implements PhpAttribute {
-    public $argumentValue;
-    
-    public function __construct($argumentValue) {
-         $this->argumentValue = $argumentValue;
+use PhpAttribute;
+
+<<PhpAttribute>>
+class SingleArgument
+{
+    public $value;
+
+    public function __construct(string $value)
+    {
+        $this->value = $value;
     }
 }
 </code>
 
-Consistent with PHP expressions in general, no validation is performed if
-the provided attribute arguments are fullfilling the contract of the attribute class constructor.
-This would happen only when accessing attributes as objects in the Reflection API (below).
+==== Compiler and Userland Attributes ====
 
-Thanks to class name resolving, IDEs or static analysis tools
-can perform this validation for the developer.
+This proposal differentiates between two different kinds of attributes:
 
-Attribute classes must extend the marker interface //PhpAttribute//
-and an error is thrown if they don't. This is again
-done to reduce the potential for developers to make mistakes
-when using attributes.
+  * Compiler Attributes (validated at compile time)
+  * Userland Attributes (validated during Reflection API access)
+
+A compiler attribute is an internal class that is attributed with the //PhpCompilerAttribute// attribute.
+
+A userland attribute is an userland class that is attributed with the //PhpAttribute// attribute.
+
+When a compiler attribute is found during compile time then the engine invokes
+a validation callback that is registered for every compiler attribute.
+
+For example the patch includes a validation callback for //PhpCompilerAttribute// that prevents
+its use by userland classes:
+
+<code c>
+#include "zend_attributes.h"
+
+void zend_attribute_validate_phpcompilerattribute(zval *attribute, int target)
+{
+    if (target != ZEND_ATTRIBUTE_TARGET_CLASS) {
+        zend_error(E_COMPILE_ERROR, "The PhpCompilerAttribute can only be used on class declarations and only on internal classes");
+    } else {
+        zend_error(E_COMPILE_ERROR, "The PhpCompilerAttribute can only be used by internal classes, use PhpAttribute instead");
+    }
+}
+
+INIT_CLASS_ENTRY(ce, "PhpCompilerAttribute", NULL);
+zend_ce_php_compiler_attribute = zend_register_internal_class(&ce);
+
+zend_attributes_internal_validator cb = zend_attribute_validate_phpcompilerattribute;
+zend_compiler_attribute_register(zend_ce_php_compiler_attribute, &cb);
+</code>
+
+The attribute zval contains all arguments passed and target is a constant that allows
+validating the attribute is on the right declaration.
+
+Userland classes can not use the //PhpCompilerAttribute//. An error is thrown if this happens.
+
+<code php>
+<?php
+<<PhpCompilerAttribute>>
+class MyAttribute
+{
+}
+// Fatal error: The PhpCompilerAttribute can only be used by internal classes, use PhpAttribute instead
+</code>
+
+By mapping attributes to classes tools, editors and IDEs can provide both
+syntactial and context information about the use of attributes to
+developers.
+
+The downside of this approach is that mistyped compiler attributes get
+classified as userland attributes.
 
 ==== Constant Expressions in Attribute Arguments ====
 
@@ -139,11 +196,8 @@ Attribute arguments are evaluated as constant AST expressions, This means that
 a subset of PHP expressions is allowed as argument:
 
 <code php>
-use My\Attributes\Addition
-use My\Attributes\ClassConst;
-
-<<Addition(1+1)>>
-<<ClassConst(PDO::class)>>
+<<SingleArgument(1+1)>>
+<<FewArguments(PDO::class, PHP_VERSION_ID)>>
 </code>
 
 The primary use-case why constant AST is allowed is the ability to reference
@@ -160,10 +214,10 @@ The following Reflection classes are extended with the getAttributes() methods,
 and return array of ReflectionAttribute instances.
 
 <code php>
-function ReflectionFunction::getAttributes(string $name = null): ReflectionAttribute[];
-function ReflectionClass::getAttributes(string $name = null): ReflectionAttribute[];
-function ReflectionProperty::getAttributes(string $name = null): ReflectionAttribute[];
-function ReflectionClassConstant::getAttributes(string $name = null): ReflectionAttribute[];
+function ReflectionFunction::getAttributes(string $name = null, int $flags = 0): ReflectionAttribute[];
+function ReflectionClass::getAttributes(string $name = null, int $flags = 0): ReflectionAttribute[];
+function ReflectionProperty::getAttributes(string $name = null, int $flags = 0): ReflectionAttribute[];
+function ReflectionClassConstant::getAttributes(string $name = null, int $flags = 0): ReflectionAttribute[];
 </code>
 
 The name argument can be used to retrieve only the attribute(s) of the given
@@ -171,6 +225,15 @@ attribute name or subclasses of the given name.
 
 <code php>
 $attributes = $reflectionFunction->getAttributes(\My\Attributes\SingleArgument::class);
+</code>
+
+When the flags parameter is not set, then getAttributes defaults to returning
+only those attributes with the exact same name as given in the first argument.
+When you pass the constant //ReflectionAttribute::IS_INSTANCEOF// then it returns
+all attributes that pass an instanceof check with the passed class name.
+
+<code php>
+$attributes = $reflectionFunction->getAttributes(\My\Attributes\MyAbstractAttribute::class, \ReflectionAttribute::IS_INSTANCEOF);
 </code>
 
 The API of the new ReflectionAttribute looks like this:
@@ -184,15 +247,57 @@ class ReflectionAttribute
 }
 </code>
 
-This proposed API aims to be a compromise for previous conflicting opinions, where
-one faction preferred to have access to only arrays and build their solution on
-top in userland and the faction that preferred PHP to already convert to
-attribute object instances.
 
-With this approach we can also guarantee that a call to //getAttributes()//
-doesn't throw errors when attributes are invalid according to their userland
-implementations. This could potentially cause problems when conflicting libraries
-have attributes on the same declaration.
+Because validation of attributes is only performed during
+//ReflectionAttribute::getAsObject()//, it is technically not required to
+declare the attribute class.  You can still acccess name and arguments directly
+from //ReflectionAttribute//.
+
+Full example:
+
+<code php>
+namespace My\Attributes {
+
+    <<PhpAttribute>>
+    class SingleArgument {
+        public $argumentValue;
+        
+        public function __construct($argumentValue) {
+             $this->argumentValue = $argumentValue;
+        }
+    }
+}
+
+namespace {
+    <<SingleArgument("Hello World")>>
+    class Foo {
+    }
+
+    $reflectionClass = new \ReflectionClass(Foo::class);
+    $attributes = $reflectionClass->getAttributes();
+
+    var_dump($attributes[0]->getName());
+    var_dump($attributes[0]->getArguments());
+    var_dump($attributes[0]->getAsObject());
+}
+
+/**
+string(28) "My\Attributes\SingleArgument"
+array(1) {
+  [0]=>
+  string(11) "Hello World"
+}
+object(My\Attributes\SingleArgument)#1 (1) {
+  ["argumentValue"]=>
+  string(11) "Hello World"
+}
+**/
+
+</code>
+
+With this approach a call to //getAttributes()// never throws errors. This will
+avoid problems when different libraries with different semantics are parsing
+attributes on the same declaration.
 
 ===== Use Cases =====
 
@@ -205,17 +310,19 @@ HashTables with declared Attributes are available on every //zend_class_entry//,
 
 PHP Core or extensions will want to check if certain declarations have an attribute or not.
 
-One such example is the check for "@jit" already in Opcache JIT that can be
-changed to:
+One such example is the existing check for "@jit" in Opcache JIT that instructs the JIT
+to always optimize a function or method.
+
+With attributes it can be changed to the following C code in the extension:
 
 <code c>
 static int zend_needs_manual_jit(const zend_op_array *op_array)
    return op_array->attributes && 
-        zend_hash_str_exists(op_array->attributes, "Opcache\\Jit", sizeof("Opcache\\Jit")-1));
+        zend_hash_str_exists(op_array->attributes, "opcache\\jit", sizeof("opcache\\jit")-1));
 }
 </code>
 
-In userland the code for this functionality becomes:
+Developers could then use an attribute instead of a doc-comment:
 
 <code php>
 use Opcache\Jit;
@@ -226,23 +333,36 @@ function foo() {}
 
 ==== Other potential core and extensions use cases/ideas ====
 
-Previous RFCs (See References below) focussed on benefits for userland. But
-foremost there are significant benefits to be had for core and extensions if we
-had attributes.
-
 Below is a list of ideas. Please note that these are not part of this RFC.
 
 Structured Deprecation of functions/methods. Almost all languages with
-attributes have this built-in as well. One benefit having this in PHP would be that it could allow deprecating classes, properties or constants, where trigger_error cannot be used by developers at the moment.
+attributes have this built-in as well. One benefit having this in PHP would be
+that it could allow deprecating classes, properties or constants, where
+trigger_error cannot be used by developers at the moment.
 
 <code php>
+// an idea, not part of the RFC
 use Php\Attributes\Deprecated;
 
 <<Deprecated("Use bar() instead")>>
 function foo() {}
 </code>
 
-Modification of selected "legacy" behavior of PHP in reference to
+A //Deprecated// attribute would have the benefit of allowing to deprecate properties and constants, which is currently not possible
+using //trigger_error//.
+
+<code php>
+class Foo
+{
+    <<Deprecated()>>
+    const BAR = 'BAR';
+}
+
+echo Foo::BAR;
+// PHP Deprecated:  Constant Foo::BAR is deprecated in test.php on line 7
+</code>
+
+Opt-in change of "legacy" behavior of PHP for example as proposed in
 [[https://wiki.php.net/rfc/engine_warnings|Reclassify Engine Warnings RFC]] and
 [[https://externals.io/message/108767#108767|Support Rewinding Generators]].
 Rust has a
@@ -254,22 +374,24 @@ set of attributes]]. This but could be used for augmenting the "Editions" propos
 use Php\Attributes\Deny;
 use Php\Attributes\Allow;
 
-<<Deny("undeclared_variables")>>
-function foo() {
-}
 <<Allow("rewind_generator")>>
 function bar() {
     yield 1;
 }
+<<Deny("undeclared_variables")>>
+function foo() {
+    echo $foo;
+    // PHP Fatal error:  Uncaught TypeError: Access to undeclared variable $foo
+}
 <<Deny("dynamic_properties")>>
 class Foo {
 }
+$foo->bar; // PHP Fatal error:  Uncaught Error: Invalid access to dynamic property Foo::$bar
 </code>
 
 Some (limited) form of macros [[https://doc.rust-lang.org/reference/conditional-compilation.html#the-cfg-attribute|similar
 to Rust]] could be useful to include polyfill functions only in lower versions
-of PHP. This helps to not break Opcache with conditional declarations of
-functions and classes:
+of PHP. This helps libraries to conditionally declare code compatible with Opcache and preloading:
 
 <code php>
 // an idea, not part of the RFC
@@ -280,18 +402,6 @@ use Php\Attributes\IgnoreRedeclaration;
 <<IgnoreRedeclaration>> // throws no error when already declared, removes the redeclared thing
 function intdiv(int $numerator, int $divisor) {
 }
-</code>
-
-Enabling more aggressive Opcache or JIT optimizations for individual functions:
-
-<code php>
-// an idea, not part of the RFC
-use Opcache\OptimizationLevel;
-use Opcache\Inline;
-
-<<OptimizationLevel(3)>>
-<<Inline>>
-function foo() {}
 </code>
 
 A ZEND_API to provide the arguments of a single attribute or a list of all
@@ -336,7 +446,8 @@ class RequestSubscriber implements EventSubscriberInterface
 }
 
 // refactor to:
-class Listener implements \PhpAttribute
+<<PhpAttribute>>
+class Listener
 {
     public $event;
 
@@ -354,7 +465,7 @@ class RequestSubscriber
     }
 }
 
-// and the potential EventDispatcher to register listeners based on attributes:
+// and the EventDispatcher to register listeners based on attributes:
 
 class EventDispatcher
 {
@@ -365,12 +476,16 @@ class EventDispatcher
         $reflection = new ReflectionObject($subscriber);
 
         foreach ($reflection->getMethods() as $method) {
+            // Does this method has Listener attributes?
             $attributes = $method->getAttributes(Listener::class);
 
             foreach ($attributes as $listenerAttribute) {
                 /** @var $listener Listener */
                 $listener = $listenerAttribute->getAsObject();
 
+                // with $listener instanceof Listener attribute,
+                // register the method to the given Listener->event
+                // as a callable
                 $this->listeners[$listener->event][] = [$subscriber, $method->getName()];
             }
         }
@@ -379,6 +494,7 @@ class EventDispatcher
     public function dispatch($event, $args...)
     {
         foreach ($this->listeners[$event] as $listener) {
+            // invoke the listener callables registered to an event name
             $listener(...$args);
         }
     }
@@ -408,94 +524,56 @@ only attributes they are interested in:
 <code php>
 namespace Doctrine\Annotations;
 
-abstract class Annotation {}
+abstract class Annotation {
+    class TARGET_CLASS = 1;
+    class TARGET_PROPERTY = 2;
+
+    public $target = self::TARGET_CLASS;
+
+    final public function __construct(array $values = []) {
+        foreach ($values as $key => $value) {
+            $this->$key = $value;
+        }
+    }
+}
 
 class AnnotationReader
 {
-    function getClassAnnotations(ReflectionClass $reflection) {
-        return array_map(
-            fn($attribute) => $attribute->getAsObject(),
-            $reflection->getAttributes(Annotation::class)
-        );
+    function getClassAnnotations(\ReflectionClass $reflection): array {
+        $doctrineAnnotations = [];
+
+        foreach ($reflection->getAttributes() as $attribute) {
+            // filter out any that doesn't extend Doctrine's annotation base class
+            if (!is_subclass_of($attribute, Annotation::class)) {
+                continue;
+            }
+
+            $annotation = $attribute->getAsObject();
+
+            // validate that doctrine annotation is on the right "target"
+            // getClassAnnotations requires all annotations to be allowed on a class
+            if ($annotation->target & Annotation::TARGET_CLASS === 0) {
+                throw new \RuntimeException(get_class($annotation) . " is not allowed on class.");
+            }
+
+            $doctrineAnnotations[] = $annotation;
+        }
+
+        return $doctrineAnnotations;
     }
 }
 </code>
 
-This way Doctrine (or any other userland annotation/attributes library)
-can also enforce stricter rules for use of the attributes by adding
-their own logic on top wihout PHP attributes getting in the way.
-
-A more complex Doctrine ORM use-case could look like this:
-
-<code php>
-namespace App\Entity {
-    use Doctrine\ORM\Mapping as ORM;
-
-    <<ORM\Entity(["repositoryClass" => UserRepository::class])>>
-    <<ORM\Table("users")>>
-    class User
-    {
-        <<ORM\Id>>
-        <<ORM\Column>>
-        <<ORM\GeneratedValue>>
-        public int $id;
-
-        <<ORM\Column(["unique" => true])>>
-        public string $email;
-
-        <<ORM\ManyToOne>>
-        public ?Address $address;
-    }
-}
-
-namespace Doctrine\ORM\Mapping {
-    use Doctrine\Annotations\Annotation;
-
-    class Entity extends Annotation {
-        public $repositoryClass;
-        public $readOnly;
-
-        public function __construct(array $options)
-        {
-            $this->repositoryClass = $options['repositoryClass'] ?? null;
-            $this->readOnly = $options['readOnly'] ?? false;
-        }
-    }
-
-    class Table extends Annotation {
-        public $name;
-        public $schema;
-
-        public function __construct($name, array $options)
-        {
-            $this->name = $name;
-            $this->schema = $options['schema'] ?? null;
-        }
-    }
-}
-
-$reader = new \Doctrine\Annotations\AnnotationReader();
-var_dump($reader->getClassAnnotations(new ReflectionClass(\App\Entity\User::class)));
-
-array(2) {
-  ["Doctrine\ORM\Mapping\Entity"]=>
-  object(Doctrine\ORM\Mapping\Entity)#2 (1) {
-    ["repositoryClass"]=>
-    string(25) "App\Entity\UserRepository"
-  },
-  ["Doctrine\ORM\Mapping\Table"]=>
-  object(Doctrine\ORM\Mapping\Table)#2 (1) {
-    ["name"]=>
-    string(5) "users"
-  }
-}
-</code>
+With this flexibility in the Reflection API, Doctrine (or any other userland
+annotation/attributes library) can also enforce stricter rules for use of the
+attributes by adding their own logic on top wihout PHP attributes getting in
+the way.
 
 [[https://github.com/RectorPHP/Rector|Migration tools such as Rector]] can help with userland migrating to attributes.
 
 ===== Criticism and Alternative Approaches =====
 
-=== Why not use @ or [] syntax like other languages? ===
+=== Alternative Syntax: Why not use @ or [] like other languages? ===
 
 <nowiki>The "<<" and ">>" syntax is used because it is one of the few syntaxes
 that can still be used at this place in the code that looks fairly natural. We
@@ -514,7 +592,7 @@ now:</nowiki>
 
 It would require looking ahead past potentially unlimited tokens to find out if
 its an array declaration or an attribute. We would end up with a context
-sensitive parser, which would be unacceptable outcome.
+sensitive parser, which would be an unacceptable outcome.
 
 === Why not extending Doc Comments? ===
 
@@ -523,7 +601,7 @@ being introduced as a new language construct for several reasons:
 
   * Namespacing prevents conflicts between different libraries using the same doc comment tag
   * Checking for attribute existance is a O(1) hash key test compared to unpredictable strstr performance or even parsing the docblock.
-  * Autoloading attribute classes ensures the attributes are correctly typed, reducing major source of bugs in reliance on docblocks at runtime.
+  * Mapping attributes to classes ensures the attributes are correctly typed, reducing major source of bugs in reliance on docblocks at runtime.
   * <nowiki>There is visible demand for something like annotations based on its common use in so many different tools and communities. However this will always be a confusing thing for newcomers to see in comments. In addition the difference between /* and /** is still a very subtle source of bugs.</nowiki>
 
 While it might be possible to make PHP parse existing doc-comments and keep
@@ -537,7 +615,7 @@ With attributes as proposed by this RFC, we re-use the existing syntax for
 expressions and constant expressions. The patch to the core for this
 functionality is small.
 
-=== Why not map attributes to simple arrays instead for simplicity? ===
+=== Why not always map attributes to simple arrays instead for simplicity? ===
 
 The previous section already re-iterated on the benefits why a class name
 resolving of attributes are important. Validation that attributes are
@@ -550,19 +628,6 @@ This RFC proposes only base PHP attribute functionality. A general solution for
 PHP and the wider community must take different use-cases into account and the
 full Doctrine like system is not necessary for a lot of use-cases, especially
 the PHP internal use-cases.
-
-One important note: Even if PHP had a very strict attributes support, this
-would always need to be evaluated at runtime only during access to
-ReflectionAttribute, because constant ASTs are evaluated at runtime:
-
-- for constants, when a class is instantiated into an object
-- for attributes, when ReflectionAttribute::getAsObject is called
-
-That means a stricter approach in this RFC doesn't lead to earlier compile time
-validation.
-
-At that point in the runtime, libraries such as Doctrine can hook on top of
-attributes and implement the stricter behaviors themselves.
 
 === Naming (attributes or annotations) ===
 
@@ -612,26 +677,39 @@ None
 
 ===== Open Issues =====
 
-  * Should we allow constant expressions or are basic type declarations (bool, int, string, array, float) already enough for arguments of attributes?
-  * Is the naming of ReflectionAttribute methods ok?
-  * Should attribute classes be required to implement an interface //PhpAttribute//? Or the built-in attribute //<<\PhpAttribute>>//? Or no requirement?
-  * Should attributes already provide a way to specify which declarations they target and throw errors on wrong placement? Example: //<<Target(["class", "function", "property"])>>//
-  * When to autoload the attributes and validate the constructor? Immediately at compile time (possible?) or only when Reflection::getAttributes() is called?
-  * Should there be an alternative "short" syntax to declare attributes in one enclosing? //<<SingleArgument("foo"), MultiArgument("bar", "baz")>>//
+  * How to best differentiate between userland and compiler/engine attributes without requiring autoload during compile time?
 
 ===== Future Scope =====
 
-  * Attributes provide the opportunity to augment existing functionality with new  behavior without breaking backwards compatibility. One example is  introduction of a "<<Rewindable>>" attribute that could be used to signal  that a generator function creates a rewindable iterator.
-  * Other languages such as Go have simple but powerful serialization from XML/JSON to objects and back. The combination of typed properties an   attributes puts this in reach for core or a PHP extension to implement.
-  * In the absence of generics attributes could provide an extension based type- or assertion system to make runtime assertions on complex/arrray types that could be disabled in production (similar to asserts and how Hack works)
+  * Integration with a potential named arguments proposal for function calls
+  * Opportunity to augment existing functionality with new behavior without
+    breaking backwards compatibility. One example is introduction of a
+    "//<<Rewindable>>//" attribute that could be used to signal  that a
+    generator function creates a rewindable iterator.
+  * Add <<Deprecated>> attribute that emits deprecation when function/method
+    called, property or const accessed
+  * Other languages such as Go have simple but powerful serialization from
+    XML/JSON to objects and back. The combination of typed properties an
+    attributes puts this in reach for core or a PHP extension to implement.
+  * An alternative "short" syntax to declare attributes in one enclosing
+    //<<SingleArgument("foo"), MultiArgument("bar", "baz")>>// This could be
+    revisited in the future similar to grouped use statements being added after
+    use statements already existed.
+  * Extending userland attributes to allow declaring which target they are
+    allowed to be declared on including validation of those targets in
+    //ReflectionAttribute::getAsObject()//.
 
 ===== Proposed Voting Choices =====
 
-  * Accept PHP Attributes v2 into core? 2/3 majority + 1
+  * Accept PHP Attributes v2 into core? 2/3 majority
+  * Which syntax to use for attributes? "<<>>" or "@:"
 
 ===== Patches and Tests =====
 
-https://github.com/beberlei/php-src/pull/2
+Two patches that are based on each other, the second one implementing future scope and alternative syntax:
+
+  * https://github.com/beberlei/php-src/pull/2 (with //<<>>// syntax)
+  * https://github.com/kooldev/php-src/pull/2 (with //@:// syntax, including userland target validation)
 
 ===== References =====
 
@@ -660,3 +738,16 @@ Previously failed or abandoned RFCs
   * Changed //Php\Attribute// to //PhpAttribute// because the PHP namespace has not been reserved for PHP and is currently "empty"
   * Clarify necessary order of docblocks, attributes and function declarations
   * Clarify no conflict with potential generics syntax
+
+0.3:
+
+  * Changed to support the same attribute multiple times on the same declaration
+  * Added support for attributes on method and function parameters
+  * Replaced //PhpAttribute// interface with an attribute instead
+  * Distiction between userland and compiler attributes and description when each of them gets evaluated/validated
+  * Reduce number of examples to shorten RFC a bit and expand the other examples instead
+
+0.4:
+
+  * Changed validation of compiler attributes to use a C callback instead of instantiating object
+  * Offer alternative syntax "@:" using new token T_ATTRIBUTE
