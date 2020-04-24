@@ -171,9 +171,10 @@ match ($x) {
 }
 </code>
 
-When you're making use of the result value of the ''match'' expression you must return a value from each block to the ''match'' expression. This can be done by omitting the last semicolon in the block. This syntax is borrowed (pun intended) from Rust ((https://doc.rust-lang.org/reference/expressions/block-expr.html)).
+Originally this RFC included a way to return a value from a block by omitting the semicolon of the last expression. This syntax is borrowed from Rust ((https://doc.rust-lang.org/reference/expressions/block-expr.html)). Due to [[https://github.com/php/php-src/pull/5448|memory management difficulties]] and a lot of negative feedback on the syntax this is no longer a part of this proposal and will be discussed in a separate RFC.
 
 <code php>
+// Original proposal
 $y = match ($x) {
     0 => {
         foo();
@@ -181,11 +182,26 @@ $y = match ($x) {
         baz() // This value is returned
     },
 };
-</code>
 
-Not returning a value from a block will lead to a compilation error.
+// Alternative syntax, <=
+$y = match ($x) {
+    0 => {
+        foo();
+        bar();
+        <= baz();
+    },
+};
 
-<code php>
+// Alternative syntax, separate keyword
+$y = match ($x) {
+    0 => {
+        foo();
+        bar();
+        pass baz();
+    },
+};
+
+// Alternative syntax, automatically return last expression regardless of semicolon
 $y = match ($x) {
     0 => {
         foo();
@@ -193,26 +209,19 @@ $y = match ($x) {
         baz();
     },
 };
-
-//> Match block must return a value. Did you mean to omit the last semicolon?
 </code>
 
-This is **not** the same as using the ''return'' keyword.
+For the time being the following code will result in a compilation error:
 
 <code php>
-function test($x) {
-    $y = match ($x) {
-        0 => {
-            foo();
-            bar();
-            // baz() will be returned from test(), $y will never be assigned
-            return baz();
-        },
-    };
-}
+$y = match ($x) {
+    0 => {},
+};
+
+//> Match that not used as a statement can't contain blocks
 </code>
 
-===== Semicolon =====
+===== Optional semicolon for match in statement form =====
 When using ''match'' as part of some other expression it is necessary to terminate the statement with a semicolon.
 
 <code php>
@@ -227,7 +236,7 @@ match ($y) {
 };
 </code>
 
-However, to make the ''match'' expression more similar to other statements like ''if'' and ''switch'' it is allowed to drop the semicolon in this case only.
+However, to make the ''match'' expression more similar to other statements like ''if'' and ''switch'' we could allow dropping the semicolon in this case only.
 
 <code php>
 match ($y) {
@@ -235,7 +244,7 @@ match ($y) {
 }
 </code>
 
-This introduces some ambiguities with prefix operators that are also binary operators, namely ''+'' and ''-''.
+This introduces an ambiguity with the ''+'' and ''-'' prefix operators.
 
 <code php>
 match ($y) { ... }
@@ -251,16 +260,26 @@ match ($y) { ... };
 match ($y) { ... } - 1;
 </code>
 
-When ''match'' appears as the first element of a statement it will always be parsed as option 1.
+When ''match'' appears as the first element of a statement would always be parsed as option 1 because there are no legitimate use cases for binary operations at a statement level. All other cases work as expected.
+
+<code php>
+// These work fine
+$x = match ($y) { ... } - 1;
+foo(match ($y) { ... } - 1);
+$x[] = fn() => match ($y) { ... };
+// etc.
+</code>
+
+Because there was some controversy around this feature it was moved to a secondary vote.
 
 ===== Miscellaneous =====
 ==== Arbitrary expressions ====
-A match condition can be any arbitrary expression. Analogous to ''switch'' each condition will be checked from top to bottom until the first one matches.
+A match condition can be any arbitrary expression. Analogous to ''switch'' each condition will be checked from top to bottom until the first one matches. If a condition matches the remaining conditions won't be evaluated
 
 <code php>
 match ($x) {
     functionCall() => ...,
-    $this->methodCall() => ...,
+    $this->methodCall() => ..., // methodCall isn't called if functionCall() matched with $x
     $this->property => ...,
     // etc.
 }
@@ -290,21 +309,6 @@ match ($i) {
     },
 }
 //> Fatal error: "continue" targeting match is disallowed. Did you mean to use "break" or "continue 2"?
-</code>
-
-It is not allowed to break out of a match expression that makes use of the return value.
-
-<code php>
-$x = match ($i) {
-    default => {
-        break;
-        'foo'
-    },
-};
-
-echo $x;
-
-//> Fatal error: Breaking out of match with result value disallowed
 </code>
 
 ==== goto ====
@@ -338,21 +342,6 @@ match ($b) {
 //> Fatal error: 'goto' into loop, switch or match is disallowed
 </code>
 
-Nor is it allowed to jump out of ''match'' expressions that make use of the return value.
-
-<code php>
-$a = match ($b) {
-    1 => {
-        goto end_of_match;
-        'foo'
-    },
-};
-
-end_of_match:
-
-//> Fatal error: 'goto' out of match with result value disallowed
-</code>
-
 ==== return ====
 ''return'' behaves the same as in any other context. It will return from the function.
 
@@ -369,23 +358,31 @@ function foo($x) {
 </code>
 
 ===== Future scope =====
+==== Block expressions ====
+As mentioned above block expressions will be discussed in a separate RFC. We'll also use this opportunity to think about blocks in arrow functions.
+
 ==== Pattern matching ====
-I have experimented with pattern matching ((https://github.com/php/php-src/compare/master...iluuu1994:pattern-matching)) for this RFC. Realistically it could sometimes save a few keystrokes. In my opinion this does not justify the significant complexity added to the language at the moment. It would be mostly useful for algebraic data types which PHP currently does not have.
+I have experimented with pattern matching ((https://github.com/php/php-src/compare/master...iluuu1994:pattern-matching)) and decided not to include it in this RFC. Pattern matching is a complex topic and requires a lot of thought. Each pattern should be discussed in detail in a separate RFC.
 
 <code php>
 // With pattern matching
 match ($value) {
     let $a => ..., // Identifer pattern
+    let 'foo' => ..., // Scalar pattern
     let 0..<10 => ..., // Range pattern
     let is string => ..., // Type pattern
     let [1, 2, $c] => ..., // Array pattern
     let Foo { foo: 1, getBar(): 2 } => ..., // Object pattern
     let $str @ is string if $str !== '' => ..., // Guard
+
+    // Algebraic data types if we ever get them
+    let Ast\BinaryExpr($lhs, '+', $rhs) => ...,
 }
 
 // Without pattern matching
 match (true) {
     true => $value ..., // Identifier pattern
+    'foo' => ..., // Scalar pattern
     $value >= 0 && $value < 10 => ..., // Range pattern
     is_string($value) => ..., // Type pattern
     count($value) === 3
@@ -398,29 +395,6 @@ match (true) {
     is_string($str) && $str !== '' => ..., // Guard
 }
 </code>
-
-While some patterns are significantly shorter (namely the array pattern) code like that is relatively rare. At the moment the argument for such a big language change is pretty weak. If the situation ever changes we can always add pattern matching at a later point in time.
-
-==== Language wide blocks ====
-While it is possible to make blocks a language wide feature there are simply not enough use cases for this at the moment. One potential use case are arrow functions.
-
-<code php>
-$callable = fn() => {
-    return 'foo';
-};
-</code>
-
-However, allowing the same blocks here would allow for two semantically equivalent versions with different syntax.
-
-<code php>
-$callable = fn() => {
-    'foo'
-};
-</code>
-
-We would likely want to disallow this. So even here blocks should behave slightly differently. Thus we're better off implementing blocks for arrow functions separately.
-
-There were no other legitimate use cases I could think of.
 
 ===== "Why don't you just use x" =====
 ==== if statements ====
@@ -444,7 +418,7 @@ $y = [
 ][$x];
 </code>
 
-This code will execute every single "arm", not just the one that is finally returned. It will also build a hash map in memory everytime it is executed. And again, you must not forget to handle unexpected values.
+This code will execute every single "arm", not just the one that is finally returned. It will also build a hash map in memory every time it is executed. And again, you must not forget to handle unexpected values.
 
 ==== Nested ternary operators ====
 <code php>
@@ -471,3 +445,26 @@ The proposed version is PHP 8.
 
 ===== Proposed Voting Choices =====
 As this is a language change, a 2/3 majority is required. The vote is a straight Yes/No vote for accepting the RFC and merging the patch.
+
+<doodle title="Would you like to add match expressions to the language?" auth="ilijatovilo" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+Secondary vote (choice with the most votes is picked):
+
+<doodle title="Should the semicolon for match in statement form be optional?" auth="ilijatovilo" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+\\
+
+<doodle title="If you voted no, why?" auth="ilijatovilo" voteType="multi" closed="true">
+   * Not interested
+   * Don't want blocks
+   * Want return val in blocks
+   * Not useful w/o pattern matching
+   * BC break
+   * Other
+</doodle>
