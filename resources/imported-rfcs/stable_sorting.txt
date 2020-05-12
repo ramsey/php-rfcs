@@ -1,0 +1,115 @@
+====== PHP RFC: Make sorting stable ======
+  * Date: 2020-05-12
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Under Discussion
+  * Target Version: PHP 8.0
+  * Implementation: https://github.com/php/php-src/pull/5236
+
+===== Introduction =====
+
+Sorting functions in PHP are currently unstable, which means that the order of "equal" elements is not guaranteed. This RFC proposes to make all sorts in PHP stable.
+
+If multiple elements in the input array compare equal, they will always be sorted adjacently. However, if the sort is unstable, their relative order is not guaranteed, and will appear to be random. A stable sort guarantees that equal elements will retain the order they had in the original array.
+
+Stable sorts are useful primarily when sorting complex data only by some part of that data. Consider this example:
+
+<PHP>
+usort($users, function($user1, $user2) {
+    return $user1->age <=> $user2->age;
+});
+</PHP>
+
+This code sorts users by age. Currently, the order of users in one age bracket will be arbitrary. With a stable sort, the original order of the objects will be retained. For example, if ''$users'' was already sorted by name, then ''$users'' will now be sorted by age first and name second. Of course, in this case it would be possible to explicitly sort by two criteria:
+
+<PHP>
+usort($users, function($user1, $user2) {
+    return $user1->age <=> $user2->age
+        ?: $user1->name <=> $user2->name;
+});
+</PHP>
+
+However, this is not always possible, because the criterion by which the data was originally sorted is not explicitly stored. A recent case I ran into was a list of git commits with metadata, which were stored in push order (but the push order was not explicitly stored on each commit).
+
+Apart from user-supplied comparison functions, another case where stable sorting is often desirable is the ''asort()'' function, which sorts by value, but preserves keys.
+
+<PHP>
+$array = [
+    'c' => 1,
+    'd' => 1,
+    'a' => 0,
+    'b' => 0,
+];
+asort($array);
+
+// With stable sorting, the result is always:
+['a' => 0, 'b' => 0, 'c' => 1, 'd' => 1]
+
+// With unstable sorting, the following results are also possible:
+['b' => 0, 'a' => 0, 'c' => 1, 'd' => 1]
+['a' => 0, 'b' => 0, 'd' => 1, 'c' => 1]
+['b' => 0, 'a' => 0, 'd' => 1, 'c' => 1]
+</PHP>
+
+It is possible to emulate a stable sort on top of an unstable one by explicitly storing the original order of the elements and using it as a fallback comparison criterion. For example, a stable sort implementation could look like this:
+
+<PHP>
+function stable_usort(array &$array, callable $compare) {
+    $arrayAndPos = [];
+    $pos = 0;
+    foreach ($array as $value) {
+        $arrayAndPos[] = [$value, $pos++];
+    }
+    usort($arrayAndPos, function($a, $b) use($compare) {
+        return $compare($a[0], $b[0]) ?: $a[1] <=> $b[1];
+    });
+    $array = [];
+    foreach ($arrayAndPos as $elem) {
+        $array[] = $elem[0];
+    }
+}
+</PHP>
+
+While this approach works, it is also highly inefficient. The additional indirection makes sorting much slower, and will also skyrocket memory usage during sorting.
+
+===== Proposal =====
+
+This RFC proposes to make all PHP sorting functions stable. This includes sort, rsort, usort, asort, arsort, uasort, ksort, krsort, uksort, array_multisort, as well as corresponding methods on ArrayObject.
+
+==== Implementation ====
+
+The underlying sort implementation ''zend_sort'' remains an unstable hybrid quick sort. Stability is achieved by storing the original order of the array elements and using that order as a fallback sorting criterion.
+
+This matches what is implemented in the ''stable_usort'' PHP code above, with the difference that certain internal implementation details allow us to do this highly efficiently, without increasing memory usage.
+
+An alternative would be to change the underlying sorting algorithm to Timsort, which is inherently stable.
+
+==== Illegal comparison functions ====
+
+PHP documents that comparison functions must return an integer smaller than, equal to, or greater than zero. However, due to the specific implementation of sorting in PHP, it is currently also possible to return a boolean that indicates whether the value is greater:
+
+<PHP>
+usort($values, function($a, $b) {
+    // Should be $a <=> $b !
+    return $a > $b;
+});
+</PHP>
+
+This works, because PHP currently only checks whether the comparison result is "greater than" or not, and never explicitly distinguishes the "equal" and "smaller than" cases. This breaks down with the approach proposed here, because we now do need to know whether values are equal or not, in order to use the fallback sorting criterion.
+
+This RFC takes two steps to address this. First, a deprecation warning will be emitted if a boolean is returned from a custom comparison function. The deprecation warning is thrown only once per sort:
+
+> usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero
+
+Second, if boolean false is returned, PHP will automatically call the comparison function again with arguments swapped. This allows us to distinguish whether the "false" stood for "equal" or "smaller than". This fallback behavior should be removed in a future version of PHP.
+
+==== Performance ====
+
+Of course, stable sorting is not entirely free. [[https://gist.github.com/nikic/5d44cb5d0d7c1f414f455090a0193567|This gist]] contains a simple script to evaluate sort performance at various levels of duplication in the array. As the results show, sort performance is essentially unchanged if the array does not contain duplicates (and thus stable vs unstable sorting does not matter). However, if the array contains many duplicates, the unstable sort becomes faster, while the stable sort always has approximately the same performance.
+
+===== Backward Incompatible Changes =====
+
+As described in the "Illegal comparison functions" section, comparison functions returning booleans instead of integers are deprecated and will no longer be supported in the future.
+
+===== Vote =====
+
+Yes/No.
