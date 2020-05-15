@@ -245,20 +245,27 @@ Numeric strings are compared the same way as non-numeric strings. To compare two
 </code>
 
 === Array comparison ===
-Equality comparison ''=='' between two arrays in strict modes will always throw a ''TypeError''.
+All comparison operators on arrays in strict modes will throw a ''TypeError''. This includes '==''.
 
-Using ''=='' implies both comparing an array as an unsorted hashmap and using type juggling. Allowing ''=='' for arrays disabling type juggling makes ''strict_operators'' change the behavior of the operator.
-
-This would lead to unexpected behavior.
+Using ''=='' implies both comparing an array as an unsorted hashmap and using type juggling. Allowing ''=='' for arrays ad disabling type juggling makes ''strict_operators'' change the behavior of the operator.
 
 <code php>
 $a = 0;
 $b = "foo";
 $a == $b;     // TypeError("Unsupported type string for comparison operation")
-[$a] == [$b]; // ????
+[$a] == [$b]; // TypeError("Unsupported type array for comparison operation")
 </code>
 
-In the example above, the 
+The example above returns ''true'' without strict operators. Resulting in ''false'' could be considered 'correct'. However if ''$b'' contains the string ''"0"'' resulting in ''false'' would be an unexpected change in behavior.
+
+<code php>
+$a = 0;
+$b = "0";
+$a == $b;     // TypeError("Unsupported type string for comparison operation")
+[$a] == [$b]; // TypeError("Unsupported type array for comparison operation")
+</code>
+
+The alternative of throwing a ''TypeError'' based on the contents of the array goes against the principles of this RFC.
 
 === Object comparison ===
 Comparing two objects of different classes using the ''=='' or ''!='' operator will throw a ''TypeError''.
@@ -282,7 +289,15 @@ class FooBar extends Foo {}
 (new Foo(10)) === (new FooBar(11)); // false
 </code>
 
-Comparing two objects of the same class will with these operators check the properties of the objects. By default, properties are compared in a similar fashion to the ''==='' operator. If the property of both objects contains arrays or objects of the same class, they're compared as using the ''=='' operator.
+Comparing two objects of the same class will with these operators check the properties of the objects. By default, properties are compared in a similar fashion to the ''==='' operator. If the property of both objects contains an object of the same class, they're compared as using the ''=='' operator.
+
+In the following examples, the ''=='' results in ''false'' when ''strict_operators'' is used and ''true'' otherwise;
+
+<code php>
+(new Foo(0)) == (new Foo('foo'));
+(new Foo(10)) == (new Foo('10'));
+(new Foo(null)) === (new Foo(0));
+</code>
 
 ==== Arithmetic operators ====
 Arithmetic operators will only work with integers and floats. Using operands of any other type will result in a ''TypeError''.
@@ -292,7 +307,7 @@ In strict type-checking mode, the behavior of the operator is not determined by 
 The ''+'' operator is still available for arrays as union operator, requiring both values to be arrays.
 
 ==== Incrementing/Decrementing operators ====
-The incrementing/decrementing operators will throw a ''TypeError'' when the operand is a string, boolean, null, array, object or resource.
+The incrementing/decrementing operators will throw a ''TypeError'' when the operand is a string, boolean, null, array, object, or resource.
 
 The function of these operators for integers and floats remains unchanged.
 
@@ -356,6 +371,7 @@ This is proposed for PHP 8.0.
 
 ==== What has been changed since the initial proposal? ====
   * Comparison operators ''>'', ''>='', ''<'', ''%%<=%%'' and ''%%<=>%%'' with string operands will throw a ''TypeError''. [[#why_aren_t_all_comparison_functions_available_for_strings|See motivation.]]
+  * Comparison operators ''=='' on array operands will always throw a ''TypeError''.
   * Variable parsing in strings specified in double quotes and with heredoc, is also affected.
   * Concatenation operation (using ''.'') on ''null'' does not throw a ''TypeError'', but will cast ''null'' to an empty string.
   * There is no secondary vote for ''switch''. If this RFC is accepted ''strict_operators'' will apply to ''switch''.
@@ -372,7 +388,7 @@ Arithmetic operators won't cast strings to an integer or float, because not all 
 
 Both the concatenation operator and arithmetic operators throw a ''TypeError'' for arrays, resources, and objects. Casting these to a string or int/float doesn't give a proper representation of the value of the operand.
 
-Using a boolean or null as operand for both concatenation and arithmetic operators also throws a ''TypeError''. In most cases, the use of a boolean or null indicates an error as many functions return ''false'' or ''null'' in case of an error or when no result can be returned. This is different from the function returning an empty string or ''0''.  [[https://php.net/strpos|''strpos'']] is a well known example.
+Using a boolean or null as operand for both concatenation and arithmetic operators also throws a ''TypeError''. In most cases, the use of a boolean or null indicates an error as many functions return ''false'' or ''null'' in case of an error or when no result can be returned. This is different from the function returning an empty string or ''0''.  [[https://php.net/strpos|''strpos'']] is a well-known example.
 
 ==== Will comparing a number to a numeric string work with strict operators? ====
 No, this will throw a ''TypeError''. Users that use string operators need to explicitly typecast the string to an integer. If it concerns input data, for instance from ''$_POST'', it's recommended to use the [[https://www.php.net/filter|filter functions]].
@@ -387,6 +403,16 @@ In case it concerns comparing text, it's better to use ''Collator::compare()''. 
 Nikita Popov made the following argument:
 
 <blockquote>Having ''$str1 < $str2'' perform a ''strcmp()'' style comparison under strict_operators is surprising. I think that overall the use of lexicographical string comparisons is quite rare and should be performed using an explicit ''strcmp()'' call. More likely than not, writing ''$str1 < $str2'' is a bug and should generate a ''TypeError''. Of course, equality comparisons like ''$str1 == $str2'' should still work, similar to the distinction you make for arrays.</blockquote>
+
+==== How can arrays be compared as unsorted hashmaps? ====
+
+Arrays are sorted hashmaps in PHP but used as any type of collection like unsorted maps, lists, and sets. Only comparing as unsorted hashmap is supported using ''=='', while other cases require the use of functions like ''sort()'' and ''array_values()''.
+
+Strict comparison of arrays as unsorted hashmaps currently isn't possible and requires sorting the array, prior to comparison.
+
+With ''=='' unavailable when using ''strict_operators'', sorting the array would be the only option available.
+
+Array functions might be added to compare arrays in different ways. But that's outside the scope of this RFC.
 
 ==== Why isn't is allowed to increment strings with strict_operators? ====
 
@@ -409,8 +435,8 @@ Throwing a ''TypeError'' only if the keys of the arrays don't match is not in li
 ==== Are there cases where a statement doesn't throw a TypeError but yields a different result? ====
 Yes, there are 3 cases where a comparison works differently in strict operators mode.
 
-    * Two numeric strings will be compared on equality as strings instead of numbers. Comparing two operands of the same type should always work. Under strict operators, the operation is only determined by the type and never by the value. Comparisons like ''"100" == "1e2"'' are unlikely to be intended and will return ''false'' with strict_operators.
-    * When comparing two arrays (or objects) no typecasting will be performed. So ''[null] == [0]'' will result in ''false'' with strict operators and in ''true'' without the directive.
+    * Two numeric strings will be compared on equality as strings instead of numbers. Comparing two operands of the same type should always work. Under strict operators, the operation is only determined by the type and never by the value. Comparisons like ''"100" == "1e2"'' are unlikely to be intended and will return ''false'' with strict operators.
+    * When comparing two objects no type juggling will be performed. This might result in ''false'' where ''true'' will be the result without strict operators.
     * With strict operators, the ''case'' in a ''switch'' statement will not do type conversion. It also doesn't compare numeric strings as numbers but as strings.
 
 ==== Will this directive disable type juggling altogether? ====
