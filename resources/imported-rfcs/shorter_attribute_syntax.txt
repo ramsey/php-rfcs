@@ -1,0 +1,168 @@
+====== PHP RFC: Shorter Attribute Syntax ======
+  * Date: 2020-06-03
+  * Author: Theodore Brown <theodorejb@outlook.com>, Martin Schröder
+  * Status: Under Discussion
+  * Target Version: PHP 8.0
+  * Implementation: Based on https://github.com/kooldev/php-src/pull/2 (requires a single character to be changed in the lexer and a small grammar adjustment)
+
+===== Introduction =====
+
+We propose to use ''@@Attr'' as the attribute syntax in PHP 8.0 instead of ''<<Attr>>''.
+
+==== Background ====
+
+Early last month, the [[https://wiki.php.net/rfc/attributes_v2|Attributes v2]] RFC was accepted for PHP 8.0.
+During voting there was a syntax choice between ''<<Attr>>'' and ''@:Attr'',
+and the former was preferred by an approximately 3/4 majority.
+
+However, this syntax has several noteworthy shortcomings:
+
+==== 1. Verbosity ====
+
+In this example from the RFC, there are more characters used for the shift tokens than for the attribute name itself:
+
+<code php>
+<<Jit>>
+function foo() {}
+</code>
+
+Especially once more than one attribute needs to be added, the syntax can get quite
+noisy and hard to read at a glance. To alleviate this, the
+[[https://wiki.php.net/rfc/attribute_amendments|Attribute Amendments]] RFC proposes to allow grouping multiple attributes between one pair of shift tokens:
+
+<code php>
+<<Attr1("foo"),
+  Attr2("bar")>>
+public function test() {}
+</code>
+
+Unfortunately, this results in another problem: adding a new attribute at the start or end of the list, or removing one of the attributes, will require modifying multiple lines, which adds noise to diffs. Notably, the proposal does allow trailing commas, so the code could be written like this instead:
+
+<code php>
+<<
+  Attr1("foo"),
+  Attr2("bar"),
+>>
+public function test() {}
+</code>
+
+But now two extra lines are needed for the shift tokens, and multiple lines will likely still be modified when moving from one attribute to two attributes, or vice versa.
+
+==== 2. Lack of nested attributes ====
+
+Nested annotations are quite common in apps using Doctrine. Here's an example [[https://www.doctrine-project.org/projects/doctrine-orm/en/2.7/reference/association-mapping.html#mapping-defaults|from the documentation]]:
+
+<code>
+@JoinTable(
+    name="User_Group",
+    joinColumns={@JoinColumn(name="User_id", referencedColumnName="id")},
+    inverseJoinColumns={@JoinColumn(name="Group_id", referencedColumnName="id")}
+)
+</code>
+
+The only way to nest attributes with the ''<<>>'' syntax (and potential attribute grouping) would be to allow ''new Attr()'' expressions. However, this isn't easy to implement and also can be confusing (e.g. ''new Foo()'' would be allowed but ''Foo::create()'' wouldn't work). Ultimately, this was given up on during implementation since it would require a lot of changes to const expressions.
+
+==== 3. Confusion with generics ====
+
+Although there isn't technically a conflict between the syntax for attributes and generics, once generics are supported in PHP it may be harder to tell at a glance where generics are being used as opposed to attributes.
+
+==== 4. Confusion with shift operators and constant parameters ====
+
+Reusing shift tokens can make it difficult to tell if a line contains multiple attributes, or a shift token in a constant expression:
+
+<code php>
+<<Bar(2 * (3 + 3)>>Baz, (4 + 5) * 2)>>
+function foo() {}
+</code>
+
+Of course, shift tokens will rarely be used in this context, so this issue is minor. But if the grouped attribute proposal is accepted, there can be similar confusion between comma separated attributes and attribute arguments:
+
+<code php>
+<<Attr1(2 * 3 + 3), Bar(4 + 5 * 2)>>
+<<Attr2(2 * (3 + 3), Baz, (4 + 5) * 2)>>
+function foo() {}
+</code>
+
+==== 5. Dissimilarity to other languages ====
+
+Most other languages in the C family use either ''[Attr]'' or ''@Attr'' for their attribute syntax, requiring just one or two characters, rather than four (see comparison further below).
+
+
+===== Proposal =====
+
+Use ''@@Attr'' instead of ''<<Attr>>'' for the attribute syntax in PHP 8.0.
+
+This solves each of the above issues. It requires half as many characters, reducing verbosity in line with most other languages that have attributes:
+
+<code php>
+@@Jit
+function foo() {}
+</code>
+
+The ''@@'' syntax doesn't have any conflicts with nested attributes, so it will be straightforward to add support for them in the future if desired (without needing any special cases or changes to const expressions):
+
+<code php>
+@@JoinTable(
+    "User_Group",
+    @@JoinColumn("User_id", "id"),
+    @@JoinColumn("Group_id", "id"),
+)
+private $groups;
+</code>
+
+The shorter syntax can also improve code readability by making it easier to tell at a glance where attributes are used as opposed to generics or shift tokens. Lastly, it avoids the problem of needing to modify multiple lines when adding or removing a single attribute:
+
+<code php>
+@@Attr1("foo")
+@@Attr2("bar") // this line can be added or removed independent of other lines
+public function test() {}
+</code>
+
+
+===== Discussion =====
+
+==== Why was the "@:" syntax rejected? ====
+
+One argument against it was that it is more prone to accidental typos like ''@;''. Another reason that some people disliked it is that it's non-symmetrical, and thus doesn't fit well with existing PHP tokens. The ''@@'' syntax avoids both of these issues.
+
+==== Why not use a keyword instead? ====
+
+It has been suggested that a keyword be used instead of a symbol. E.g.
+
+<code php>
+attribute Foo();
+function myFunc() {}
+</code>
+
+However, the objective of this proposal is to arrive at a syntax that is less verbose and aligns better with the attribute syntax used in other common languages. Using a keyword doesn't meet either of these goals.
+
+==== Isn't the syntax choice just something subjective we'll get used to? ====
+
+To some extent I would agree. However, in this case I believe there are also objective reasons to prefer the shorter syntax, which this RFC attempts to outline.
+
+==== Comparison to other languages ====
+
+Most other languages with attributes use a variant of ''[Attr]'' or ''@Attr'' for the syntax. Hack is the only language using ''<<Attr>>'', but apparently they are migrating away from this to ''@Attr'' now that compatibility with PHP is no longer a goal.
+
+  * C#: ''[Attr]'' [[https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/concepts/attributes/|1]]
+  * C++: ''[[attr]]'' [[https://docs.microsoft.com/en-us/cpp/cpp/attributes?view=vs-2019|2]]
+  * Hack: ''<<Attr>>'' [[https://docs.hhvm.com/hack/attributes/attribute-specification|3]] (but migrating to ''@Attr'') [[https://github.com/facebook/hhvm/commit/a3f65737996e151ca2f25b3a335b89ef665c75cd|4]]
+  * Java: ''@Attr'' [[https://en.wikipedia.org/wiki/Java_annotation|5]]
+  * Kotlin: ''@Attr'' [[https://kotlinlang.org/docs/reference/annotations.html|6]]
+  * Python: ''@attr'' [[https://pythonbasics.org/decorators/|7]]
+  * Rust: ''#[attr]'' [[https://doc.rust-lang.org/reference/attributes.html|8]]
+  * Swift: ''@attr'' [[https://docs.swift.org/swift-book/ReferenceManual/Attributes.html|9]]
+  * TypeScript/JS: ''@Attr'' [[https://www.typescriptlang.org/docs/handbook/decorators.html|10]]
+
+===== Backward Incompatible Changes =====
+
+In theory there is a small BC break, since multiple error suppression operators can currently be added with no additional effect (e.g. `@@@@@really_suppress_me()`). However, this isn't useful for anything and is very unlikely to be used anywhere.
+
+===== Vote =====
+
+Use proposed ''@@'' syntax for attributes in PHP 8.0? Yes/No
+
+===== References =====
+
+  * Previous discussion about nested attributes: https://externals.io/message/108907#109623 and https://externals.io/message/108907#109688
+  * Previous comments in favor of `@@`: https://externals.io/message/109713#109742
