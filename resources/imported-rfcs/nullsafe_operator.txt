@@ -43,9 +43,30 @@ $country = $session?->user?->getAddress()?->country;
 </code>
 When the left hand side of the operator evaluates to ''%%null%%'' the execution of the entire chain will stop and evalute to ''%%null%%''. When it is not ''%%null%%'' it will behave exactly like the normal ''%%->%%'' operator.
 
-==== Short circuiting ====
+===== Short circuiting =====
 
-This RFC proposes full short circuiting. This means when the evaluation of one element in the chain fails the execution of the entire chain is aborted and the entire chain evaluates to ''%%null%%''. The following elements are considered part of the chain.
+==== Introduction ====
+
+Short circuiting refers to skipping the evaluation of an expression based on some given condition. Two common examples are the operators ''%%&&%%'' and ''%%||%%''. There are three ways the nullsafe operator ''%%?->%%'' could implement short circuiting. We’ll look at the same code snippet for every option.
+
+<code php>
+null?->foo(bar())->baz();
+</code>
+**1. Short circuiting for neither method arguments nor chained method calls**
+
+This complete lack of short circuiting is currently only found in Hack. Both the function ''%%bar()%%'' and the method ''%%baz()%%'' are called. ''%%baz()%%'' will cause a “Call to a member function on null” error. Evaluating method arguments makes it the most surprising of the three options. This was the primary criticism of [[https://wiki.php.net/rfc/nullsafe_calls|the last RFC]].
+
+**2. Short circuiting for method arguments but not chained method calls**
+
+This is what would normally be considered lack of short circuiting. The function ''%%bar()%%'' is not called, the method ''%%baz()%%'' is. ''%%baz()%%'' will cause a “Call to a member function on null” error.
+
+**3. Short circuiting for both method arguments and chained method calls**
+
+We’ll refer to this as full short circuiting. Neither the function ''%%bar()%%'' nor the method ''%%baz()%%'' are called. There will be no “Call to a member function on null” error.
+
+==== Proposal ====
+
+This RFC proposes full short circuiting. When the evaluation of one element in the chain fails the execution of the entire chain is aborted and the entire chain evaluates to ''%%null%%''. The following elements are considered part of the chain.
 
   * Array access (''%%[]%%'')
   * Property access (''%%->%%'')
@@ -90,9 +111,54 @@ Chains are automatically inferred. Only the closest chain will terminate. The fo
 // ------------ chain 1
 // If $foo is null, chain 1 is aborted, ++ is skipped
 </code>
-===== Syntax choice =====
+==== Rationale ====
 
-The syntax has been chosen to indicate the precise place in the code that the short circuiting occurs.
+**1. It avoids surprises**
+
+<code php>
+$foo = null;
+$foo?->bar(expensive_function());
+</code>
+The evaluation of ''%%expensive_function()%%'' is undesirable if ''%%$foo%%'' is ''%%null%%'' as its result will simply be discarded. If the function has side effects it could also lead to surpsises.
+
+**2. You can see which methods/properties return null**
+
+<code php>
+$foo = null;
+$foo?->bar()->baz();
+</code>
+Without short circuiting every subsequent method call and property access in the chain will require using the nullsafe operator or you will get a “Call to a member function on null” error. With short circuiting this isn’t necessary which makes it more obvious which methods/properties might return ''%%null%%''.
+
+**3. Allows for nullsafe operator in write context**
+
+<code php>
+$foo = null;
+$foo?->bar = 'bar';
+var_dump($foo);
+
+// Without short circuiting:
+// Fatal error: Can't use nullsafe result value in write context
+
+// With short circuiting:
+// NULL
+</code>
+Without short circuiting the assignment to a nullsafe property would be illegal because it produces an r-value (a value that cannot be assigned to). With short circuiting if a nullsafe operation on the left hand side of the assignment fails the assignment is simply skipped.
+
+**4. Mixing with other operators**
+
+<code php>
+$foo = null;
+$baz = $foo?->bar()['baz'];
+var_dump($baz);
+
+// Without short circuiting:
+// Notice: Trying to access array offset on value of type null
+// NULL
+
+// With short circuiting
+// NULL
+</code>
+Since with short circuiting the array access ''%%['baz']%%'' will be completely skipped no notice is emitted.
 
 ===== Other languages =====
 
@@ -119,65 +185,9 @@ Lets look the most popular high-level programming languages (according to the [[
 
 8/13 languages have a nullsafe operator. 4/8 of those implement the nullsafe operator with short circuiting.
 
-===== Why short circuiting? =====
+===== Syntax choice =====
 
-As with most things short circuiting has benefits and drawbacks.
-
-==== Benefits ====
-
-**1. You can see which methods/properties return null**
-
-<code php>
-// Without short circuiting
-$foo = null;
-$foo?->bar()?->baz();
-
-// With short circuiting
-$foo = null;
-$foo?->bar()->baz();
-</code>
-In this example ''%%$foo%%'' might be ''%%null%%'' but ''%%bar()%%'' will never return ''%%null%%''. Without short circuiting every subsequent method call and property access in the chain will require the nullsafe operator. With short circuiting this isn’t necessary which makes it more obvious which methods/properties might return ''%%null%%''.
-
-**2. Allows for nullsafe operator in write context**
-
-<code php>
-$foo = null;
-$foo?->bar = 'bar';
-var_dump($foo);
-
-// Without short circuiting:
-// Fatal error: Can't use nullsafe result value in write context
-
-// With short circuiting:
-// NULL
-</code>
-Without short circuiting the assignment to a nullsafe property would be illegal because it produces an r-value (a value that cannot be assigned to). With short circuiting if a nullsafe operation on the left hand side of the assignment fails the assignment is simply skipped.
-
-**3. Mixing with other operators**
-
-<code php>
-$foo = null;
-$baz = $foo?->bar()['baz'];
-var_dump($baz);
-
-// Without short circuiting:
-// Notice: Trying to access array offset on value of type null
-// NULL
-
-// With short circuiting
-// NULL
-</code>
-Since with short circuiting the array access ''%%['baz']%%'' will be completely skipped no notice is emitted. This might be less of a problem once we have a nullsafe array access operator ''%%?[]%%''.
-
-==== Drawbacks ====
-
-**1. More rules**
-
-Short circuiting must define which elements belong to the short circuiting chain and which do not. Not all of them might be immediately obvious but they should be intuitive for the most part.
-
-**2. Complexity**
-
-It’s also very likely that the implementation of the nullsafe operator with short circuiting will be slightly more complicated than without it. No short circutiing poses it’s own set of complications though (like checking that ''%%?->%%'' can’t be used in write context).
+The ''%%?%%'' in ''%%?->%%'' denotes the precise place in the code where the short circuiting occurs. It closesly resembles the syntax of every other language that implements a nullsafe operator.
 
 ===== Backward Incompatible Changes =====
 
@@ -187,7 +197,7 @@ There are no known backward incompatible changes in this RFC.
 
 Since PHP 7.4 a notice is emitted on array access on ''%%null%%'' (''%%null["foo"]%%''). Thus the operator ''%%?[]%%'' could also be useful (''%%$foo?["foo"]%%''). Unfortunately, this code introduces a parser ambiguity because of the ternary operator and short array syntax (''%%$foo?["foo"]:["bar"]%%''). Because of this complication the ''%%?[]%%'' operator is not part of this RFC.
 
-The same also goes for a nullsafe function call syntax (''%%$callableOrNull?()%%'').
+A nullsafe function call syntax (''%%$callableOrNull?()%%'') is also outside of scope for this RFC.
 
 ===== Vote =====
 
