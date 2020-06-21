@@ -18,13 +18,14 @@ With the introduction of typed properties in PHP 7.4, properties have become far
 This RFC resolves this issue by proposing a few options:
   - Language approach:
     - Change to make it possibility to specify write visibility disconnected from read.
-    - Immutable keyword for immutable semantics on write access
+    - readonly keyword for write access, on property and class (implicit all properties)
+    - immutable keyword for write access, on property and class (implicit all properties)
   - Attribute approach:
     - Readonly attribute for properties, if #1.1 is accepted this is merely syntax sugar that adds possibility to set readonly on classes (implicit all properties).
     - Immutable attribute for properties, if #1.2 is accepted this is merely syntax sugar that adds possibility to set immutability on classes (implicit all properties).
 
 
-//Unless discussions phase points to clear preference within php internals and broader community, these four proposals will be offered as separate votes. Technically all 4 options can be accepted, however downside is there will be more than one way of doing things. So maybe a discussion on where Attributes fits into the language in the future is needed as well.//
+//One of the options here are intended to be ruled out during early discussions//
 
 
 Under this RFC, code like
@@ -109,15 +110,15 @@ class User {
 
 ==== Readonly ====
 
-This RFC differs from [[rfc:readonly_properties|Readonly properties]] (2014, withdrawn) by instead using the recently accepted Attribute language feature for annotating Readonly properties. As done in Rust, and in user land annotations in many PHP frameworks.
+This RFC aligns with [[rfc:readonly_properties|Readonly properties]] (2014, Withdrawn), however also proposing a more granular way of defining readonly access rules.
 
 
 ==== Immutability ====
 
 
-This RFC differs from[[rfc:immutability|Immutability]] (2018, stale) by instead using the recently accepted Attribute language feature for annotating Immutable properties. Aligning with Readonly proposal within this RFC.
+This RFC aligns with [[rfc:immutability|Immutability]] (2018, Stale), however also proposing a more granular way of defining immutable access rules.
 
-This RFC does __not__ align with the semantics of the recent [[rfc:write_once_properties|Write once properties]], which is targeting a different problem.
+This RFC does __not__ align with the semantics of the recent [[rfc:write_once_properties|Write once properties]] (2020, Declined), which is targeting a different problem.
 
 
 ==== Property Accessors Syntax ====
@@ -132,7 +133,17 @@ Thus the author of this RFC believes what is proposed here should be done before
 
 ===== Proposal =====
 
-==== 1.1 Language ability to set property visibility for write access ====
+==== Common semantics ====
+
+== References ==
+
+Attempting to pass a property value outside of allowed writable scope as a reference, results in an error.
+
+
+==== 1. Language Approach ====
+
+
+=== 1.1 Language ability to set property visibility separately for write access ===
 
 This proposal adds support for enforced write visibility checks for declared properties. The following example illustrates the basic syntax:
 
@@ -154,13 +165,7 @@ class User {
 }
 </code>
 
-The format is "<read_visibility>:<write_visibility>", and if you omit the last visibility value you will like before implicit set both read and write visibility at once _(unless other future keywords or attributes states otherwise). 
-
-
-== References ==
-
-Attempting to pass a property value outside of allowed scope as reference, is an error.
-
+The format is "<read_visibility>:<write_visibility>", and if you omit the last visibility value you will like before implicit set both read and write visibility at once _(unless other future keywords or attributes states otherwise).
 
 
 == Reflection ==
@@ -182,16 +187,75 @@ And for checking separate write visibility the following methods may be used:
 
 //TODO: Expand this with modifier ints representing all variations and their names//
 
+=== 1.2 readonly keyword ===
+
+This proposal adds support for runtime-enforced readonly write visibility for declared properties. The following example illustrates the basic syntax:
+
+<code php>
+class User {
+    // Property is readonly, and can only be written to in protected scope
+    public readonly int $id;
+    
+    // Property is readonly, and can only be written to in private scope
+    protected readonly string $name;
+
+    // [assuming 1.1 is accepted] Invalid declaration (visibility is already stating property is readonly)
+    public:private readonly string $email;
+
+    public function __construct(int $id, string $name) {
+        $this->id = $id;
+        $this->name = $name;
+    }
+}
+</code>
+
+Keyword can also be set on class level, implicit setting it on all fields unless they have their own immutable attribute:
+
+<code php>
+readonly class User {
+    // Property is readonly, and can only be written to in protected scope
+    public int $id;
+    
+    // Property is readonly, and can only be written to in private scope
+    protected string $name;
+
+    // [assuming 1.1 is accepted] Invalid declaration (visibility is already stating property is readonly)
+    public:private string $email;
+
+    public function __construct(int $id, string $name) {
+        $this->id = $id;
+        $this->name = $name;
+    }
+}
+</code>
 
 
-=== 1.2 Language ability to set immutable property visibility for write access ===
+== Readonly semantics ==
+
+An readonly property may only be written to in scope lower than what is define as its read+write visibility, so if visibility is public, it may only be written to in protected scope.
+
+
+== Reflection ==
+
+When using reflection, methods such as "ReflectionProperty::setAccessible()" will work as before, it will implicit disable immutable flag.
+
+Furthermore the following method is proposed added to be able to detect immutable properties:
+- ReflectionProperty::isImmutable
+
+
+"Reflection::getModifiers()" and "Reflection::getModifierNames()" will need adaption too to add int and keywords for "immutable".
+
+//TODO: Expand this with specific modifier int for "immutable"//
+
+
+=== 1.3 immutable keyword ===
 
 This proposal adds support for runtime-enforced immutable write visibility for declared properties. The following example illustrates the basic syntax:
 
 <code php>
 class User {
     // Property is immutable, can only be written to in __construct in protected scope
-    public immutable string $id;
+    public immutable int $id;
 
     // [assuming 1.1 is accepted] Property is immutable, can only be written to in __construct in private scope
     public:private immutable string $email;
@@ -203,10 +267,27 @@ class User {
 }
 </code>
 
+Keyword can also be set on class level, implicit setting it on all fields unless they have their own readonly attribute:
+
+<code php>
+immutable class User {
+    // Property is immutable, can only be written to in during construction in protected scope
+    public int $id;
+    
+    // Property is immutable, can only be written to during construction in private scope
+    protected string $email;
+
+    public function __construct(int $id, string $email) {
+        $this->id = $id;
+        $this->email = $email;
+    }
+}
+</code> 
+
 
 == Immutable semantics ==
 
-An immutable property may only be written to in __construct() and in other methods involved in object creation (__set_state, __unserialize, __wakeup, and unserialize), besides that it is allowed to be unset in __destruct(). 
+An immutable property may only be written to in construct and in other methods involved in object creation (set_state, unserialize, and wakeup), besides that it is allowed to be unset in destruct. 
 
 Unless otherwise specified in visibility, the write/unset access is available within protected scope.
 
@@ -232,7 +313,7 @@ However the Attribute RFC does not allow for what is being drafted here, so this
 **As such, maybe this should be completely omitted from the proposal?** Should we aim for concepts in 1.1, 1.2 and 3.0 in this RFC?
 
 
-==== 2.1 Readonly attribute ====
+=== 2.1 Readonly attribute ===
 
 
 This proposal adds support for runtime-enforced readonly write visibility for declared properties. The following example illustrates the basic syntax:
@@ -242,7 +323,7 @@ use PHP\Attribute\PropertyVisibility\Readonly;
 
 class User {
     <<Readonly>>
-    public string $id;
+    public int $id;
 
     // This property is not readonly
     public string $email;
@@ -262,7 +343,7 @@ use PHP\Attribute\PropertyVisibility\Readonly;
 <<Readonly>>
 class User {
     // This property is readable in public scope and writeable in protected
-    public string $id;
+    public int $id;
     
     // This property is readable in protected scope and writeable in private
     protected string $email;
@@ -274,13 +355,16 @@ class User {
 }
 </code> 
 
-
-== Readonly semantics ==
-
-An readonly property may only be written to in scope lower than what is define as its read+write visibility, so if visibility is public, it may only be written to in protected scope. 
+//For readonly semantics see proposal 1.2//
 
 
-==== 2.2. Immutable attribute ====
+== Reflection ==
+
+//TODO: show example on reading /setting attribute via reflection, and how this relates to "ReflectionProperty::setAccessible()".//
+
+
+
+=== 2.2. Immutable attribute ===
 
 This proposal adds a compiler attribute which implies a runtime-enforced immutable write visibility checks for declared properties. The following example illustrates the basic syntax:
 
@@ -289,7 +373,7 @@ use PHP\Attribute\PropertyVisibility\Immutable;
 
 class User {
     <<Immutable>>
-    public string $id;
+    public int $id;
 
     public string $email;
 
@@ -309,7 +393,7 @@ use PHP\Attribute\PropertyVisibility\Immutable;
 
 <<Immutable>>
 class User {
-    public string $id;
+    public int $id;
     public string $email;
 
     public function __construct(int $id, string $email) {
@@ -320,17 +404,11 @@ class User {
 </code> 
 
 
-//For immutable semantics see proposal 1.2, when setting the attribute on semantics will be //
+//For immutable semantics see proposal 1.3//
 
 == Reflection ==
 
-
-==== 3.0 Class only attribute ====
-
-One third option here, is that if 1.x proposals are accepted, and the proposed attributes in 2.x are accepted but only for being specified on class level, where it adds the capability to affect all properties.
-
-Alternative would be to propose class level keyword for "readonly" and "immutable".
-
+//TODO: show example on reading /setting attribute via reflection, and how this relates to "ReflectionProperty::setAccessible()".//
 
 
 
