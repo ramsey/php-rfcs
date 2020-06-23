@@ -343,17 +343,17 @@ $proxy->someMethod(1, paramName: 2);
 Currently, parameter names are not part of the signature-contract. When only positional arguments are used, this is quite reasonable: The name of the parameter is irrelevant to the caller. Named arguments change this. If an inheriting class changes a parameter name, calls using named arguments might fail, thus violating the Liskov substitution principle (LSP):
 
 <code php>
-interface A {
-	public function test($foo, $bar);
+interface I {
+    public function test($foo, $bar);
 }
 
-class B implements A {
-	public function test($a, $b) {}
+class C implements I {
+    public function test($a, $b) {}
 }
 
-$obj = new B;
+$obj = new C;
 
-// Pass params according to A::test() contract
+// Pass params according to I::test() contract
 $obj->test(foo: "foo", bar: "bar"); // ERROR!
 </code>
 
@@ -363,9 +363,109 @@ $obj->test(foo: "foo", bar: "bar"); // ERROR!
   * C# and Swift introduce a new overload (or error if override is requested). As PHP does not support method overloading, this is not an option for us.
   * Kotlin warns on parameter name change and errors on call.
 
-The stance of this RFC is that PHP should silently accept parameter name changes, at least for the initial release of this feature. Instead we should encourage static analyzers and IDEs to diagnose parameter name mismatches, with appropriate suppression facilities.
+Because we are retrofitting named arguments to an old language with a large body of existing code, we do not consider it sensible to unconditionally diagnose parameter name mismatches, especially considering that a lot of old code will never be invoked using named arguments. This RFC proposes two possible approaches to handle this issue, which are described in the following.
 
-The reason is simple: PHP has a very large body of existing code that was not designed with named arguments in mind, does not use named arguments and will likely never use named arguments in non-trivial capacity. While throwing a warning/notice would be more theoretically pure, it is not particularly pragmatic for the migration of existing code. Taking into account that the poster-child of named argument usage (Python) does not make such an enforcement either, I think it is fine to hold off on diagnostics in this area.
+=== Silently allow parameter name changes ===
+
+The first option is to follow the model of Python or Ruby: PHP will silently accept parameter name changes during inheritance, which may result in call-time exceptions when methods with renamed parameters are called. Static analyzers and IDEs are encouraged to diagnose parameter name mismatches, with appropriate suppression facilities.
+
+This is a pragmatic approach that acknowledges that named arguments are not relevant for many methods, and renamed parameters will usually not become a problem in practice. There is no conveicable reason why a method such as ''offsetGet()'' would be called with named parameters, and there is thus no benefit in requiring ''offsetGet()'' implementors to use the same parameter name.
+
+As previously mentioned, this approach is also used by some existing languages, most notably Python, which is one of the languages with the heaviest usage of named arguments. This is hard evidence that such an approach does work reasonably well in practice, though of course the situations are somewhat different.
+
+=== Allow using parameter names from parent methods ===
+
+The alternative is to allow using parameter names from parent methods, as the following example illustrates:
+
+<PHP>
+interface I {
+    public function test($foo, $bar);
+}
+
+class C implements I {
+    public function test($a, $b) {}
+}
+
+$obj = new C;
+
+// Pass params according to C::test() contract
+$obj->test(a: "foo", b: "bar");     // Works!
+// Pass params according to I::test() contract
+$obj->test(foo: "foo", bar: "bar"); // Also works!
+</PHP>
+
+Here using ''foo'' and ''bar'' as parameter names is allowed, and will be interpreted as ''a'' and ''b'', because there is a parent method using those names. This makes the methods artificially and automatically LSP compatible.
+
+Names from parent methods are registered as aliases, but not bound to a specific signature. As such, it's possible (though not recommended) to mix parameter names from different signatures:
+
+<PHP>
+// Use parameter names from both C::test() and I::test()
+$obj->test(a: "foo", bar: "bar"); // Also works.
+</PHP>
+
+From a design perspective it would be better to forbid such calls, but I don't believe that it worth the technical and performance cost this would entail.
+
+There is one problem with this scheme: What happens if two signatures share the same name at different positions?
+
+<PHP>
+interface I {
+    public function test($foo, $bar);
+}
+
+class C implements I {
+    public function test($bar, $foo) {}
+}
+
+// Fatal error: Parameter $foo of C::test() at position #2 conflicts with
+//              parameter $foo of I::test() at position #1
+</PHP>
+
+In this case, the LSP inheritance checks will report a fatal error. It is expected that this restriction will have much less impact in practice than a blanket prohibition of parameter renames, and that it will mostly point out legitimate LSP violations that hold even in the absence of named arguments. An analysis affected cases in the top 2k composer packages can be found at https://gist.github.com/nikic/6cc9891381a83b8dca5ebdaef1068f4d. (It should be noted that the analysis is not fully accurate and may have false negatives.)
+
+Parameter names from prototype methods can come from a number of sources:
+
+  * Parent methods, including grand parents.
+  * Interface methods, including implementations of the same method from multiple interfaces.
+  * Abstract trait methods.
+
+As such, a single parameter can have a potentially large number of aliases from a large number of prototypes.
+
+A case that requires special consideration are parameters that are absorbed by a variadic in a child class:
+
+<PHP>
+class A {
+    public function method($a) {}
+}
+class B extends A {
+    public function method(...$args) {}
+}
+class C extends B {
+    public function method($c = null, ...$args) {}
+}
+
+(new B)->method(a: 42);
+(new C)->method(a: 42);
+</PHP>
+
+There are principally two ways in which this might behave:
+
+<code>
+// Option A:
+(new B)->method(a: 42); // $args = [42]
+(new C)->method(a: 42); // $c = 42, $args = []
+
+// Option B:
+(new B)->method(a: 42); // $args = ['a' => 42]
+(new C)->method(a: 42); // $c = null, $args = ['a' => 42]
+</code>
+
+With option A, we would remember that ''a'' was the first parameter of a parent method, and as such store it at position 0 rather than name ''"a"'' in the variadic parameter. Consequently, in the ''C'' class, the parameter ''a'' would be considered an alias of ''c''.
+
+With option B, we instead discard parent parameters that are absorbed in a variadic. This means that the parameter ''a'' will be stored under the name ''"a"'' in the variadic parameter for both classes ''B'' and ''C''.
+
+This RFC proposed to use option B to avoid further special-casing of variadic argument collection.
+
+Overall, while I think this approach to the LSP problem is conceptually elegant, it turns out that it involves quite a few language design edge cases, as well as technical complexity. I'm not convinced that this is worthwhile, especially as it solves a problem that is largely theoretical at this point.
 
 ==== Internal functions ====
 
@@ -554,6 +654,7 @@ Approaching from this angle, the named argument syntax we should use is ''paramN
 
 ===== Changelog =====
 
+  * 2020-06-23: Add alternative LSP behavior.
   * 2020-06-23: Remove syntax as open question, specify use of '':''.
   * 2020-05-05: RFC picked up again for PHP 8.0.
   * 2013-09-09: ''func_get_arg(s)'' now return default values on skipped parameters.
