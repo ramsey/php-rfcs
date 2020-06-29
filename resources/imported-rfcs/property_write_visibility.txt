@@ -1,5 +1,5 @@
-====== PHP RFC: Property write visibility ======
-  * Version: 0.4.1
+====== PHP RFC: Property write/set visibility ======
+  * Version: 0.4.5
   * Date: 2020-06-29
   * Author: André Rømcke <andre.romcke+php@gmail.com>
   * Proposed PHP version: PHP 8.0
@@ -9,12 +9,12 @@
 
 ===== Introduction =====
 
-With the introduction of [[rfc:typed_properties_v2|typed properties]] in PHP 7.4, properties have become far more powerful. However there are still some common scenarios where you'll need to use magic methods or methods for properties. Namely disconnected write vs read visibility for properties, like readonly, writeonly or immutable //like// semantic. This requires unnecessary boilerplate, makes usage less ergonomic and in the case of magic methods hurts performance.
+With the introduction of [[rfc:typed_properties_v2|typed properties]] in PHP 7.4, properties have become far more powerful. However there are still common scenarios where you'll need to use magic methods or methods for properties in order to deal with disconnected write/set vs read/get visibility for properties, like readonly, writeonly or immutable //like// semantic. This requires unnecessary boilerplate, makes usage less ergonomic and in the case of magic methods hurts performance.
 
-This RFC resolves this issue by proposing to allow classes to optionally declare property write visibility, disconnected from read visibility.
+This RFC resolves this issue by proposing to allow classes to optionally declare property write/set visibility, disconnected from read/get visibility.
 
 
-Under this RFC, code like
+Under this RFC, code like the following using magic methods:
 
 <code php>
 class User {
@@ -56,7 +56,7 @@ class User {
 }
 </code>
 
-might be written as
+might be written as //(Language syntax Option A)//:
 
 <code php>
 class User {
@@ -71,19 +71,37 @@ class User {
 </code>
 
 
+or //(Language Syntax Option B)//:
+
+<code php>
+class User {
+    public private(set) int $id;
+    public protected(set) string $name;
+
+    public function __construct(int $id, string $name) {
+        $this->id = $id;
+        $this->name = $name;
+    }
+}
+</code>
+
+
+
 
 ===== Main differences to previous proposals =====
 
-This RFC is inspired by what was proposed on internals mailing list in "RFC Proposal - Attributes read/write visibility" by Amaury Bouchard, on 15 July 2012. The proposal was made as part of the ongoing discussions around [[rfc:readonly_properties|Readonly properties]] and [[rfc:propertygetsetsyntax-v1.2|Property Accessors Syntax]], who where proposing different ways to deal with among others write visibility, and in the latter case also type hints.
+This RFC is inspired by what was proposed on internals mailing list in "RFC Proposal - Attributes read/write visibility" by Amaury Bouchard, on 15 July 2012. The proposal was made as part of the ongoing discussions around [[rfc:readonly_properties|Readonly properties]] and [[rfc:propertygetsetsyntax-v1.2|Property Accessors Syntax]].
 
 ==== Readonly ====
 
-This RFC allows for among others semantics proposed in [[rfc:readonly_properties|Readonly properties]] (2014, Withdrawn), by using ''public:protected''.
+This RFC allows for among others semantics proposed in [[rfc:readonly_properties|Readonly properties]] (2014, Withdrawn), by setting read/get as ''public'' and write/set as ''protected''.
 
 
 ==== Immutability ====
 
-This RFC allows for use cases //similar// to what was proposed in [[rfc:immutability|Immutability]] (2018, Stale), by using for instance ''public:private''.
+This RFC allows to //simulate// what was proposed in [[rfc:immutability|Immutability]] (2018, Stale), by setting read/get as ''public'' and write/set as ''private''.
+
+This RFC does however **not** introduce any immutable knowhow in the language which JIT can optimize for, however the features here can be built upon for a native immutable keyword/attribute in the future.
 
 
 ==== Write once ====
@@ -95,12 +113,16 @@ This RFC does __not__ align with the semantics of the recent [[rfc:write_once_pr
 
 This RFC does not try to solve as wide use case as the different iterations of [[rfc:propertygetsetsyntax-v1.2|Property Accessors Syntax]] (2012, Declined) does.
 
-However with what being proposed here and with [[rfc:typed_properties_v2|typed properties]], most common use cases needed for properties are covered in a simpler, arguably more PHP like way.
+However what being proposed here is aligned to make sure Accessors can cleanly be added later.
 
 
 ===== Proposal =====
 
-This proposal adds support for enforced write visibility checks for declared properties. The following example illustrates the basic syntax:
+This proposal adds support for enforced write/set visibility checks for declared properties. 
+
+==== Language syntax A: "public:private" ====
+
+The following example illustrates the basic syntax:
 
 <code php>
 class User {
@@ -120,7 +142,33 @@ class User {
 }
 </code>
 
-The format is ''<read_visibility>:<write_visibility>'', and if you omit the last visibility value you will like before implicit set both read and write visibility at once.
+The format is ''<get_visibility>:<set_visibility>'', and if you omit the last visibility value you will like before implicit set both read and write visibility at once.
+
+==== Language syntax B: "private(set)" ====
+
+The following example illustrates the basic syntax:
+
+<code php>
+class User {
+    // Property is readonly in protected and public scope
+    public private(set) int $id;
+
+    // Property is readonly in public scope
+    public protected(set) string $name;
+    
+    // Property is write-only in public and protected scope
+    private public(set) string $newName;
+
+    public function __construct(int $id, string $name) {
+        $this->id = $id;
+        $this->name = $name;
+    }
+}
+</code>
+
+The format in this option is taken from [[https://docs.swift.org/swift-book/LanguageGuide/AccessControl.html#ID18|Swift]], and is perhaps more readable in terms of intent. It also aligns nicely with vocabulary of future Accessors proposal.
+
+Like in the other syntax proposal, if set visibility is not specified, as before the global visibility will define both read/get and write/set visibility.
 
 ==== References ====
 
@@ -130,23 +178,23 @@ Attempting to pass a property value outside of allowed writable scope as a refer
 
 ==== Reflection ====
 
-When using reflection, methods such as ''ReflectionProperty::setAccessible()'' will work as before, it will implicit set visibility for both read and write.
+When using reflection, methods such as ''ReflectionProperty::setAccessible()'' will work as before, it will implicit set visibility for both read/get and write/set.
 
 In order to avoid backwards compatibility issue, the following methods will get updated behavior:
 
-- ''ReflectionProperty::isPrivate()'' — Checks if property is private for read and write visibility, or one of them
-- ''ReflectionProperty::isProtected()'' - Checks if property is protected for read and write visibility, or one of them with the remaining being public
-- ''ReflectionProperty::isPublic()'' - Checks if property is public for read and write visibility
+  * ''ReflectionProperty::isPrivate()'' - Checks if property is private **for get and set visibility, or one of them**
+  * ''ReflectionProperty::isProtected()'' - Checks if property is protected **for get and set visibility, or one of them with the remaining being public**
+  * ''ReflectionProperty::isPublic()'' - Checks if property is public **for get and set visibility**
 
 The following methods needs to be added to detect different read vs write visibility: 
 
-- ''ReflectionProperty::isWritePrivate()'' — Checks if property is writable in private
-- ''ReflectionProperty::isWriteProtected()'' — Checks if property is writable in protected
-- ''ReflectionProperty::isWritePublic()'' — Checks if property is writable in public
+  * ''ReflectionProperty::isSetPrivate()'' - Checks if property is writable in private
+  * ''ReflectionProperty::isSetProtected()'' - Checks if property is writable in protected
+  * ''ReflectionProperty::isSetPublic()'' - Checks if property is writable in public
 
-- ''ReflectionProperty::isReadPrivate()'' — Checks if property is readable in private
-- ''ReflectionProperty::isReadProtected()'' — Checks if property is readable in protected
-- ''ReflectionProperty::isReadPublic()'' — Checks if property is readable in public
+  * ''ReflectionProperty::isGetPrivate()'' - Checks if property is readable in private
+  * ''ReflectionProperty::isGetProtected()'' - Checks if property is readable in protected
+  * ''ReflectionProperty::isGetPublic()'' - Checks if property is readable in public
 
 
 
@@ -157,11 +205,15 @@ The following methods needs to be added to detect different read vs write visibi
 
 ==== Language Syntax ====
 
-The format being proposed here ''<read_visibility>:<write_visibility>'' is open for discussion if for instance this causes problems for parser, or is deemed otherwise in-practical.
+The format options being proposed here are open for discussion, and additional proposal can be made on internals list.
 
-If we where to just have two separate visibility keywords on properties, where second one will denote write visibility, that can cause issues for API's such as ''Reflection::getModifierNames()'', and arguably lowers readability.
+Plain "public private $var" was on purpose skipped as it is less readable and could easily cause issues for ''Reflection::getModifierNames()''.
 
-One other alternative would be to align with, or take inspiration from [[https://docs.swift.org/swift-book/LanguageGuide/AccessControl.html#ID18|Swift setter access level syntax]].
+==== Why not a Readonly keyword/attribute ====
+
+Several comments are pointing out that ''readonly'', ''writeonly'', ''immutable'' keywords/attributes would be more readable, and this is true. However what is proposed here is made in such a way that for instance a ''Readonly'' attribute can be introduced more easily in the future, given attributes themselves currently can't define language features.
+
+Additionally if the language don't have a concept for write/set property visibility, then we'll end up with having to introduce reflection api that are tied in to the keyword/attribute introduced instead, as opposed to the underlying concept solved.
 
 
 ===== Backward Incompatible Changes =====
@@ -207,6 +259,8 @@ As this is a language change, a 2/3 majority is required.
 
 Significant changes to the RFC are noted here.
 
+
+  * 2020-06-29 Adapt for initial feedback, add syntax proposal aligned with Swift
   * 2020-06-28 Simplify Reflection API proposal, add syntax alternatives for discussion
   * 2020-06-25 Focus on write visibility proposal
   * 2020-06-20 Initial early draft to get feedback on direction between visibility, readonly/immutable keywords or attributes
