@@ -1,5 +1,5 @@
 ====== PHP RFC: Saner numeric strings ======
-  * Version: 1.1
+  * Version: 1.2
   * Date: 2020-06-28
   * Author: George Peter Banyard <girgias@php.net>
   * Status: Under Discussion
@@ -18,6 +18,12 @@ $b = "123.0";
 $c = ($a == $b); // bool(true)</PHP>
   * The <php>\is_numeric()</php> function, e.g. <PHP>$a = "123";
 $b = \is_numeric($a); // bool(true)</PHP>
+  * String offsets, as they use explicit int casting, e.g. <PHP>$str = "PHP";
+$char = $str['1']; // string(1) "H"
+$char = $str['01']; // string(1) "H"
+$char = $str[' 1']; // string(1) "H"
+$char = $str['1str']; // string(1) "H" with an E_NOTICE
+</PHP>
 
 A string can be categorised in three ways according to its numeric-ness, as [[https://github.com/php/php-langspec/blob/be010b4435e7b0801737bb66b5bbdd8f9fb51dde/spec/05-types.md#the-string-type|described by the language specification]]:
 
@@ -36,6 +42,55 @@ The difference between a numeric string and a leading-numeric string is signific
 
 It is notable that while a numeric string may contain leading white-space, only a leading-numeric string may contain trailing white-space.
 
+A fourth way PHP might deal with numeric strings is when using an //integer// string for an array offset.
+An integer string is stricter than numeric strings in two major ways:
+  * It doesn't accept leading whitespaces
+  * It doesn't accept leading zeros (0)
+As stated above this is wastly different to the handling of strings offsets, as can be demonstrated in the following code snippet:
+<PHP>
+$a = [
+    "4" => "Integer index",
+    "03" => "Integer index with leading 0/octal",
+    "2str" => "leading numeric string",
+    " 1" => "leading whitespace",
+    "5.5" => "Float",
+];
+
+$str = 'The world is fun';
+
+var_dump($a);
+var_dump($str['4']);
+var_dump($str['03']);
+var_dump($str['2str']);
+var_dump($str[' 1']);
+var_dump($str['5.5']);
+</PHP>
+Which results in the following output:
+
+<code>
+array(5) {
+  [4]=>
+  string(13) "Integer index"
+  ["03"]=>
+  string(34) "Integer index with leading 0/octal"
+  ["2str"]=>
+  string(22) "leading numeric string"
+  [" 1"]=>
+  string(18) "leading whitespace"
+  ["5.5"]=>
+  string(5) "Float"
+}
+string(1) "w"
+string(1) " "
+
+Notice: A non well formed numeric value encountered [...]
+string(1) "e"
+string(1) "h"
+
+Warning: Illegal string offset '5.5' [...]
+string(1) "o"
+</code>
+
 ===== The Problem =====
 
 The current behaviour of numerical strings has various issues:
@@ -48,7 +103,12 @@ The current behaviour of numerical strings has various issues:
 
 Drop the concept of leading-numeric strings and allow trailing white-spaces for all numeric strings.
 
-This means, all strings which currently emit the <php>E_NOTICE</php> “A non well formed numeric value encountered” will emit the <php>E_WARNING</php> “A non-numeric value encountered” //except// if the leading-numeric string contained only trailing white-spaces. 
+This means, all strings which currently emit the <php>E_NOTICE</php> “A non well formed numeric value encountered” will emit the <php>E_WARNING</php> “A non-numeric value encountered” //except// if the leading-numeric string contained only trailing white-spaces or if the operation used explicit int casting semantics.
+
+For string offsets accessed using numeric strings the following changes will be made:
+  * numeric strings which correspond to well formed floats will emit the more usual “String offset cast occurred” warning instead of the “Illegal string offset” one.
+  * leading numeric strings will emit the “Illegal string offset” instead of the “A non well formed numeric value encountered” notice, and continue to evaluate to their respective values.
+  * Non-numeric strings which emmited the “Illegal string offset” warning will throw an “Illegal offset type” TypeError
 
 For the PHP interpreter, this would be accomplished by modifying the ''is_numeric_string'' C function (and its variants) in the Zend Engine. This would therefore affect PHP features which make use of this function, including:
 
@@ -60,6 +120,8 @@ For the PHP interpreter, this would be accomplished by modifying the ''is_numeri
   * The <php>++</php> and <php>--</php> operators would convert numeric strings with trailing white-space to integers or floats, as appropriate, rather than applying the alphanumeric increment rules
 
 The PHP language specification's [[https://github.com/php/php-langspec/blob/master/spec/05-types.md#the-string-type|definition of str-numeric]] would be modified by the addition of ''str-whitespace''<sub>''opt''</sub> after ''str-number'' and the removal of the following sentence: "A leading-numeric string is a string whose initial characters follow the requirements of a numeric string, and whose trailing characters are non-numeric".
+
+For the string offset behaviour changes the following C Zend engine function and their JIT equivalent will be modified ''zend_check_string_offset()'' and ''zend_fetch_dimension_address_read()''.
 
 ===== Backward Incompatible Changes =====
 There are two backward incompatible changes:
@@ -93,6 +155,9 @@ This does not affect the filter extension, which handles numeric strings itself 
   * Nikita Popov's [[rfc:string_to_number_comparison|PHP RFC: Saner string to number comparisons]]
   * Adding an E_NOTICE for numerical strings with leading/trailing white-spaces
   * Adding a flag to <php>\is_numeric</php> to accept or reject numerical strings with leading/trailing white-spaces
+  * Align string offset behaviour with array offsets
+  * Promote remaining "Illegal string offset" warnings to Type Errors in PHP 9
+  * Warn on illegal offsets when used within <php>isset()</php> or <php>empty()</php>
 
 ===== Proposed Voting Choices =====
 Per the Voting RFC, there would be a single Yes/No vote requiring a 2/3 majority.
@@ -115,5 +180,6 @@ After the project is implemented, this section should contain
 To Andrea Faulds for the [[http://wiki.php.net/rfc/trailing_whitespace_numerics|PHP RFC: Permit trailing whitespace in numeric strings]] on which this RFC and patch is based of.
 
 ===== Changelog =====
+  * 2020-07-02: Explain difference between array and string offsets, and how the RFC will impact string offsets
   * 2020-07-01: Add explicit cast behaviour for leading numeric strings
   * 2020-06-28: Initial version
