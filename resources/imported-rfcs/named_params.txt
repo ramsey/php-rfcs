@@ -294,7 +294,7 @@ function passthru(callable $c, ...$args) {
 
 The support for named arguments in both variadics and argument unpacking ensures that this pattern will continue to work once named arguments are introduced.
 
-==== func_* and call_user_func_array ====
+==== func_get_args() and friends ====
 
 The ''func_*()'' family of functions is intended to be mostly transparent with regard to named arguments, by treating the arguments as if they were all passed positionally, and missing arguments were replaced with their defaults. For example:
 
@@ -312,11 +312,29 @@ test(0, 1, 5);
 
 The behavior of ''func_num_args()'' and ''func_get_arg()'' is consistent with that of ''func_get_args()''.
 
-All three functions are oblivious to the collection of unknown named arguments by variadics. ''func_get_args()'' will not return the collected values and ''func_num_args()'' will not include them in the argument count.
-  
-The ''call_user_func_array'' function will continue behaving exactly as is: It currently treats the passed arguments as positional (regardless of whether they have string keys), and will continue to do so. (This is unlike the argument unpacking syntax, which was designed with named argument forward compatibility in mind: It currently throws for string keys.)
+All three functions are oblivious to the collection of unknown named arguments by variadics. ''func_get_args()'' will not return the collected values and ''func_num_args()'' will not include them in the argument count. Collected unknown named arguments can only be accessed through the variadic parameter.
 
-The general philosophy here is that ''func_get_args()'' and ''call_user_func_array()'' are legacy functionality that has been obsoleted by variadic arguments and argument unpacking. Changing their behavior is likely to cause more breakage than benefit. (We should begin making plans to phase out these functions.)
+==== call_user_func() and friends ====
+
+Internal functions that perform some kind of "call forwarding", including ''call_user_func()'' and ''call_user_func_array()'' support named arguments:
+
+<PHP>
+
+$func = function($a = '', $b = '', $c = '') {
+    echo "a: $a, b: $b, c: $c\n";
+}
+
+// All of the following behave the same:
+$func('x', c: 'y');
+call_user_func($func, 'x', c: 'y');
+call_user_func_array($func, ['x', 'c' => 'y']);
+</PHP>
+
+These calls are subject to the same restrictions as normal suchs, for example there may not be positional arguments after named arguments.
+
+For ''call_user_func_array()'', this behavior constitutes a minor backwards-compatibility break: Previously, array keys were completely ignored by this function. Now, string keys will be interpreted as parameter names.
+
+While ''call_user_func(_array)'' are the "base cases", this support also extends to other similar functions, such as ''ReflectionClass::newInstance()'' and ''ReflectionClass::newInstanceArgs()''.
 
 ==== __call() ====
 
@@ -529,7 +547,7 @@ Currently, the parameter names used in the documentation and the implementation 
 
 === Internal APIs ===
 
-As outlined above, the existence of named arguments is mostly transparent for internal functions. Internal functions will see ordinary positional arguments, without any indication that the original call occurred via named arguments. As such, no code adjustments will be necessary.
+As outlined above, the existence of named arguments is mostly transparent for internal functions. Internal functions will see ordinary positional arguments, without any indication that the original call occurred via named arguments. As such, code adjustments will usually not be necessary.
 
 One special case to consider are variadic functions, which will collect unknown named parameters into the ''extra_named_params'' field in the call ''execute_data'' and set the ''ZEND_CALL_HAS_EXTRA_NAMED_PARAMS'' call info flag. On the assumption that most existing internal functions will not be able to do anything useful with this information, functions using the ZPP ''*'' or ''+'' specifiers, or the ''Z_PARAM_VARIADIC'' and ''Z_PARAM_VARIADIC_EX'' macros will automatically throw an ''ArgumentCountError'' if extra unknown named arguments are encountered.
 
@@ -549,22 +567,24 @@ ZEND_PARSE_PARAMETERS_START(0, -1)
 ZEND_PARSE_PARAMETERS_END();
 </code>
 
-The ''zend_call_function()'' mechanism is extended to support calls with named parameters as well. Because fcall infos do not always go through a centralized initialization procedure, we avoid breaking existing code that manually initializes fcall infos, by defining a new extension structure:
+The ''zend_call_function()'' mechanism is extended to support calls with named parameters by adding a new field into the ''zend_fcall_info'' structure:
 
 <code>
-typedef struct _zend_fcall_info_named {
-    zend_fcall_info fci;
+typedef struct _zend_fcall_info {
+    /* ... */
     HashTable *named_params;
-} zend_fcall_info_named;
+} zend_fcall_info;
 </code>
 
-The new ''named_params'' field will only be used if the FCI size is initialized to ''sizeof(zend_fcall_info_named)''.
+Code that manually initializes ''zend_fcall_info'' structures, instead of going through supported initialization functions, should take care to initialize this field to ''NULL'' if it is unused.
+
+For convenience of implementation for ''call_user_func_array()'' style functions, ''named_params'' may also contain positional arguments, that will be appended to the normal ''params''. As usual, ordering positional arguments after named ones in the array will result in an exception.
 
 ===== Backwards incompatible changes =====
 
-In the narrow sense, this proposal has no backwards-incompatible changes, in that the behavior of existing code remains completely unchanged.
+In the narrow sense, this proposal has only one backwards-incompatible change: String keys in the ''call_user_func_array()'' arguments will now be interpreted as parameter names, instead of being silently ignored.
 
-However, there are two primary complications that may occur when named arguments are used with code that is not prepared to deal with them:
+Next to this actual incompatibility, there are also two potential complications that may occur when named arguments are used with code that is not prepared to deal with them:
 
 First, as parameter names are now significant, they should not be changed during inheritance. Existing code that performs such changes may be practically incompatible with named arguments. More generally, greater care needs to be taken when choosing parameter names, as they are now part of the API contract.
 
@@ -722,6 +742,7 @@ Secondary vote: "Automagically allow using parent parameter names?" Yes/No. This
 
 ===== Changelog =====
 
+  * 2020-07-06: Specify that call_user_func etc support named args.
   * 2020-07-03: Add information on internal APIs.
   * 2020-07-03: Explicitly mention behavior of attributes.
   * 2020-06-23: Add alternative LSP behavior.
