@@ -1,5 +1,5 @@
 ====== PHP RFC: Saner numeric strings ======
-  * Version: 1.2
+  * Version: 1.3
   * Date: 2020-06-28
   * Author: George Peter Banyard <girgias@php.net>
   * Status: Under Discussion
@@ -7,25 +7,7 @@
   * Implementation: https://github.com/php/php-src/pull/5762
 
 ===== Technical Background =====
-The PHP language has a concept of //numeric strings//, strings which can be interpreted as numbers. This concept is used in a few places:
-
-  * Explicit conversions of strings to number types, e.g. <PHP>$a = "123";
-$b = (float)$a; // float(123)</PHP>
-  * Implicit conversions of strings to number types, e.g. in weak typing mode <PHP>$a = "123";
-$b = intdiv($a, 1); // int(123)</PHP>
-  * Comparisons, e.g. <PHP>$a = "123";
-$b = "123.0";
-$c = ($a == $b); // bool(true)</PHP>
-  * The <php>\is_numeric()</php> function, e.g. <PHP>$a = "123";
-$b = \is_numeric($a); // bool(true)</PHP>
-  * String offsets, e.g. <PHP>$str = 'The world';
-var_dump($str['4']);      // string(1) "w"
-var_dump($str['03']);     // string(1) " "
-var_dump($str['2str']);   // string(1) "e" with E_NOTICE "A non well formed numeric value encountered"
-var_dump($str[' 1']);     // string(1) "h"
-var_dump($str['5.5']);    // string(1) "o" with E_WARNING "Illegal string offset '5.5'"
-var_dump($str['string']); // string(1) "T" with E_WARNING "Illegal string offset 'string'"
-</PHP>
+The PHP language has a concept of //numeric strings//, strings which can be interpreted as numbers.
 
 A string can be categorised in three ways according to its numeric-ness, as [[https://github.com/php/php-langspec/blob/be010b4435e7b0801737bb66b5bbdd8f9fb51dde/spec/05-types.md#the-string-type|described by the language specification]]:
 
@@ -33,28 +15,18 @@ A string can be categorised in three ways according to its numeric-ness, as [[ht
   * A //leading-numeric string// is a string that begins with a numeric string but is followed by non-number characters  (including white-space characters). For example, <php>"123abc"</php> or <php>"123 "</php>.
   * A //non-numeric string// is a string which is neither a numeric string nor a leading-numeric string.
 
-The difference between a numeric string and a leading-numeric string is significant, because certain operations distinguish between these:
+A fourth way PHP might deal with numeric strings is when using an //integer// string for an array index.
+An integer string is stricter than a numeric string as it has the following additional constraints:
+  * It doesn't accept leading white-spaces
+  * It doesn't accept leading zeros (''0'')
 
-  * <php>\is_numeric()</php> returns <php>TRUE</php> only for numeric strings
-  * Arithmetic operations (e.g. <php>$a * $b</php>, <php>$a + $b</php>) accept and implicitly convert both numeric and leading-numeric strings, but trigger the <php>E_NOTICE</php> “A non well formed numeric value encountered” for leading-numeric strings
-  * In weak typing mode (no ''strict_type'' declare statement or ''strict_types=0''), <php>int</php> and <php>float</php> parameter and return type declarations will accept and implicitly convert both numeric and leading-numeric strings, but likewise trigger the same <php>E_NOTICE</php>
-  * Type casts and other explicit conversions to integer or float (e.g. <php>(int)</php>, <php>(float)</php>, <php>settype()</php>) accept all strings, converting both numeric and leading-numeric strings and producing 0 for non-numeric strings
-  * String-to-string comparisons with <php>==</php>, <php>!=</php>, <php><></php>, <php><</php>, <php>></php>, <php><=</php>, and <php>>=</php> perform numeric comparison only if both strings are numeric strings
-  * String-to-int/float comparisons with <php>==</php>, <php>!=</php>, <php><></php>, <php><</php>, <php>></php>, <php><=</php>, and <php>>=</php> type-juggle the string (and thus perform numeric comparison) if it is either a numeric string or a non-numeric string
-
-It is notable that while a numeric string may contain leading white-space, only a leading-numeric string may contain trailing white-space.
-
-A fourth way PHP might deal with numeric strings is when using an //integer// string for an array offset.
-An integer string is stricter than numeric strings in two major ways:
-  * It doesn't accept leading whitespaces
-  * It doesn't accept leading zeros (0)
-As stated above this is vastly different to the handling of strings offsets, as can be demonstrated in the following code snippet:
+How PHP deals with array indexes is shown in the following code snippet:
 <PHP>
 $a = [
     "4" => "Integer index",
     "03" => "Integer index with leading 0/octal",
     "2str" => "leading numeric string",
-    " 1" => "leading whitespace",
+    " 1" => "leading white-space",
     "5.5" => "Float",
 ];
 var_dump($a);
@@ -70,11 +42,79 @@ array(5) {
   ["2str"]=>
   string(22) "leading numeric string"
   [" 1"]=>
-  string(18) "leading whitespace"
+  string(19) "leading white-space"
   ["5.5"]=>
   string(5) "Float"
 }
 </code>
+
+This RFC does not affect how array indexes behave, and thus won't mention them again.
+
+One final behaviour of PHP which needs to be presented is how PHP performs weak comparisons, i.e. a comparison with one of the following binary operators: <php>==</php>, <php>!=</php>, <php><></php>, <php><</php>, <php>></php>, <php><=</php>, and <php>>=</php>, in the string-to-string case and in the string-to-int/float case.
+
+String-to-string comparisons are performed numerically if and only if both strings are numeric strings.
+
+String-to-int/float are **always** performed numerically, therefore the string will be type-juggled silently regardless of its numeric-ness.
+
+This RFC does not propose to modify this behaviour, see [[rfc:string_to_number_comparison|PHP RFC: Saner string to number comparisons]] instead.
+
+
+The concept of numeric strings is used in a few places, and the distinction between a numeric string and a leading-numeric string is significant as certain operations distinguish between these:
+
+  * Explicit conversions of strings to number types, such as <php>(int)</php> and <php>(float)</php> type casts or <php>settype()</php>, convert numeric and leading-numeric strings and produce ''0'' for non-numeric strings silently, e.g.:<PHP>
+var_dump((float) "123");    // float(123)
+var_dump((float) "   123"); // float(123)
+var_dump((float) "123   "); // float(123)
+var_dump((float) "123abc"); // float(123)
+var_dump((float) "string"); // float(0)
+</PHP>
+  * Implicit conversions of strings to number types in weak typing mode (i.e. no ''strict_type'' declare statement or ''strict_types=0'') due to type declarations [note: internal function behave similarly in PHP 8], e.g.<PHP>
+function foo(int $i) { var_dump($i); }
+foo("123");    // int(123)
+foo("   123"); // int(123)
+foo("123   "); // int(123) with E_NOTICE "A non well formed numeric value encountered"
+foo("123abc"); // int(123) with E_NOTICE "A non well formed numeric value encountered"
+foo("string"); // TypeError
+</PHP>
+  * <php>\is_numeric()</php> returns <php>true</php> only for numeric strings, e.g. <PHP>
+var_dump(is_numeric("123"));     // bool(true)
+var_dump(is_numeric("   123"));  // bool(true)
+var_dump(is_numeric("123   "));  // bool(false)
+var_dump(is_numeric("123abc"));  // bool(false)
+</PHP>
+  * String offsets, e.g. <PHP>
+$str = 'The world';
+var_dump($str['4']);      // string(1) "w"
+var_dump($str['03']);     // string(1) " "
+var_dump($str['2str']);   // string(1) "e" with E_NOTICE "A non well formed numeric value encountered"
+var_dump($str[' 1']);     // string(1) "h"
+var_dump($str['5.5']);    // string(1) "o" with E_WARNING "Illegal string offset '5.5'"
+var_dump($str['string']); // string(1) "T" with E_WARNING "Illegal string offset 'string'"
+</PHP>
+  * Arithmetic operations, i.e. <php>-</php>, <php>+</php>, <php>*</php>, <php>/</php>, <php>%</php>, or <php>**</php>, strings will be converted to int/float but will emit the <php>E_NOTICE</php>/<php>E_WARNING</php> as needed, e.g.<PHP>
+var_dump(123 + "123");    // int(246)
+var_dump(123 + "   123"); // int(246)
+var_dump(123 + "123   "); // int(246) with E_NOTICE "A non well formed numeric value encountered"
+var_dump(123 + "123abc"); // int(246) with E_NOTICE "A non well formed numeric value encountered"
+var_dump(123 + "string"); // int(123) with E_WARNING "A non-numeric value encountered"
+</PHP>
+  * Increment/Decrement operators, i.e. <php>++</php> and <php>--</php>, e.g.<PHP>
+$a = "5";
+var_dump(++$a); // int(6)
+$b = " 5";
+var_dump(++$b); // int(6)
+$c = "5z";
+var_dump(++$c); // string(2) "6a"
+$d = "5 ";
+var_dump(++$d); // string(2) "5 "
+</PHP>
+  * String-to-string comparisons, e.g.<PHP>
+var_dump("123" == "123.0");  // bool(true)
+var_dump("123" == "   123"); // bool(true)
+var_dump("123" == "123   "); // bool(false)
+var_dump("123" == "123abc"); // bool(false)
+</PHP>
+
 
 ===== The Problem =====
 
@@ -84,46 +124,57 @@ The current behaviour of numerical strings has various issues:
   * <php>\is_numeric()</php> is misleading, as it will reject values that a weak-mode parameter check will accept
   * leading-numeric strings is a rather strange concept and an unintuitive/surprising behaviour.
 
-|                       ^ <php>is_numeric()</php> ^ Weak mode int type ^ Weak mode float type ^ Legal string offset ^ Legal Array index ^ Explicit(int) cast ^ Explicit(float) cast ^ ''== 123'' ^ ''== "123"'' ^
-^  ''123''                |  ''true''   |  ''123''     |  <php>123.0</php>   |  ''123''  |  ''123''  |  ''123''  |  <php>123.0</php>  |  ''true''   |   ''true''   |
-^  <php>'123'</php>       |  ''true''   |  ''123''     |  <php>123.0</php>   |  ''123''  |  ''123''  |  ''123''    |  <php>123.0</php>  |  ''true''   |   ''true''   |
-^  <php>'  123'</php>     |  ''true''   |  ''123''     |  <php>123.0</php>   |  ''123''  |  <php>'  123'</php>     |  ''123''  |  <php>123.0</php>  |  ''true''   |   ''true''   |
-^  <php>'123   '</php>    |  ''false''  |  ''123''  *  |  <php>123.0</php>*  |  ''123''  |  <php>'123   '</php>    |  ''123''  |  <php>123.0</php>  |  ''true''   |  ''false''  |
-^  <php>'  123   '</php>  |  ''false''  |  ''123''  *  |  <php>123.0</php>*  |  ''123''  |  <php>'  123   '</php>  |  ''123''  |  <php>123.0</php>  |  ''true''   |  ''false''    |
-^  <php>'123abc'</php>    |  ''false''  |  ''123''  *  |  <php>123.0</php>*  |  ''123''  |  <php>'123abc'</php>    |  ''123''  |  <php>123.0</php>  |  ''true''   |  ''false''  |
-^  <php>'string'</php>    |  ''false''  |  ''TypeError''    |  ''TypeError''      |  ''0''°    |  <php>'string'</php>    |  ''0''  |  <php>0.0</php>    |  ''false''  |  ''false''  |
-Items denoted with * indicate that an <php>E_NOTICE</php> “A non well formed numeric value encountered” is emitted.
-Items denoted with ° indicate that an <php>E_WARNING</php> “Illegal string offset” is emitted.
-
 ===== Proposal =====
-Unify the various numeric string modes into a single concept: Numeric characters only with both leading and trailing whitespace allowed.
+Unify the various numeric string modes into a single concept: Numeric characters only with both leading and trailing white-spaces allowed.
 
-This means, all strings which currently emit the <php>E_NOTICE</php> “A non well formed numeric value encountered” will emit the <php>E_WARNING</php> “A non-numeric value encountered” //except// if the leading-numeric string contained only trailing white-spaces or if the operation used explicit int casting semantics.
+This means, all strings which currently emit the <php>E_NOTICE</php> “A non well formed numeric value encountered” will emit the <php>E_WARNING</php> “A non-numeric value encountered” //except// if the leading-numeric string contained only trailing white-spaces.
 
 For string offsets accessed using numeric strings the following changes will be made:
-  * numeric strings which correspond to well formed floats will emit the more usual “String offset cast occurred” warning instead of the “Illegal string offset” one.
-  * leading numeric strings will emit the “Illegal string offset” instead of the “A non well formed numeric value encountered” notice, and continue to evaluate to their respective values.
+  * Leading numeric strings will emit the “Illegal string offset” instead of the “A non well formed numeric value encountered” notice, and continue to evaluate to their respective values.
   * Non-numeric strings which emitted the “Illegal string offset” warning will throw an “Illegal offset type” TypeError
+  * A secondary implementation vote will decide if: numeric strings which correspond to well formed floats will emit the more usual “String offset cast occurred” warning instead of the “Illegal string offset” warning. 
 
-For the PHP interpreter, this would be accomplished by modifying the ''is_numeric_string'' C function (and its variants) in the Zend Engine. This would therefore affect PHP features which make use of this function, including:
 
-  * [[rfc:invalid_strings_in_arithmetic|Arithmetic operators]]
-  * The <php>int</php> and <php>float</php> type declarations
-  * Type checks for built-in/extension (“internal”) PHP functions
-  * The comparison operators will now consider numeric strings with trailing white-space to be numeric, therefore meaning that, for example, <php>"123  " == "  123"</php> produces <php>true</php>, instead of <php>false</php>
-  * The <php>\is_numeric</php> function would return <php>true</php> for numeric strings with trailing white-space
-  * The <php>++</php> and <php>--</php> operators would convert numeric strings with trailing white-space to integers or floats, as appropriate, rather than applying the alphanumeric increment rules
+The following cases will produce this behaviour under the proposal:
+  * Type declarations<PHP>
+function foo(int $i) { var_dump($i); }
+foo("123   "); // int(123)
+foo("123abc"); // TypeError
+</PHP>
+  * <php>\is_numeric</php> will return <php>true</php> for numeric strings with trailing white-spaces<PHP>
+var_dump(is_numeric("123   "));  // bool(true)
+</PHP>
+  * String offsets<PHP>
+$str = 'The world';
+var_dump($str['2str']);   // string(1) "e" with E_WARNING "Illegal string offset '2str'"
+var_dump($str['5.5']);    // string(1) "o" with E_WARNING "String offset cast occurred" if the secondary vote is accepted
+var_dump($str['string']); // TypeError
+</PHP>
+  * Arithmetic operations<PHP>
+var_dump(123 + "123   "); // int(246)
+var_dump(123 + "123abc"); // int(123) with E_WARNING "A non-numeric value encountered"
+var_dump(123 + "string"); // int(123) with E_WARNING "A non-numeric value encountered"
+</PHP>
+  * The <php>++</php> and <php>--</php> operators would convert numeric strings with trailing white-space to integers or floats, as appropriate, rather than applying the alphanumeric increment rules<PHP>
+$d = "5 ";
+var_dump(++$d); // int(6)
+</PHP>
+  * String-to-string comparisons<PHP>
+var_dump("123" == "123   "); // bool(true)
+</PHP>
 
-The PHP language specification's [[https://github.com/php/php-langspec/blob/master/spec/05-types.md#the-string-type|definition of str-numeric]] would be modified by the addition of ''str-whitespace''<sub>''opt''</sub> after ''str-number'' and the removal of the following sentence: "A leading-numeric string is a string whose initial characters follow the requirements of a numeric string, and whose trailing characters are non-numeric".
+These changes will be accomplished by modifying the ''is_numeric_string'' C function (and its variants) in the Zend Engine.
 
 For the string offset behaviour changes the following C Zend engine function and their JIT equivalent will be modified ''zend_check_string_offset()'' and ''zend_fetch_dimension_address_read()''.
+
+The PHP language specification's [[https://github.com/php/php-langspec/blob/master/spec/05-types.md#the-string-type|definition of str-numeric]] would be modified by the addition of ''str-whitespace''<sub>''opt''</sub> after ''str-number'' and the removal of the following sentence: "A leading-numeric string is a string whose initial characters follow the requirements of a numeric string, and whose trailing characters are non-numeric".
 
 ===== Backward Incompatible Changes =====
 There are two backward incompatible changes:
   * code relying on numerical strings with trailing white-spaces to be considered non-well-formed
-  * code with liberal use of leading-numerical strings will need to be updated
+  * code with liberal use of leading-numerical strings might need to use explicit type casts
 
-The first reason is a precise requirement and therefore should be checked explicitly. A small polyfill to check for the previous <php>is_numeric()</php> behaviour:
+The first reason is a precise requirement and therefore should be checked explicitly. A small poly-fill to check for the previous <php>is_numeric()</php> behaviour:
 <PHP>if (is_numeric($str) && strlen($str) === strlen(rtrim($str)) ){...}</PHP>
 
 Breaking the second reason will allow to catch various bugs ahead of time, and the previous behaviour can be obtained by adding explicit casts, e.g.:
@@ -134,52 +185,6 @@ var_dump((int) "2.5px"); // int(2)
 var_dump((float) "2.5px"); // float(2.5)
 </PHP>
 
-Some notable cases are:
-  * Arithmetic operations: <php>var_dump('5b' + 'c');</php>, currently:
-<code>
-Notice: A non well formed numeric value encountered
-
-Warning: A non-numeric value encountered
-int(5)
-</code>
-With the proposal accepted:
-<code>
-Warning: A non-numeric value encountered
-
-Warning: A non-numeric value encountered
-int(0)
-</code>
-  * Type declarations:
-<PHP>function foo(int $i) { var_dump($i); }
-foo('5 ');
-foo('5b');</PHP>
-currently:
-<code>Notice: A non well formed numeric value encountered in /in/ZoOdK on line 3
-int(5)
-
-Notice: A non well formed numeric value encountered in /in/ZoOdK on line 3
-int(5)</code>
-With the proposal accepted:
-<code>int(5)
-Fatal error: Uncaught TypeError: foo(): Argument #1 ($i) must be of type int, string given</code>
-
-  * Increment/Decrement ops
-<PHP>
-$a = "5z";
-var_dump(++$a);
-$b = "5 ";
-var_dump(++$b);
-</PHP>
-Currently:
-<code>
-string(2) "6a"
-string(2) "5 "
-</code>
-With the proposal accepted:
-<code>
-string(2) "6a"
-int(6)
-</code>
 ===== Proposed PHP Version =====
 PHP 8.0.
 
@@ -221,7 +226,10 @@ After the project is implemented, this section should contain
 ===== Acknowledgement =====
 To Andrea Faulds for the [[http://wiki.php.net/rfc/trailing_whitespace_numerics|PHP RFC: Permit trailing whitespace in numeric strings]] on which this RFC and patch is based of.
 
+To Theodore Brown and Larry Garfield for reviewing the RFC.
+
 ===== Changelog =====
+  * 2020-07-10: Major rewrite
   * 2020-07-02: Explain difference between array and string offsets, and how the RFC will impact string offsets
   * 2020-07-01: Add explicit cast behaviour for leading numeric strings
   * 2020-06-28: Initial version
