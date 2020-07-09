@@ -7,9 +7,9 @@
 
 ===== Introduction =====
 
-PHP currently treats namespaced names like ''Foo\Bar'' as a sequence of identifiers and namespace separator tokens. This RFC proposes to treat namespaced names as a single token, and as such allow reserved keywords to appear inside them. At the same time, it proposes to lift reserved keyword restrictions for class, function and constant declarations.
+PHP currently treats namespaced names like ''Foo\Bar'' as a sequence of identifiers and namespace separator tokens. This RFC proposes to treat namespaced names as a single token, and as such allow reserved keywords to appear inside them.
 
-The motivation is to reduce the backwards compatibility impact of new reserved keyword additions in future versions of PHP. To give a specific example, PHP 7.4 added the ''fn'' keyword as part of arrow function support. This broke my [[https://github.com/nikic/iter|iter library]], because it was using ''fn'' as part of a namespace name. However, this breakage was entirely unnecessary! Here is a typical usage example:
+There are two motivations: The first is to reduce the backwards compatibility impact of new reserved keyword additions in future versions of PHP. To give a specific example, PHP 7.4 added the ''fn'' keyword as part of arrow function support. This broke my [[https://github.com/nikic/iter|iter library]], because it was using ''fn'' as part of a namespace name. However, this breakage was entirely unnecessary! Here is a typical usage example:
 
 <PHP>
 // In the library:
@@ -25,30 +25,25 @@ iter\map(fn\operator('*', 2), $nums);
 
 As you can see, both references of ''fn'' are part of a namespaced name: ''iter\fn'' and ''fn\operator''. Under this proposal, these are considered perfectly legal names, and the backwards compatibility break would not have occurred.
 
-To provide another example, what would happen if ''enum'' become a reserved keyword in a future PHP version? There are a number of userland implementations that use the ''Enum'' class name and would break. After this proposal, they would still break, but in a way that can be salvaged and migrated more easily:
+Additionally, treating namespaced names as a single token avoids certain syntactical ambiguities. For example, the [[rfc:shorter_attribute_syntax|shorter attribute syntax]] has the following ambiguity:
 
 <PHP>
-// This line would remain legal
-use MyCLabs\Enum\Enum;
-
-// This line would still result in a parse error
-class Action extends Enum { }
+function test(@@A \ B $param) {}
+// Can be interpreted as:
+function test(
+   @@A\B
+   $param
+) {}
+// Or:
+function test(
+   @@A
+   \B $param
+) {}
 </PHP>
 
-This means that code using the enum library will very likely break, but there are easy ways to avoid it, possibly by automated means:
-
-<PHP>
-class Action extends \MyCLabs\Enum\Enum { }
-// or
-use MyCLabs\Enum\Enum as Enum_;
-class Action extends Enum_ { }
-</PHP>
-
-This makes it possible to keep code working until it is migrated.
+This RFC resolves this by making the first variant a syntax error, and requiring you to write whichever interpretation was intended. This proposal is a prerequisite for the implementation of the "shorter attribute syntax" in PHP 8.
 
 ===== Proposal =====
-
-==== Changes to namespaced names ====
 
 PHP distinguishes four kinds of namespaced names:
 
@@ -92,7 +87,7 @@ FooBar\List
 namespace\List
 </PHP>
 
-Whitespace is not permitted between namespace separators. If it occurs, the namespace separator will be parsed as ''T_NS_SEPARATOR'', which will subsequently lead to a parser error. It is not possible to allow whitespace, because namespaced names commonly occur next to keywords:
+Whitespace is not permitted between namespace separators. If it occurs, the namespace separator will be parsed as ''T_NS_SEPARATOR'', which will subsequently lead to a parse error. It is not possible to allow whitespace, because namespaced names commonly occur next to keywords:
 
 <PHP>
 class Foo implements \Bar {}
@@ -112,38 +107,21 @@ $foo = Foo // <- Missing semicolon
 \call($bar);
 </PHP>
 
-==== Changes to reserved keywords limitations ====
-
-In additional to the namespaced name changes, reserved keywords may now be used in a number of additional places:
+In this interest of consistency, the ''namespace'' declaration will accept any name, including isolated reserved keywords:
 
 <PHP>
-class KEYWORD {}
-interface KEYWORD {}
-trait KEYWORD {}
-function KEYWORD() {}
-const KEYWORD = 0;
-use Foo as KEYWORD;
+namespace iter\fn; // Legal
+namespace fn;      // Legal
 </PHP>
 
-It should be emphasized that it will not be possible to refer to symbols that use keyword names by directly using the keyword, it always needs to be part of a namespaced name that renders its usage unambigous:
+This is to avoid a discrepancy where defining symbols like ''iter\fn\operator'' is allowed, but ''fn\operator'' is not. The only restriction is that the namespace name cannot start with a ''namespace'' segment:
 
 <PHP>
-class List {}
-
-new List;  // Parse error.
-new \List; // Ok!
+namespace namespace;   // Illegal
+namespace namespace\x; // Illegal
 </PHP>
 
-This also extends to function-like language constructs:
-
-<PHP>
-function print($arg) {}
-
-print($arg); // This is the normal "print" language construct.
-\print($arg) // This calls the print() function defined above.
-</PHP>
-
-To avoid confusion in this particular case, it would be possible to prevent defining function symbols that clash with function-like language constructs.
+This avoids introducing an ambiguity with namespace-relative names.
 
 ===== Backward Incompatible Changes =====
 
@@ -169,3 +147,7 @@ Additionally tooling based on ''token_get_all()'' will need to be adjusted to ha
 ===== Vote =====
 
 Yes/No.
+
+===== Future Scope =====
+
+An earlier version of this RFC also relaxed various reserved keyword restrictions for class, function and constant declarations. Because these have to deal with more perceived ambiguities, I have dropped them from this proposal. Reserved keyword restrictions can always be lifted lateron, while the change in this RFC contains a backwards-compatibility break that is best done in PHP 8.0.
