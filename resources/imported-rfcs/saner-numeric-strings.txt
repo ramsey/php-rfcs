@@ -1,5 +1,5 @@
 ====== PHP RFC: Saner numeric strings ======
-  * Version: 1.3
+  * Version: 1.4
   * Date: 2020-06-28
   * Author: George Peter Banyard <girgias@php.net>
   * Status: Under Discussion
@@ -117,7 +117,10 @@ var_dump("123" == "123   "); // bool(false)
 var_dump("123" == "123abc"); // bool(false)
 </PHP>
   * Bitwise operations, e.g.<PHP>
-TODO
+var_dump(123 & "123");    // int(123)
+var_dump(123 & "123  ");  // int(123) with E_NOTICE "A non well formed numeric value encountered"
+var_dump(123 & "123abc"); // int(123) with E_NOTICE "A non well formed numeric value encountered"
+var_dump(123 & "abc");    // int(0) with E_WARNING "A non-numeric value encountered"
 </PHP>
 
 ===== The Problem =====
@@ -129,14 +132,17 @@ The current behaviour of numerical strings has various issues:
   * Leading-numeric strings is a rather strange concept with unintuitive/surprising behaviour.
 
 ===== Proposal =====
-Unify the various numeric string modes into a single concept: Numeric characters only with both leading and trailing white-spaces allowed. And throw ''TypeError''s when non-numeric strings are used in a numeric context
+Unify the various numeric string modes into a single concept: Numeric characters only with both leading and trailing white-spaces allowed. And throw <php>TypeError</php>s when non-numeric strings are used in a numeric context.
 
-This means, all strings which currently emit the <php>E_NOTICE</php> “A non well formed numeric value encountered” will emit the <php>E_WARNING</php> “A non-numeric value encountered” //except// if the leading-numeric string contained only trailing white-spaces. And the various <php>E_WARNING</php> will be promoted to <php>TypeError</php>
+This means, all strings which currently emit the <php>E_NOTICE</php> “A non well formed numeric value encountered” will de reclassified into the <php>E_WARNING</php> “A non-numeric value encountered” //except// if the leading-numeric string contained only trailing white-spaces. And the various cases which currently emit an <php>E_WARNING</php> will be promoted to <php>TypeError</php>s.
+
+One exception to this are type declarations as they only accept proper numeric strings, thus some <php>E_NOTICE</php> will result in a <php>TypeError</php>, see below for an example.
+
 
 For string offsets accessed using numeric strings the following changes will be made:
   * Leading numeric strings will emit the “Illegal string offset” instead of the “A non well formed numeric value encountered” notice, and continue to evaluate to their respective values.
   * Non-numeric strings which emitted the “Illegal string offset” warning will throw an “Illegal offset type” TypeError.
-  * A secondary implementation vote will decide if: numeric strings which correspond to well formed floats will emit the more usual “String offset cast occurred” warning instead of the “Illegal string offset” warning. 
+  * A secondary implementation vote will decide if: numeric strings which correspond to well formed floats will remain a warning by emit the more usual “String offset cast occurred” warning instead of the current “Illegal string offset” warning which is being promoted to <php>TypeError</php>. 
 
 
 The following cases will produce this behaviour under the proposal:
@@ -151,7 +157,7 @@ var_dump(is_numeric("123   "));  // bool(true)
   * String offsets<PHP>
 $str = 'The world';
 var_dump($str['4str']);   // string(1) "w" with E_WARNING "Illegal string offset '4str'"
-var_dump($str['4.5']);    // string(1) "w" with E_WARNING "String offset cast occurred" if the secondary vote is accepted
+var_dump($str['4.5']);    // string(1) "w" with E_WARNING "String offset cast occurred" if the secondary vote is accepted otherwise TypeError
 var_dump($str['string']); // TypeError
 </PHP>
   * Arithmetic operations<PHP>
@@ -159,12 +165,17 @@ var_dump(123 + "123   "); // int(246)
 var_dump(123 + "123abc"); // int(246) with E_WARNING "A non-numeric value encountered"
 var_dump(123 + "string"); // TypeError
 </PHP>
-  * The <php>++</php> and <php>--</php> operators would convert numeric strings with trailing whitespace to integers or floats, as appropriate, rather than applying the alphanumeric increment rules<PHP>
+  * The <php>++</php> and <php>--</php> operators would convert numeric strings with trailing white-space to integers or floats, as appropriate, rather than applying the alphanumeric increment rules<PHP>
 $d = "5 ";
 var_dump(++$d); // int(6)
 </PHP>
   * String-to-string comparisons<PHP>
 var_dump("123" == "123   "); // bool(true)
+</PHP>
+  * Bitwise operations, e.g.<PHP>
+var_dump(123 & "123  ");  // int(123)
+var_dump(123 & "123abc"); // int(123) with E_WARNING "A non-numeric value encountered"
+var_dump(123 & "abc");    // int(0) TypeError
 </PHP>
 
 These changes will be accomplished by modifying the ''is_numeric_string'' C function (and its variants) in the Zend Engine.
@@ -207,14 +218,14 @@ This does not affect the filter extension, which handles numeric strings itself 
   * Adding an E_NOTICE for numerical strings with leading/trailing white-spaces
   * Adding a flag to <php>\is_numeric</php> to accept or reject numerical strings with leading/trailing white-spaces
   * Align string offset behaviour with array offsets
-  * Promote remaining "Illegal string offset" warnings to Type Errors in PHP 9
+  * Promote remaining warnings to Type Errors in PHP 9
   * Warn on illegal offsets when used within <php>isset()</php> or <php>empty()</php>
 
 ===== Proposed Voting Choices =====
 Per the Voting RFC, there would be a single Yes/No vote requiring a 2/3 majority.
 
 ===== Patches and Tests =====
-A pull request for a complete PHP interpreter patch, including a test file, can be found here: https://github.com/php/php-src/pull/5762
+A pull request for a complete PHP interpreter patch, including test files, can be found here: https://github.com/php/php-src/pull/5762
 
 A language specification patch still needs to be done.
 
@@ -233,7 +244,7 @@ To Andrea Faulds for the [[http://wiki.php.net/rfc/trailing_whitespace_numerics|
 To Theodore Brown and Larry Garfield for reviewing the RFC.
 
 ===== Changelog =====
-  * 2020-07-13: Tweak inconsistency in regards to Arithmetics/Bitwise ops
+  * 2020-07-13: Tweak inconsistency in regards to Arithmetic/Bitwise ops
   * 2020-07-10: Major rewrite
   * 2020-07-02: Explain difference between array and string offsets, and how the RFC will impact string offsets
   * 2020-07-01: Add explicit cast behaviour for leading numeric strings
