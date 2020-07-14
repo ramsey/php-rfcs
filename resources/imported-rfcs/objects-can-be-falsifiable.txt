@@ -1,0 +1,257 @@
+====== PHP RFC: Objects can be declared falsifiable ======
+  * Version: 0.9
+  * Date: 2020-07-14
+  * Author: Josh Bruce, josh@joshbruce.dev
+  * Implementer: seeking (or someone willing to answer specific questions when I have them)
+  * Status: In discussion
+  * First Published at: http://wiki.php.net/rfc/objects-can-be-falsifiable
+
+This RFC introduces a new interface <php>Falsifiable</php> and magic method <php>__toBool()</php> allowing custom objects (types) to define and declare themselves <php>true</php> or <php>false</php>. Given PHP 8 interprets a valid instance as only true, this would give developers the opportunity to work with an instance of a known object (type) and glean its truthiness from the instance itself, not <php>null</php> or <php>empty()</php> checks. (Or <php>strlen()</php> and other operator-required checks.)
+
+This RFC has 3 goals:
+
+  - provide a way for an instantiated object to be interpreted as <php>false</php>, without <php>null</php> while being consistent with similar approaches as of PHP 8,
+  - provide a new <php>Falsifiable</php> functional interface and <php>__toBool()</php> method, which allows for direct conversion of the object by way of casting to <php>bool</php> or passing to <php>empty()</php>, and
+  - no BC breaks (no polyfill is planned at this time).
+
+===== Introduction =====
+
+Goal 1: All PHP scalar types have a <php>true</php> and <php>false</php> representation. One of the three compound types (<php>array</php>) has a <php>true</php> and <php>false</php> representation. The other two compound types (<php>callable</php> and <php>object</php>) only have a <php>true</php> representation but no <php>false</php> representation. As such, developers tend to resort to using <php>null</php> assigned to variables or returned from function and method calls to represent non-objects; however, this is an inaccurate representation as the object cannot be interacted with as that type of object. Further, <php>null</php> itself is a special type separate from the scalar and compound types. (See Truthiness tables section.)
+
+Language features have been added and are proposed to address or workaround this use of <php>null</php>, namely nullable types (optionals) and the proposed nullsafe operator, both of which add syntax while addressing interaction with <php>null</php> causing a fatal error.
+
+This RFC seeks to add another layer. The ability to have a live instance (not <php>null</php>) that can still represent <php>false</php> and be interacted with as an instance of that object (type).
+
+Goal 2: To maintain consistency and feel within PHP, this RFC follows the <php>Countable</php> and <php>Stringable</php> interfaces and implementations. For type safety, implementers can explicitly declare the <php>Falsifiable</php> interface in their class declarations. Further, the union type <php>bool|Falsifiable</php> will be dynamically added at run time to any object implementing the reserved <php>__toBool()</php> method, which would allow <php>stdClass()</php> objects to be defined as <php>Falsifiable</php> also.
+
+The interface stub.
+
+<code php>
+interface Falsifiable
+{
+  public function __toBool(): bool;
+}
+</code>
+
+Unlike <php>Stringable</php> we can explicitly declare (force) the return type (<php>bool</php>).
+
+A <php>__toBool()</php> magic method was selected to maintain consistency with PHP 8. <php>__toString()</php> allows developers to specify a string representation of the object (with the <php>Stringable</php> interface for type safety). There is an RFC to do similar with <php>array</php> using a <php>__toArray()</php> magic method. Converting to an <php>array</php> can also be done by way of the <php>__serialize()</php> magic method, but requires the object be passed to the <php>serialize()</php> and <php>unserialize()</php> functions from the standard library. The signature for <php>__serialize()</php> in PHP 8 indicates the return type is being changed to an <php>array</php> not a <php>string</php>, but still requires being passed to the <php>serialize()</php> and <php>unserialize()</php> functions. Therefore, there seems to be a precedent for using magic methods when declaring base type representations of custom objects (types).
+
+Goal 3: BC breaks should be minimal, if at all:
+
+  - PHP language guidance reserves methods beginning with two underscores for language features. (Including <php>__construct()</php> replacing old style constructors in PHP 7.)
+  - The interface would be in the root PHP namespace; therefore, should not collide with other implementations and, if so, can be modified with <php>as</php>. 
+  - The implementation does not replace, or interfere with the interactions of <php>null</php> types; therefore, nullable types and the possibility of nullsafe operators can work as expected.
+
+===== Proposal =====
+As-is using a mixed type array:
+
+<code php>
+$array = [
+  new stdClass(),
+  [1, 2, 3],
+  "",
+  "Hello",
+  [],
+  new ClassWithToBoolReturningFalse()
+];
+
+$filtered = array_filter($array, function($item) { return (bool) $item });
+
+// output:
+// [
+//   stdClass(),
+//   [1, 2, 3],
+//   "Hello",
+//   ClassWithToBoolReturningFalse()
+// ];
+
+$filtered = array_filter($array, function($item) { return empty($item) });
+
+// output:
+// [
+//   "",
+//   []
+// ];
+</code>
+
+To-be with <php>Falsifiable</php> interface and magic method:
+
+<code php>
+$array = [
+  new stdClass(),
+  [1, 2, 3],
+  "",
+  "Hello",
+  [],
+  new ClassWithToBoolReturningFalse()
+];
+
+$filtered = array_filter($array, function($item) { return (bool) $item });
+
+// output:
+// [
+//   stdClass(),
+//   [1, 2, 3],
+//   "Hello"
+// ];
+
+$filtered = array_filter($array, function($item) { return empty($item) });
+
+// output:
+// [
+//   "",
+//   [],
+//   ClassWithToBoolReturningFalse()
+// ];
+</code>
+
+To get the same output from the "To-be" sample, without the <php>Falsifiable</php> interface being interpreted automatically from PHP (removing the double underscore to reduce unneeded syntax).
+
+<code php>
+$array = [
+  new stdClass(),
+  [1, 2, 3],
+  "",
+  "Hello",
+  [],
+  new ClassWithIsEmptyReturningFalse()
+];
+
+$filtered = array_filter($array, function($item) { 
+  return (is_object($item) and $item instanceof Falsifiable)
+    ? $item->toBool()
+    : (bool) $item;
+});
+
+// output:
+// [
+//   stdClass(),
+//   [1, 2, 3],
+//   "Hello"
+// ];
+
+$filtered = array_filter($array, function($item) { 
+  return (is_object($item) and $item instanceof Falsifiable)
+    ? ! $item->toBool()
+    : empty($item);
+});
+
+// output:
+// [
+//   "",
+//   [],
+//   ClassWithToBoolReturningFalse()
+// ];
+</code>
+
+===== Truthiness tables =====
+
+Scalar types and their relationship to <php>false</php>:
+
+
+^Type     ^Value/Context    ^Result from (bool) cast  ^Result from empty()  ^Result from conditional if ({value}) {} ^
+|string   |"Hello"          |true                     |false                |true - inside braces                  |
+|integer  |>= 1             |true                     |false                |true                                  |
+|integer  |<= -1            |true                     |false                |true                                  |
+|float    |> 0              |true                     |false                |true                                  |
+|float    |< 0              |true                     |false                |true                                  |
+|string   |""               |false                    |true                 |false - outside braces                |
+|integer  |0                |false                    |true                 |false                                 |
+|float    |0.0              |false                    |true                 |false                                 |
+
+
+Compound types (no pseudo-types) and their relationship to <php>false</php>:
+
+^Type     ^Value/Context    ^Result from (bool) cast  ^Result from empty()  ^Result from conditional if ({value}) {} ^
+|array    |[1, 2, 3]        |true                     |false                |true                                  |
+|callable |function() {}    |true                     |false                |true                                  |
+|object   |new stdClass()   |true                     |false                |true                                  |
+|array    |[]               |false                    |true                 |false                                 |
+
+
+<php>null</php> and its relationship to <php>false</php>:
+
+^Type     ^Value/Context    ^Result from (bool) cast  ^Result from empty()  ^Result from conditional if ({value}) {} ^
+|NULL     |--               |false                    |true                 |false                                 |
+
+
+Outliers (beyond the scope of this RFC):
+
+^Type     ^Value/Context    ^Result from (bool) cast  ^Result from empty()  ^Result from conditional if ({value}) {} ^
+|string   |"0"              |false                    |true                 |false                                 |
+
+
+Row 1: Even though the string contains a character, it is considered <php>false</php> and <php>empty</php> as it appears the value is passed through <php>intval()</php>, which results in zero and is automatically inerpeted as <php>false</php> and <php>empty</php> as of PHP 8.
+
+
+===== Backward Incompatible Changes =====
+
+No known incompatibles.
+
+===== Proposed PHP Version(s) =====
+
+PHP 8.1 or later
+
+===== RFC Impact =====
+
+No known negative impacts.
+
+===== Open Issues =====
+
+  * As of this writing I do not have the knowledge, practice, and practical understanding of implementing within PHP internals to implement this myself. If you're interested in (helping) implement this concept, please do reach out (help may be in the form guidance and instruction or full implementation, up to you).
+  * Would presume impact similar to <php>__toString()</php> and <php>Stringable</php>. RFC for <php>Stringable</php> listed concerns related to <php>__toString()</php> already being a method. Would look at the implementation as it should be similar, level of knowledge to implement is not there yet.
+
+===== Unaffected PHP Functionality =====
+
+  * <php>null</php> behavior remains unchanged
+
+===== Future Scope =====
+
+None.
+
+===== Proposed Voting Choices =====
+yes/no
+
+===== Patches and Tests =====
+Links to any external patches and tests go here.
+
+If there is no patch, make it clear who will create a patch, or whether a volunteer to help with implementation is needed.
+
+Make it clear if the patch is intended to be the final patch, or is just a prototype.
+
+For changes affecting the core language, you should also provide a patch for the language specification.
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  * the version(s) it was merged into
+  * a link to the git commit(s)
+  * a link to the PHP manual entry for the feature
+  * a link to the language specification section (if any)
+
+===== References =====
+These RFCs are identified as similar in spirit to this [concept], possibly helped by this [concept], or this [concept] is potentially helped by the result of the linked RFC.
+
+Implemented:
+
+  * [[https://wiki.php.net/rfc/union_types_v2|PHP RFC: Union Types 2.0]] - accept multiple types, including <php>null</php>
+  * [[https://wiki.php.net/rfc/counting_non_countables|PHP RFC: Counting of non-countable objects]] - return <php>1</php> or <php>0</php>, not <php>null</php>.
+
+Accepted:
+
+  * [[https://wiki.php.net/rfc/nullable_types|PHP RFC: Nullable Types]] - return <php>null</php> or one (or more) types from function or method
+  * [[https://wiki.php.net/rfc/stringable|PHP RFC: Add Stringable interface]] - implementation reference, automatically view object as string
+  * [[https://wiki.php.net/rfc/magic-methods-signature|PHP RFC: Ensure correct signatures of magic methods]] - implementation reference
+
+Under review and discussion:
+
+  * [[https://wiki.php.net/rfc/nullsafe_operator|PHP RFC: Nullsafe operator]] - chained method calls do not halt when encountering <php>null</php>
+  * [[https://wiki.php.net/rfc/pipe-operator-v2|PHP RFC: Pipe Operator v2]] - chain using object instance using <php>__invoke()</php>
+  * [[https://wiki.php.net/rfc/to-array|PHP RFC:__toArray()]] - implementation reference and where magic method should live
+
+Declined:
+
+  * [[https://wiki.php.net/rfc/userspace_operator_overloading|PHP RFC: Userspace operator overloading]] - could facilitate <php>__toBool()</php> by proxy via operators
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
