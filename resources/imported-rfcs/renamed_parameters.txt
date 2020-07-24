@@ -1,0 +1,189 @@
+====== PHP RFC: Renamed Parameters ======
+  * Version: 0.1
+  * Date: 2020-07-24 (use today's date here)
+  * Author: Chris Riley, t.carnage@gmail.com
+  * Status: Draft 
+  * First Published at: http://wiki.php.net/rfc/renamed_parameters
+
+
+===== Introduction =====
+
+The named parameters RFC has been accepted, despite significant objections from maintainers of larger OSS projects due to the overhead it adds to maintaining backwards compatibility as it has now made method/function parameter names part of the API; a change to them would cause a BC break for any library users who decide to use the new feature. 
+
+It is likely that the way this will shake out is that some maintainers will accept the additional overhead of including parameter names in their BC guidelines and others will not, this leaves users unsure if they can use the new feature without storing up issues in potentially minor/security releases of the libraries they use. This is not really an ideal situation.
+
+More pressing a point is that the current implementation breaks object polymorphism. Consider this example (simplified from one of my codebases)
+
+<code php>
+interface Handler {
+    public function handle($message);
+}
+
+class RegistrationHandler implements Handler {
+    public function handle($registraionCommand);
+}
+
+class ForgottenPasswordHandler implements Handler {
+    public function handle($forgottenPasswordCommand);
+}
+
+class MessageBus {
+    //...
+    public function addHandler(string $message, Handler $handler) { //... }
+    public function getHandler(string $messageType): Handler { //... }
+    public function dispatch($message)
+    {
+        $this->getHandler(get_class($message))->handle(message: $message);
+    }
+}
+</code>
+
+This code breaks at run time. 
+
+Proposals were made for resolutions to this issue however all of them require trade offs and could potentially break existing code. I offer a new proposal which offers some advantages.
+
+===== Proposal =====
+
+=== Option 1 ===
+My proposal to resolve these two issues is to add the ability to rename parameters with a new syntax as follows.
+
+<code php>
+function callBar(Foo $internalName:externalName) {
+    $internalName->bar();
+}
+
+$x = new Foo();
+callBar(externalName: $x);
+</code>
+
+This allows both the above problems to be resolved, by renaming the internal parameter and keeping the external signature the same.
+
+=== Option 2 === 
+
+The second option would be to use this syntax to make named parameters in userland code explicitly opt in. As such an additional shortcut syntax would be implemented: $: to designate a named parameter. eg
+
+<code php>
+function callBar($:externalName) {
+    $externalName->bar();
+}
+
+$x = new Foo();
+callBar(externalName: $x);
+</code>
+
+If a parameter is not opted in, a compile time error is raised:
+
+<code php>
+function callBar($externalName) {
+    $externalName->bar();
+}
+
+$x = new Foo();
+callBar(externalName: $x); // Error: cannot call parameter $externalName by name.
+
+</code>
+
+There are pros and cons to this second approach, on the one hand it reduces the usefulness of the named parameter syntax by requiring changes to old code to enable it (although this could probably be automated fairly easily) however it does provide a neater solution to the second problem in that, to prevent the runtime errors in the second issue example, every child class would need to use the rename syntax on it's parameter to prevent errors, whereas if we went down this route, the parent class could just not opt into the named parameter syntax and the code would function as expected.
+
+Another advantage is that with the ability to rename parameters using the opt in, we gain some flexibility to tighten up the LSP rules relating to named parameter inheritance. 
+
+<code php>
+class Foo {
+    public function bar($:param) { //... }
+    public function baz($internal:external) { //... }
+}
+
+// OK
+class Bar {
+    public function bar($renamed:param) { //... }
+    public function baz($renamed:external) { //... }
+}
+
+// Compile time error cannot rename named parameter $:param (renamed to $:renamedParam)
+class Baz {
+    public function bar($:renamedParam) { //... }
+}
+
+// Compile time error cannot rename named parameter $:external (renamed to $:renamed)
+class Baz {
+    public function baz($internal:renamed) { //... }
+}
+
+</code>
+
+While this would be technically possible with the first option (no opt in) it would break any existing code which renames a parameter as every parameter would be subject to these rules.
+
+
+===== Alternative solutions =====
+
+==== Attributes ====
+It has been suggested that some of the issues raised in this RFC could be solved by attributes an internal attribute could be
+created to specify a parameter name alias and allow argument renaming. This would work similarly to option 1, however has the downside of splitting the definition of a parameter over two parts of the code.
+
+Option 2 could also be achieved using an attribute to either enable or disable named parameters on a per function/method basis.
+
+
+==== Opt out named parameters ====
+The comparison to swift brings up another alternative implementation whereby a function/method author can explicitly opt out of 
+named parameter syntax by using the special argument reference _ we could adopt something similar as a middle ground between option 1 and option 2. An example might be
+
+<code php>
+function foo($:bar) { //... }
+
+foo(bar: 'test'); // Error: cannot call parameter $bar by name. 
+</code>
+
+This wouldn't allow compile time checks of inheritance issues as doing so would break existing userland code.
+
+===== Backward Incompatible Changes =====
+None
+
+===== Proposed PHP Version(s) =====
+PHP 8.0
+
+===== RFC Impact =====
+==== To SAPIs ====
+Unknown (probably none?)
+
+==== To Existing Extensions ====
+Unknown (probably none?)
+
+==== To Opcache ====
+The naming changes should be done at compile time, so shouldn't impact Opcache from my understanding of it.
+
+==== New Constants ====
+None
+
+==== php.ini Defaults ====
+None
+
+===== Open Issues =====
+Make sure there are no open issues when the vote starts!
+
+===== Unaffected PHP Functionality =====
+List existing areas/features of PHP that will not be changed by the RFC.
+
+This helps avoid any ambiguity, shows that you have thought deeply about the RFC's impact, and helps reduces mail list noise.
+
+===== Future Scope =====
+This section details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
+
+===== Proposed Voting Choices =====
+Proposed two voting options:
+
+1. Implement parameter renaming
+2. Make parameter names opt in
+
+===== Patches and Tests =====
+
+No patch yet. 
+
+===== Implementation =====
+
+N/a
+
+===== References =====
+This proposal is very similar to argument labels in swift: https://docs.swift.org/swift-book/LanguageGuide/Functions.html
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
