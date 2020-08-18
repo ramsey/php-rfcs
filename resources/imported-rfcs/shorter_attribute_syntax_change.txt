@@ -1,5 +1,5 @@
 ====== PHP RFC: Shorter Attribute Syntax Change ======
-  * Version: 0.5
+  * Version: 0.6
   * Date: 2020-08-04
   * Author: Derick Rethans, Benjamin Eberlei
   * Status: In Discussion
@@ -72,12 +72,9 @@ used at the moment in annotations made using PHP docblock comments.
 **Tokens used** explains if the syntax introduces a new token into the language
 or re-uses existing ones.
 
-**Changes lexing of remaining tokens** indicates that a newly introduced token
-changes the behaviour of existing tokens. In the example of #[ the occurance of
-a # would have previously always signified a comment, but that now changes to
-become an attribute instead when followed by [. This would require code working
-with a token stream of PHP code such as static analysis tools to know the
-target version of the code to interpret it correctly.
+**Changes lexing of remaining tokens** is related to forward compatibility. Specific
+usages of Attributes in PHP 8 can lead to code that compiles very differently on PHP 7
+but still runs. [[#discussion_of_forwards_compatibility_procons|More Details Below]]
 
 **Does syntax prevent nested attributes in future?** This was added to make
 clear that none of the proposed syntaxes prevents the same symbols being used
@@ -187,7 +184,7 @@ syntax extremely short and concise, it has a few downsides.
 Many complex syntax constructs in PHP have an ending delimiter or are enclosed 
 in a starting and corresponding ending delimiter pair.
 
-  * Classes and functions are enclosed in ''{}''
+  * Classes and function body are enclosed in ''{}''
   * Blocks are enclosed in ''{}'' (with the exception of single line blocks with only one statement, but coding styles discourage them for that reason)
   * Argument/Parameter lists are enclosed in ''()''
   * Statements end in '';''
@@ -241,7 +238,7 @@ Or without grouped:
 public $users;
 </code>
 
-==== Attributes are not just Modifiers ====
+==== Attributes are not like Modifiers ====
 
 A counter argument why attributes should not need an ending delimiter is
 that attributes are modifiers to declarations, similar to the existing keywords
@@ -300,49 +297,19 @@ final class Something {
 }
 </code>
 
-==== Machine Scanning for End of Attribute Declaration ====
+==== Attributes are not like Type Declarations ====
 
-For machines, a lexer scans until an ending symbol is found.
+A more complex part of a declaration that is not enclosed in syntax are types. Up until PHP 8
+this was a simple scalar type or a class name. With PHP 8 union types added more complexity
+and could lead to multiline declarations even with reasonable coding standards.
 
-For all attribute syntaxes without an ending symbol the lexer and userland token stream scanners with ''token_get_all''
-must look for multiple different tokens: Start of a new attribute, whitespace (but not
-necessarily), end of argument list:
+However a type declaration itself is not as complex as an attribute, wchich also includes arguments with constant expressions.
 
-<code php>
-@@Foo @@Bar // ends due to T_WHITESPACE with " "
-@@Foo // ends due to T_WHITESPACE with "\n"
-@@Foo() // ends due to )
-@@Foo () // ends with ), the T_WHITESPACE between class and arguments is valid
-@@Foo@@Bar // ends due to new T_ATTRIBUTE
-@@Foo()@@Bar // ends due to )
-@@Foo
-("bar") // ends here in the second line at )
-function a_function() {
-}
-</code>
+There are two viewpoints to consider:
 
-This makes programmatic token based scanning for attribute syntax without a
-closing delimiter such as ''@@'' unnecessarily complicated.
+  * Union Types were added onto an existing syntax construct that was not enclosed as such inherited this decision. Other languages have the same union type syntax as PHP (TypeScript) but other languages require more explicit and complex "typedef" declarations. The union type RFC itself hints at a future extension with typedefs to reduce the complexity in declaration.
 
-For an enclosed attribute syntax there is less complexity when looking only for
-the last '']'' on the stack (or '','' with grouping).
-
-<code php>
-@[Foo, Bar]
-@[Foo]
-@[Foo()]
-@[Foo ()]
-@[Foo,Bar]
-@[Foo]@[Bar]
-@[Foo(),Bar] 
-@[Foo
-("bar")]
-function a_function() {
-}
-</code>
-
-While for humans the exotic examples are mostly a "problem" that is solved by coding standards,
-for machines they introduce additional complexity.
+  * Union type declarations show that more complex syntax in declarations works without enclosing. 
 
 ==== Forcing @@ Attributes to end with parenthesis does not solve issues ====
 
@@ -385,7 +352,7 @@ allow simpler "attributes" than objects such as strings:
 function foo($x) { return $x * 2;}
 </code>
 
-While I can't rule out that this is impossible with ''@@'' it introduces more readability concerns on when an attribute ends:
+While not impossible with ''@@'' it introduces more readability concerns on when an attribute ends:
 
 <code php>
 @@"foo"
@@ -393,9 +360,11 @@ While I can't rule out that this is impossible with ''@@'' it introduces more re
 function foo() {}
 </code>
 
-Repeating again, a few suggestions were made that when necessary enclosing delimiters could be
-added at a later point. This might lead us with a syntax ''@@[Attr]'' though,
-when we could have a shorter unified syntax ''@[Attr]'' or ''#[Attr]'' now.
+Another approach to solve this could be wrapping more complex syntax in an attribute:
+
+<code php>
+@:Before(fn ($x) => $x*4)
+</code>
 
 ===== Discussion on Grouping Pro/Cons =====
 
@@ -507,6 +476,8 @@ https://grep.app/search?q=%40%5B&filter[lang][0]=PHP
 This BC break can be fixed mechanically with a project-wide search and replace
 from ''@['' to ''@ ['', with some care as ''@['' often appears in regular expressions.
 
+As the short syntax for list expressions was only added in 7.1, there is unlikely going to be a very large body of code out there using this breaking pattern, as recent code is often run avoiding error suppression of this kind.
+
 ===== Discussion of Forwards Compatibility Pro/Cons =====
 
 The ''#[]'' Syntax has the unique property of being forwards compatible, meaning
@@ -550,6 +521,9 @@ function foo(
     $param2
 ) { }
 </code>
+
+As PHP doesn't warn about calling a user-defined function too many parameters, making this harder to detect.
+Especially since IDEs and PHPs own linter will accept the syntax as valid PHP.
 
 Code would need to be written a very specific way to benefit from forwards compatibilty:
 <code php>
@@ -626,7 +600,7 @@ function foo() {
 
 These declarations all refer to the same attribute.
 
-As such we did not include "Better Grep'ability" as a Yes/No argument in the Proposals overview table.
+As such we did not include "Better Grep'ability" as a Yes/No argument in the Proposals overview table, since it depends on coding style and in every syntax a coding style can be found that has good grepability.
 
 ===== Proposed PHP Version(s) =====
 PHP 8.0
@@ -660,3 +634,4 @@ Links to external references, discussions or RFCs
    * v0.3: Removed "Difficulties for Userland Parsers" as its a subjective opinion and boils down to the fact that a new token T_ATTRIBUTE is introduced in some syntaxes that would include tokens that were parsed differently in previous PHP versions. Added "Tokens used" and "Changes the lexing of remaining tokens".
    * v0.4 Added more details about BC breaks and forward compatilbity issues.
    * v0.5 add new sections summerizing different discussions from the mailing list
+   * v0.6 added section on why attributes not compare against even more complex type declarations, removed section on machine parsing as too narrow and ultimately not important
