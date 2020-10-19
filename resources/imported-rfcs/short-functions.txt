@@ -37,13 +37,46 @@ class Adder
 }
 </code>
 
+More precisely, the form of a short function/method is:
+
+<code>
+function ($params): returnType => expression;
+</code>
+
+Where "expression" is any valid PHP expression, the evaluated value of which will be returned by the function.  That is the same semantic behavior as for the body of a short-lambda.
+
 Functions are simpler than lambdas, as there is no need for closing over variables contextually.  Therefore this patch is implemented 100% in the lexer, and thus should have no performance impact whatsoever.
+
 
 ==== Reasoning ====
 
 Many functions and methods are, in practice, simple expressions.  They take input and return some simple output that can be computed in a single expression (of arbitrary complexity).  When anonymous, short lambdas offer a compact way to express that function as a literal expression.  Named functions, however, currently still require writing them as if they would be a long block of statements.  That provides extra visual clutter (especially when there are several such methods in one class).  It also forces you to code in "statement headspace" rather than "expression headspace".  Allowing functions to be written in a more expression-y way helps with conceptualizing a program as evaluating expressions, not statement steps.
 
-Expressions are becoming increasingly capable, too.  match() expressions and throw expressions in PHP 8.0, plus proposals such as [[rfc:pipe-operator-v2|PHP RFC: Pipe Operator v2]], are collectively making it easier to write expressive expressions.  This improvement is a part of that larger trend.  For example, this code would become entirely legal:
+Expressions are becoming increasingly capable, too.  match() expressions and throw expressions in PHP 8.0, plus proposals such as [[rfc:pipe-operator-v2|PHP RFC: Pipe Operator v2]], are collectively making it easier to write expressive expressions.  This improvement is a part of that larger trend.
+
+Expression functions are also more likely to avoid mutable state.  While expression-only functions cannot guarantee that the function is pure (expressions like $i++ are a thing), it does tend to encourage more pure code, which is generally less error prone.
+
+==== Examples ====
+
+Below are some examples of "long form" current code and what the short function equivalent would be.  This RFC asserts that the shorter version is more concise and readable.  All code is using standard PSR-12 formatting.
+
+=== Match functions ===
+
+A function that encapsulates a match() expression.
+
+<code php>
+function pick_one(int $a) 
+{
+    return match($a) {
+        1 => 'One',
+        2 => 'Two',
+        3 => 'Three',
+        default => 'More',
+    };
+}
+</code>
+
+vs.
 
 <code php>
 function pick_one(int $a) => match($a) {
@@ -56,15 +89,94 @@ function pick_one(int $a) => match($a) {
 print pick_one(1) . PHP_EOL;
 </code>
 
-Making functions that just "fan out" to other routines simple to write in the most compact way possible.
+=== Getter methods ===
+
+Many classes consist primarily or almost entirely out of methods that either return a property, or some computation off of a property.  With short-functions, that becomes considerably more concise.
+
+<code php>
+class Person
+{
+    public function __construct(private string $firstName, private string $lastName) {}
+    
+    public function getFirstName(): string
+    {
+        return $this->firstName;
+    }
+
+    public function getLastName(): string
+    {
+        return $this->lastName;
+    }
+
+    public function getFullName(): string
+    {
+        return $this->firstName . ' ' . $this->lastName;
+    }
+}
+</code>
+
+vs.
+
+<code php>
+class Person
+{
+    public function __construct(private string $firstName, private string $lastName) {}
+    
+    public function getFirstName(): string => $this->firstName;
+
+    public function getLastName(): string => $this->lastName;
+
+    public function getFullName(): string => $this->firstName . ' ' . $this->lastName;
+}
+</code>
+
+=== Functional code ===
+
+<code php>
+function addUp(array $vals) 
+{
+    return array_reduce($vals, fn($x, $col) => $coll + $x, 0);
+}
+</code>
+
+vs.
+
+<code php>
+function addUp(array $vals) 
+    => array_reduce($vals, fn($x, $col) => $coll + $x, 0);
+</code>
+
+More complex lines of short lambdas can be wrapped to a new line like this already, and it works just as well for short-functions.
+
+=== Piped functions ===
+
+The pipe operator |> is still pending in an RFC, but the feedback on it before was generally positive.  Short functions would allow a function to be easily defined as the composition of several other functions.
+
+<code php>
+function doAThing(User $u)
+{
+    return $u |> 'step1' |> 'step2' |> 'step3' |> 'step4;
+}
+</code>
+
+vs.
+
+<code php>
+function doAThing(User $u) => $u
+    |> 'step1' 
+    |> 'step2' 
+    |> 'step3' 
+    |> 'step4;
+};
+</code>
+
+Which is a really nice way to build up a pipeline through composition.
 
 ==== Syntax decisions ====
 
 The => operator has de facto become the "maps to this expression" operator: Short lambdas use it, match() uses it, array literals use it...  It seemed the natural choice.  Anything else would have been more confusing.
 
-I opted to not change the "function" keyword, mainly because it was unnecessary.  The only thing it could have changed to would be "fn", but that would have been confusing with short lambdas.
-
-Any other syntax changes would likely have also required much more invasive code changes, which I was trying to avoid.  This allows us to have a very tight, surgical change with no runtime impact.
+I opted to not change the "function" keyword, mainly because it was unnecessary.  The only thing it could have changed to would be "fn", but that would have been confusing with short lambdas.  It would also require more in-depth changes to the lexer rules for methods, as they are defined in a different way to functions so changing function to fn there would involve more invasive changes.
 
 ===== Backward Incompatible Changes =====
 
