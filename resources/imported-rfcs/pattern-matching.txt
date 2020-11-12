@@ -33,7 +33,7 @@ While patterns may resemble other language constructs, whatever follows ''is'' i
 
 ==== Supported patterns ====
 
-=== Type patterns ===
+=== Type pattern ===
 
 A pattern may be a type signature, including both class and primitive types as well as compound types.  In this case, ''is'' will match the left hand side value against the specified type.  That is, the following are all legal:
 
@@ -47,7 +47,9 @@ $foo is ?array;    // Equivalent to is_array($foo) || is_null($foo)
 
 A type match may be any syntax supported by a parameter type; in a sense, ''$foo is pattern'' is equivalent to "would $foo pass a type check if passed to a parameter with this type specification."  As more complex type checks become allowed (such as intersection types, type aliases, etc.) they will become valid in a pattern as well.
 
-=== Literal patterns ===
+Type patterns respect the strict/weak typing mode of the file in which it is evaluated.
+
+=== Literal pattern ===
 
 Any literal may be a pattern.  This is a degenerate case and not generally useful, but is included for consistency when used with ''match()'' (see below).
 
@@ -57,6 +59,29 @@ $foo is 'yay PHP'; // Equivalent to $foo === 'yay PHP'
 </code>
 
 Global constants are NOT permitted in a pattern.  They cannot be disambiguated from a class name, and are of minimal if any use in practice.
+
+=== Object property pattern ===
+
+A pattern may also define an class and matches against scope-accessible properties of that object.  Only a single class type may be used, but any number of properties may be matched.  The properties must be accessible in the scope in which the pattern executes.  That is, a pattern evaluated outside the class may only match against public properties; a pattern inside the class may match against public, private, or protected; a pattern in a child class may match against protected properties of its parent but not private; etc.
+
+<code php>
+
+class Point {
+  public function __construct(public int $x, public int $y, public int $z) {}
+}
+
+$p = new Point(3, 4, 5);
+
+$p is Point {x: 3};
+// Equivalent to:
+$p instanceof Point && $p->x === 3;
+
+$p is Point {y: 37, x: 2,};
+// Equivalent to:
+$p instanceof Point && $p->y === 37 && $p->x === 2;
+</code>
+
+Properties may be listed in any order.  A trailing comma is permitted.
 
 ==== ''match()'' enhancement ====
 
@@ -82,10 +107,64 @@ $result = match (true) {
 };
 </code>
 
+==== Variable binding ====
+
+One of the prime uses of pattern matching is to extract a value from a larger structure, such as an object (or Enumeration/ADT, in the future).  This RFC supports such variable binding.  A variable that should be bound is denoted by a % and a variable.  If the input variable matches the rest of the pattern, then the corresponding value will be extracted and assigned to a variable of that name in the current scope.  It will remain in scope as long as normal variable rules say it should.
+
+In the currently supported patterns, it is only relevant for object pattern matching.
+
+<code php>
+class Point {
+  public function __construct(public int $x, public int $y, public int $z) {}
+}
+
+$p = new Point(3, 4, 5);
+
+if ($p is Point {x: 3, y: %$y} ) {
+  print "x is 3 and y is $y.";
+}
+// Equivalent to:
+if ($p instanceof Point && $p->x === 3) {
+  $y = $p->y;
+  print "x is 3 and y is $y.";
+}
+
+if ($p is Point {z: %$z, x: 3, y: %$y} ) {
+  print "x is 3 and y is $y and z is $z.";
+}
+// Equivalent to:
+if ($p instanceof Point && $p->x === 3) {
+  $y = $p->y;
+  $z = $p->z;
+  print "x is 3 and y is $y and z is $z.";
+}
+</code>
+
+If the variable name to extract to is the same as the name of the property, then the property name may be omitted.  That is, the last example can be abbreviated as:
+
+<code php>
+if ($p is Point {%$z, x: 3, %$y} ) {
+  print "x is 3 and y is $y and z is $z.";
+}
+</code>
+
+Variable binding is especially useful in ''match()'' statements, where there is no simple logical equivalent that doesn't involve additional functions.
+
+<code php>
+$result = match ($p) is {
+  Point{x: 3, y: 9, %$z} => "x is 3, y is 9, z is $z",
+  Point{%$z, %$x, y: 4} => "x is $x, y is 4, z is $z",
+  Point{x: 5, %$y} => "x is 5, y is $y, and z doesn't matter",
+  // This will always match.
+  Point{%$x, %$y, %$z} => "x is $x, y is $y, z is $z",
+};
+</code>
+
+Note that in this case, the variables ''$x'', ''$y'', and ''$z'' may or may not be defined after the ''match()'' statement executes depending on which pattern was matched.
 
 ===== Backward Incompatible Changes =====
 
-A new keyword is added, ''is''.  That precludes global constants named ''is''.
+A new keyword is added, ''is''.  That conflicts with a global constant named ''is''.
 
 No other BC breaks are expected.
 
@@ -99,6 +178,7 @@ PHP 8.next (aka 8.1).
 
 Do any other patterns need to be included in the initial RFC?
 
+The % flag for binding is still an open question.  It would be necessary if we want to allow variables to be used in the pattern, but so far we haven't decided if variables belong in the pattern.  Open question for discussion.
 
 ===== Future Scope =====
 
