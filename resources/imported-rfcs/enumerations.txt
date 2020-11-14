@@ -1,0 +1,382 @@
+====== PHP RFC: Enumerations ======
+
+  * Date: 2020-11-13
+  * Author: Larry Garfield (larry@garfieldtech.com), Ilija Tovilo (tovilo.ilija@gmail.com)
+  * Status: Draft
+  * Target Version: PHP 8.1
+  * Implementation: TBD
+
+===== Introduction =====
+
+This RFC introduces Enumerations to PHP.  The scope of this RFC is limited to "unit enumerations," that is, enumerations that are themselves a value, rather than simply a fancy syntax for a primitive constant, and do not include additional associated information.  This capability offers greatly expanded support for data modeling, custom type definitions, and monad-style behavior. Enums enable the modeling technique of “make invalid states unrepresentable,” which leads to more robust code with less need for exhaustive testing.
+
+Many languages have support for enumerations of some variety. A [[https://github.com/Crell/enum-comparison|survey we conducted of various languages]] found that they could be categorized into three general groups: Fancy Constants, Fancy Objects, and full Algebraic Data Types (ADTs). 
+
+This RFC is part of a larger effort to introduce full Algebraic Data Types.  It implements the "Fancy Objects" variant of enumerations in such a way that it may be extended to full ADTs by future RFCs.
+
+The most popular case of enumerations is ''%%boolean%%'', which is an enumerated type with legal values ''%%true%%'' and ''%%false%%''. This RFC allows developers to define their own arbitrarily robust enumerations.
+
+===== Proposal =====
+
+==== Basic enumerations ====
+
+This RFC introduces a new language construct, ''%%enum%%''. Enums are similar to classes, and share the same namespaces as classes, interfaces, and traits. They are also autoloadable the same way. An Enum defines a new type, which has a fixed, limited number of possible legal values.
+
+<code php>
+enum Suit {
+  case Hearts;
+  case Diamonds;
+  case Clubs;
+  case Spades;
+}
+</code>
+
+This declaration creates a new enumerated type named ''%%Suit%%'', which has four and only four legal values: ''%%Suit::Hearts%%'', ''%%Suit::Diamonds%%'', ''%%Suit::Clubs%%'', and ''%%Suit::Spades%%''. Variables may be assigned to one of those legal values. A function may be type checked against an enumerated type, in which case only values of that type may be passed.
+
+<code php>
+$val = Suit::Diamonds;
+
+function pick_a_card(Suit $suit) { ... }
+
+pick_a_card($val);        // OK
+pick_a_card(Suit::Clubs); // OK
+pick_a_card('Spades');    // throws TypeError
+</code>
+
+In the simple case, multiple cases may be defined on a single line. The following is semantically equivalent to the definition above.
+
+<code php>
+enum Suit {
+  case Hearts, Diamonds, Clubs, Spades;
+}
+</code>
+
+An Enumeration may have one or more ''%%case%%'' definitions, with no maximum, although at least one is required.
+
+Cases are not intrinsically backed by a primitive value. That is, ''%%Suit::Hearts%%'' is not equal to 0. Instead, each case is backed by a singleton object of that name. That means that:
+
+<code php>
+$a = Suit::Spades;
+$b = Suit::Spades;
+
+$a === $b; // true
+
+
+$a instanceof Suit;         // true
+$a instanceof Suit::Spades; // true
+</code>
+
+==== Enumerated Case Methods ====
+
+As both Enum Types and Enum Cases are implemented using classes, they may take methods. The Enum Type may also implement an interface, which all Cases must then fulfill, directly or indirectly.  Enum Cases may not implement interfaces themselves.
+
+<code php>
+interface Colorful {
+  public function color(): string;
+}
+
+enum Suit implements Colorful {
+  case Hearts {
+    public function color(): string {
+      return "Red";
+    }
+  };  // Note the semi-colon here!
+  
+  case Diamonds {
+    public function color(): string {
+      return "Red";
+    }
+  };
+  
+  case Clubs {
+    public function color(): string {
+      return "Black";
+    }
+  };
+  
+  case Spades {
+    public function color(): string {
+      return "Black";
+    }
+  };
+  
+  public function shape(): string {
+    return "Rectangle";
+  }
+}
+
+function paint(Colorful $c) { ... }
+
+paint(Suit::Clubs);  // Works
+</code>
+
+In this example, all four Enum cases will have a method ''%%shape%%'' inherited from ''%%Suit%%'', and will all have their own method ''%%color%%'', which they implement themselves. Case methods may be arbitrarily complex, and function the same as any other method. Additionally, magic methods such as ''%%__toString%%'' and friends may also be implemented and will behave like a normal method on an object. The one exception is ''%%__construct%%'', which it not permitted. (See below.)
+
+Static methods on Cases are not supported. Static methods on the Enum Type are supported.
+
+Inside a method on a Case, The ''%%$this%%'' variable is defined and refers to the Case instance.
+
+Note that in this case it would be a better data modeling practice to also define a ''%%SuitColor%%'' Enum Type with values Red and Black and return that instead. However, that would complicate this example.
+
+The above hierarchy is logically similar to the following class structure:
+
+<code php>
+interface Colorful {
+  public function color(): string;
+}
+
+abstract class Suit implements Colorful {
+  public function shape(): string {
+    return "Rectangle";
+  }
+}
+
+class Hearts extends Suit {
+  public function color(): string {
+    return "Red";
+  }
+}
+
+class Diamonds extends Suit {
+  public function color(): string {
+    return "Red";
+  }
+}
+
+class Clubs extends Suit {
+  public function color(): string {
+    return "Black";
+  }
+}
+  
+class Spades extends Suit {
+  public function color(): string {
+    return "Black";
+  }
+}
+</code>
+
+==== Primitive-Equivalent Cases ====
+
+By default, Enumerated Cases have no primitive equivalent. They are simply singleton objects. However, there are ample cases where an Enumerated Case needs to be able to round-trip to a database or similar datastore, so having a built-in primitive (and thus trivially serializable) equivalent defined intrinsically is useful.
+
+To define a primitive equivalent for an Enumeration, the syntax is as follows:
+
+<code php>
+enum Suit: string {
+  case Hearts = 'H';
+  case Diamonds = 'D';
+  case Clubs = 'C';
+  case Spades = 'S';
+}
+</code>
+
+Primitive backing types of ''%%int%%'', ''%%string%%'', or ''%%float%%'' are supported, and a given enumeration supports only a single type at a time. (That is, no union of ''%%int|string%%''.) If an enumeration is marked as having a primitive equivalent, then all cases must have a unique primitive equivalent defined.
+
+A Primitive-Equivalent Case will automatically down-cast to its primitive when used in a primitive context. For example, when used with ''%%print%%''.
+
+<code php>
+print Suit::Clubs;
+// prints "C"
+print "I hope I draw a " . Suit::Spades;
+// prints "I hope I draw a S".
+</code>
+
+Passing a Primitive Case to a primitive-typed parameter or return will produce the primitive value in weak-typing mode, and produce a ''%%TypeError%%'' in strict-typing mode.
+
+A Primitive-Backed enumeration also has a static method ''%%from()%%'' that is automatically generated. The ''%%from()%%'' method will up-cast from a primitive to its corresponding Enumerated Case. Invalid primitives with no matching Case will throw a ''%%ValueError%%''.
+
+<code php>
+$record = get_stuff_from_database($id);
+print $record['suit'];
+// Prints "H"
+$suit = Suit::from($record['suit']);
+$suit === Suit::Hearts; // True
+</code>
+A Primitive-Backed enumeration additionally has a method ''%%list()%%'' that returns an associated array of cases, in lexical order, keyed by their primitive equivalent.
+
+<code php>
+$list = Suit::list();
+$list === [
+'H' => Suit::Hearts,
+'D' => Suit::Diamonds,
+'C' => Suit::Clubs,
+'S' => Suit::Spades,
+]; // true
+</code>
+
+Primitive-backed Cases are not allowed to define a ''%%__toString()%%'' method, as that would create confusion with the primitive value itself. However, primitive-backed Cases are allowed to have other methods just like any other enum:
+
+<code php>
+enum Suit: string {
+  case Hearts = 'H';
+  case Diamonds = 'D';
+  case Clubs = 'C';
+  case Spades = 'S' {
+    public function color(): string { return 'Black'; }
+  }
+
+  public function color(): string
+  {
+    // ...
+  }
+}
+</code>
+
+==== Value listing ====
+
+The enumeration itself has an automatically generated static method ''%%values()%%''. ''%%values()%%'' returns an array of all defined Cases in lexical order.
+
+<code php>
+Suit::values();
+// Produces: [Suit::Hearts, Suit::Diamonds, Suit::Clubs, Suit:Spades]
+</code>
+
+If the enumeration has no primitive equivalent, the array will be packed (indexed sequentially starting from 0).  If the enumeration has a primitive equivalent, the keys will be the corresponding primitive for each enumeration.  If the enumeration is of type ''float'', the keys will be rendered as strings.  (So a primitive equivalent of ''1.5'' will result in a key of ''"1.5"''.)
+
+==== Match expressions ====
+
+''%%match%%'' expressions offer a natural and convenient way to branch logic depending on the enum value. Since every instance of a Unit Case is a singleton, it will always pass an identity check. Therefore:
+
+<code php>
+$val = Suit::Diamonds;
+
+$str = match ($val) {
+    Suit::Spades => "The swords of a soldier",
+    Suit::Clubs => "Weapons of war",
+    Suit::Diamonds => "Money for this art",
+    default => "The shape of my heart",
+}
+</code>
+
+This usage requires no modification of ''%%match%%''.  It is a natural implication of the current functionality.
+
+==== Examples ====
+
+Below are a few examples of Enums in action.
+
+=== Basic limited values ===
+
+<code php>
+enum SortOrder {
+  case ASC, DESC;
+}
+
+function query($fields, $filter, SortOrder $order) { ... }
+</code>
+
+The ''query'' function can now proceed safe in the knowledge that ''$order'' is guaranteed to be either ''SortOrder::ASC'' or ''SortOrder::DESC''.  Any other value would have resulted in a TypeError, so no further error checking or testing is needed.
+
+=== Advanced Exclusive values ===
+
+<code php>
+enum UserStatus: string {
+  case Pending = 'pending' {
+    public function label(): string { 
+      return 'Pending';
+    }
+  }
+  case Active = 'active' {
+    public function label(): string { 
+      return 'Active';
+    }
+  }
+  case Suspended = 'suspended' {
+    public function label(): string { 
+      return 'Suspended';
+    }
+  }
+  case CanceledByUser = 'canceled' {
+    public function label(): string { 
+      return 'Canceled by user';
+    }
+  }
+}
+</code>
+
+In this example, a user's status may be one of, and exclusively, ''UserStatus::Pending'', ''UserStatus::Active'', ''UserStatus::Suspended'', or ''UserStatus::CanceledByUser''.  A function can type a parameter against ''UserStatus'' and then only accept those four values, period.
+
+All four values have a polymorphic ''label()'' method, which returns a human-readable string.  That string is independent of the "machine name" primitive equivalent string, which can be used in, for example, a database field or an HTML select box.
+
+<code php>
+foreach (UserStatus::values() as $key => val) {
+  printf('<option value="%s">%s</option\n", $key, $val->label());
+}
+</code>
+
+''label()'' could alternatively be implemented as a single method using a ''match'':
+
+<code php>
+enum UserStatus: string {
+  case Pending = 'pending';
+  case Active = 'active';
+  case Suspended = 'suspended';
+  case CanceledByUser = 'canceled';
+  
+  public function label(): string {
+    return match($this) {
+      UserStatus::Pending => 'Pending',
+      UserStatus::Active => 'Active',
+      UserStatus::Suspended => 'Suspended',
+      UserStatus::CanceledByUser => 'Canceled by user',
+    };
+  }
+}
+</code>
+
+Which approach is better will depend on the particulars of what the method is supposed to do, and is left at the discretion of the developer.
+
+=== State machine ===
+
+Enums make it straightforward to express finite state machines.
+
+<code php>
+enum OvenStatus {
+
+  case Off {
+    public function turnOn() { return OvenStatus::On; }
+  };
+  
+  case On {
+    public function turnOff() { return OvenStatus::Off; }
+    public function idle() { return OvenStatus::Idle; }
+  };
+  
+  case Idle {
+    public function on() { return OvenStatus::On; }
+  };
+}
+</code>
+
+In this example, the oven can be in one of three states (Off, On, and Idling, meaning the flame is not on, but it will turn back on when it detects it needs to). However, it can never go from Off to Idle or Idle to Off; it must go through On state first. That means no tests need to be written or code paths defined for going from Off to Idle, because it’s literally impossible to even describe that state.
+
+(Additional methods are of course likely in a real implementation.)
+
+===== Backward Incompatible Changes =====
+
+“enum” becomes a language keyword, with the usual potential for naming conflicts with existing global constants.
+
+===== Open questions =====
+
+* Do we allow static methods on Enums, Cases, or both?
+
+* Is the ''case'' keyword necessary?
+
+* Should it be possible to type against a specific enum case?  Eg:
+
+<code php>
+public function stuff(Suit::Heart|Suit:Diamond $card) { ... }
+</code>
+
+
+===== Future Scope =====
+
+See the [[rfc:adts|Algebraic data types (Meta RFC)]] document.
+
+===== Voting =====
+
+This is a simple yes/no vote to include Enumerations. 2/3 required to pass.
+
+===== References =====
+
+[Survey of enumerations supported by various languages, conducted by Larry](https://github.com/Crell/enum-comparison}
