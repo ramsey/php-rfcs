@@ -1,0 +1,84 @@
+====== PHP RFC: Deprecate passing null to non-nullable arguments of internal functions ======
+  * Date: 2020-12-01
+  * Author: Nikita Popov <nikic@php.net>
+  * Target version: PHP 8.1
+  * Implementation: https://github.com/php/php-src/pull/6475
+  * Status: Under Discussion
+
+===== Introduction =====
+
+Internal functions (defined by PHP or PHP extensions) currently silently accept null values for non-nullable arguments in coercive typing mode. This is contrary to the behavior of user-defined functions, which only accept null for nullable arguments. This RFC aims to resolve this inconsistency.
+
+For example, this code currently runs without producing any diagnostics:
+
+<PHP>
+var_dump(str_contains("foobar", null));
+// bool(true)
+</PHP>
+
+The null value is silently converted into an empty string and ''str_contains()'' thus returns true.
+
+However, the behavior is different for user-defined functions. For example, consider the same function being defined as a polyfill:
+
+<PHP>
+// Inside a polyfill:
+function str_contains(string $haystack, string $needle): bool {
+    return false !== strpos($haystack, $needle);
+}
+
+var_dump(str_contains("foobar", null));
+// TypeError: str_contains(): Argument #2 ($needle) must be of type string, null given
+</PHP>
+
+After the changes in PHP 8.0, this is the only remaining fundamental difference in behavior between user-defined and internal functions. This makes it infeasible to accurately polyfill functions, and will complicate long-term projects such as migrating the standard library to be partially implemented in PHP rather than C.
+
+Historically, the reason for this discrepancy is that internal functions have supported a concept of scalar types (bool, int, float, string) long before they were introduced for user-defined functions in PHP 7.0, and the existing implementation silently accepted null values. For the new scalar type declarations introduced in PHP 7.0 an explicit choice was made to not accept null values to non-nullable arguments, but changing the existing behavior of internal functions would have been too disruptive at the time.
+
+This RFC proposes to synchronize the behavior of internal functions, by throwing a deprecation warning in PHP 8.1, which will become a TypeError in the next major version.
+
+<PHP>
+var_dump(str_contains("foobar", null));
+// Deprecated: Passing null to argument of type string is deprecated
+</PHP>
+
+===== Proposal =====
+
+If
+
+  * ''null'' is passed to an argument of an internal function,
+  * the argument is not nullable,
+  * the argument accepts at least one scalar type (one of bool, int, float, or string),
+  * coercive typing mode is used, i.e. ''strict_types=1'' is not enabled,
+
+then
+
+  * in PHP < 8.1 the null value will be silently coerced to either ''false'', ''0'', ''0.0'' or ''""''.
+  * in PHP >= 8.1 a deprecation error is thrown, but the value is still coerced and the call still takes place.
+  * in PHP >= 9.0 a TypeError is thrown, consistent with the behavior of user-defined functions.
+
+===== Backward Incompatible Changes =====
+
+Passing null to non-nullable scalar internal arguments will be forbidden in the future, which constitutes a backwards compatibility break. The behavior for user-defined functions, strict typing mode and non-scalar arguments is not affected, as all these cases already generate a ''TypeError'' for null arguments.
+
+The following shows typical ways to resolve a deprecation warning:
+
+<PHP>
+// Throws deprecation warning if $maybe_null is null.
+strlen($maybe_null);
+
+// Resolution 1: Explicitly check for null, take different control flow path.
+if (null === $maybe_null) {
+    return; // or similar
+}
+strlen($maybe_null);
+
+// Resolution 2: Explicitly specify a default value for null values.
+strlen($maybe_null ?? '');
+
+// Resolution 3: Explicitly cast the argument.
+strlen((string) $maybe_null);
+</PHP>
+
+===== Vote =====
+
+Yes/No.
