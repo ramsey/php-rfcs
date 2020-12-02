@@ -1,0 +1,84 @@
+====== PHP RFC: Restrict $GLOBALS usage ======
+  * Date: 2020-12-02
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Target Version: PHP 8.1
+
+===== Introduction =====
+
+The ''$GLOBALS'' variable currently provides a direct reference to PHP's internal symbol table. Supporting this requires significant technical complexity, affects performance of all array operations in PHP, but is only rarely used. This RFC restricts supported usages of ''$GLOBALS'' to disallow the problematic cases, while allowing most code to continue working as-is.
+
+First, some technical background on how ''$GLOBALS'' currently works is necessary. Consider this simple example:
+
+<PHP>
+$a = 1;
+$GLOBALS['a'] = 2;
+var_dump($a); // int(2)
+</PHP>
+
+The variable ''$a'' is stored inside a compiled-variable (CV) call frame slot on the virtual machine stack, which allows is to be accessed efficient. In order to allow modification of the variable through ''$GLOBALS'', the ''$GLOBALS'' array stores array elements of type ''INDIRECT'', which contain a pointer to the CV slot.
+
+As such, array operations on ''$GLOBALS'' need to check whether the acecssed element is ''INDIRECT'' and perform a de-indirection operation. However, as //any// array could potentially be the ''$GLOBALS'' array, this check has to be performed for all essentially all array operations on all arrays. This imposes an implementation and performance cost to account for a rarely used edge-case.
+
+Additionally, the ''$GLOBALS'' array is excluded from the usual by-value behavior of PHP arrays:
+
+<PHP>
+$a = 1;
+$globals = $GLOBALS; // Ostensibly by-value copy
+$globals['a'] = 2;
+var_dump($a); // int(2)
+</PHP>
+
+According to normal PHP semantics, ''$globals'' should be a copy of ''$GLOBALS'' and modifications of ''$globals'' should not have any impact on the global symbol table.
+
+Finally, there currently is a mismatch between handling of integer keys between ''$GLOBALS'' and normal PHP arrays:
+
+<PHP>
+${1} = 1;
+$GLOBALS[1] = 2;
+var_dump(${1}); // int(1)
+</PHP>
+
+Normal PHP arrays will canonicalize integral string keys to integers, while symbol tables canonicalize integer keys to strings. As ''$GLOBALS'' interfaces between these two worlds, it cannot satisfy the rules of either.
+
+===== Proposal =====
+
+The syntax ''$GLOBALS[$var]'' will no longer access an actual ''$GLOBALS'' array, it will be given special treatment akin to ''${$var}'', just for the global rather than local scope. The engine machinery for this already exists.
+
+Other accesses to ''$GLOBALS'' will return a //copy// of the global symbol table. This copy will not contain INDIRECT entries and will use correct array canonicalization.
+
+This means that the behavior will stay the same for all usages that either only read ''$GLOBALS'' or only modify it directly. However, indirect modifications of ''$GLOBALS'' will no longer work.
+
+These two examples show cases where the behavior will change:
+
+<PHP>
+// This no longer modifies $a. Arguably this is a bug fix.
+$globals = $GLOBALS;
+$globals['a'] = 1;
+</PHP>
+
+</PHP>
+// This no longer works, the global scope is not modified:
+foreach ($GLOBALS as $name => &$value) {
+    $value = 1;
+}
+
+// This continue to work fine.
+foreach ($GLOBALS as $name => $value) {
+    $GLOBALS[$name] = 1;
+}
+</PHP>
+
+TODO: Some of the details here need to be fleshed out.
+
+===== Backward Incompatible Changes =====
+
+Indirect modification of ''$GLOBALS'' will no longer be supported.
+
+In the top 2k composer packages I found 23 cases that use ''$GLOBALS'' without directly dereferecing it. However, all of these usages appear to be read-only on cursory inspection. The only exception is a ''$GLOBALS = array();'' assignment in the PhpStorm stubs, but this is not real code. Here is the full list of non-trivial ''$GLOBALS'' usage: https://gist.github.com/nikic/9fd95866f9811b349b947f63214ad7a9
+
+As such, I expect the impact of this change to be very low.
+
+===== Vote =====
+
+Yes/No.
