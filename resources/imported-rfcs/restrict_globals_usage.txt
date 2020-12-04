@@ -1,7 +1,7 @@
 ====== PHP RFC: Restrict $GLOBALS usage ======
   * Date: 2020-12-02
   * Author: Nikita Popov <nikic@php.net>
-  * Status: Draft
+  * Status: Under Discussion
   * Target Version: PHP 8.1
   * Implementation: https://github.com/php/php-src/pull/6487
 
@@ -108,13 +108,20 @@ $GLOBALS[1] = 2;
 var_dump(${1}); // int(2)
 </PHP>
 
+==== Impact on internals ====
+
+From an implementation perspective, these changes mean that ''INDIRECT'' elements no longer have to be considered when working on ordinary PHP arrays (though many places didn't do so in the first place). However, ''INDIRECT'' elements still need to be considered when working with certain special hashtables. In particular, internal symbol tables, as well as object property tables may still contain ''INDIRECT'' elements. However, these special hashtables will never escape into ordinary PHP arrays.
+
 ===== Backward Incompatible Changes =====
 
-Indirect modification of ''$GLOBALS'' will no longer be supported.
+Indirect modification of ''$GLOBALS'' will no longer be supported, which is a backwards-incompatible change.
 
-In the top 2k composer packages I found 23 cases that use ''$GLOBALS'' without directly dereferecing it. However, all of these usages appear to be read-only on cursory inspection. The only exception is a ''$GLOBALS = array();'' assignment in the PhpStorm stubs, but this is not real code. Here is the full list of non-trivial ''$GLOBALS'' usage: https://gist.github.com/nikic/9fd95866f9811b349b947f63214ad7a9
+In the top 2k composer packages I found 23 cases that use ''$GLOBALS'' without directly dereferecing it (full list: https://gist.github.com/nikic/9fd95866f9811b349b947f63214ad7a9). Based on a cursory inspection, there are only two instances where ''$GLOBALS'' is not used in a read-only way:
 
-As such, I expect the impact of this change to be fairly low. Which isn't to say non-existent: bwoebi has shared an example from his codebase that would be affected:
+  * By-ref passing of ''$GLOBALS'' in [[https://github.com/phpseclib/phpseclib/blob/7e72d923ceb8b7456a64149f10d6b04c43e9281a/phpseclib/Crypt/Random.php#L104|phpseclib]]: This code is doing something very peculiar, and I wasn't able to figure out what the purpose of the ''safe_serialize()'' function is. Possibly very old versions of PHP caused infinite recursion when serializing ''$GLOBALS''?
+  * ''$GLOBALS = array()'' in [[https://github.com/JetBrains/phpstorm-stubs/blob/master/superglobals/_superglobals.php#L10|phpstorm-stubs]]: This is not real code, so the usage is not problematic.
+
+As such, the impact of this change is expected to be fairly low. Which isn't to say non-existent: bwoebi has shared an example from his codebase that would be affected:
 
 <PHP>
 extract($GLOBALS, EXTR_REFS);
@@ -122,7 +129,7 @@ extract($GLOBALS, EXTR_REFS);
 $GLOBALS += get_defined_vars();
 </PHP>
 
-Both of these lines constitute indirect modification and will no longer work. They can be rewritten using explicit loops:
+Both of these lines constitute indirect modification and will no longer work. It is possible to rewrite them in terms of explicit loops:
 
 <PHP>
 foreach ($GLOBALS as $var => $_) $$var =& $GLOBALS[$var];
