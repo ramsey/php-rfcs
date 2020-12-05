@@ -18,7 +18,9 @@ The most popular case of enumerations is ''%%boolean%%'', which is an enumerated
 
 ===== Proposal =====
 
-==== Basic enumerations ====
+Enumerations are built on top of classes and objects.  That means, except where otherwise noted, "how would Enums behave in situation X" can be answered "the same as any other object instance."  They would, for example, pass an ''object'' type check.
+
+==== Unit enumerations ====
 
 This RFC introduces a new language construct, ''%%enum%%''. Enums are similar to classes, and share the same namespaces as classes, interfaces, and traits. They are also autoloadable the same way. An Enum defines a new type, which has a fixed, limited number of possible legal values.
 
@@ -45,7 +47,7 @@ pick_a_card('Spades');    // throws TypeError
 
 An Enumeration may have zero or more ''%%case%%'' definitions, with no maximum.  A zero-case enum is syntactically valid, if rather useless.
 
-Cases are not intrinsically backed by a primitive value. That is, ''%%Suit::Hearts%%'' is not equal to 0. Instead, each case is backed by a singleton object of that name. That means that:
+Cases are not intrinsically backed by a scalar value. That is, ''%%Suit::Hearts%%'' is not equal to 0. Instead, each case is backed by a singleton object of that name. That means that:
 
 <code php>
 $a = Suit::Spades;
@@ -57,6 +59,17 @@ $a === $b; // true
 $a instanceof Suit;         // true
 $a instanceof Suit::Spades; // true
 </code>
+
+This type of enum (with just enum cases and no related data) is known as a "Unit Enum".
+
+All Unit Enums as implemented as objects, and implement an internal ''Enum'' interface that may be typed against.  They also implement an internal ''UnitEnum'' interface.  That is one way to determine an Enum from any other object:
+
+<code php>
+Suit::Hearts instanceof Enum; // true
+Suit::Hearts instanceof UnitEnum; // true
+</code>
+
+(See below for more on the enum interfaces.)
 
 ==== Enumerated Case Methods ====
 
@@ -115,9 +128,13 @@ interface Colorful {
   public function color(): string;
 }
 
-abstract class Suit implements Colorful {
+abstract class Suit implements UnitEnum, Colorful {
   public function shape(): string {
     return "Rectangle";
+  }
+  
+  public function cases(): array {
+    // See below.
   }
 }
 
@@ -155,7 +172,7 @@ enum Size {
   case Small;
   case Medium;
   case Large;
-  
+
   public static function fromLength(int $cm) {
     return match(true) {
       $cm < 50 => static::Small,
@@ -196,11 +213,11 @@ The following is available on the Enumeration itself, not on Cases:
 
   * Static methods
 
-==== Primitive-Equivalent Cases ====
+==== Scalar Enums ====
 
-By default, Enumerated Cases have no primitive equivalent. They are simply singleton objects. However, there are ample cases where an Enumerated Case needs to be able to round-trip to a database or similar datastore, so having a built-in primitive (and thus trivially serializable) equivalent defined intrinsically is useful.
+By default, Enumerated Cases have no scalar equivalent. They are simply singleton objects. However, there are ample cases where an Enumerated Case needs to be able to round-trip to a database or similar datastore, so having a built-in scalar (and thus trivially serializable) equivalent defined intrinsically is useful.
 
-To define a primitive equivalent for an Enumeration, the syntax is as follows:
+To define a scalar equivalent for an Enumeration, the syntax is as follows:
 
 <code php>
 enum Suit: string {
@@ -211,9 +228,9 @@ enum Suit: string {
 }
 </code>
 
-Primitive backing types of ''%%int%%'', ''%%string%%'', or ''%%float%%'' are supported, and a given enumeration supports only a single type at a time. (That is, no union of ''%%int|string%%''.) If an enumeration is marked as having a primitive equivalent, then all cases must have a unique primitive equivalent defined explicitly.  There are no auto-generated primitive equivalents (e.g., sequential integers).
+Scalar backing types of ''%%int%%'', ''%%string%%'', or ''%%float%%'' are supported, and a given enumeration supports only a single type at a time. (That is, no union of ''%%int|string%%''.) If an enumeration is marked as having a scalar equivalent, then all cases must have a unique scalar equivalent defined explicitly.  There are no auto-generated scalar equivalents (e.g., sequential integers).
 
-A Primitive-Equivalent Case will automatically down-cast to its primitive when used in a primitive context. For example, when used with ''%%print%%''.
+A Scalar Case will automatically down-cast to its scalar when used in a scalar context. For example, when used with ''%%print%%''.
 
 <code php>
 print Suit::Clubs;
@@ -222,9 +239,9 @@ print "I hope I draw a " . Suit::Spades;
 // prints "I hope I draw a S".
 </code>
 
-Passing a Primitive Case to a primitive-typed parameter or return will produce the primitive value in weak-typing mode, and produce a ''%%TypeError%%'' in strict-typing mode.
+Passing a Scalar Case to a scalar-typed parameter or return will produce the scalar value in weak-typing mode, and produce a ''%%TypeError%%'' in strict-typing mode.
 
-A Primitive-Backed enumeration also has a static method ''%%from()%%'' that is automatically generated. The ''%%from()%%'' method will up-cast from a primitive to its corresponding Enumerated Case. Invalid primitives with no matching Case will throw a ''%%ValueError%%''.
+Scalar enums implement both the internal ''UnitEnum'' interface and an additional ''ScalarEnum'' interface.  ''ScalarEnum'' exposes an additional static method ''%%from()%%'' that is automatically generated. The ''%%from()%%'' method will up-cast from a scalar to its corresponding Enumerated Case. Invalid scalars with no matching Case will throw a ''%%ValueError%%''.
 
 <code php>
 $record = get_stuff_from_database($id);
@@ -234,7 +251,7 @@ $suit = Suit::from($record['suit']);
 $suit === Suit::Hearts; // True
 </code>
 
-Primitive-backed Cases are not allowed to define a ''%%__toString()%%'' method, as that would create confusion with the primitive value itself. However, primitive-backed Cases are allowed to have other methods just like any other enum:
+Scalar cases may have methods like any other enum.
 
 <code php>
 enum Suit: string {
@@ -254,14 +271,20 @@ enum Suit: string {
 
 ==== Value listing ====
 
-The enumeration itself has an automatically generated static method ''%%cases()%%''. ''%%cases()%%'' returns an array of all defined Cases in lexical order.
+The ''UnitEnum'' interface includes a static method ''%%cases()%%''. ''%%cases()%%'' returns an array of all defined Cases in lexical order.
 
 <code php>
 Suit::cases();
 // Produces: [Suit::Hearts, Suit::Diamonds, Suit::Clubs, Suit:Spades]
 </code>
 
-If the enumeration has no primitive equivalent, the array will be packed (indexed sequentially starting from 0).  If the enumeration has a primitive equivalent, the keys will be the corresponding primitive for each enumeration.  If the enumeration is of type ''float'', the keys will be rendered as strings.  (So a primitive equivalent of ''1.5'' will result in a key of ''"1.5"''.)
+If the enumeration is not a Scalar Enum, the array will be packed (indexed sequentially starting from 0).  If the enumeration is a Scalar Enum, the keys will be the corresponding scalar for each enumeration.  If the enumeration is of type ''float'', the keys will be rendered as strings.  (So a scalar enum with a value of ''1.5'' will result in a key of ''"1.5"''.)
+
+The ''ScalarEnum'' interface additionally has a method ''%value()%%'' that returns the scalar value for a given case.
+
+<code php>
+'D' == Suit::Diamonds->value(); // true
+</code>
 
 ==== Attributes ====
 
@@ -299,13 +322,13 @@ Enums are reflectable using a ''ReflectionEnum'' class, which extends ''Reflecti
   * ''hasCase(string $name): bool'' - Returns true if there is a Case defined with that name.  For instance, ''$r->hasCase('Hearts')'' returns true.
   * ''getCases(): array'' - Returns an array of ''ReflectionCase'' objects.
   * ''getCase(string $name): ReflectionCase'' - Returns a single ''ReflectionCase'' object for the corresponding case.  If not found, it throws a ''ReflectionException''.
-  * ''hasType(): bool'' - Returns true if the Enum has a primitive equivalent type.  False if not.
-  * ''getType(): ReflectionType'' - Returns the primitive equivalent type of the Enum, if any.  If it doesn't have one, it returns a ''ReflectionType'' on ''null''.
+  * ''hasType(): bool'' - Returns true if the Enum has a scalar equivalent type.  False if not.
+  * ''getType(): ReflectionType'' - Returns the scalar equivalent type of the Enum, if any.  If it doesn't have one, it returns a ''ReflectionType'' on ''null''.
 
 ''ReflectionCase'' represents an individual Case in an enumeration.  It also extends ''ReflectionClass'' and stubs out irrelevant methods.  It also has the following methods:
 
   * ''getEnum(): ReflectionEnum'' - Returns a reflection of the Enum that contains the Case.
-  * ''getPrimitive(): ?int|string|float'' - Returns the primitive equivalent value defined for the case, if defined.  If one is not defined, it returns ''null''.
+  * ''getScalar(): ?int|string|float'' - Returns the scalar equivalent value defined for the case, if defined.  If one is not defined, it returns ''null''.
   * ''getInstance(): Enum'' - Returns the singleton instance of the Case, as though it were read off of the Enum.
 
 ==== Examples ====
@@ -410,9 +433,29 @@ In this example, the oven can be in one of three states (Off, On, and Idling, me
 
 (Additional methods are of course likely in a real implementation.)
 
+==== New interfaces ====
+
+As noted above, this RFC defines three additional internal interfaces.  These interfaces are available to make it possible for user code to determine if a given object is an enumeration, and if so what type.  User-defined classes may not implement or extend these interfaces directly.
+
+<code php>
+interface Enum {}
+
+interface UnitEnum extends Enum {
+  public function cases(): array;
+}
+
+interface ScalarEnum extends Enum {
+  public function value(): int|string|float;
+  
+  public static function from(int|string|float $scalar): static;
+}
+</code>
+
 ===== Backward Incompatible Changes =====
 
 “enum” becomes a language keyword, with the usual potential for naming conflicts with existing global constants.
+
+The global scoped internal interfaces ''Enum'', ''UnitEnum'', and ''ScalarEnum'' are defined.
 
 ===== Open questions =====
 
