@@ -1,4 +1,4 @@
-====== PHP RFC: Add is_list() ======
+====== PHP RFC: Add is_list(mixed $value): bool ======
   * Version: 0.1
   * Date: 2020-12-19
   * Author: Tyson Andre <tandre@php.net>
@@ -12,20 +12,20 @@ PHP's ''array'' data type is rare in that it supports both integer and string ke
 
 ===== Proposal =====
 
-Add a new function ''is_list(mixed $value): bool'' that will return true if the type of ''$value'' is mixed and the array keys are ''0 .. count($value)-1'' in that order. Otherwise, it returns false.
+Add a new function ''is_list(mixed $value): bool'' that will return true if the type of ''$value'' is ''array'' and the array keys are ''0 .. count($value)-1'' in that order. Otherwise, it returns false.
 
 This RFC doesn't change PHP's type system and doesn't add new type hints.
 
-The functionality is equivalent to the below polyfill, but a native implementation can quickly return true by checking ''HT_IS_PACKED(array) && HT_IS_WITHOUT_HOLES(array)'', which is what ''json_encode()'' already uses.
+The functionality is equivalent to the below polyfill:
 
 <code php>
 function is_list(mixed $value): bool {
     if (!is_array($value)) { return false; }
     
-    $j = 0;
+    $expectedKey = 0;
     foreach ($value as $i => $_) {
-        if ($i !== $j) { return false; }
-        $j++;
+        if ($i !== $expectedKey) { return false; }
+        $expectedKey++;
     }
     return true;
 }
@@ -34,16 +34,27 @@ $x = [1 => 'a', 0 => 'b'];
 var_export(is_list($x));  // false because keys are out of order
 unset($x[1]);
 var_export(is_list($x));  // true
+
+// Pitfalls of simpler polyfills - NAN !== NAN
+$x = ['key' => 2, NAN];
+unset($x['key']);
+var_export($x === array_values($x));  // false because NAN !== NAN
+var_export($x);  // array (0 => NAN)
+var_export(is_list($x));  // true because keys are consecutive integers starting from 0
 </code>
 
-Note that there are pitfalls in writing a shorter polyfill. For example, ''array_values($array) === $array'' would be false for some ways of building the array ''[0 => NAN]'' because ''NAN !== NAN'' (Not A Number), and ''array_keys($array) === range(0, count($array) - 1)'' is wrong for the empty array.
+Note that there are pitfalls in writing a correct polyfill/substitute. For example, ''array_values($array) === $array'' would be false for some arrays containing ''NAN'', and ''array_keys($array) === range(0, count($array) - 1)'' is wrong for the empty array.
+
+The native implementation will quickly return true for most lists by checking the C macro ''HT_IS_PACKED(array) && HT_IS_WITHOUT_HOLES(array)''. This optimization is already used by ''json_encode()''.
 
 ==== Example Use Cases ====
 
-  - Throwing or warning in a library, framework, or API if the passed in value is not a list with elements in order. For example, ''array_filter($list)'' returns a list with gaps in it.
-  - Serializers written in PHP, or other use cases that benefits from validating that data conforms to an expected format.
-  - Warning about the use of named arguments with varargs (''function example(...$args) {}'') in code that does not expect named arguments.
-  - Having an efficient, correct, and understandable way to check that an array is actually a list that doesn't have the pitfalls mentioned earlier.
+  - Having an efficient, correct, and readable way to check that an array is actually a list (that doesn't have the pitfalls mentioned earlier).
+  - Making it more efficient and straightforward to check assumptions about data (In most other languages, there is already a non-associative list/array type that could be enforced during compilation or at runtime with the equivalent of ''instanceof'')
+  - Throwing or warning in a library, framework, or API if the passed in value is not a list with elements in order and without gaps. For example, a potential source of bugs is that ''array_filter($list)'' returns a list with gaps in it, and ''array_values(array_filter($list))'' should be used instead.
+  - Serializers or data encoders written in PHP, or other use cases that require or benefit from checking if data conforms to an expected format.
+  - Detecting invoking a function with named arguments in variable arguments in code that does not expect named arguments (e.g. ''example(argname: $value);'' for ''function example(...$args) {}'').
+
 
 ===== Proposed PHP Version(s) =====
 8.1
@@ -64,12 +75,57 @@ Long-term, if this sees wide enough adoption to affect performance on widely use
 Yes/No, requiring 2/3 majority
 
 ===== References =====
+
   - https://externals.io/message/109760
+
 ===== Rejected Features =====
 
+==== Alternate implementations ====
 Making the signature ''array_is_list(array $value): bool'' was rejected because it would lead to much more verbose code such as ''is_array($value) && array_is_list($value)'' and more frequent TypeErrors for null/false.
 Similar to ''is_numeric()'' and ''is_callable()'', ''is_list()'' returns false instead of throwing an error for types that can't possibly be lists.
 
 This deliberately only returns true for arrays with sequential keys and a start offset of 0. It returns false for ''[1=>'first', 2=>'second']''.
 
-This does not attempt to change php's type system. Static analyzers may benefit from inferring key types from ''is_list()'' conditionals seen in code for more accurate information about array keys. https://docs.hhvm.com/hack/built-in-types/arrays may be of interest to anyone who is interested in stricter alternatives to php's arrays.
+This deliberately always returns false for objects, e.g. ''ArrayObject'' or ''SplFixedArray''.
+
+==== Changes to PHP's type system ====
+
+**This RFC does not attempt to change php's type system.** External static analyzers may still benefit from inferring key types from ''is_list()'' conditionals seen in code - ''is_list()'' conditionals would give more accurate information about array keys that can be used to detect issues or avoid false positives. (Phan, Psalm, and PHPStan are all static analyzers that support the unofficial phpdoc type ''list<T>'', which is used for arrays that would satisfy ''is_list()'').
+
+Any attempt to change php's type system would need to deal with references and the global scope - e.g. what would happen if an array was passed to `list &$val` but modified to become a non-list from a different callback or through ''asort()''.
+
+Additionally, I'd personally expect that changes to the type system that were backwards incompatible would be possible, but unpopular and difficult to implement. HHVM is a project that was initially compatible with php, but has recently dropped compatibility with PHP. https://docs.hhvm.com/hack/built-in-types/arrays may be of interest to anyone who is interested in ways to migrate to stricter alternatives to php's arrays, but that required an entirely different language mode to use (''<?hh''), which doesn't seem viable for PHP itself (for reasons such as splitting the ecosystem and being incompatible with older php versions).
+
+The thread https://externals.io/message/109760#109812 discussed this, but I'm not aware of anyone working on an implementation of ''list''/''vec'', and supporting adding ''list''/''vec'' to the type system would be a lot of work for PECL extensions, language design, backwards compatibility concerns, etc. (It would also potentially be an issue with serializing/unserializing for data sent to/from older php versions (e.g. memcache, $_SESSION data, etc.))
+
+
+
+<blockquote>
+Hack introduced the vec type (with value semantics) in 2016
+after they'd experimented first with Vector (object semantics). Use of
+Vector is now discouraged.
+
+Details here: https://github.com/facebook/hhvm/issues/6451
+
+FB/Hack appears to be in the multi-year process of moving all PHP arrays to
+one of [vec/dict/keyset]. That's likely not an option for PHP itself, but
+having the option of a vec equivalent (in this proposal "list") would
+make sense, I think.
+</blockquote>
+
+https://externals.io/message/109760#109781
+
+<blockquote>
+Most users don't realize that PHP's arrays-not-really-arrays have caused millions of dollars in security breaches in the past. :-) They're dangerous and to be avoided whenever possible.
+
+I'm very open to a list/sequence type, but as others have noted there's a whole crapload of details to sort out to make it viable. In particular:
+
+  * Is it an effective subclass of array? IMO, no. It should have absolutely no auto-conversion to/from an array whatsoever of any kind, period. Keep them as separate as possible.
+  * Should it even have random-access indexes? Honestly I'd say no; Just support adding, removing, and iteration and generate the indexes on the fly when iterating if necessary.
+  * Should they pass like arrays or like objects? Many questions here.
+  * Should they be mutable or immutable? I could argue for either one effectively, I think, though I'd honestly favor immutable.
+  * Are they iterable? Presumably, but does that have any weird implications for iterables that implicitly assume there are keys? How's that work?
+  * Does it make sense to add them without type enforcement via generics? Lists + Generics would be lovely, but as we've seen Generics are Hard(tm) and Not Imminent(tm). But would adding them now make a generic version harder in the future? (I've no idea.)
+  * Besides add/remove/iterate, what other baked-in functionality should they have? Eg, can they be mapped/filtered/reduced? It would really suck to revisit lists and not fix that disconnect in the API. (Insert me talking about comprehensions and stuff here.) Ideally this would happen as part of a larger review of how collections work at various levels, which are currently highly clunky.
+  * Those are all solvable problems (and I've likely forgotten several), but they would have to be thought through extensively before an implementation could be viable.
+</blockquote>
