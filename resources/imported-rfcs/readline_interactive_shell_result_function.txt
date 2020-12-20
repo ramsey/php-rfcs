@@ -1,0 +1,92 @@
+====== PHP RFC: Configurable callback to dump results of expressions in `php -a` ======
+  * Version: 0.1
+  * Date: 2020-12-10 (use today's date here)
+  * Author: Tyson Andre, tandre@php.net
+  * Status: Draft
+  * Implementation: https://github.com/php/php-src/pull/5962/files
+  * First Published at: https://wiki.php.net/rfc/readline_interactive_shell_result_function
+
+===== Introduction =====
+
+Many other REPLs (Read-Eval-Print Loops) that I'm familiar with print a (possibly truncated) representation of the result of expressions, but PHP doesn't.
+It would be useful to allow users to extend the functionality of the default interactive php shell (''php -a''), possibly with ''auto_prepend_file'' or through use of command wrappers/aliases, or after loading the shell.
+Prior to this RFC, there was no way to extend the interactive php shell in this way.
+(I've seen https://github.com/bobthecow/psysh mentioned as an alternative for ''php -a'' while investigating this, but that's a shell written from scratch, and doesn't have some functionality from ''php -a'' such as tolerance of fatal errors)
+
+===== Proposal =====
+
+Add a new function ''readline_interactive_shell_result_function'' when starting an interactive PHP session with ''php -a''. This function is only provided for interactive shells - it does not exist for non-interactive php processes, even when ''extension_loaded('readline') === true''.
+
+Using this, users can configure callables to be run every time a statement containing a single expression such as ''2+2;'' or ''$x = call_function();'' is evaluated (but not non-expressions such as ''class X{}'' or combinations of expressions such as ''$x = 1; $y = $x*2;''. A very basic example of using this would be:
+
+<code php>
+php -a
+Interactive shell
+
+php > readline_interactive_shell_result_function(
+php (     function (string $code, $result) {
+php (         echo "Saw " . trim($code) . "\n";
+php (         echo json_encode($result);
+php (     });
+php > 2+2;
+Saw 2+2;
+4
+</code>
+
+Real implementations may be much more complex, and make use of parsers such as https://github.com/nikic/PHP-Parser or https://github.com/nikic/php-ast to check if the expression in question is an assignment, call to print(), etc.
+
+===== Backward Incompatible Changes =====
+None, only interactive sessions are affected, and only when this functionality is enabled.
+
+===== Proposed PHP Version(s) =====
+8.1
+
+===== RFC Impact =====
+==== To SAPIs ====
+This functionality is available in interactive CLI sessions. Other SAPIs are unaffected.
+
+==== php.ini Defaults ====
+If there are any php.ini settings then list:
+  * hardcoded default values: ''cli.enable_interactive_shell_result_function = On''
+  * php.ini-development values: ''cli.enable_interactive_shell_result_function = On'' (or omitted, cli.pager and cli.prompt currently exist but not documented in those files)
+  * php.ini-production values: ''cli.enable_interactive_shell_result_function = On''
+
+===== Future Scope =====
+
+==== Providing a default callback to dump expression results ====
+
+This RFC is minimal and does not provide a default implementation for rendering values of expressions (i.e. there is no callback by default). Providing a default is feasible, but there are a variety of choices that could be made (e.g. var_dump vs var_export vs shorter JSON-like equivalents for simple arrays, handling of recursive data structures, truncating output, etc).
+
+  * In order to provide more extensive default handlers for tab completion and rendering of evaluated expressions, it may be useful to bundle a parser written in php with the interactive shell. The heuristics currently written in C are very limited and not aware of context beyond the most recent tokens.
+
+<blockquote>
+Miscellaneous thoughts on implementation details:
+
+  * Bundling an actual parser (e.g. https://github.com/nikic/PHP-Parser) would help in properly analyzing ''Foo::$var-><TAB>''
+by being less reliant on heuristics (e.g. checking if the token ''$var'' was a variable or a property, making it easier to collect local variables, etc).
+
+Is packaging a parser practical for a ''phpi'' binary (e.g. for package managers, maintainers of php, other reasons)?
+
+A parser may fail for code using new token types until the parser gets updated to handle the new token types. This stops being a concern after feature freezes.
+Looping over ''@token_get_all()'' and bailing out on an unknown token type may help with that.
+
+How would crash/bug fixes of phpi or the parser be handled in patch releases of php if this was released with php?
+
+Automatically rewriting the code to namespace the parser and its dependencies with ''\PHP\Internal\BundledPhpParser''
+would let ''phpi'' be used with projects that depend on a different php-parser version.
+
+(clarifications may be necessary to indicate to end users that the bundled parser copy won't get updates or support outside of php minor releases,
+should not be used by libraries/applications and that it won't support newer php syntax, and possibly other clarifications)
+</blockquote>
+
+==== Supporting rendering the last expression in a list of statements ====
+
+This was left out to simplify the implementation, but is probably doable by rewriting the C AST before evaluating the snippet for safe node kinds.
+(i.e. change ''foo(); bar();'' to ''foo(); return (bar());'')
+
+===== Proposed Voting Choices =====
+Yes/No, requiring 2/3 majority
+
+===== References =====
+
+  * https://externals.io/message/111073 "Improving the usability of PHP's interactive shell? (completions, displaying expression results, custom syntax)"
