@@ -1,0 +1,167 @@
+====== PHP RFC: Object scoped PRNG Implemantations. ======
+  * Version: 0.1
+  * Date: 2020-12-20
+  * Author: Go Kudo <zeriyoshi@gmail.com>
+  * Status: Draft
+  * Implementation: WIP
+  * First Published at: https://wiki.php.net/rfc/object_scope_prng
+
+===== Introduction =====
+
+PHP currently provides the mt_srand() and mt_rand() functions based on the Meresenne Twister as PRNGs.
+However, since these functions keep their state in global space, unintended function calls may cause inconsistency even for the same seed value.
+
+<code php>
+mt_srand(1234);
+foo();
+mt_rand() === 411284887; // false
+
+function foo() {
+    mt_rand(); // code added
+}
+</code>
+
+This is inappropriate for applications that require consistency in the generated values (game logic, test code, etc.).
+
+The global state of MT is also used by other functions that use random numbers, and this problem is further exacerbated when the consistency of the results is required by seeding with specific values. (Of course, you are right that such usage is a bad example.)
+
+<code php>
+mt_srand(1234);
+$arr = [1, 2, 3, 4, 5];
+shuffle($arr);
+echo print_r($arr, true); // This result is always consistent.
+
+/*
+Array
+(
+    [0] => 3
+    [1] => 2
+    [2] => 5
+    [3] => 4
+    [4] => 1
+)
+*/
+</code>
+
+One possible solution is to implement the PRNG in pure PHP. There is actually a userland library [1], but it is not fast enough for PHP at the moment. (However, this may be improved by JIT).
+
+I have created an extension for PHP to improve these [2]. This could be used to consider what specific goals this RFC is trying to achieve.
+
+===== Proposal =====
+
+Implements an object-scoped PRNG in PHP, providing methods equivalent to functions that use RNG results.
+
+First, it provides the following interface. Namespaces, including their availability, they are stub.
+Users can implement this interface through extensions or PHP code.
+
+<code php>
+namesapce PRNG;
+
+interface PRNGInterface
+{
+    public function __construct(int $seed);
+    public function next(): int;
+    public function range(int $min, int $max): int;
+    public function shuffle(array &$array): bool;
+    public function str_shuffle(string $string): string;
+    public function arrayRand(array $array, int $num = 1): int|string|array;
+}
+</code>
+
+The next step is to implement PRNGs that implement the interface. These may be serializable, Being serializable helps to preserve the state.
+
+<code php>
+namespace PRNG;
+
+class XorShift128Plus implements PRNGInterface
+{
+    public function __construct(int $seed) {}
+    public function next(): int {}
+    public function next64(): int {}
+    public function range(int $min, int $max): int {}
+    public function shuffle(array &$array): bool {}
+    public function arrayRand(array $array, int $num = 1): int|string|array {}
+    public function strShuffle(string $string): string {}
+    public function __serialize(): string {}
+    public function __unserialized(string $serialized): static {}
+}
+
+class MT19937 implements PRNGInterface
+{
+    public function __construct(int $seed) {}
+    public function next(): int {}
+    public function next64(): int {}
+    public function range(int $min, int $max): int {}
+    public function shuffle(array &$array): bool {}
+    public function arrayRand(array $array, int $num = 1): int|string|array {}
+    public function strShuffle(string $string): string {}
+    public function __serialize(): string {}
+    public function __unserialized(string $serialized): static {}
+}
+
+</code>
+
+===== Backward Incompatible Changes =====
+
+With the provides of new classes, some class names (or namespaces) will no longer be available in userland.
+
+===== Proposed PHP Version(s) =====
+
+8.1
+
+===== RFC Impact =====
+==== To SAPIs ====
+none
+
+==== To Existing Extensions ====
+orng [[https://pecl.php.net/package/orng]] : it is a PECL extension that provides almost the same functionality. If the interface is provided by the core in the future, it will need to be supported. And that's me.
+
+==== To Opcache ====
+none
+
+==== New Constants ====
+none
+
+==== php.ini Defaults ====
+none
+
+===== Open Issues =====
+=== Why do we need this feature in the core and not in the extension? ===
+In order to use the features related to pseudo-random numbers that PHP currently provides, an understanding of the core is required. If this proposal is implemented, users will be able to use pseudo-random numbers under the easy to understand concept of objects. This is a useful improvement to the overall functionality of the language.
+
+===== Unaffected PHP Functionality =====
+It does not affect any related existing functions.
+  * mt_srand()
+  * mt_rand()
+  * shuffle()
+  * str_shuffle()
+  * array_rand()
+
+===== Proposed Voting Choices =====
+Yes/No, requiring 2/3 majority
+
+There are a few additional options for implementation.
+
+<doodle title="In which module will you implement these?" auth="user" voteType="single" closed="true">
+   * ext/standard
+   * ext/prng (new module)
+</doodle>
+
+<doodle title="To which namespace should these classes and interfaces belong?" auth="user" voteType="single" closed="true">
+   * Top Level (\PRNGInterface)
+   * "PRNG" namespace (\PRNG\PRNGInterface)
+</doodle>
+
+<doodle title="Which set of PRNGs should be provided as standard?" auth="user" voteType="single" closed="true">
+   * MT19937 (64bit) / XorShift128+
+   * MT19937
+   * XorShift128+
+   * Interfaces only.
+</doodle>
+
+===== Patches and Tests =====
+WIP (A rough overview is given in the orng extension [2])
+
+===== References =====
+  * [1] https://github.com/savvot/random
+  * [2] https://github.com/zeriyoshi/php-ext-orng
