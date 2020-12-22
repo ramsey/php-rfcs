@@ -1,5 +1,5 @@
 ====== PHP RFC: Object scoped PRNG Implementations. ======
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2020-12-20
   * Author: Go Kudo <zeriyoshi@gmail.com>
   * Status: Draft
@@ -23,6 +23,8 @@ function foo() {
 
 This is inappropriate for applications that require consistency in the generated values (game logic, test code, etc.).
 
+In other languages, RNGs are implemented as objects, so this problem doesn't exists. [3] [4]
+
 The global state of MT is also used by other functions that use random numbers, and this problem is further exacerbated when the consistency of the results is required by seeding with specific values. (Of course, you are right that such usage is a bad example.)
 
 <code php>
@@ -43,7 +45,9 @@ Array
 */
 </code>
 
-One possible solution is to implement the PRNG in pure PHP. There is actually a userland library [1], but it is not fast enough for PHP at the moment. (However, this may be improved by JIT).
+One possible solution is to implement the PRNG in pure PHP. There is actually a userland library [1], but it is not fast enough for PHP at the moment, including with JIT (Benchmark results are available at Open Issues.)
+
+This implementation will also allow us to support the PHP paradigm, which will become even more complex in the future.
 
 I have created an extension for PHP to improve these [2]. This could be used to consider what specific goals this RFC is trying to achieve.
 
@@ -51,13 +55,14 @@ I have created an extension for PHP to improve these [2]. This could be used to 
 
 Implements an object-scoped PRNG in PHP, providing methods equivalent to functions that use RNG results.
 
-First, it provides the following interface. Namespaces, including their availability, they are stub.
+First, it provides the following interface. Namespaces is a stub. These will be shown in the voting options.
+
 Users can implement this interface through extensions or PHP code.
 
 <code php>
-namesapce PRNG;
+namesapce PHP\PRNG;
 
-interface PRNGInterface
+interface Randomizer
 {
     public function __construct(int $seed);
     public function next(): int;
@@ -71,9 +76,9 @@ interface PRNGInterface
 The next step is to implement PRNGs that implement the interface. These may be serializable, Being serializable helps to preserve the state.
 
 <code php>
-namespace PRNG;
+namespace PHP\PRNG;
 
-class XorShift128Plus implements PRNGInterface
+class XorShift128Plus implements Randomizer
 {
     public function __construct(int $seed) {}
     public function next(): int {}
@@ -85,7 +90,7 @@ class XorShift128Plus implements PRNGInterface
     public function __unserialize(string $serialized): static {}
 }
 
-class MT19937 implements PRNGInterface
+class MT19937 implements Randomizer
 {
     public function __construct(int $seed) {}
     public function next(): int {}
@@ -124,6 +129,41 @@ none
 none
 
 ===== Open Issues =====
+=== Why implement a method that is almost identical to a traditional function? ===
+It is intended to improve interoperability with conventional code. Users can modify the implementation to be safe against state by simply replacing the existing code.
+
+=== With JIT, won't the userland implementation reach a useful speed? ===
+Comparing the speed of the userland implementation of XorShift128+ and the orng extension.
+
+**PHP 8.0**
+<code shell>
+$ time php -r 'require __DIR__ . "/vendor/savvot/random/src/AbstractRand.php"; require __DIR__ . "/vendor/savvot/random/src/XorShiftRand.php"; $r = new Savvot\Random\XorShiftRand(1234); for ($i = 0; $i < 1000000; $i++) { $r->random(); }'
+
+real	0m0.441s
+user	0m0.429s
+sys	0m0.010s
+</code>
+
+**PHP 8.0 + OPcache JIT**
+<code shell>
+$ time php -dopcache.jit_buffer_size=100M -dopcache.enable_cli=1 -r 'require __DIR__ . "/vendor/savvot/random/src/AbstractRand.php"; require __DIR__ . "/vendor/savvot/random/src/XorShiftRand.php"; $r = new Savvot\Random\XorShiftRand(1234); for ($i = 0; $i < 1000000; $i++) { $r->random(); }'
+
+real	0m0.155s
+user	0m0.139s
+sys	0m0.015s
+</code>
+
+**PHP 8.0 + orng**
+<code shell>
+$ time php -r '$r = new \ORNG\XorShift128Plus(1234); for ($i = 0; $i < 1000000; $i++) { $r->next(); }'
+
+real	0m0.056s
+user	0m0.048s
+sys	0m0.008s
+</code>
+
+This provides a significant improvement, but still slow from the C implementation.
+
 === Why do we need this feature in the core and not in the extension? ===
 In order to use the features related to pseudo-random numbers that PHP currently provides, an understanding of the core is required. If this proposal is implemented, users will be able to use pseudo-random numbers under the easy to understand concept of objects. This is a useful improvement to the overall functionality of the language.
 
@@ -146,15 +186,15 @@ There are a few additional options for implementation.
 </doodle>
 
 <doodle title="To which namespace should these classes and interfaces belong?" auth="user" voteType="single" closed="true">
-   * Top Level (\PRNGInterface)
-   * "PRNG" namespace (\PRNG\PRNGInterface)
+   * Top Level (\Randomizer)
+   * "PRNG" namespace (\PRNG\Randomizer)
+   * "PHP\PRNG" namespace (\PHP\PRNG\Randomizer)
 </doodle>
 
 <doodle title="Which set of PRNGs should be provided as standard?" auth="user" voteType="single" closed="true">
    * MT19937 (64bit) / XorShift128+
-   * MT19937
+   * MT19937 (64bit)
    * XorShift128+
-   * Interfaces only.
 </doodle>
 
 ===== Patches and Tests =====
@@ -163,3 +203,5 @@ WIP (A rough overview is given in the orng extension [2])
 ===== References =====
   * [1] https://github.com/savvot/random
   * [2] https://github.com/zeriyoshi/php-ext-orng
+  * [3] https://docs.microsoft.com/en-us/dotnet/api/system.random
+  * [4] https://docs.oracle.com/javase/8/docs/api/java/util/Random.html
