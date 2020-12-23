@@ -1078,6 +1078,71 @@ Blocking code (such as ''file_get_contents()'') will continue to block the entir
 
 As fibers allow transparent use of asynchronous I/O, blocking implementations can be replaced by non-blocking implementations without affecting the entire call stack. If an internal scheduler is available in the future, internal functions such as ''sleep()'' could be made non-blocking by default.
 
+=== How do various fibers access the same memory? ===
+
+All fibers exist within a single thread. Only a single fiber may execute at a time, so memory cannot be accessed or modified simultaneously by multiple fibers, unlike threads which may modify memory simultaneously.
+
+As fibers are suspended and resumed, execution of multiple fibers that access the same memory can be interleaved. Thus a running fiber may modify memory depended upon by another suspended fiber. There are various strategies to address this problem, including mutexes, semaphores, memory parcels, and channels. This RFC does not provide any such implementations as these can be implemented in user space code using the proposed fiber API. Below is an example implementation of a mutex using the proposed fiber API and the ''FiberScheduler'' implementation from the first example.
+
+<code php>
+class Mutex
+{
+    private Scheduler $scheduler;
+    private SplQueue $queue;
+    private bool $locked = false;
+
+    public function __construct(Scheduler $scheduler)
+    {
+        $this->scheduler = $scheduler;
+        $this->queue = new SplQueue;
+    }
+
+    public function acquire(): Lock
+    {
+        if ($this->locked) {
+            $this->queue->push(Fiber::this());
+            Fiber::suspend($this->scheduler);
+        }
+
+        $this->locked = true;
+
+        return new Lock(function (): void {
+            if ($this->queue->isEmpty()) {
+                $this->locked = false;
+                return;
+            }
+
+            $fiber = $this->queue->pop();
+            $this->scheduler->defer(fn() => $fiber->resume());
+        });
+    }
+}
+
+class Lock
+{
+    private \Closure $release;
+
+    public function __construct(\Closure $release)
+    {
+        $this->release = $release;
+    }
+
+    public function __destruct()
+    {
+        $this->release();
+    }
+
+    public function release(): void
+    {
+        if (isset($this->release)) {
+            $release = $this->release;
+            unset($this->release);
+            ($release)();
+        }
+    }
+}
+</code>
+
 === Why add this to PHP core? ===
 
 Adding this capability directly in PHP core makes it widely available on any host providing PHP. Often users are not able to determine what extensions may be available in a particular hosting environment, are unsure of how to install extensions, or do not want to install 3rd-party extensions. With fibers in PHP core, any library author may use the feature without concerns for portability.
