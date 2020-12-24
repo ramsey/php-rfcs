@@ -1,5 +1,5 @@
 ====== PHP RFC: Object scoped PRNG Implementations. ======
-  * Version: 0.2
+  * Version: 0.3
   * Date: 2020-12-20
   * Author: Go Kudo <zeriyoshi@gmail.com>
   * Status: Draft
@@ -22,6 +22,7 @@ function foo() {
 </code>
 
 This is inappropriate for applications that require consistency in the generated values (game logic, test code, etc.).
+These global states also affect the forked child processes. In fact, the Swoole extension has been alerted to this behavior. [5]
 
 In other languages, RNGs are implemented as objects, so this problem doesn't exists. [3] [4]
 
@@ -45,7 +46,9 @@ Array
 */
 </code>
 
-One possible solution is to implement the PRNG in pure PHP. There is actually a userland library [1], but it is not fast enough for PHP at the moment, including with JIT (Benchmark results are available at Open Issues.)
+Therefore, it may be a good idea to consider deprecating global state-dependent RNG functions in the future.
+
+One currently possible userland solution is to implement the PRNG in pure PHP. There is actually a userland library [1], but it is not fast enough for PHP at the moment, including with JIT (Benchmark results are available at Open Issues.)
 
 This implementation will also allow us to support the PHP paradigm, which will become even more complex in the future.
 
@@ -62,30 +65,42 @@ Users can implement this interface through extensions or PHP code.
 <code php>
 namesapce PHP\PRNG;
 
-interface RandomGenerator
+interface RNGInterface
 {
     public function __construct(int $seed);
-    public function next(): int;
-    public function range(int $min, int $max): int;
-    public function shuffle(array &$array): bool;
-    public function strShuffle(string $string): string;
-    public function arrayRand(array $array, int $num = 1): int|string|array;
+    public function nextInt(?int $min = null, ?int $max = null): int;
+    public function nextDouble(): double; // maybe non-needed.
+    public function nextByte(int $length): string;
 }
 </code>
+
+Next, Create an interface with methods to replace PHP's internal MT state-dependent functions. This will inherit from the previous interface.
+Behavior of these functions is not consistent and may need to be revised. but it also has the advantage that simple substitution is possible.
+
+<code php>
+namespace PHP\PRNG;
+
+interface RandomInterface extends RNGInterface
+{
+    public function shuffle(array &array): bool; // replacement of shuffle()
+    public function stringShuffle(string $string): string; // replacement of str_shuffle()
+    public function arrayRandom(array $array): int|string|array; // replacement of array_rand()
+}
 
 The next step is to implement PRNGs that implement the interface. These may be serializable, Being serializable helps to preserve the state.
 
 <code php>
 namespace PHP\PRNG;
 
-class XorShift128Plus implements RandomGenerator
+class XorShift128Plus implements RandomInterface
 {
     public function __construct(int $seed) {}
-    public function next(): int {}
-    public function range(int $min, int $max): int {}
+    public function nextInt(?int $min = null, ?int $max = null): int;
+    public function nextDouble(): double; // maybe non-needed.
+    public function nextByte(int $length): string;
     public function shuffle(array &$array): bool {}
-    public function arrayRand(array $array, int $num = 1): int|string|array {}
-    public function strShuffle(string $string): string {}
+    public function stringShuffle(string $string): string {}
+    public function arrayRandom(array $array, int $num = 1): int|string|array {}
     public function __serialize(): string {}
     public function __unserialize(string $serialized): static {}
 }
@@ -93,11 +108,12 @@ class XorShift128Plus implements RandomGenerator
 class MT19937 implements RandomGenerator
 {
     public function __construct(int $seed) {}
-    public function next(): int {}
-    public function range(int $min, int $max): int {}
+    public function nextInt(?int $min = null, ?int $max = null): int;
+    public function nextDouble(): double; // maybe non-needed.
+    public function nextByte(int $length): string;
     public function shuffle(array &$array): bool {}
-    public function arrayRand(array $array, int $num = 1): int|string|array {}
-    public function strShuffle(string $string): string {}
+    public function stringShuffle(string $string): string {}
+    public function arrayRandom(array $array, int $num = 1): int|string|array {}
     public function __serialize(): string {}
     public function __unserialize(string $serialized): static {}
 }
@@ -205,3 +221,4 @@ WIP (A rough overview is given in the orng extension [2])
   * [2] https://github.com/zeriyoshi/php-ext-orng
   * [3] https://docs.microsoft.com/en-us/dotnet/api/system.random
   * [4] https://docs.oracle.com/javase/8/docs/api/java/util/Random.html
+  * [5] https://www.easyswoole.com/En/Other/random.html
