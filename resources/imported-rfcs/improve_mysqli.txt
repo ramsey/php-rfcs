@@ -16,7 +16,7 @@ This proposal is trying to address some of the most common pain points to make l
 
 ==== Exception error reporting mode should be the default one ====
 
-Why is error reporting disabled by default? The reasoning behind this was probably to hide very sensitive information present in the error messages on production systems that have ''display_errors'' set to true. In hindsight that was not a smart decision. The feature went almost unnoticed and the most common solution to many mysqli-related Stack Overflow questions is to just make people aware of automatic error reporting. By silencing error reporting by default we only made matters worse, as people add ''or die($mysqli->error)'' to every mysqli function call unaware of the benefits of PHP error reporting. 
+//Why is error reporting disabled by default?// The reasoning behind this was probably to hide very sensitive information present in the error messages on production systems that have ''display_errors'' set to true. In hindsight that was not a smart decision. The feature went almost unnoticed and the most common solution to many mysqli-related Stack Overflow questions is to just make people aware of automatic error reporting. By silencing error reporting by default we only made matters worse, as people add ''or die($mysqli->error)'' to every mysqli function call unaware of the benefits of PHP error reporting. 
 
 Since PHP 8.0 PDO has exception mode enabled by default, it would only make sense to do the same for mysqli. [[rfc::pdo_default_errmode|PHP RFC: Change Default PDO Error Mode]]
 
@@ -77,66 +77,194 @@ $mysqli = mysqli_connect();
 </code>
 
 
+=== ''new mysqli'' and ''mysqli_connect()'' are not true aliases ===
+The [[https://www.php.net/manual/en/function.mysqli-connect|mysqli_connect() page]] claims that it is just an alias of ''%%mysqli::__construct()%%''. It's not. 
+
+1. ''mysqli_connect()'' returns false if the **connection** fails. This leads to a very strange wording in the manual for ''%%mysqli::__construct()%%'':
+> Returns an object which represents the connection to a MySQL Server, or false on failure.
+The signature for ''%%mysqli::__construct()%%'' claims that it returns void as all constructors do. This leads a to a large number of users falsely believing that this will work:
+<code PHP>
+$mysqli = new mysqli('localhost') or die(mysqli_connect_error());
+</code>
+
+2. You can call ''mysqli_connect()'' with 0 arguments and it will connect, but it won't connect if you instantiate an object by passing 0 arguments. As described above ''%%mysqli::__construct()%%'' will not attempt connection if no arguments are provided. This leads to another false claim in the manual:
+>Passing the null value or the string "localhost" to this parameter, the local host is assumed.
+The above applies to ''mysqli_connect()'' but not to ''%%mysqli::__construct()%%''
+
+3. The whole notion of functional //aliases// for constructors is quite strange. They might be equivalent in functionality, but they are not the same thing. Consider the following scenario:
+<code php>
+class my_mysqli extends \mysqli{
+    public function __construct() {
+        // the only possible way to connect is to call ''mysqli::connect()'' method like:
+        parent::connect();
+        // or trigger parent constructor followed by ''mysqli::real_connect()''
+        parent::__construct();
+        parent::real_connect();
+        // (technically it can also be ''parent::init()'' followed by ''parent::connect()'' or any mix thereof)
+        // It can even be this monster:
+        [$this, \connect::class]();
+        // but there is no way to call ''mysqli_connect()''
+        mysqli_connect();
+    }
+}
+
+$mysqli = new my_mysqli();
+</code>
+Constructors cannot have functional aliases in a true sense as 1 to 1 replacements. ''mysqli_connect()'' should rather be described as a wrapper function, with its functionality more or less desribed as a following PHP function:
+<code php>
+function mysqli_connect(/* 6 params */) {
+    $mysqli = mysqli_init();
+    if ($mysqli->real_connect(/* 6 params */)) {
+        return $mysqli;
+    } else {
+        return false;
+    }
+}
+</code>
+
+===  mysqli_init() and mysqli_real_connect() are weird aliases that do not match OO style. === 
+
+''mysqli_init()'' has the exact same behaviour as ''new mysqli()''(with 0 arguments) but it does not accept any arguments. The below two lines of code are identical:
+<code php>
+$mysqli = mysqli_init();
+$mysqli = new mysqli();
+</code>
+
+''mysqli_real_connect()'' is very similar to ''mysqli::connect()'' with the following differences:
+
+  * ''mysqli::connect()'' returns void whereas ''mysqli_real_connect()'' returns bool
+  * ''mysqli_real_connect()'' has one more parameter called ''$flags''
+  * ''mysqli::real_connect()'' does not initilize the object on its own, while ''mysqli::connect()'' will initilize it if it isn't yet.
+
+''mysqli_real_connect()'' has the OO-style variant too, which is confusing. The name of the function does not help to explain what is the difference between this and ''connect'' method. The extra parameter could be added to ''mysqli::connect()'' and the method could be made to return a boolean. The last point I would consider more of a bug than a feature. I think the object should be initialized by ''mysqli_real_connect()'' also. 
+
+Given that all functions are very similar you can also mix & match as long as you don't need that 7th parameter. For example. 
+<code php>
+// 1. new mysqli and real_connect
+$mysqli = new mysqli();
+$mysqli->real_connect();
+
+// 2. mysqli_init and connect
+$mysqli = mysqli_init();
+$mysqli->connect();
+</code>
+
+=== Proposal ===
+
+These functions need some refactoring. I see no reason to have so many confusing functions with tiny differences. It makes both implementation and documentation unnecessarily complicated and it does not help users make the right decisions and avoid mistakes. 
+
+  - Make ''mysqli::connect()'' and ''mysqli::real_connect()'' aliases (and later remove ''mysqli::real_connect()''). They should really be the same thing. ''mysqli::connect()'' should return boolean and have the same number of arguments.
+  - Remove ''mysqli::init()'' as it is the weirdest one of the bunch. Since it is nothing more than an alias of ''%%mysqli::__construct()%%'' this makes it completely unnecessary. Of course, we would have to make ''mysqli::real_connect()'' initialize the object just like ''mysqli::connect()'' does (see 1st point).
+    - CMB69 has suggested that it should be a static function, but I find it revolting to have a static method as an alias of the constructor for absolutely no reason. After all, we have the OO-style equivalent already: the constructor.
+  - Align the behaviour of ''mysqli_connect()'' with ''new mysqli()'', so that they both work the same with 0 arguments. We should also let them accept the 7th argument to make them the same as ''mysqli::real_connect()''/''mysqli_real_connect()''.
+  - We could either keep ''mysqli_init()'' as an alias of mysqli constructor with 0 arguments, or remove it completely in favour of ''mysqli_connect()'' with 0 arguments. The main purpose of these functions is to let people set options before connecting. This could then be achieved with code like this (assuming point 3+4): <code php>
+// 1. initialize object
+$mysqli = mysqli_connect();
+// 2. set options
+mysqli_options($mysqli, MYSQLI_OPT_READ_TIMEOUT, 42);
+// 3. connect
+mysqli_real_connect($mysqli);
+</code> But since we can't really change ''mysqli_connect()'' or get rid of ''mysqli_real_connect()'', the above example looks strange and will not sell (there's no benefit in removing ''mysqli_init()''). **Therefore we should keep the procedural version as is.**
+  - We should optionally deprecate and remove ''mysqli::set_opt()'' and ''mysqli_set_opt''. This is an alias of ''mysqli::options()''/''mysqli_options()''.
+
+I realize that the whole mess comes from the fact that we try to maintain both OO and procedural style. My proposal therefore is aimed to keep the two ways of opening the connection as clear as possible reducing inconsistencies and confusion. The below examples should respectively be the recommended way for opening and setting connection options with OO and procedural style:
+
+<code php>
+// OOP
+$mysqli = new mysqli(); // <- 0 arguments
+$mysqli->options(MYSQLI_OPT_READ_TIMEOUT, 42);
+$mysqli->connect('localhost', /** the other 6 arguments **/); // connect instead of real_connect
+
+// Procedural
+$mysqli = mysqli_init();
+mysqli_options($mysqli, MYSQLI_OPT_READ_TIMEOUT, 42);
+mysqli_real_connect($mysqli, 'localhost', /** the other 6 arguments **/);
+</code>
+
+The shorthand form without setting options would stay as it is now. However, we would have to split the documentation for ''%%mysqli::__construct()%%'', ''mysqli::connect()'' and ''mysqli_connect()'' to have separate pages.
+
+==== libmysqlclient support - untested and unmaitained ====
+
+PHP has been pushing for the use of mysqlnd for years. While it is still possible to compile PHP against libmysql client, and Nikita has spent some time fixing the support, the truth is that the libmysql support has been in decline ever since mysqlnd was released. The native driver offers more and often better. We have the full control of mysqlnd and its implementation including fixing bugs, memory handling, adding new features and error reporting. As of now, de jure compatibility makes fixing some stuff in mysqlnd more limited and difficult. 
+
+We should consider dropping the support for libmysql client in the near future. It would make maintenance of the mysqli extension easier, considering the number of people willing and capable of actively maintaining it. 
+
+==== The never-finished features ====
+
+I include this section for completeness but as of now I have no clue what should be done about them and how to improve these functionalities. 
+
+=== mysqli::get_warnings() and mysqli_warning class ===
+
+The functionality works as is. Nikita has recently removed the part of the code that was never finished. While the functionality never actually got finished, the way it works now is fine as is. 
+
+=== mysqli::savepoint and mysqli::release_savepoint() ===
+ 
+As far as I know, these two methods don't actually do anything useful. I suppose the idea was to abstract some SQL functionality but given that the function name is the same as the actual SQL command I really don't see the point. The development should be ironed out, or the functionality should be deprecated and removed. 
+
+===  Async queries ===
+
+I believe this functionality mostly works. At least the example given in PHP manual works, albeit I have a lot of questions about that example. It seems this is only available for mysqlnd and only for normal queries. Prepared statements are not supported. I assume this is meant to aid in running parallel queries on multiple mysqli connections, but given that queries are mostly executed using prepared statements, this is a very niche feature. If it would be possible to execute prepared statements asynchronously and if it would be any easier than it is now, this feature could come quite handy. 
+
 
 ===== Backward Incompatible Changes =====
-What breaks, and what is the justification for it?
+
+  * Existing code that does not explicitly set the mysqli error mode and relies on the silent mode will be affected by this change. This code can be updated by explicitly setting the mysqli error mode to silent. e.g. <code PHP>mysqli_report(MYSQLI_REPORT_OFF);</code> 
+  * ''connect_error'' and ''connect_errno'' no longer accessible using object operator (''->'')
+  * ''mysqli::init()'' will be deprecated and removed. Code that relied on it in polymorphism will have to replace calls to it with ''%%parent::__construct()%%''
+  * ''mysqli_connect()'' will not open a connection with 0 arguments passed. 
+
+Optional:
+
+  * Aliases ''mysqli::set_opt()'' and ''mysqli_set_opt'' will be deprecated (PHP 8.1) and removed (PHP 9.0)
+  * ''mysqli::real_connect()'' will get a deprecation notice.
 
 ===== Proposed PHP Version(s) =====
-List the proposed PHP versions that the feature will be included in.  Use relative versions such as "next PHP 8.x" or "next PHP 8.x.y".
+Most changes should go into next PHP 8.x, but some of the described changes can only be made in the next PHP x
 
 ===== RFC Impact =====
 ==== To SAPIs ====
-Describe the impact to CLI, Development web server, embedded PHP etc.
+N/A
 
 ==== To Existing Extensions ====
-Will existing extensions be affected?
+If we are going to drop support for libmysql client in mysqli then this should be a global change. It would affect PDO_MySQL as well as any other unbundled extension that is currently compiling against libmysql client. 
 
 ==== To Opcache ====
-It is necessary to develop RFC's with opcache in mind, since opcache is a core extension distributed with PHP.
-
-Please explain how you have verified your RFC's compatibility with opcache.
+N/A
 
 ==== New Constants ====
-Describe any new constants so they can be accurately and comprehensively explained in the PHP documentation.
+N/A
 
 ==== php.ini Defaults ====
-If there are any php.ini settings then list:
-  * hardcoded default values
-  * php.ini-development values
-  * php.ini-production values
+N/A
 
 ===== Open Issues =====
-Make sure there are no open issues when the vote starts!
 
 ===== Unaffected PHP Functionality =====
-List existing areas/features of PHP that will not be changed by the RFC.
 
-This helps avoid any ambiguity, shows that you have thought deeply about the RFC's impact, and helps reduces mail list noise.
+The signature of certain mysqli functions/methods will be affected with optional parameters, but this should not impact any existing functionality. 
+
+  - ''mysqli_execute()''/''mysqli_stmt_execute()''/''mysqli_stmt::execute()'' will gain an additional optional parameter of type array. 
+  - ''mysqli_connect()''/''mysqli::connect()''/''%%mysqli::__construct()%%'' will gain an optional 7th parameter.
+
+The existing prepared statement parameter binding will remain unaffected. There will be no change to ''mysqli_stmt::bind_param()''. 
+
+The existing procedural style connection will remain the same. The only potential difference would be that `mysqli_connect()` with 0 arguments no longer opens the default connection. 
+
+Opening the connection while setting options before will remain the same in procedural form. Setting the connection flags will also remain the same with the only difference that it will now become available using the normal `connect()` method too.
 
 ===== Future Scope =====
-This section details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
 
 ===== Proposed Voting Choices =====
-Include these so readers know where you are heading and can discuss the proposed voting options.
+The RFC is just a concept at the moment. For voting purposes, the details will need to be ironed out and each proposal voted on separately. 
 
 ===== Patches and Tests =====
-Links to any external patches and tests go here.
-
-If there is no patch, make it clear who will create a patch, or whether a volunteer to help with implementation is needed.
-
-Make it clear if the patch is intended to be the final patch, or is just a prototype.
-
-For changes affecting the core language, you should also provide a patch for the language specification.
+I will try to create patches for the mentioned changes, but since I am very inexperienced I would appreciate if a volunteer would like to help in implementing them.
 
 ===== Implementation =====
-After the project is implemented, this section should contain 
-  - the version(s) it was merged into
-  - a link to the git commit(s)
-  - a link to the PHP manual entry for the feature
-  - a link to the language specification section (if any)
+N/A
 
 ===== References =====
-Links to external references, discussions or RFCs
+N/A
 
 ===== Rejected Features =====
-Keep this updated with features that were discussed on the mail lists.
+N/A
