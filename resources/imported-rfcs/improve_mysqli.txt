@@ -1,0 +1,142 @@
+====== PHP RFC: Concepts to improve mysqli extension ======
+  * Version: 0.9
+  * Date: 2020-12-30
+  * Author: Kamil Tekiela, dharman@php.net
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/improve_mysqli
+
+This is a proposal to discuss possible ways of improving the mysqli extension.
+
+===== Introduction =====
+As we all know mysqli was created as a replacement for the old mysql_* API. The core improvements over the old API were: support for prepared statements, object-oriented style, support for MySQL 4.1.3 and newer, automatic error reporting, and support for Stored Procedures, Multiple Statements, and Transactions. It was a huge step forward and it definitely contributed to a more secure web. But even then mysqli was only a very quick workaround. It is still a very thin wrapper around the MySQL C API. Some functions were added, some were removed, some functionality was never fully developed. Pretty much since PHP 5.6 mysqli extension has not been actively maintained. IMHO people pick mysqli either because they are not aware of PDO or because they are stuck with some legacy codebase. There's nothing inherently wrong with mysqli, but the numerous problems and limited functionality force people to use PDO instead. 
+
+This proposal is trying to address some of the most common pain points to make life easier for people who must use mysqli. Starting with concepts that would be the most beneficial/impactful I will try to present ideas on how we could improve this extension.
+
+===== Proposal =====
+
+==== Exception error reporting mode should be the default one ====
+
+Why is error reporting disabled by default? The reasoning behind this was probably to hide very sensitive information present in the error messages on production systems that have ''display_errors'' set to true. In hindsight that was not a smart decision. The feature went almost unnoticed and the most common solution to many mysqli-related Stack Overflow questions is to just make people aware of automatic error reporting. By silencing error reporting by default we only made matters worse, as people add ''or die($mysqli->error)'' to every mysqli function call unaware of the benefits of PHP error reporting. 
+
+Since PHP 8.0 PDO has exception mode enabled by default, it would only make sense to do the same for mysqli. [[rfc::pdo_default_errmode|PHP RFC: Change Default PDO Error Mode]]
+
+Some users claim that silenced mode still makes sense as you can display a more user-friendly message instead, but this is a moot point. The information to the user should not expose any details about the underlying code problem. The mysqli error should be logged to a file in a secure location on the server. How the application handles exceptional situations is up to the programmer, but that logic should not be dependant on mysqli error reporting level. 
+
+==== Add bind-in-execute to mysqli ====
+
+Mysqli prepared statements are painfully difficult to use. In comparison to PDO which has a bind-in-execute or per-placeholder binding by value and by reference, mysqli only has binding by reference using ''mysqli_stmt::bind_param()'' method. You must provide all bindings as a separate variadic argument to this function, keeping in mind that they all have to be passed by reference. Additionally, the first argument is a string composed of cryptic characters denoting cast type of each argument. On top of that, if you want to bind long binary string, you must call this method with dummy binding, and use ''mysqli_stmt::send_long_data()'' instead to bind the data in chunks.
+
+There is a very simple way to make things better: add bind-in-execute to mysqli. ''mysqli_stmt::execute()'' doesn't take any parameters, which means we can extend it to accept an array just like PDO does. The data would be bound by value as strings. The proposal is described in more detail in the following [[https://github.com/php/php-src/pull/6271|GitHub PR #6271]].
+
+==== $mysqli->connect_error is a static property that can only be accessed as an instance property ====
+
+These properties make very little sense as they are implemented right now. Both ''mysqli::connect_error'' and ''mysqli::connect_errno'' are implemented as static properties with function-variant equivalents. However, they can only be accessed using the object operator as instance properties. While this is not a very common problem, it does cause some headache for people who try to open two mysqli connections at the same time and have error reporting silenced. 
+
+I would propose to make these attributes as proper static attributes accessible via scope resolution operator (''::''). This would be the sanest solution, but the problem is that it would be a breaking change. If we implement this after proposal number 1 (Exception mode by default) then the potential impact would be much smaller.
+
+Another solution would be to make them truly instance attributes. The big problem with this is that it would be incompatible with the functional variants. We would have to make these two functions expect ''$mysqli'' object as an argument, which not only would be a breaking change, but it would be impossible given the existence of ''mysqli_connect'' that doesn't return an object if the connection fails. 
+
+==== Functions to establish connection using mysqli are a mess ====
+
+Let's break this point into smaller issues. At the moment we have at least 4 ways of opening a connection to the MySQL server and at least 2 ways of initializing mysqli object without connecting. Each one is slightly different than the other. 
+
+=== mysqli::init() is confusing and unnecessary and not an alias of mysqli_init() ===
+
+Despite what the documentation says, ''mysqli::init()'' is not an OOP version of ''mysqli_init()''. In fact, such a claim makes absolutely no sense, given that ''mysqli_init()'' was meant to create an empty instance of mysqli without calling the connect method. In reality, ''mysqli::init()'' is just a thin wrapper for ''%%mysqli::__construct()%%'' with 0 arguments. Gicen the nonsensical nature of this method I am proposing to [[https://github.com/php/php-src/pull/6409|deprecate it in PHP 8.1]]. 
+
+The only valid use case for this method was in polymorphism, which can be replaced with a constructor.
+
+<code php>
+class test extends mysqli
+{
+    public function __construct($host, $user, $passwd, $db, $port, $socket) {
+        // parent::init();
+        // change to:
+        parent::__construct();
+        parent::real_connect($host, $user, $passwd, $db, $port, $socket);
+    }
+}
+</code>
+
+See [[https://www.php.net/manual/en/mysqli.init.php|mysqli_init on php.net]]
+
+=== "new mysqli()" doesn't open a connection with 0 arguments ===
+
+At the moment PHP manual claims that all 6 parameters of ''%%mysqli::__construct()%%'' are optional with default values taken from INI settings. As you might have guessed that is not entirely true. The default values are in fact honoured, but at least 1 argument must be provided, even if that 1 argument is ''NULL''. If absolutely no arguments are passed, then ''%%mysqli::__construct()%%'' behaves as ''mysqli_init()''. What are the workarounds if I want to store all my configuration details in INI?
+
+<code php>
+// 1. Pass NULL as a sole argument.
+$mysqli = new mysqli(NULL);
+
+// 2. Call connect explicitely
+$mysqli = new mysqli();
+$mysqli->connect();
+
+// 3. Use mysqli_connect() function
+$mysqli = mysqli_connect();
+</code>
+
+
+
+===== Backward Incompatible Changes =====
+What breaks, and what is the justification for it?
+
+===== Proposed PHP Version(s) =====
+List the proposed PHP versions that the feature will be included in.  Use relative versions such as "next PHP 8.x" or "next PHP 8.x.y".
+
+===== RFC Impact =====
+==== To SAPIs ====
+Describe the impact to CLI, Development web server, embedded PHP etc.
+
+==== To Existing Extensions ====
+Will existing extensions be affected?
+
+==== To Opcache ====
+It is necessary to develop RFC's with opcache in mind, since opcache is a core extension distributed with PHP.
+
+Please explain how you have verified your RFC's compatibility with opcache.
+
+==== New Constants ====
+Describe any new constants so they can be accurately and comprehensively explained in the PHP documentation.
+
+==== php.ini Defaults ====
+If there are any php.ini settings then list:
+  * hardcoded default values
+  * php.ini-development values
+  * php.ini-production values
+
+===== Open Issues =====
+Make sure there are no open issues when the vote starts!
+
+===== Unaffected PHP Functionality =====
+List existing areas/features of PHP that will not be changed by the RFC.
+
+This helps avoid any ambiguity, shows that you have thought deeply about the RFC's impact, and helps reduces mail list noise.
+
+===== Future Scope =====
+This section details areas where the feature might be improved in future, but that are not currently proposed in this RFC.
+
+===== Proposed Voting Choices =====
+Include these so readers know where you are heading and can discuss the proposed voting options.
+
+===== Patches and Tests =====
+Links to any external patches and tests go here.
+
+If there is no patch, make it clear who will create a patch, or whether a volunteer to help with implementation is needed.
+
+Make it clear if the patch is intended to be the final patch, or is just a prototype.
+
+For changes affecting the core language, you should also provide a patch for the language specification.
+
+===== Implementation =====
+After the project is implemented, this section should contain 
+  - the version(s) it was merged into
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+  - a link to the language specification section (if any)
+
+===== References =====
+Links to external references, discussions or RFCs
+
+===== Rejected Features =====
+Keep this updated with features that were discussed on the mail lists.
