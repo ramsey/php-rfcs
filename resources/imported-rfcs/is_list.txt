@@ -1,4 +1,4 @@
-====== PHP RFC: Add is_array_and_list(mixed $value): bool ======
+====== PHP RFC: Add array_is_list(array $array): bool ======
   * Version: 0.2
   * Date: 2020-12-19
   * Author: Tyson Andre <tandre@php.net>
@@ -12,18 +12,16 @@ PHP's ''array'' data type is rare in that it supports both integer and string ke
 
 ===== Proposal =====
 
-Add a new function ''is_array_and_list(mixed $value): bool'' that will return true if the type of ''$value'' is ''array'' and the array keys are ''0 .. count($value)-1'' in that order. Otherwise, it returns false.
+Add a new function ''array_is_list(array $array): bool'' that will return true if the array keys are ''0 .. count($array)-1'' in that order. For other arrays, it returns false. For non-arrays, it throws a ''TypeError''.
 
 This RFC doesn't change PHP's type system and doesn't add new type hints.
 
 The functionality is equivalent to the below polyfill:
 
 <code php>
-function is_array_and_list(mixed $value): bool {
-    if (!is_array($value)) { return false; }
-
+function array_is_list(array $array): bool {
     $expectedKey = 0;
-    foreach ($value as $i => $_) {
+    foreach ($array as $i => $_) {
         if ($i !== $expectedKey) { return false; }
         $expectedKey++;
     }
@@ -31,16 +29,19 @@ function is_array_and_list(mixed $value): bool {
 }
 
 $x = [1 => 'a', 0 => 'b'];
-var_export(is_array_and_list($x));  // false because keys are out of order
+var_export(array_is_list($x));  // false because keys are out of order
 unset($x[1]);
-var_export(is_array_and_list($x));  // true
+var_export(array_is_list($x));  // true
 
 // Pitfalls of simpler polyfills - NAN !== NAN
 $x = ['key' => 2, NAN];
 unset($x['key']);
 var_export($x === array_values($x));  // false because NAN !== NAN
 var_export($x);  // array (0 => NAN)
-var_export(is_array_and_list($x));  // true because keys are consecutive integers starting from 0
+var_export(array_is_list($x));  // true because keys are consecutive integers starting from 0
+
+array_is_list(new stdClass());  // throws a TypeError
+array_is_list(null);  // throws a TypeError
 </code>
 
 Note that there are pitfalls in writing a correct polyfill/substitute. For example, ''array_values($array) === $array'' would be false for some arrays containing ''NAN'', and ''array_keys($array) === range(0, count($array) - 1)'' is wrong for the empty array.
@@ -63,19 +64,19 @@ The native implementation will quickly return true for most lists by checking th
 
 ==== To Opcache ====
 
-Opcache's architecture does not change because the type system is unchanged; optimizations of ''is_array_and_list()'' can easily be added or removed.
+Opcache's architecture does not change because the type system is unchanged; optimizations of ''array_is_list()'' can easily be added or removed.
 
-In the RFC's implementation, opcache evaluates the call ''is_array_and_list(arg)'' to a constant if the argument is a constant value.
+In the RFC's implementation, opcache evaluates the call ''array_is_list(arg)'' to a constant if the argument is a constant value.
 
-Long-term, if this sees wide enough adoption to affect performance on widely used apps or frameworks, opcache's contributors will have the option of adding additional checks to make opcache infer that ''is_array_and_list()'' being true implies that the argument is an array, and that the keys of the array are integers.
+Long-term, if this sees wide enough adoption to affect performance on widely used apps or frameworks, opcache's contributors will have the option of adding additional checks to make opcache infer that ''array_is_list()'' being true implies that the keys of the array are integers.
 
-(Currently, Opcache only optimizes type checks that are converted to type check opcodes such as ''is_resource()'' and ''is_array()''. Opcache doesn't do anything similar for opcodes that become regular function calls such as ''is_numeric()'', so the implementation for ''is_array_and_list()'' included with this RFC does not do this.)
+(Currently, Opcache only optimizes type checks that are converted to type check opcodes such as ''is_resource()'' and ''is_array()''. Opcache doesn't do anything similar for opcodes that become regular function calls such as ''is_numeric()'', so the implementation for ''array_is_list()'' included with this RFC does not do this.)
 
 ===== Discussion =====
 
 ==== Possibility of naming conflicts with future vector-like types ====
 
-Originally, this was called ''is_list'', but renamed due to the potential of naming conflicts.
+Originally, this was called ''is_list'', but renamed due to the potential of naming conflicts with a potential list type.
 
 https://externals.io/message/112560#112565
 
@@ -92,7 +93,7 @@ or some other new type check with a less preferable name.
 If it's compatible with arrays/lists
 (e.g. only checked during property assignment, passing in arguments, and returning values), then it wouldn't be an issue.
 
-- is_array_and_list() or is_array_and_list() or array_is_list() would avoid some of that ambiguity but would be much more verbose. Many existing array methods only accept arrays, making the name ''array_is_list(mixed $value)'' possibly inconsistent.
+- ''array_is_list(array $array)'' is consistent with many other ''array_*'' methods, which only accept arrays.
 - It is very possible that we may end up using the word ''list'' anyway despite those objections, because it's already a reserved keyword in PHP for unrelated syntax (''list($first, $second) = $values''). Recently added types such as ''object'', ''void'', and ''iterable'' (and scalar types) were added in previous PHP versions despite not being reserved in the past.
 - The name ''vector'' may conflict with the php-ds PECL depending on how functionality is implemented.
 
@@ -103,7 +104,7 @@ As mentioned in [[https://wiki.php.net/rfc/is_list#changes_to_php_s_type_system|
 In Hack/HHVM, it was practical for users to adopt because HHVM is bundled with a typechecker that checks that the uses
 are correct at compile time - because PHP has no bundled type checker, a new type would potentially cause a lot of unintuitive behaviors.
 
-Additionally, a name of ''is_list'' may cause confusion with built-in list types such as SplDoublyLinkedList.
+Additionally, a name of ''is_list'' may cause confusion with built-in list types such as ''SplDoublyLinkedList''.
 
 ===== Proposed Voting Choices =====
 Yes/No, requiring 2/3 majority
@@ -120,20 +121,17 @@ Yes/No, requiring 2/3 majority
 
 ==== Alternate names ====
 
-''is_sequential_array'' was rejected because ''[2=>'a', 3=>'b']'' is also sequential.
+''is_sequential_array''/''array_is_sequential'' was rejected because ''[2=>'a', 3=>'b']'' is also sequential.
 
-''is_zero_indexed_array'' was rejected because that term is much less commonly used.
-
-''array_is_list'' was rejected because functions with that naming scheme typically throw a ''TypeError'' for non-arrays.
-Similarly, this ambiguity is why ''is_array_list''/''is_array_a_list'' was not chosen.
+''is_zero_indexed_array''/''array_is_zero_indexed'' was rejected because that term is much less commonly used.
 
 ==== Alternate implementations ====
-Making the signature ''array_is_list(array $value): bool'' was rejected because it would lead to much more verbose code such as ''is_array($value) && array_is_list($value)'' and more frequent TypeErrors for null/false.
-Similar to ''is_numeric()'' and ''is_callable()'', ''is_array_and_list()'' returns false instead of throwing an error for types that can't possibly be lists.
+The signature ''is_array_and_list(mixed $value): bool'' was considered, but rejected because silently returning false for objects would be surprising,
+and the behavior for future list-like types might be misunderstood (''SplDoublyLinkedList'', ''ArrayObject'', etc.)
 
 This deliberately only returns true for arrays with sequential keys and a start offset of 0. It returns false for ''[1=>'first', 2=>'second']''.
 
-This deliberately always returns false for objects, e.g. ''ArrayObject'' or ''SplFixedArray''.
+This deliberately throws a TypeError for non-arrays.
 
 ==== Adding flags to is_array() ====
 
@@ -156,7 +154,7 @@ The addition of flags has a small impact on performance for calls that aren't un
 
 ==== Changes to PHP's type system ====
 
-**This RFC does not attempt to change php's type system.** External static analyzers may still benefit from inferring key types from ''is_array_and_list()'' conditionals seen in code - ''is_array_and_list()'' conditionals would give more accurate information about array keys that can be used to detect issues or avoid false positives. (Phan, Psalm, and PHPStan are all static analyzers that support the unofficial phpdoc type ''list<T>'', which is used for arrays that would satisfy ''is_array_and_list()'').
+**This RFC does not attempt to change php's type system.** External static analyzers may still benefit from inferring key types from ''array_is_list()'' conditionals seen in code - ''array_is_list()'' conditionals would give more accurate information about array keys that can be used to detect issues or avoid false positives. (Phan, Psalm, and PHPStan are all static analyzers that support the unofficial phpdoc type ''list<T>'', which is used for arrays that would satisfy ''array_is_list()'').
 
 Any attempt to change php's type system would need to deal with references and the global scope - e.g. what would happen if an array was passed to ''list &$val'' but modified to become a non-list from a different callback or through ''asort()''.
 
@@ -199,4 +197,5 @@ Those are all solvable problems (and I've likely forgotten several), but they wo
 
 ===== Changelog ======
 
+0.3: Change name and signature from ''is_array_and_list(mixed $value)'' to ''array_is_list(array $array)''
 0.2: Rename from ''is_list()'' to ''is_array_and_list()'', add references and more rejected features
