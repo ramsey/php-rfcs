@@ -1,4 +1,4 @@
-====== Straw poll: Interest in configurable callback to dump results of expressions in `php -a` ======
+====== Straw poll: Interest in configurable callback to dump results of expressions in ''php -a'' ======
   * Version: 0.1
   * Date: 2021-01-05
   * Author: Tyson Andre, <tandre@php.net>
@@ -22,6 +22,11 @@ One of the comments was that it would make more sense if it was added at the sam
 
 For the sake of discussion, the following default implementation is proposed.
 var_dump() is proposed for arrays and objects because it properly represents references and cyclic data structures.
+
+''var_dump()'' is proposed instead of ''print_r()'' for various reasons
+
+  * ''print_r()'' will represent the int ''1'' and the float ''1.0'' in the same way on its own, in arrays, and in objects, which may confuse users debugging an application or learning the language.
+  * ''print_r()'' does not mention which fields are references.
 
 The proposed snippet would be to behave as if this snippet were evaluated before ''auto_prepend_file'' was run and any input was entered.
 
@@ -89,6 +94,117 @@ php > readline_interactive_shell_result_function(null);
 php > 1+1; // no longer dumped
 php > 
 </code>
+
+Improvements to the default result expression dumper can be proposed in subsequent RFCs if this ends up being added.
+
+===== Discussion =====
+
+==== Propose defaults implementations first? ====
+
+<blockquote>
+by Rowan Tommins:
+
+> I'd planned to propose defaults if this passed.
+
+Then I guess my feedback can be summarised as: propose these default
+implementations first, rather than last. Start by improving the
+out-of-the-box experience, and then look at what hooks userland tools
+might want to customise that (which might involve something "smarter"
+than replacing the entire output routine).
+
+> Psysh is 2.4MB as a compiled phar release and larger if distributed with library/application releases (e.g. on remote servers).
+default extension hooks would likely be much smaller.
+
+That was a lot of data when I used to carry floppy disks around in my
+school backpack. It sounds pretty reasonable for a feature-rich
+command-line tool in 2021.
+
+> Someone learning from the php.net manual or a tutorial with minimal dependencies wouldn't install psysh right now.
+
+To be honest, I doubt most users ever come across php -a either, or know
+that they need to install ext/readline to unlock its features (I'm
+pretty sure that's not installed by default on Ubuntu, for instance).
+
+I'm supportive of the idea of changing that, but I don't think the RFC
+as currently presented particularly helps that cause.
+
+</blockquote>
+
+==== Formatting output ====
+<blockquote>
+by Rowan Tommins:
+
+A couple of notes on this:
+
+  * The readline-based shell for "php -a" was added in PHP 5.1
+    [https://www.php.net/manual/en/features.commandline.interactive.php] and
+    __debugInfo not until 5.6 [https://wiki.php.net/rfc/debug-info]
+  * I agree that the existing debug outputs are quite verbose, but I don't
+    think that's a problem unique to the REPL. '' var_export()'' is constrained
+    to render valid PHP code, but ''print_r()'' and ''var_dump()'' could and perhaps
+    should represent objects more compactly.
+  * That compact representation of a Point (''Point(x: 1, y: 2)'') would be useful pretty much
+    everywhere anyone wanted debug output. It would also be possible to
+    build it on top of the existing functionality (key-value pairs from
+    ''__debugInfo'' if defined, else all properties).
+  * Allowing objects to overload the output seems much preferable to the
+    formatting function having to know all the special cases, so I'm not
+    convinced of the need to hook the entire output for the shell.
+  * I can't find any references off-hand, but I'm pretty sure popular
+    REPLs in other languages take that approach: use existing
+    pretty-printing mechanisms from the language, which in turn can be
+    overloaded by individual types / classes.
+</blockquote>
+
+Adding a pretty-printing alternative to ''var_dump'' would be a separate RFC proposal but may be worth proposing.
+( e.g. ''public function debugRepresentation(): string'' )
+
+==== Exposing the ability to handle input and recover from fatal errors in interactive shells ====
+
+<blockquote>
+by Rowan Tommins:
+
+If all the code using these hooks is going to be distributed as userland
+code anyway, then they're not going to improve the default experience.
+
+It feels like we need to go in one of two directions:
+
+a) Build a full-featured official REPL with all of these improvements
+completely implemented out of the box. Limited extension hooks might
+still be desirable to build custom versions for frameworks etc, but they
+could be more targeted - for custom input, it could be "register
+meta-command"; for custom output, we already have __debugInfo() at the
+class level.
+
+b) Expose the magic behaviour needed for something like PsySh to do
+everything ''php -a'' already can, and leave the rest to userland. So far,
+the only mentioned requirement is a special form of eval() that swallows
+fatal errors.
+
+My feeling is that the current mood of the community favours (b) rather
+than (a); the most obvious example is that PHP used to bundle a PEAR
+executable, but Composer remains an entirely external project. Is there
+a reason not to aim for the same "de facto standard" for a REPL?
+</blockquote>
+
+<blockquote>
+by Tyson Andre:
+
+Compared to psysh, the main distinguishing feature is definitely the ability to detect/tolerate fatal errors when compiling snippets or inheriting classes, and fewer dependencies to include to integrate an interactive shell with utilities for a project.
+I don't think it should be exposed to regular processes or web servers, though, due to possible memory corruption or leaks after zend_error_noreturn (e.g. class inheritance errors after autoloading), etc.).
+
+  * It would possibly be an improvement to throw an error instead of causing a fatal error for common mistakes in interactive 
+    shell sessions such as duplicate functions/parameters but I'm not sure how likely that is, especially since classes and functions currently get added as the file is being compiled.
+
+
+Integrating userland shells like ''psysh'' deeply into ''php -a'' may wish to avoid readline entirely and call a callback instead of printing php> and directly processing input like those projects already do.
+Two hooks may help with enabling that approach, which can be added in auto_prepend_file
+
+  * A hook to call a callback instead of printing "php >" and C readline reading stdin.
+e.g. ''readline_replace_interactive_shell_initializer(function () { ... read and process stdin in a loop })''
+  * Adding a hook to call a function every time an uncatchable fatal error was encountered, e.g. to resume the userland shell.
+e.g. ''readline_replace_interactive_fatal_error_handler(function ($errcode, $errmsg, $file, $line, $errcount): bool { /* process or exit */ })''
+</blockquote>
 
 ===== Vote =====
 
