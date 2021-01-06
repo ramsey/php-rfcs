@@ -1,6 +1,6 @@
 ====== PHP RFC: Fibers ======
 
-  * Date: 2020-12-17
+  * Date: 2021-01-06
   * Authors: Aaron Piotrowski <trowski@php.net>, Niklas Keller <kelunik@php.net>
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/fibers
@@ -9,7 +9,7 @@
 
 For most of PHP’s history, people have written PHP code only as synchronous code. They have code that runs synchronously and in turn, only calls functions that run synchronously. Synchronous functions stop execution until a result is available to return from the function.
 
-More recently, there have been multiple projects that have allowed people to write asynchronous PHP code. Asynchronous functions accept a callback or return a placeholder for a future value (such as a promise) to run code at a future time once the result is available. Execution continues without waiting for a result. Examples of these projects are [[https://amphp.org/|AMPHP]], [[https://reactphp.org/|ReactPHP]], and [[https://guzzlephp.org/|Guzzle]].
+More recently, there have been multiple projects that have allowed people to write asynchronous PHP code. Asynchronous functions accept a callback or return a placeholder for a future value (such as a promise) to run code at a future time once the result is available. Execution continues without waiting for a result. Examples of these projects are [[https://amphp.org/|amphp]], [[https://reactphp.org/|ReactPHP]], and [[https://guzzlephp.org/|Guzzle]].
 
 The problem this RFC seeks to address is a difficult one to explain, but can be referred to as the [[https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/|“What color is your function?”]] problem.
 
@@ -167,33 +167,50 @@ A suspended fiber may be resumed in one of two ways:
 ==== FiberScheduler ====
 
 <code php>
-interface FiberScheduler
+final class FiberScheduler
 {
     /**
-     * Run the scheduler, scheduling and responding to events.
-     * This method should not return until no futher pending events remain in the fiber scheduler.
+     * @param callable $callback Function to invoke when starting the fiber scheduler.
      */
-    public function run(): void;
+    public function __construct(callable $callback) { }
+
+    /**
+     * @return bool True if the fiber has been started.
+     */
+    public function isStarted(): bool { }
+
+    /**
+     * @return bool True if the fiber is suspended.
+     */
+    public function isSuspended(): bool { }
+
+    /**
+     * @return bool True if the fiber is currently running.
+     */
+    public function isRunning(): bool { }
+
+    /**
+     * @return bool True if the fiber has completed execution.
+     */
+    public function isTerminated(): bool { }
 }
 </code>
 
-A ''FiberScheduler'' defines a class which is able to start new fibers using ''Fiber->start()'' and resume fibers using ''Fiber->resume()'' and ''Fiber->throw()''. In general, a fiber scheduler would be an event loop that responds to events on sockets, timers, and deferred functions.
+A ''FiberScheduler'' is able to start new fibers using ''Fiber->start()'' and resume fibers using ''Fiber->resume()'' and ''Fiber->throw()''. In general, a fiber scheduler would be created using a callback that runs an event loop that responds to events on sockets, timers, and deferred functions.
 
-When an instance of ''FiberScheduler'' is provided to ''Fiber::suspend()'' for the first time, internally a new fiber (a scheduler fiber) is created for that instance and invokes ''FiberScheduler->run()''. The scheduler fiber created is suspended when resuming or starting another fiber (that is, when calling ''Fiber->start()'', ''Fiber->resume()'', or ''Fiber->throw()'') and again resumed when the same instance of ''FiberScheduler'' is provided to another call to ''Fiber::suspend()''. It is expected that ''FiberScheduler->run()'' will not return until all pending events have been processed and any suspended fibers have been resumed. In practice this is not difficult, as the scheduler fiber is suspended when resuming a fiber and only re-entered upon a fiber suspending which will create more events in the scheduler.
+When an instance of ''FiberScheduler'' is provided to ''Fiber::suspend()'', execution switches to the the scheduler fiber, a fiber created from the callback provided to the ''FiberScheduler'' constructor. This scheduler fiber is suspended when resuming or starting a ''Fiber'' (that is, when calling ''Fiber->start()'', ''Fiber->resume()'', or ''Fiber->throw()'') and again resumed when the same instance of ''FiberScheduler'' is provided to another call to ''Fiber::suspend()''. It is expected the callback provided to ''FiberScheduler'' will not return until all pending events have been processed and any suspended fibers have been resumed. In practice this is not difficult, as the scheduler fiber is suspended when resuming a fiber and only re-entered upon a fiber suspending which will create more events in the scheduler.
 
-If a scheduler completes (that is, returns from ''FiberScheduler->run()'') without resuming the suspended fiber, an instance of ''FiberError'' is thrown from the call to ''Fiber::suspend()''.
+If a scheduler completes (that is, returns from the callback provided to ''FiberScheduler'') without resuming the suspended fiber, an instance of ''FiberError'' is thrown from the call to ''Fiber::suspend()''.
 
-If a ''FiberScheduler'' instance whose associated fiber has completed is later reused in a call to ''Fiber::suspend()'', ''FiberScheduler->run()'' will be invoked again to create a new fiber associated with that ''FiberScheduler'' instance.
+If the callback provided to ''FiberScheduler'' throws an exception, this results in an uncaught ''FiberExit'' exception and exits the script.
 
-''FiberScheduler->run()'' throwing an exception results in an uncaught ''FiberExit'' exception and exits the script.
-
-A fiber //must// be resumed from within the instance of ''FiberScheduler'' provided to ''Fiber::suspend()''. Doing otherwise results in a fatal error. In practice this means that calling ''Fiber->resume()'' or ''Fiber->throw()'' must be within a callback registered to an event handled within a ''FiberScheduler'' instance. Often it is desirable to ensure resumption of a fiber is asynchronous, making it easier to reason about program state before and after an event would resume a fiber. New fibers also must be started within a ''FiberScheduler'' (though the started fiber may use any scheduler within that fiber).
+A fiber //must// be resumed from within the instance of ''FiberScheduler'' provided to ''Fiber::suspend()''. Doing otherwise results in a fatal error. In practice this means that calling ''Fiber->resume()'' or ''Fiber->throw()'' must be within a callback registered to an event handled within the code provided as the ''FiberScheduler'' callback. Often it is desirable to ensure resumption of a fiber is asynchronous, making it easier to reason about program state before and after an event would resume a fiber. New fibers also must be started within a ''FiberScheduler'' (though the started fiber may use any scheduler within that fiber).
 
 Fibers must be started and resumed within a fiber scheduler in order to maintain ordering of the internal fiber stack. Internally, a fiber may only switch to a new fiber, a suspended fiber, or suspend to the prior fiber. In essense, a fiber may be pushed or popped from the stack, but execution cannot move to within the stack. The fiber scheduler acts as a hub which may branch into another fiber or suspend to the main fiber. If a fiber were to attempt to switch to a fiber that is already running, the program will crash. Checks prevent this from happening, throwing an exception into PHP instead of crashing the VM.
 
-When a script ends, each scheduler fiber created from a call to ''FiberScheduler->run()'' is resumed in reverse order of creation to complete unfinished tasks or free resources.
+If all references to an instance of ''FiberScheduler'' are destroyed before a script terminates, the fiber is treated like an [[#unfinished_fibers|unfinished fiber]].
 
-This RFC does not include an implementation for ''FiberScheduler''. Instead, it proposes only defining an interface and any implementation would be done in user code (see [[#future_scope|Future Scope]]).
+When a script ends, each scheduler fiber that has not been previously destroyed or terminated is resumed in reverse order of creation to complete unfinished tasks or free resources.
 
 ==== ReflectionFiber ====
 
@@ -325,13 +342,13 @@ $awaitable = async functionOrMethod();
 await $awaitable; // Await the function result at a later point.
 </code>
 
-These keywords can be created in user code using the proposed fiber API. [[https://github.com/amphp/amp/tree/v3|AMPHP v3]] (a work-in-progress) defines ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L6-L67|await() and async()]]'' functions to await ''Amp\Promise'' instances and create new coroutines.
+These keywords can be created in user code using the proposed fiber API. [[https://github.com/amphp/amp/tree/v3|amphp v3]] (a work-in-progress) defines ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L6-L67|await() and async()]]'' functions to await ''Amp\Promise'' instances and create new coroutines.
 
 === defer keyword ===
 
 Fibers may be used to implement a ''defer'' keyword that executes a statement within a new fiber when the current fiber is suspended or terminates. Such a keyword would also require an internal implementation of ''FiberScheduler'' and likely would be an addition after async/await keywords. This behavior differs from ''defer'' in Go, as PHP is already able to mimick such behavior with ''finally'' blocks.
 
-This keyword also can be created in user code using the proposed fiber API, an example being ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L83-L102|defer()]]'' in AMPHP v3.
+This keyword also can be created in user code using the proposed fiber API, an example being ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L83-L102|defer()]]'' in amphp v3.
 
 ===== Proposed Voting Choices =====
 
@@ -341,16 +358,16 @@ Merge implementation into core, 2/3 required.
 
 Implementation and tests at [[https://github.com/amphp/ext-fiber|amphp/ext-fiber]].
 
-[[https://github.com/amphp/amp/tree/v3|AMPHP v3]], a work-in-progress, uses ''ext-fiber''. Nearly all libraries under the GitHub organization [[https://github.com/amphp|amphp]] have branches compatible with AMPHP v3. The branches are labeled as ''vX'', where ''X'' is the current version + 1 (for example, the ''v5'' branch of [[https://github.com/amphp/http-client/tree/v5|amphp/http-client]]). See the ''examples'' directories in various libraries for samples of PHP code using fibers.
+[[https://github.com/amphp/amp/tree/v3|amphp v3]], a work-in-progress, uses ''ext-fiber''. Nearly all libraries under the GitHub organization [[https://github.com/amphp|amphp]] have branches compatible with amphp v3. The branches are labeled as ''vX'', where ''X'' is the current version + 1 (for example, the ''v5'' branch of [[https://github.com/amphp/http-client/tree/v5|amphp/http-client]]). See the ''examples'' directories in various libraries for samples of PHP code using fibers.
 
-[[https://github.com/trowski/react-fiber|React Fiber]] uses ''ext-fiber'' to create coroutines and await any instance of ''React\Promise\PromiseInterface'' until it is resolved.
+[[https://github.com/trowski/react-fiber|React Fiber]] uses ''ext-fiber'' and the current stable versions of ''react/event-loop'' and ''react/promise''  to create coroutines and await any instance of ''React\Promise\PromiseInterface'' until it is resolved.
 
 ===== Examples =====
 
-First let’s define a very simple ''FiberScheduler'' that will be used by our first examples to demonstrate how fibers are suspended and resumed. This scheduler is only able to defer a function to execute at a later time. These functions are executed in a loop within ''Scheduler->run()''.
+First let’s define a very simple scheduler class which will be used by our first examples to create a ''FiberScheduler'' to demonstrate how fibers are suspended and resumed. This scheduler is only able to defer a function to execute at a later time. These functions are executed in a loop within ''EventLoop->run()''.
 
 <code php>
-class Scheduler implements FiberScheduler
+class EventLoop
 {
     private array $callbacks = [];
 
@@ -381,7 +398,8 @@ class Scheduler implements FiberScheduler
 This scheduler does nothing really useful by itself, but will be used to demonstrate the basics of how a fiber may be suspended and later resumed in a fiber scheduler (event loop) upon an event.
 
 <code php>
-$scheduler = new Scheduler;
+$loop = new EventLoop;
+$scheduler = new FiberScheduler(fn() => $loop->run());
 
 // Get a reference to the currently executing fiber ({main} in this case).
 $fiber = Fiber::this();
@@ -390,7 +408,7 @@ $fiber = Fiber::this();
 // Usually a fiber will be resumed in response to an event.
 
 // Create an event in the fiber scheduler to resume the fiber at a later time.
-$scheduler->defer(function () use ($fiber): void {
+$loop->defer(function () use ($fiber): void {
     // Fibers must be resumed within FiberScheduler::run().
     // This closure will be executed within the loop in Scheduler::run().
     $fiber->resume("Test");
@@ -405,10 +423,11 @@ echo "After resuming main fiber: ", $value, "\n"; // Output: After resuming main
 This example is expanded for clarity and comments, but may be condensed using short closures.
 
 <code php>
-$scheduler = new Scheduler;
+$loop = new EventLoop;
+$scheduler = new FiberScheduler(fn() => $loop->run());
 
 $fiber = Fiber::this();
-$scheduler->defer(fn() => $fiber->resume("Test"));
+$loop->defer(fn() => $fiber->resume("Test"));
 $value = Fiber::suspend($scheduler);
 
 echo "After resuming main fiber: ", $value, "\n"; // Output: After resuming main fiber: Test
@@ -417,7 +436,8 @@ echo "After resuming main fiber: ", $value, "\n"; // Output: After resuming main
 Fibers may also be resumed by throwing an exception.
 
 <code php>
-$scheduler = new Scheduler;
+$loop = new EventLoop;
+$scheduler = new FiberScheduler(fn() => $loop->run());
 
 // Get a reference to the currently executing fiber ({main} in this case).
 $fiber = Fiber::this();
@@ -425,7 +445,7 @@ $fiber = Fiber::this();
 // This example instead throws an exception into the fiber to resume it.
 
 // Create an event in the fiber scheduler to throw into the fiber at a later time.
-$scheduler->defer(function () use ($fiber): void {
+$loop->defer(function () use ($fiber): void {
     $fiber->throw(new Exception("Test"));
 });
 
@@ -441,10 +461,11 @@ try {
 Again this example may be condensed using short closures.
 
 <code php>
-$scheduler = new Scheduler;
+$loop = new EventLoop;
+$scheduler = new FiberScheduler(fn() => $loop->run());
 
 $fiber = Fiber::this();
-$scheduler->defer(fn() => $fiber->throw(new Exception("Test")));
+$loop->defer(fn() => $fiber->throw(new Exception("Test")));
 
 try {
     $value = Fiber::suspend($scheduler);
@@ -455,13 +476,12 @@ try {
 
 To be useful, rather than the scheduler immediately resuming the fiber, the scheduler should resume a fiber at a later time in response to an event. The next example demonstrates how a scheduler can resume a fiber in response to data becoming available on a socket.
 
-
 ----
 
-The next example adds to the ''FiberScheduler'' the ability to poll a socket for incoming data, invoking a callback when data becomes available on the socket. This scheduler can now be used to resume a fiber //only// when data becomes available on a socket, avoiding a blocking read.
+The next example adds to the event loop the ability to poll a socket for incoming data, invoking a callback when data becomes available on the socket. This scheduler can now be used to resume a fiber //only// when data becomes available on a socket, avoiding a blocking read.
 
 <code php>
-class Scheduler implements FiberScheduler
+class EventLoop
 {
     private string $nextId = 'a';
     private array $deferCallbacks = [];
@@ -519,7 +539,8 @@ class Scheduler implements FiberScheduler
 stream_set_blocking($read, false);
 stream_set_blocking($write, false);
 
-$scheduler = new Scheduler;
+$loop = new EventLoop;
+$scheduler = new FiberScheduler(fn() => $loop->run());
 
 // Read data in a separate fiber after checking if the stream is readable.
 $fiber = new Fiber(function () use ($scheduler, $read): void {
@@ -535,11 +556,11 @@ $fiber = new Fiber(function () use ($scheduler, $read): void {
 });
 
 // Start the new fiber within the fiber scheduler.
-$scheduler->defer(fn() => $fiber->start());
+$loop->defer(fn() => $fiber->start());
 
 // Suspend main fiber to enter the scheduler.
 $fiber = Fiber::this();
-$scheduler->defer(fn() => $fiber->resume("Writing data...\n"));
+$loop->defer(fn() => $fiber->resume("Writing data...\n"));
 echo Fiber::suspend($scheduler);
 
 // Write data in main thread once it is resumed.
@@ -562,13 +583,13 @@ Below is a chart illustrating execution flow between the three fibers in this ex
 
 ----
 
-The next example below uses ''[[https://github.com/amphp/ext-fiber/blob/67771864a376e58e47aa5ef6ef447a887b378d33/scripts/Loop.php|Loop]]'' from the ''ext-fiber'' tests, a simple implemenation of ''FiberScheduler'', yet more complex than that in the above examples, to delay execution of a function for 1000 milliseconds. When the fiber is suspended with ''Fiber::suspend()'', resumption of the fiber is scheduled with ''Loop->delay()'', which invokes the callback after the given number of milliseconds.
+The next example below uses ''[[https://github.com/amphp/ext-fiber/blob/67771864a376e58e47aa5ef6ef447a887b378d33/scripts/Loop.php|Loop]]'' from the ''ext-fiber'' tests, a simple event loop implemenation, yet more complex than that in the above examples, to delay execution of a function for 1000 milliseconds. When the fiber is suspended with ''Fiber::suspend()'', resumption of the fiber is scheduled with ''Loop->delay()'', which invokes the callback after the given number of milliseconds. An instance of ''FiberScheduler'' is returned from ''Loop::getScheduler()''.
 
 <code php>
 $loop = new Loop;
 $fiber = Fiber::this();
 $loop->delay(1000, fn() => $fiber->resume(42));
-var_dump(Fiber::suspend($loop)); // int(42)
+var_dump(Fiber::suspend($loop->getScheduler())); // int(42)
 </code>
 
 This example can be expanded to create multiple fibers, each with it’s own delay before resuming.
@@ -580,7 +601,7 @@ $loop = new Loop;
 $fiber = new Fiber(function () use ($loop): void {
     $fiber = Fiber::this();
     $loop->delay(1500, fn() => $fiber->resume(1));
-    $value = Fiber::suspend($loop);
+    $value = Fiber::suspend($loop->getScheduler());
     var_dump($value);
 });
 $loop->defer(fn() => $fiber->start());
@@ -588,7 +609,7 @@ $loop->defer(fn() => $fiber->start());
 $fiber = new Fiber(function () use ($loop): void {
     $fiber = Fiber::this();
     $loop->delay(1000, fn() => $fiber->resume(2));
-    $value = Fiber::suspend($loop);
+    $value = Fiber::suspend($loop->getScheduler());
     var_dump($value);
 });
 $loop->defer(fn() => $fiber->start());
@@ -596,7 +617,7 @@ $loop->defer(fn() => $fiber->start());
 $fiber = new Fiber(function () use ($loop): void {
     $fiber = Fiber::this();
     $loop->delay(2000, fn() => $fiber->resume(3));
-    $value = Fiber::suspend($loop);
+    $value = Fiber::suspend($loop->getScheduler());
     var_dump($value);
 });
 $loop->defer(fn() => $fiber->start());
@@ -604,7 +625,7 @@ $loop->defer(fn() => $fiber->start());
 // Suspend the main thread to enter the FiberScheduler.
 $fiber = Fiber::this();
 $loop->delay(500, fn() => $fiber->resume(4));
-$value = Fiber::suspend($loop);
+$value = Fiber::suspend($loop->getScheduler());
 var_dump($value);
 </code>
 
@@ -620,7 +641,6 @@ int(3)
 Total execution time for the script is 2 seconds (2000ms) as this is the longest delay (sleep) defined. A similar synchronous script would take 5 seconds to execute as each delay would be in series rather than concurrent.
 
 While a contrived example, imagine if each of the fibers was awaiting data on a network socket or the result of a database query. Combining this with the ability to simultaneously run and suspend many fibers allows a single PHP process to concurrently await many events.
-
 
 ----
 
@@ -646,12 +666,12 @@ $fiber = new Fiber(function () use ($loop, $write): void {
     // Suspend fiber for 1 second.
     echo "Waiting for 1 second...\n";
     $loop->delay(1000, fn() => $fiber->resume());
-    Fiber::suspend($loop);
+    Fiber::suspend($loop->getScheduler());
 
     // Write data to the socket once it is writable.
     echo "Writing data...\n";
     $loop->write($write, 'Hello, world!', fn(int $bytes) => $fiber->resume($bytes));
-    $bytes = Fiber::suspend($loop);
+    $bytes = Fiber::suspend($loop->getScheduler());
 
     echo "Wrote {$bytes} bytes.\n";
 });
@@ -663,7 +683,7 @@ echo "Waiting for data...\n";
 // Read data in main fiber.
 $fiber = Fiber::this();
 $loop->read($read, fn(?string $data) => $fiber->resume($data));
-$data = Fiber::suspend($loop);
+$data = Fiber::suspend($loop->getScheduler());
 
 echo "Received data: ", $data, "\n";
 </code>
@@ -683,13 +703,13 @@ For simplicity this example is reading and writing to an internally connected so
 
 ----
 
-The next few examples use the async framework [[https://github.com/amphp/amp/tree/v3|AMPHP v3]] mentioned in [[#patches_and_tests|Patches and Tests]] to demonstrate how fibers may be used by frameworks to create asynchronous code that is written like synchronous code.
+The next few examples use the async framework [[https://github.com/amphp/amp/tree/v3|amphp v3]] mentioned in [[#patches_and_tests|Patches and Tests]] to demonstrate how fibers may be used by frameworks to create asynchronous code that is written like synchronous code.
 
-AMPHP v3 uses an [[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/Loop/Driver.php|event loop interface]] that extends ''FiberScheduler'' together with a variety of functions and a placeholder object (''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/Promise.php|Promise]]'') to build on top of the underlying fiber API to create its own opinionated API to create green-threads (coroutines) to execute code concurrently. Users of AMPHP v3 do not use the Fiber API directly, the framework handles suspending and creating fibers as necessary. Other frameworks may choose to approach creating green-threads and placeholders differently.
+amphp v3 uses an [[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/Loop/Driver.php|event loop interface]] that extends ''FiberScheduler'' together with a variety of functions and a placeholder object (''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/Promise.php|Promise]]'') to build on top of the underlying fiber API to create its own opinionated API to create green-threads (coroutines) to execute code concurrently. Users of amphp v3 do not use the Fiber API directly, the framework handles suspending and creating fibers as necessary. Other frameworks may choose to approach creating green-threads and placeholders differently.
 
 The ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L83-L102|defer(callable $callback, mixed ...$args)]]'' function creates a new fiber that is executed when the current fiber suspends or terminates. ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L220-L230|delay(int $milliseconds)]]'' suspends the current fiber until the given number of milliseconds has elasped.
 
-This example is similar to the example above which created mutiple fibers that “slept” for differing times, but the underlying Fiber API is abstracted away into an API specific to the Amp framework. //Note again this code is specific to AMPHP v3 and not part of this RFC, other frameworks may choose to implement this behavior in a different way.//
+This example is similar to the example above which created mutiple fibers that “slept” for differing times, but the underlying Fiber API is abstracted away into an API specific to the Amp framework. //Note again this code is specific to amphp v3 and not part of this RFC, other frameworks may choose to implement this behavior in a different way.//
 
 <code php>
 use function Amp\defer;
@@ -720,7 +740,7 @@ var_dump(4);
 
 ----
 
-The next example again uses AMPHP v3 to demonstrate how the ''FiberScheduler'' fiber continues executing while the main thread is suspended. The ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L6-L38|await(Promise $promise)]]'' function suspends a fiber until the given promise is resolved and the ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L40-L67|async(callable $callback, mixed ...$args)]]'' function creates a new fiber, returning a promise that is resolved when the fiber completes, allowing multiple fibers to be executed concurrently.
+The next example again uses amphp v3 to demonstrate how the ''FiberScheduler'' fiber continues executing while the main thread is suspended. The ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L6-L38|await(Promise $promise)]]'' function suspends a fiber until the given promise is resolved and the ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/functions.php#L40-L67|async(callable $callback, mixed ...$args)]]'' function creates a new fiber, returning a promise that is resolved when the fiber completes, allowing multiple fibers to be executed concurrently.
 
 <code php>
 use function Amp\async;
@@ -771,7 +791,7 @@ $running = false; // Stop the loop in the fiber created with defer() above.
 
 ----
 
-Since fibers can be paused during calls within the PHP VM, fibers can also be used to create asynchronous iterators and generators. The example below uses AMPHP v3 to suspend a fiber within a generator, awaiting resolution of a ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/Delayed.php|Delayed]]'', a promise-like object that resolves itself with the second argument after the number of milliseconds given as the first argument. When iterating over the generator, the ''foreach'' loop will suspend while waiting for another value to be yielded from the generator.
+Since fibers can be paused during calls within the PHP VM, fibers can also be used to create asynchronous iterators and generators. The example below uses amphp v3 to suspend a fiber within a generator, awaiting resolution of a ''[[https://github.com/amphp/amp/blob/80ea42bdcfc4176f78162d5e3cbcad9c4cc20761/lib/Delayed.php|Delayed]]'', a promise-like object that resolves itself with the second argument after the number of milliseconds given as the first argument. When iterating over the generator, the ''foreach'' loop will suspend while waiting for another value to be yielded from the generator.
 
 <code php>
 use Amp\Delayed;
@@ -803,7 +823,7 @@ var_dump(...generator());
 
 ----
 
-The example below shows how [[https://github.com/reactphp|ReactPHP]] might use fibers to define an ''await()'' function using their ''PromiseInterface'' and ''LoopInterface''. (Note this example assumes ''LoopInterface'' would extend ''FiberScheduler'', which it already implements without modification.)
+The example below shows how [[https://github.com/reactphp|ReactPHP]] might use fibers to define an ''await()'' function using their ''PromiseInterface'' and ''LoopInterface''. (Note this example assumes ''LoopInterface'' would add a ''getScheduler()'' method returning an instance of ''FiberScheduler'' associated with the event loop instance.)
 
 <code php>
 use React\EventLoop\LoopInterface;
@@ -818,7 +838,7 @@ function await(PromiseInterface $promise, LoopInterface $loop): mixed
         fn(Throwable $reason) => $loop->futureTick(fn() => $fiber->throw($reason))
     );
 
-    return Fiber::suspend($loop);
+    return Fiber::suspend($loop->getScheduler());
 }
 </code>
 
@@ -848,7 +868,7 @@ class Promise
     {
         if (!$this->resolved) {
             $this->schedule(Fiber::this());
-            return Fiber::suspend($this->scheduler);
+            return Fiber::suspend($this->scheduler->getScheduler());
         }
 
         if ($this->error) {
@@ -906,8 +926,9 @@ class Promise
     }
 }
 
-class Scheduler implements FiberScheduler
+class Scheduler
 {
+    private FiberScheduler $scheduler;
     /** @var resource */
     private $curl;
     /** @var callable[] */
@@ -925,6 +946,15 @@ class Scheduler implements FiberScheduler
         curl_multi_close($this->curl);
     }
 
+    public function getScheduler(): FiberScheduler
+    {
+        if (!isset($this->scheduler) || $this->scheduler->isTerminated()) {
+            $this->scheduler = new FiberScheduler(fn() => $this->run());
+        }
+
+        return $this->scheduler;
+    }
+
     public function fetch(string $url): string
     {
         $curl = curl_init();
@@ -936,7 +966,7 @@ class Scheduler implements FiberScheduler
         curl_multi_add_handle($this->curl, $curl);
 
         $this->fibers[(int) $curl] = Fiber::this();
-        Fiber::suspend($this);
+        Fiber::suspend($this->getScheduler());
 
         $status = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
         if ($status !== 200) {
@@ -1068,9 +1098,9 @@ Fibers are supported on nearly all modern CPU architectures, including x86, x86_
 
 ''ext-fiber'' is actively tested on [[https://travis-ci.com/github/amphp/ext-fiber/builds|Travis]] for Linux running on x86_64 and 64-bit ARM, on [[https://ci.appveyor.com/project/amphp/ext-fiber|AppVeyor]] for Windows, and by the developers on macOS running on x86_64.
 
-=== How is a FiberScheduler implemented? ===
+=== How is a FiberScheduler callback implemented? ===
 
-A ''FiberScheduler'' is like any other PHP class implementing an interface. The ''run()'' method may contain any necessary code to resume suspended fibers for the given application. Generally, a ''FiberScheduler'' would loop through available events, resuming fibers when an event occurs. The ''ext-fiber'' repo contains a very simple implementation, ''[[https://github.com/amphp/ext-fiber/blob/67771864a376e58e47aa5ef6ef447a887b378d33/scripts/Loop.php|Loop]]'', that is able to delay functions for a given number of milliseconds or until the scheduler is entered again. This simple implementation is used in the [[https://github.com/amphp/ext-fiber/tree/67771864a376e58e47aa5ef6ef447a887b378d33/tests|ext-fiber phpt tests]].
+A ''FiberScheduler'' callback should invoke the necessary code to resume suspended fibers for the given application. Generally, a ''FiberScheduler'' would be created from a function that runs a loop through available events, resuming fibers when an event occurs. The ''ext-fiber'' repo contains a very simple implementation, ''[[https://github.com/amphp/ext-fiber/blob/67771864a376e58e47aa5ef6ef447a887b378d33/scripts/Loop.php|Loop]]'', that is able to delay functions for a given number of milliseconds or until the scheduler is entered again. This simple implementation is used in the [[https://github.com/amphp/ext-fiber/tree/67771864a376e58e47aa5ef6ef447a887b378d33/tests|ext-fiber tests]].
 
 === How does blocking code affect fibers ===
 
@@ -1082,18 +1112,18 @@ As fibers allow transparent use of asynchronous I/O, blocking implementations ca
 
 All fibers exist within a single thread. Only a single fiber may execute at a time, so memory cannot be accessed or modified simultaneously by multiple fibers, unlike threads which may modify memory simultaneously.
 
-As fibers are suspended and resumed, execution of multiple fibers that access the same memory can be interleaved. Thus a running fiber may modify memory depended upon by another suspended fiber. There are various strategies to address this problem, including mutexes, semaphores, memory parcels, and channels. This RFC does not provide any such implementations as these can be implemented in user space code using the proposed fiber API. Below is an example implementation of a mutex using the proposed fiber API and the ''FiberScheduler'' implementation from the first example.
+As fibers are suspended and resumed, execution of multiple fibers that access the same memory can be interleaved. Thus a running fiber may modify memory depended upon by another suspended fiber. There are various strategies to address this problem, including mutexes, semaphores, memory parcels, and channels. This RFC does not provide any such implementations as these can be implemented in user space code using the proposed fiber API. Below is an example implementation of a mutex using the proposed fiber API and the example ''[[https://github.com/amphp/ext-fiber/blob/67771864a376e58e47aa5ef6ef447a887b378d33/scripts/Loop.php|Loop]]'' implementation in the [[https://github.com/amphp/ext-fiber/tree/67771864a376e58e47aa5ef6ef447a887b378d33/tests|ext-fiber tests]].
 
 <code php>
 class Mutex
 {
-    private Scheduler $scheduler;
+    private Loop $loop;
     private SplQueue $queue;
     private bool $locked = false;
 
-    public function __construct(Scheduler $scheduler)
+    public function __construct(Loop $loop)
     {
-        $this->scheduler = $scheduler;
+        $this->loop = $loop;
         $this->queue = new SplQueue;
     }
 
@@ -1101,7 +1131,7 @@ class Mutex
     {
         if ($this->locked) {
             $this->queue->push(Fiber::this());
-            Fiber::suspend($this->scheduler);
+            Fiber::suspend($this->loop->getScheduler());
         }
 
         $this->locked = true;
@@ -1113,7 +1143,7 @@ class Mutex
             }
 
             $fiber = $this->queue->pop();
-            $this->scheduler->defer(fn() => $fiber->resume());
+            $this->loop->defer(fn() => $fiber->resume());
         });
     }
 }
