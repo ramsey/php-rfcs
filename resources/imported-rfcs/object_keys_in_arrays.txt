@@ -1,0 +1,162 @@
+====== PHP RFC: Object keys in arrays ======
+  * Date: 2020-01-07
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Target Version: PHP 8.1
+  * Implementation: TBD
+
+===== Introduction =====
+
+The [[rfc:enumerations|enumerations proposal]] implements enums as special objects. This has many advantages, and one significant limitation: Objects currently cannot be used as array keys.
+
+To pick up the running ''Suit''s example, writing this kind of code is currently not possible:
+
+<PHP>
+enum Suit {
+    case Hearts;
+    case Diamonds;
+    case Clubs;
+    case Spades;
+}
+
+$counts = [
+    Suit::Hearts => 0,
+    Suit::Diamonds => 0,
+    Suit::Clubs => 0,
+    Suit::Spades => 0,
+];
+foreach ($cards as $card) {
+    $counts[$card->suit]++;
+}
+</PHP>
+
+The enumerations RFC suggests to instead use either ''WeakMap'' or ''SplObjectStorage''. Both of them work in this case (due to the specifics of enums), and the former has a saner API. However, it is not possible to construct an array literal using either, limiting the places where they can be used. More importantly, both of these are specialized structures, and as such not supported by any array-based functions (including the entire ''array_*'' portion of the standard library.)
+
+This RFC proposes to address this issue by allowing the use of object keys (and thus enum keys) inside array.
+
+===== Proposal =====
+
+This RFC allows the use of object keys inside arrays:
+
+<PHP>
+$obj1 = new stdClass;
+$obj2 = new stdClass;
+
+$array = [];
+$array[$obj1] = 1;
+$array[$obj2] = 2;
+
+var_dump($array[$obj1]); // int(1)
+var_dump($array[$obj2]); // int(2)
+</PHP>
+
+Object keys are compared by object identity. That is, ''$array[$obj1]'' and ''$array[$obj2]'' refer to the same array element if and only if ''$obj1 === $obj2''.
+
+While an extension to support custom object hashing and comparison overloads may be possible in the future, it is very much out of scope of this proposal.
+
+===== Backward Incompatible Changes =====
+
+The primary backwards compatibility impact is that arbitrary arrays can now have object keys, which might invalidate assumptions of existing code:
+
+<PHP>
+function accepts_array(array $array) {
+    foreach ($array as $key => $value) {
+        // Previously code was guaranteed that $key is either int or string here.
+        // Now it can also be an object.
+    }
+}
+</PHP>
+
+It should be noted that Traversables could already yield non-string, non-integer keys beforehand and as such more generic code already needs to handle them gracefully. Code dealing specifically with array could have reasonably assumed keys to only be strings or integers.
+
+===== Implementation Impact =====
+
+Hashtable entries are currently represented using the following structure:
+
+<code c>
+typedef struct _Bucket {
+    zval val; // u2 = next index
+    zend_ulong h;
+    zend_string *key;
+} Bucket;
+</code>
+
+To implement this proposal, the structure would change to:
+
+<code c>
+typedef struct _Bucket {
+    zval val; // u2 = next index
+    zval key; // u2 = hash
+} Bucket;
+</code>
+
+The size of this structure remains the same on 64-bit systems (on legacy 32-bit systems it is 8 bytes larger).
+
+The stored hash value is reduced to 32-bits in order to fit into u2 space. As hash indexes are already limited to 32-bits, this is not problematic.
+
+The key zval may have type ''IS_LONG'', ''IS_STRING'' or ''IS_OBJECT''. During bucket lookups, objects keys can be mostly treated the same way as integer keys, because comparison of objects only requires comparison of the object pointers.
+
+In order to support object keys (and potentially other key types in the future), a new ''zkey'' family of hash functions and macros is added. ''zkey'' functions accept a zval key, which must be of type ''IS_LONG'', ''IS_STRING'' or ''IS_OBJECT''.
+
+A non-exhaustive list of new functions:
+
+<code c>
+// This omits various _ind, _ptr, etc variants.
+ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_add_or_update(HashTable *ht, zval *key, zval *val, uint32_t flag);
+ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_update(HashTable *ht, zval *key, zval *val);
+ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_add(HashTable *ht, zval *key, zval *val);
+ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_add_new(HashTable *ht, zval *key, zval *val);
+ZEND_API zend_result ZEND_FASTCALL zend_hash_zkey_del(HashTable *ht, zval *key);
+ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_find(const HashTable *ht, zval *key);
+static zend_always_inline zend_bool zend_hash_zkey_exists(const HashTable *ht, zval *key);
+</code>
+
+Similarly, ''ZKEY'' variants of ''ZEND_HASH_FOREACH'' macros are introduced:
+
+<code c>
+ZEND_HASH_FOREACH_ZKEY(ht, key)
+ZEND_HASH_FOREACH_ZKEY_VAL(ht, key, val)
+// etc.
+</code>
+
+The existing ''ZEND_HASH_FOREACH_KEY'' macro family is removed.
+
+The ''ZEND_HASH_FOREACH_NUM_KEY'' macro family is changed to assert that the key is of type ''IS_LONG''.
+
+The ''ZEND_HASH_FOREACH_STR_KEY'' macro family is changed to use a NULL key for non-string keys (rather than integer keys specifically).
+
+This allows replacing hashtable iteration code that currently assumes specific key types with generic code. For example, this typical pattern:
+
+<code c>
+zval *val;
+zend_ulong h;
+zend_string *key;
+ZEND_HASH_FOREACH_KEY_VAL(input_ht, h, str, val) {
+    zval new_val;
+    transform_val(&new_val, val);
+    if (str) {
+        zend_hash_add_new(output_ht, str, &new_val);
+    } else {
+        zend_hash_index_add_new(output_ht, h, &new_val);
+    }
+} ZEND_HASH_FOREACH_END();
+</code>
+
+Can be replaced by:
+
+<code c>
+zval *key, *val;
+ZEND_HASH_FOREACH_ZKEY_VAL(input_ht, key, val) {
+    zval new_val;
+    transform_val(&new_val, val);
+    zend_hash_zkey_add_new(output_ht, key, &new_val);
+} ZEND_HASH_FOREACH_END();
+</code>
+
+As the key is only passed through to a new array in this case, using the new APIs makes the code more straightforward. Of course, code that does something meaningful with the key will need to figure out how to handle object keys properly in a given situation.
+
+The new macros can be polyfilled for older PHP versions, which is also why this introduces new macros rather than modifying existing ones.
+
+===== Vote =====
+
+Yes/No.
