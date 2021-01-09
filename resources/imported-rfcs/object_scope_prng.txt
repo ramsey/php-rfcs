@@ -1,9 +1,9 @@
-====== PHP RFC: Object scoped PRNG Implementations. ======
-  * Version: 0.91
+====== PHP RFC: Object scoped RNG Implementations. ======
+  * Version: 1.0
   * Date: 2021-01-06
   * Author: Go Kudo <zeriyoshi@gmail.com>
   * Status: Draft
-  * Implementation: https://github.com/php/php-src/pull/6568
+  * Implementation: https://github.com/php/php-src/pull/6568 (outdated)
   * First Published at: https://wiki.php.net/rfc/object_scope_prng
 
 ===== Introduction =====
@@ -60,133 +60,103 @@ Implements an object-scoped PRNG in PHP, providing methods equivalent to functio
 
 Two methods have been proposed in the discussion.
 
-=== Type A ===
+=== Type I ===
 
-First, it provides the following interface. Namespaces is a stub. These will be shown in the voting options.
-
-Users can implement this interface through extensions or PHP code.
+First, it provides the following interface.
 
 <code php>
 namespace RNG;
 
 interface RNGInterface
 {
-    public function next(int $min = UNKNOWN, int $max = UNKNOWN): int;
+    public function next(): int;
+    /** @throws ValueError */
+    public function next64(): int;
 }
-
 </code>
 
-Next, Create an interface with methods to replace PHP's internal MT state-dependent functions. This will inherit from the previous interface.
-Behavior of these functions is not consistent and may need to be revised. but it also has the advantage that simple substitution is possible.
+The next64() method throws a ValueError exception when running on a non-64bit architecture or not supported RNG class.
+
+Next, define an interface that provides methods equivalent to PHP functions that use the output of the RNG.
 
 <code php>
 namespace RNG;
 
 interface RandomInterface extends RNGInterface
 {
-    public function arrayShuffle(array &$array): bool;
-    public function stringShuffle(string $string): string;
-    public function arrayRandom(array $array, int $num = 1): int|string|array;
+    public function arrayShuffle(array &$array): bool; // substitute array_shuffle() function.
+    public function stringShuffle(string $string): string; // substitute str_shuffle() function.
+    public function arrayRandom(array $array, int $num = 1): int|string|array; // substitute array_rand() function.
 }
 </code>
 
-The next step is to implement PRNGs that implement the interface. These may be serializable, Being serializable helps to preserve the state.
+These methods are safe for the internal state of the RNG class.
+
+Finally, we provide an RNG class that implements these interfaces.
+At this time, considering support for XorShift128+ , MT19937 and OSRandom.
 
 <code php>
 namespace RNG;
 
-class XorShift128Plus implements RandomInterface
-{
-    public function __construct(int $seed) {}
-    public function next(int $min = UNKNOWN, int $max = UNKNOWN): int {}
-    public function arrayShuffle(array &$array): bool {}
-    public function stringShuffle(string $string): string {}
-    public function arrayRandom(array $array, int $num = 1): int|string|array {}
-    public function __serialize(): array {}
-    public function __unserialize(array $data): void {}
-}
+class XorShift128Plus implements RandomInterface {} // use XorShift128+ algorithm
+class MT19937 implements RandomInterface {} // use MT19937 algorithm
+class OSRandom　implements RandomInterface {} // use php_random_bytes() internal API
 </code>
 
-=== Type B ===
-First, we define a RNG interface that inherits from Iterator.
+This implementation is superior to the Type II implementation in the following ways
+
+- Userland can provide an arbitrary RNGInterface / RandomInterface implementation.
+- Providing methods based on inheritance is user-friendly.
+- The implementation will be simple.
+
+However, it is inferior in the following areas
+
+- Implementation will be redundant.
+- Inheritance patterns are not modern.
+- Unable to recognize incorrect usage of existing functions.
+
+=== Type II ===
+
+First, it provides the following interface.
 
 <code php>
-interface RNG extends Iterator {}
-</code>
+namespace RNG;
 
-Next, we define the PRNG interfaces that inherit from the RNG. Each PRNG implements this interface.
-
-<code php>
-interface PRNG extends RNG
-{
-    public function __construct(int $seed);
-    public function getSeed(): int;
-}
-</code>
-
-Finally, we will create a class that provides utility methods to use these results.
-<code php>
-class RNGUtil
-{
-    public static function shuffleArray(int $randomNumber, array $arr): array;
-    public static function randomArrayElement(int $randomNumber, array $arr): mixed;
-    public static function between(int $randomNumber, int $min = PHP_INT_MIN, int $max = PHP_INT_MAX): int;
-    public static function bytes(RNG $rng, int $length): string;
-}
-</code>
-
-This method is more complex, but more OOP-like.
-However, it is important to note that PHP is also a language that values simplicity.
-
-=== Type C ===
-In this scheme, PHP provides a pure RNGInterface and a few implemented classes.
-RNGInterface has two public methods.
-
-<code php>
 interface RNGInterface
 {
     public function next(): int;
+    /** @throws ValueError */
     public function next64(): int;
 }
-
-class XorShift128Plus implements RNGInterface {} // next() and next64()
-class MT19937_64 implements RNGInterface {} // next() and next64()
-class MT19937 implements RNGInterface {} // next() only
 </code>
 
-next() returns a 32-bit unsigned integer, and next64() returns a 64bit unsigned integer, respectively. next64() throws an exception if not available.
-The reason for supporting 64bit width is that the current primary operating environment for PHP is a 64bit environment.
+The next64() method throws a ValueError exception when running on a non-64bit architecture or not supported RNG class.
 
-Also, add the following functions to PHP as global functions. These functions use the RNGInterface argument to perform the randomization process.
-
-<code php>
-function rng_shuffle(RNGInterface $rng, array &$array): bool {}
-function rng_str_shuffle(RNGInterface $rng, string $string: string {}
-function rng_array_rand(RNGInterface $rng, array $array, int $num = 1): int|string|array {}
-function rng_between(RNGInterface $rng, int $min, int $max): int {}
-function rng_bytes(RNGInterface $rng, int $length): string {}
-</code>
-
-This is a smarter implementation, but there are a couple of things to keep in mind: first, the user needs to pay close attention to how the RNG instance is handled, and second, the function implementation is more complex. Functions need to be able to determine if they are userland implementations and behave appropriately.
-
-=== Type C2 ===
-This is a variant of TypeC that makes some of the global functions it provides extensions to existing functions that use RNGs.
+Next, make some changes to the existing functions and add some new ones.
 
 <code php>
 function shuffle(array &$array, ?RNGInterface $rng = null): bool {}
 function str_shuffle(string $string, ?RNGInterface $rng = null): string {}
 function array_rand(array $array, int $num = 1, ?RNGInterface $rng = null): int|string|array {}
-</code>
-
-These functions use the global state MT as before to handle the case where $rng is null.
-With this change, users will be able to recognize that RNG is used inside each function without knowing the core implementation.
-
-Also add some new functions, these functions required $rng parameter.
-
-<code php>
+/** Generates a random number for the specified range using RNG. */
 function rng_between(RNGInterface $rng, int $min, int $max): int [}
+/** Generates a sequence of bytes for a specified range using RNG. */
 function rng_bytes(RNGInterface $rng, int $length): string {}
 </code>
+
+Existing RNG-specifying functions will now be able to explicitly specify the source of the RNG. This makes it clear that these functions are using the RNG internally.
+
+This implementation is superior to the Type II implementation in the following ways
+
+- User will be able to notice in advance that the function uses RNG.
+- RandomInterface is not required.
+- Simplifies the internal implementation of the class.
+
+However, it is inferior in the following areas
+
+- Implementations that handle userland RNGInterface implementations can be complex.
+    - You may not need to support this.
+- RNG instances as an argument confuses the user.
 
 ===== Backward Incompatible Changes =====
 
@@ -252,7 +222,7 @@ This provides a significant improvement, but still slow from the C implementatio
 In order to use the features related to pseudo-random numbers that PHP currently provides, an understanding of the core is required. If this proposal is implemented, users will be able to use pseudo-random numbers under the easy to understand concept of objects. This is a useful improvement to the overall functionality of the language.
 
 ===== Unaffected PHP Functionality =====
-It does not affect any related existing functions.
+It does not affect any related existing functions. (However, in the case of Type II, non-destructive arguments will be added.)
   * mt_srand()
   * mt_rand()
   * shuffle()
@@ -265,8 +235,8 @@ Yes/No, requiring 2/3 majority
 There are a few additional options for implementation.
 
 <doodle title="Which implementation looks good?" auth="user" voteType="single" closed="true">
-   * Type A
-   * Type B
+   * Type I
+   * Type II
 </doodle>
 
 <doodle title="In which module will you implement these?" auth="user" voteType="single" closed="true">
@@ -280,14 +250,8 @@ There are a few additional options for implementation.
    * "PHP\RNG" namespace (\PHP\RNG\RNGInterface)
 </doodle>
 
-<doodle title="Which set of PRNGs should be provided as standard?" auth="user" voteType="single" closed="true">
-   * MT19937 (64bit) / XorShift128+
-   * MT19937 (64bit)
-   * XorShift128+
-</doodle>
-
 ===== Patches and Tests =====
-https://github.com/php/php-src/pull/6568
+https://github.com/php/php-src/pull/6568 (outdated)
 
 ===== References =====
   * [1] https://github.com/savvot/random
