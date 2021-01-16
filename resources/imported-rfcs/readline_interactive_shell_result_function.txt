@@ -18,9 +18,71 @@ C programming, PHP's internals and memory management, and with PHP's internal C 
 
 ===== Proposal =====
 
-Add a new function ''readline_interactive_shell_result_function'' when starting an interactive PHP session with ''php -a''. This function only affects interactive shells - it can be used to set or clear a closure when ''extension_loaded('readline') === true'', but that closure would only be called in interactive shells (i.e. ''php -a'').
+By default, in ''php -a'', dump the results of non-null expressions using ''var_dump''/''var_export()''.
+Additionally, add a new function ''readline_interactive_shell_result_function'' to the ''readline'' PHP module. This function only affects interactive shells - it can be used to set or clear a closure when ''extension_loaded('readline') === true'', but that closure would only be called in interactive shells (i.e. ''php -a'').
 
-Using this, users or applications can configure callables to be run every time a statement containing a single expression such as ''2+2;'' or ''$x = call_function();'' is evaluated (but not non-expressions such as ''class X{}'' or combinations of expressions such as ''$x = 1; $y = $x*2;''. A very basic example of using this would be:
+This will dump the results of expressions every time a statement containing a single expression such as ''2+2;'' or ''$x = call_function();'' is evaluated (but not non-expressions such as ''class X{}'' or combinations of expressions such as ''$x = 1; $y = $x*2;''.
+
+An example of the behavior of the default expression dumper is below:
+
+<code php>
+$ php -a
+Interactive shell
+
+php > 1+1;
+=> 2
+php > 0.5 * 2;
+=> 1.0
+php > namespace\MyClass::class;
+=> 'MyClass'
+php > fn()=>true;
+=> object(Closure)#1 (0) {
+}
+php > $x = ["foo", "bar"];
+=> array(2) {
+  [0]=>
+  string(3) "foo"
+  [1]=>
+  string(3) "bar"
+}
+php > asort($x);
+=> true
+php > $x;
+=> array(2) {
+  [1]=>
+  string(3) "bar"
+  [0]=>
+  string(3) "foo"
+}
+php > json_encode($x);
+=> '{"1":"bar","0":"foo"}'
+php > unset($x);
+php > function do_something() { echo "in do_something()\n"; }
+php > do_something();
+in do_something()
+php > json_decode('{"key": "value"}');
+=> object(stdClass)#1 (1) {
+  ["key"]=>
+  string(5) "value"
+}
+php > throw new RuntimeException("test");
+
+Warning: Uncaught RuntimeException: test in php shell code:1
+Stack trace:
+#0 {main}
+  thrown in php shell code on line 1
+php > printf("newline is automatically appended by shell");
+newline is automatically appended by shell
+=> 42
+php > printf("newline not automatically appended by shell\n");
+newline not automatically appended by shell
+=> 44
+php > { print("test\n"); }; // statement blocks can be used to avoid dumping expression results
+test
+php >
+</code>
+
+Using the function ''readline_interactive_shell_result_function()'', users or applications can override the default expression dumper, or remove it entirely.
 
 <code php>
 php -a
@@ -31,9 +93,18 @@ php (     function (string $code, $result) {
 php (         echo "Saw " . trim($code) . "\n";
 php (         echo json_encode($result);
 php (     });
+Saw readline_interactive_shell_result_function(
+     function (string $code, $result) {
+         echo "Saw " . trim($code) . "\n";
+         echo json_encode($result);
+     });
+true
 php > 2+2;
 Saw 2+2;
 4
+php > readline_interactive_shell_result_function(null);  // useful if output would be extremely long
+php > 2+2;
+php > 
 </code>
 
 Real implementations may be much more complex, and make use of parsers such as https://github.com/nikic/PHP-Parser or https://github.com/nikic/php-ast to check if the expression in question is an assignment, call to print(), etc.
@@ -50,7 +121,7 @@ This has the following signature:
 function readline_interactive_shell_result_function(?callable $callback): bool;
 </code>
 
-A new system ini boolean setting ''cli.enable_interactive_shell_result_function'' is added as part of this RFC, defaulting to enabled. It can be disabled to prevent the closures from being called on expression results, e.g. if the closures have bugs, are excessivly verbose, or have unpredictable performance.
+A new system ini boolean setting ''cli.enable_interactive_shell_result_function'' is added as part of this RFC, defaulting to enabled. It can be disabled to prevent expression results from being dumped at all (by the internal implementation or by overrides), e.g. if the closures have bugs, are excessivly verbose, or have unpredictable performance.
 
 ===== Backward Incompatible Changes =====
 None, only interactive sessions are affected, and only when this functionality is enabled and a callback is installed.
@@ -69,12 +140,6 @@ If there are any php.ini settings then list:
   * php.ini-production values: ''cli.enable_interactive_shell_result_function = On''
 
 ===== Future Scope =====
-
-==== Providing a default callback to dump expression results ====
-
-This RFC is minimal and does not provide a default implementation for rendering values of expressions (i.e. there is no callback by default). Providing a default is feasible, but there are a variety of choices that could be made (e.g. var_dump vs var_export vs shorter JSON-like equivalents for simple arrays, handling of recursive data structures, truncating output, etc).
-
-  * In order to provide more extensive default handlers for tab completion and rendering of evaluated expressions, it may be useful to bundle a parser written in php with the interactive shell. The heuristics currently written in C are very limited and not aware of context beyond the most recent tokens.
 
 From https://externals.io/message/111073#111073
 <blockquote>
