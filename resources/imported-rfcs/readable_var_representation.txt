@@ -1,0 +1,312 @@
+====== PHP RFC: var_representation() : readable alternative to var_export() ======
+  * Version: 0.1
+  * Date: 2021-01-22
+  * Author: Tyson Andre, tandre@php.net
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/readable_var_representation
+  * Implementation: https://github.com/php/php-src/pull/6619 (currently using another name)
+
+===== Introduction =====
+
+''var_export()'' is a function that gets structured information about the given variable. It is similar to var_dump() with one exception: the returned representation is (often) valid PHP code.
+However, it is inconvenient to work with the representation of ''var_export()'' in many ways, especially since that function was introduced in php 4.2.0 and predates both namespaces and the short ''[]'' array syntax.
+However, because the output format of ''var_export()'' is depended upon in php's own unit tests, tests of PECL modules, and the behavior or unit tests of various applications written in PHP, changing ''var_export()'' itself may be impractical.
+This RFC proposes to add a new function ''var_representation(mixed $value, int $flags = 0): string'' to convert a variable to a string in a way that fixes the shortcomings of ''var_export()''
+
+===== Proposal =====
+
+Add a new function ''var_representation(mixed $value, int $flags = 0): string'' that always returns a string. This has the following differences from ''var_export()''
+
+  - Unconditionally return a string instead of printing to standard output.
+  - Use ''null'' instead of ''NULL'' - the former is recommended by more coding guidelines [[https://www.php-fig.org/psr/psr-2/|such as PSR-2]].
+  - Change the way indentation is done for arrays/objects. Always add 2 spaces for every level of arrays, never 3 in objects, and put the array start on the same line as the key for arrays and objects)
+  - Render lists as ''"['item1']"'' rather than ''"array(\n  0 => 'item1',\n)"''.
+  - Always render empty lists on a single line instead of two lines.
+  - Prepend ''\'' to class names so that generated code snippets can be used in namespaces without any issues.
+  - Support the bit flag ''VAR_REPRESENTATION_SINGLE_LINE=1'' in a new optional parameter ''int $flags = 0'' accepting a bitmask. If the value of $flags includes this flags, ''var_representation()'' will return a single-line representation for arrays/objects, though strings with embedded newlines will still cause newlines in the output.
+
+<code php>
+php > echo var_representation(true);
+true
+php > echo var_representation(1);
+1
+php > echo var_representation(1.00);
+1.0
+php > echo var_representation(null);  // differs from uppercase NULL from var_export
+null
+php > echo var_representation(['key' => 'value']);  // uses short arrays, unlike var_export
+[
+  'key' => 'value',
+]
+php > echo var_representation(['a','b']);  // uses short arrays, and omits array keys if array_is_list() would be true
+[
+  'a',
+  'b',
+]
+php > echo var_representation(['a', 'b', 'c'], VAR_REPRESENTATION_SINGLE_LINE);  // can dump everything on one line.
+['a', 'b', 'c']
+php > echo var_representation([]);  // always print zero-element arrays without a newline
+[]
+</code>
+
+<code php>
+php > echo var_representation(fopen('test','w'));  // resources are output as null, like var_export
+
+Warning: var_representation does not handle resources in php shell code on line 1
+null
+php > $x = new stdClass(); $x->x = $x; echo var_representation($x);
+
+Warning: var_representation does not handle circular references in php shell code on line 1
+(object) [
+  'x' => null,
+]
+</code>
+
+<code php>
+// If there are any control characters (\x00-\x1f and \x7f), use double quotes instead of single quotes
+// (that includes "\r", "\n", "\t", etc.)
+php > echo var_representation("Content-Length: 42\r\n"); 
+"Content-Length: 42\r\n"
+php > echo var_representation("uses double quotes: \$\"'\\\n");
+"uses double quotes: \$\"'\\\n"
+php > echo var_representation("uses single quotes: \$\"'\\");
+'uses single quotes: $"\'\\'
+
+
+php > echo var_representation(implode('', array_map('chr', range(0, 0x1f)))), "\n"; // ascii \x00-0x1f
+"\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
+php > echo var_representation(implode('', array_map('chr', range(0x20, 0x7f)))), "\n"; // ascii \x20-0x7f
+" !\"#\$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\x7f"
+</code>
+
+==== Advantages over var_export ====
+
+=== Encoding binary data ===
+This does a better job at encoding binary data in a form that is easy to edit.
+var_export() passes through everything except ''\\'', ''\''', and ''\0'', 
+even control characters such as tabs, vertical tabs, backspaces, carriage returns, etc.
+
+<code php>
+php > echo var_representation("\x00\r\n\x00");
+"\x00\r\n\x00"
+php > var_export("\x00\r\n\x00");
+'' . "\0" . '
+' . "\0" . ''
+
+// bytes above \x80 are passed through with no modification or encoding checks.
+// PHP strings are internally just arrays of bytes.
+php > echo var_representation('pi=π'); 
+'pi=π'
+php > var_export('pi=π');
+'pi=π'
+php > echo var_representation("\xcf\x80");
+'π'
+</code>
+
+=== Supporting namespaces ===
+
+var_export() was written in php 4.2, long before php supported namespaces.
+Because of that, the output of ''var_export()'' has never included backslashes to fully qualify class names,
+which is inconvenient for objects that do implement ''<nowiki>__set_state</nowiki>'' (aside: ArrayObject currently doesn't)
+
+<code php>
+php > echo var_representation(new ArrayObject([1,['key' => [true]]]));
+\ArrayObject::__set_state([
+  1,
+  [
+    'key' => [
+      true,
+    ],
+  ],
+])
+php > echo var_representation(new ArrayObject([1,['key'=>[true]]]),VAR_REPRESENTATION_SINGLE_LINE);
+\ArrayObject::__set_state([1, ['key' => [true]]])
+php > var_export(new ArrayObject([1,['key' => [true]]]));
+ArrayObject::__set_state(array(
+   0 => 1,
+   1 => 
+  array (
+    'key' => 
+    array (
+      0 => true,
+    ),
+  ),
+))
+</code>
+
+Without the backslash, using ''var_export'' to build a snipppet such as ''<nowiki>NS\Something::__set_state([])</nowiki>'' will have the class be relatively resolved as ''OtherNS\NS\Something'' if the output of var_export is used as part of a php file generated using anything other than the global namespace.
+
+<code php>
+php > namespace NS { class Something { public static function __set_state($data) {} }}
+php > $code = "namespace Other; return " . var_export(new NS\Something(), true) . ";\n";
+php > echo $code;
+namespace OtherNS; return NS\Something::__set_state(array(
+));
+php > eval($code);
+
+Warning: Uncaught Error: Class "OtherNS\NS\Something" not found in php shell code(1) : eval()'d code:1
+Stack trace:
+#0 php shell code(1): eval()
+#1 {main}
+  thrown in php shell code(1) : eval()'d code on line 1
+</code>
+
+=== Cleaner output ===
+
+This omits array keys when they are not required, and puts array values on the same line as array keys.
+Additionally, this outputs ''null'' instead of ''NULL'', following [[https://www.php-fig.org/psr/psr-2/|modern coding guidelines such as PSR-2]]
+
+===== Backward Incompatible Changes =====
+
+None, except for newly added function and constant names. The output format of ''var_export()'' is not changed in any way.
+
+===== Proposed PHP Version(s) =====
+8.1
+
+===== RFC Impact =====
+==== To SAPIs ====
+None
+
+==== To Existing Extensions ====
+No
+
+==== To Opcache ====
+No impact
+
+==== New Constants ====
+
+''VAR_REPRESENTATION_SINGLE_LINE''
+
+===== Unaffected PHP Functionality =====
+
+''var_export()'' does not change in any way.
+
+===== Future Scope =====
+
+==== Extending $flags ====
+
+Future RFCs may extend ''$flags'' by adding more flags, or by allowing an array to be passed to ''$flags''.
+
+Adding more flags here would increase the scope of the rfc and complexity of implementing the change and for reviewing/understanding the implementation.
+
+==== Adding magic methods such as __toRepresentation() to PHP ====
+
+This is outside of the scope of this RFC, but it is possible future RFCs by others may amend the representation of ''var_representation()''
+before php 8.1 is released or through adding new options to $flags.
+
+Others have suggested adding magic methods that would convert objects to a better representation.
+No concrete proposals have been made yet. Multiline formatting and the detection of recursive data structures is a potential concern.
+
+Another possibility is to add a magic method such as ''<nowiki>__toConstructorArgs</nowiki>(): array'' 
+which would allow converting `$point` to the string '''new Point(x: 1, y: 2)''' or '''new Point(1, 2)'''
+if that magic method is defined.
+
+==== Customizing string representations ====
+
+It may be useful to override this string representation through additional flags, callbacks, or other mechanisms.
+However, I don't know if there's widespread interest in that, and this would increase the scope of this RFC.
+
+===== Proposed Voting Choices =====
+Yes/No, requiring 2/3 majority.
+
+===== References =====
+Links to external references, discussions or RFCs
+
+===== Rejected Features =====
+
+==== Printing to stdout by default/configurably ====
+
+Printing to stdout and creating a string representation are two distinct behaviors, which some would argue should not be combined into the same function.
+It is simple enough to explicitly write ''echo var_representation($value);''
+
+The name ''var_representation()'' was chosen to make it clearer that the function returning a representation, rather than performing an action such as ''dump''ing or ''export''ing the value.
+
+https://externals.io/message/112924#112925
+<blockquote>
+The formatting of var_export is certainly a recurring complaint, and
+previous discussions were not particularly open to changing current
+var_export behavior, so adding a new function seems to be the way to
+address the issue (the alternative would be to add a flag to var_export).
+
+I like the idea of the "one line" flag. Actually, this is the main part I'm
+interested in :) With the one line flag, this produces the ideal formatting
+for PHPT tests that want to print something like "$v1 + $v2 = $v3". None of
+our current dumping functions are suitable for this purpose (json_encode
+comes closest, but has edge cases like lack of NAN support.)
+
+Some notes:
+
+  * You should drop the $return parameter and make it always return. As this is primarily an export and not a dumping function, printing to stdout doesn't make sense to me.  * For strings, have you considered printing them as double-quoted and escaping more characters? This would avoid newlines in oneline mode. And would allow you to escape more control characters. I also find the current ''<nowiki>'' . "\0" . ''</nowiki>'' format for encoding null bytes quite awkward.
+  * I don't like the short_var_export() name. Is "short" really the primary characteristic of this function? Both var_export_pretty and var_export_canonical seem better to me, though I can't say they're great either. I will refrain from proposing real_var_export() ... oops :P
+
+Regards,
+
+Nikita
+</blockquote>
+
+==== Calling this var_export_something ====
+
+The var_export() function will print to stdout by default, unless ''$return = true'' is passed in.
+I would find it extremely inconsistent and confusing to add a new global function ''var_export_something()'' that does not print to stdout by default.
+
+==== Using an object-oriented api ====
+
+This was rejected because the most common use cases would not need the ability to customize the output.
+Additionally, it is possible to use $flags (possibly also allowing an array containing callbacks) to achieve a similar result to method overrides.
+
+https://externals.io/message/112924#112944
+<blockquote>
+Alternatively how about making a VarExporter class.
+
+<code php>
+$exporter = new VarExporter; // Defaults to basic set of encoding options TBD
+$exporter->setIndent('  '); // 2 spaces, 1 tab, whatever blows your dress up
+$exporter->setUserShortArray(false); // e.g. use array(...)
+etc...
+
+$serialized = $exporter->serialize($var); // Exports to a var
+$exporter->serializeToFile($var, '/tmp/include.inc'); // Exports to a file
+$exporter->serializeToStream($var, $stream); // Exports to an already open stream
+</code>
+
+And if you want the defaults, then just:
+
+<code php>
+$serialized = (var VarExporter)->serialize($var);
+</code>
+
+Potentially, one could also allow overriding helper methods to perform transformations along the way:
+
+<code php>
+// VarExporter which encodes all strings as base64 blobs.
+class Base64StringVarExporter extends VarExporter {
+    public function encodeString(string $var): string {
+      // parent behavior is `return '"' . addslashes($var) . '"';
+      return "base64_decode('" . base64_encode($var) . "')";
+    }
+}
+</code>
+
+Not the most performant thing, but extremely powerful.
+</blockquote>
+
+==== Dumping to a stream ====
+
+https://externals.io/message/112924#112944
+<blockquote>
+> * You should drop the $return parameter and make it always return. As this is primarily an export and not a dumping function, printing to stdout doesn't make sense to me.
+
+I'd argue the opposite. If dumping a particularly large tree of elements,
+serializing that to a single string before then being able to write it to
+file or wherever seems like packing on a lot of unnecessary effort. What I
+would do is expand the purpose of the $output parameter to take a stream.
+STDOUT by default, a file stream for writing to include files (one of the
+more common uses), or even a tmpfile() if you do actually want it in a var.
+</blockquote>
+
+There's 3 drawbacks I don't like about that proposal:
+
+  - If a function taking a stream were to throw or encounter a fatal error while converting an object to a stream, then you'd write an incomplete object to the stream or file, which would have to be deleted \\ E.g. internally, ''fprintf()'' and ''printf()'' calls ''sprintf'' before writing anything to the stream for related reasons.
+  - This may be much slower and end users may not expect that - a lot of small stream writes with dynamic C function calls would be something I'd expect to take much longer than converting to a string then writing to the stream.  (e.g. I assume a lot of small echo $str; is much faster than ''\fwrite(\STDOUT, $str);'' in the internal C implementation) (if we call ''->serialize()'' first, then there's less of a reason to expose ''->serializeFile()'' and ''->serializeStream()'')
+  - Adding even more ways to dump to a stream/file. Should that include stream wrappers such as http://?  For something like XML/YAML/CSV, being able to write to a file makes sense because those are formats many other applications/languages can consume, which isn't the case for var_export.
+
