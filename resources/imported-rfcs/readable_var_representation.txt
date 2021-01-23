@@ -1,8 +1,8 @@
 ====== PHP RFC: var_representation() : readable alternative to var_export() ======
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2021-01-22
   * Author: Tyson Andre, tandre@php.net
-  * Status: Draft
+  * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/readable_var_representation
   * Implementation: https://github.com/php/php-src/pull/6619 (currently using another name)
 
@@ -158,6 +158,127 @@ Stack trace:
   thrown in php shell code(1) : eval()'d code on line 1
 </code>
 
+===== When would a user use var_representation? =====
+
+https://externals.io/message/112967#112968
+
+<blockquote>
+My hesitation remains that this is just duplicating existing
+functionality with only cosmetic differences.
+
+As a user of PHP 8.1, how would I decide whether to use print_r,
+var_dump, var_export, or var_representation?
+
+And under what circumstances would I bother to write
+"var_representation($var, VAR_REPRESENTATION_SINGLE_LINE);"?
+</blockquote>
+
+An end user may wish to use these functions in the following situations:
+(These are the personal opinions of the RFC's author)
+
+==== Use var_representation when: ====
+
+var_representation returns a parsable string representation of a variable that is easier to read than var_export.
+
+It may be useful when any of the following apply:
+
+  * You are generating a snippet of code to ''eval()'' in a situation where the snippet will occasionally or frequently be read by a human - see the section [[#supporting_namespaces|Supporting Namespaces]]. (If the output never needs to be read by a human, ''return unserialize(' . var_export(serialize($data), true) . ');'' can be used)
+  * The output is occasionally or frequently read by humans (e.g. CLI or web app output, a REPL, unit test output, etc.). 
+  * The output contains control characters such as newlines, tabs, ''\r'' or ''\x00'' and may be viewed or edited by other users in a text editor/IDE. Many IDEs may convert from windows line endings (''\r\n'') to unix line endings(''\r\n'') automatically.
+  * You want to unambiguously see control characters in the raw output regardless of how likely they are (e.g. dumping php ini settings, debugging mysterious test failures, etc)
+  * You are writing unit tests for applications supporting PHP 8.1+ (or a var_representation polyfill) that test the exact string representation of the output (e.g. phpt tests of php-src and PECL extensions) - see the section [[#printing_to_stdout_by_default_or_configurably|Printing to stdout by default or configurably]].
+  * You need to copy the output into a codebase that's following a modern coding style guideline such as [[https://www.php-fig.org/psr/psr-2/|modern coding guidelines such as PSR-2]] - see the section [[#cleaner_output|Cleaner Output]]. It saves time if you don't have to remove array keys of lists and convert ''array()'' to ''[]''.
+
+==== Use VAR_REPRESENTATION_SINGLE_LINE when: ====
+
+This flag may be useful when any of the following apply:
+
+  * You are writing or modifying tests of exact variable representation and want to write the equivalent of ''assertSame("[NAN, 2]", $repr)'' instead of ''assertSame("[\n  NAN,\n  2,\n]", $repr)''
+  * You are generating human-readable output and expect the output to be a small object/array - see the section [[#printing_to_stdout_by_default_or_configurably|Printing to stdout by default or configurably]]
+  * You want the output to be as short as possible while still being somewhat human readable, e.g. sending an extremely long array representation over the network, or are saving it to a file/cache/external service, or you're using var_representation($mixed) as an array key for thousands of objects.
+
+==== Use var_export when: ====
+
+var_representation returns a parsable string representation of a variable (that has the limitations described in this RFC)
+
+  * You are writing an application or library that would benefit from behaving the exact same way in php 8.0 and 8.1, and polyfilling is impractical (e.g. for performance reasons or packaging requirements such as being distributed without additional dependencies (e.g. a single-file script))
+  * You prefer string output escaped with single quotes mixed with newlines, tabs, and embedded control characters (especially if control characters are unlikely), or want to render NULL as an uppercase scalar.
+  * You need to generate output that can be ''eval()''ed even in PHP versions [[https://wiki.php.net/rfc/shortsyntaxforarrays|5.3 or older]].
+
+==== Use var_dump when: ====
+
+  * You do not need valid php code.
+  * You need to inspect a datastructure to determine if it contains references or recursive data structures such as recursive objects or recursive array references.
+  * You need a human-readable representation of data, don't need valid php syntax, and want to distinguish between 
+
+==== Use debug_zval_dump when: ====
+
+[[https://www.php.net/manual/en/function.debug-zval-dump.php|debug_zval_dump]] dumps a string representation of an internal zend value to output.
+
+  * You do not need valid php code.
+  * You are looking into bugs in the internals of php (e.g. incorrect reference counting of php values leading to memory leaks or premature freeing) and need to know exact reference counts
+  * You are generating a test case for a PECL extension or php-src validating that a reference counting bug is fixed.
+
+<code php>
+php > $y = [new stdClass()]; $y[1] = &$y[0]; 
+php > debug_zval_dump($y);
+array(2) refcount(2){
+  [0]=>
+  &object(stdClass)#1 (0) refcount(1){
+  }
+  [1]=>
+  &object(stdClass)#1 (0) refcount(1){
+  }
+}
+php > var_dump($y);
+array(2) {
+  [0]=>
+  &object(stdClass)#1 (0) {
+  }
+  [1]=>
+  &object(stdClass)#1 (0) {
+  }
+}
+php > var_export($y);  // here, you get valid php code but don't see the object ids and can't tell if they're different objects
+array (
+  0 => 
+  (object) array(
+  ),
+  1 => 
+  (object) array(
+  ),
+)
+</code>
+
+==== Use print_r when: ====
+
+[[https://www.php.net/print_r|print_r]] prints human-readable information about a variable - it is like print() but recursive.
+
+  * You do not need valid php code.
+  * You want human-readable output, string escaping isn't a concern for your use case, and differentiating between strings, integers, floats, booleans, and null doesn't need to happen (printed the same way as print()). This can be useful if keys and values are almost always the same types.
+
+The below snippet is an example of where you may not want to use print_r().
+
+<code php>
+php > print_r([['key' => 'first', 'other' => 'second', 'third' => '1'], '1', 1, 1.0, true, false, null, '']);
+Array
+(
+    [0] => Array
+        (
+            [key] => first
+            [other] => second
+            [third] => 1
+        )
+
+    [1] => 1
+    [2] => 1
+    [3] => 1
+    [4] => 1
+    [5] => 
+    [6] => 
+    [7] => 
+)
+</code>
 
 ===== Backward Incompatible Changes =====
 
@@ -284,11 +405,15 @@ The last time ''var_export()'' changed was from ''<nowiki>stdClass::__set_state(
 Yes/No, requiring 2/3 majority.
 
 ===== References =====
-Links to external references, discussions or RFCs
+
+  * https://externals.io/message/112967 "[RFC] var_representation() : readable alternative to var_export()"
+  * https://externals.io/message/112924 "Proposal: short_var_export($value, bool $return=false, int $flags=0)"
+  * https://externals.io/message/109415 "[RFC][DISCUSSION] Change var_export() array syntax to use short hand arrays" (A competing RFC that started discussion 9 months ago in March 2020). See quote in the section [[#printing_to_stdout_by_default_or_configurably|Printing to stdout by default or configurably]] about previous discussions not being particularly open to changing var_export behavior.
+  * https://wiki.php.net/rfc/var-export-array-syntax "PHP RFC: Change var_export() array syntax to use shorthand arrays" (A competing RFC that started discussion 9 months ago in March 2020)
 
 ===== Rejected Features =====
 
-==== Printing to stdout by default/configurably ====
+==== Printing to stdout by default or configurably ====
 
 Printing to stdout and creating a string representation are two distinct behaviors, which some would argue should not be combined into the same function.
 It is simple enough to explicitly write ''echo var_representation($value);''
@@ -384,3 +509,6 @@ There's 3 drawbacks I don't like about that proposal:
   - This may be much slower and end users may not expect that - a lot of small stream writes with dynamic C function calls would be something I'd expect to take much longer than converting to a string then writing to the stream.  (e.g. I assume a lot of small echo $str; is much faster than ''\fwrite(\STDOUT, $str);'' in the internal C implementation) (if we call ''->serialize()'' first, then there's less of a reason to expose ''->serializeFile()'' and ''->serializeStream()'')
   - Adding even more ways to dump to a stream/file. Should that include stream wrappers such as http://?  For something like XML/YAML/CSV, being able to write to a file makes sense because those are formats many other applications/languages can consume, which isn't the case for var_export.
 
+==== Changelog ====
+
+  * 0.2: Add the section "When would a user use var_representation?"
