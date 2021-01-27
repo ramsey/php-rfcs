@@ -20,7 +20,7 @@ The most popular case of enumerations is ''%%boolean%%'', which is an enumerated
 
 Enumerations are built on top of classes and objects.  That means, except where otherwise noted, "how would Enums behave in situation X" can be answered "the same as any other object instance."  They would, for example, pass an ''object'' type check.  Enum names are case-insensitive, but subject to the same caveat about autoloading on case-sensitive file systems that already applies to classes generally.  Case names are internally implemented as class constants, and thus are case-sensitive.
 
-==== Unit enumerations ====
+==== Basic enumerations ====
 
 This RFC introduces a new language construct, ''%%enum%%''. Enums are similar to classes, and share the same namespaces as classes, interfaces, and traits. They are also autoloadable the same way. An Enum defines a new type, which has a fixed, limited number of possible legal values.
 
@@ -47,7 +47,7 @@ pick_a_card('Spades');    // throws TypeError
 
 An Enumeration may have zero or more ''%%case%%'' definitions, with no maximum.  A zero-case enum is syntactically valid, if rather useless.
 
-Cases are not intrinsically backed by a scalar value. That is, ''%%Suit::Hearts%%'' is not equal to 0. Instead, each case is backed by a singleton object of that name. That means that:
+By default, cases are not intrinsically backed by a scalar value. That is, ''%%Suit::Hearts%%'' is not equal to 0. Instead, each case is backed by a singleton object of that name. That means that:
 
 <code php>
 $a = Suit::Spades;
@@ -60,15 +60,9 @@ $a instanceof Suit;         // true
 
 It also means that enum values are never ''<'' or ''>'' each other, since those comparisons are not meaningful on objects.  Those comparisons will always return false when working with enum values.
 
-This type of enum (with just enum cases and no related data) is known as a "Unit Enum".
+This type of case, with no related data, is called a "Pure Case."  An Enum that contains only Pure Cases is called a Pure Enum.
 
-All Unit Enums are implemented as instances of their enum type.  The enum type is represented internally as a class that implements an internal ''UnitEnum'' interface that may be typed against.  That is one way to distinguish an Enum from any other object:
-
-<code php>
-Suit::Hearts instanceof UnitEnum; // true
-</code>
-
-(See below for more on the enum interfaces.)
+All Pure Cases are implemented as instances of their enum type.  The enum type is represented internally as a class.
 
 All Cases have a read-only property, ''name'', that is the case-sensitive name of the case itself.  That is largely an implementation artifact, but may also be used for debugging purposes.
 
@@ -77,9 +71,68 @@ print Suit::Spades->name;
 // prints "Spades"
 </code>
 
+==== Value Enums ====
+
+By default, Enumerated Cases have no scalar equivalent. They are simply singleton objects. However, there are ample cases where an Enumerated Case needs to be able to round-trip to a database or similar datastore, so having a built-in scalar (and thus trivially serializable) equivalent defined intrinsically is useful.
+
+To define a scalar equivalent for an Enumeration, the syntax is as follows:
+
+<code php>
+enum Suit: string {
+  case Hearts = 'H';
+  case Diamonds = 'D';
+  case Clubs = 'C';
+  case Spades = 'S';
+}
+</code>
+
+A case that has a scalar equivalent is called a Value Case.  An Enum that contains all Value Cases is called a "Value Enum."  A Value Enum may contain only Value Cases.  A Pure Enum may contain only Pure Cases.
+
+A Value Enum may be backed by types of ''%%int%%'' or ''%%string%%'', and a given enumeration supports only a single type at a time. (That is, no union of ''%%int|string%%''.) If an enumeration is marked as having a scalar equivalent, then all cases must have a unique scalar equivalent defined explicitly.  There are no auto-generated scalar equivalents (e.g., sequential integers).  Value cases must be unique; two value enum cases may not have the same scalar equivalent.  (However, a constant may refer to a case, effectively creating an alias.)
+
+Equivalent values must be literals or literal expressions. Constants and constant expressions are not supported.  That is, ''1+1'' is allowed, but ''1 + SOME_CONST'' is not.  This is primarily due to implementation complexity.  (See Future Scope below.)
+
+Value Cases have an additional read-only property, ''%%value%%'', which is the value specified in the definition.
+
+<code php>
+print Suit::Clubs->value;
+// Prints "C"
+</code>
+
+In order to enforce the ''value'' property as read-only, a variable cannot be assigned as a reference to it.  That is, the following is an error:
+
+<code php>
+// Not OK.
+$ref = &Suit::Clubs->value;
+</code>
+
+Value enums implement an internal ''ValueEnum'', which exposes two additional methods:
+
+  * ''%%from(int|string): self%%'' will take a scalar and return the corresponding Enum Case.  If one is not found, it will throw a ''%%ValueError%%''.  This is mainly useful in cases where the input scalar is trusted and a missing enum value should be considered an application-stopping error.
+  * ''%%tryFrom(int|string): ?self%%'' will take a scalar and return the corresponding Enum Case.  If one is not found, it will return ''null''.  This is mainly useful in cases where the input scalar is untrusted and the caller wants to implement their own error handling or default-value logic.
+
+The "tryX" idiom is common in C# and Rust (albeit in somewhat different ways) to indicate that the result may be null/optional.  It would be new to PHP, but not incompatible with any current conventions.
+
+<code php>
+$record = get_stuff_from_database($id);
+print $record['suit'];
+
+// Prints "H"; invalid data would throw.
+$suit =  Suit::from($record['suit']);
+$suit === Suit::Hearts; // True
+print $suit->value;
+
+// Invalid data returns null, so Suit::Spades is used instead.
+$suit = Suit::tryFrom('A') ?? Suit::Spades;
+$suit === Suit::Spades; // True
+print $suit->value;
+</code>
+
+Manually defining a ''%%from()%%'' or ''%%tryFrom()%%'' method on a Value Enum will result in a fatal error.
+
 ==== Enumerated Methods ====
 
-Enums may contain methods, and may implement interfaces.  If an Enum implements an interface, then any type check for that interface will also accept all cases of that Enum.
+Enums (both Pure Enums and Value Enums) may contain methods, and may implement interfaces.  If an Enum implements an interface, then any type check for that interface will also accept all cases of that Enum.
 
 <code php>
 interface Colorful {
@@ -115,7 +168,7 @@ print Suit::Diamonds->shape(); // prints "rectangle"
 
 In this example, all four instances of ''Suit'' have two methods, ''%%color()%%'' and ''%%shape()%%''.  As far as calling code and type checks are concerned, they behave exactly the same as any other object instance.
 
-Inside a method on a Case, the ''%%$this%%'' variable is defined and refers to the Case instance.
+Inside a method, the ''%%$this%%'' variable is defined and refers to the Case instance.
 
 Methods may be arbitrarily complex, but in practice will usually return a static value or ''match'' on ''%%$this%%'' to provide different results for different cases.
 
@@ -228,7 +281,7 @@ enum Suit implements Colorful {
 }
 </code>
 
-==== Enums in constant expressions ====
+==== Enum values in constant expressions ====
 
 Because cases are represented as constants on the enum itself, they may be used as static values in most constant expressions: property defaults, static variable defaults, parameter defaults, global and class constant values. They may not be used in other enum case values due to implementation complexity.  (That restriction may be lifted in the future, but since they can be used by constants on an enum it is not a significant limitation.)
 
@@ -293,97 +346,20 @@ $clovers = new Suit(); // error
 $mace = new Suit::Club; // error
 </code>
 
-==== Scalar Enums ====
-
-By default, Enumerated Cases have no scalar equivalent. They are simply singleton objects. However, there are ample cases where an Enumerated Case needs to be able to round-trip to a database or similar datastore, so having a built-in scalar (and thus trivially serializable) equivalent defined intrinsically is useful.
-
-To define a scalar equivalent for an Enumeration, the syntax is as follows:
-
-<code php>
-enum Suit: string {
-  case Hearts = 'H';
-  case Diamonds = 'D';
-  case Clubs = 'C';
-  case Spades = 'S';
-}
-</code>
-
-Scalar backing types of ''%%int%%'' or ''%%string%%'' are supported, and a given enumeration supports only a single type at a time. (That is, no union of ''%%int|string%%''.) If an enumeration is marked as having a scalar equivalent, then all cases must have a unique scalar equivalent defined explicitly.  There are no auto-generated scalar equivalents (e.g., sequential integers).  Scalar cases must be unique; two enum cases may not have the same scalar equivalent.  (However, a constant may refer to a case, effectively creating an alias.)
-
-Scalar equivalent values must be literals or literal expressions. Constants and constant expressions are not supported.  That is, ''1+1'' is allowed, but ''1 + SOME_CONST'' is not.  This is primarily due to implementation complexity.  (See Future Scope below.)
-
-The scalar equivalent of a case is accessible via a ''%%value%%'' property, which is read-only.
-
-<code php>
-print Suit::Clubs->value;
-// Prints "C"
-</code>
-
-In order to enforce the ''value'' property as read-only, a variable cannot be assigned as a reference to it.  That is, the following is an error:
-
-<code php>
-// Not OK.
-$ref = &Suit::Clubs->value;
-</code>
-
-Scalar enums implement an internal ''ScalarEnum'' interface, which extends ''UnitEnum''.  ''ScalarEnum'' exposes two additional methods:
-
-  * ''%%from(int|string): self%%'' will take a scalar and return the corresponding Enum Case.  If one is not found, it will throw a ''%%ValueError%%''.  This is mainly useful in cases where the input scalar is trusted and a missing enum value should be considered an application-stopping error.
-  * ''%%tryFrom(int|string): ?self%%'' will take a scalar and return the corresponding Enum Case.  If one is not found, it will return ''null''.  This is mainly useful in cases where the input scalar is untrusted and the caller wants to implement their own error handling or default-value logic.
-
-The "tryX" idiom is common in C# and Rust (albeit in somewhat different ways) to indicate that the result may be null/optional.  It would be new to PHP, but not incompatible with any current conventions.
-
-<code php>
-$record = get_stuff_from_database($id);
-print $record['suit'];
-
-// Prints "H"; invalid data would throw.
-$suit =  Suit::from($record['suit']);
-$suit === Suit::Hearts; // True
-print $suit->value;
-
-// Invalid data returns null, so Suit::Spades is used instead.
-$suit = Suit::tryFrom('A') ?? Suit::Spades;
-$suit === Suit::Spades; // True
-print $suit->value;
-</code>
-
-Manually defining a ''%%from()%%'' or ''%%tryFrom()%%'' method on a Scalar Enum will result in a fatal error.
-
-Scalar Enums may implement interfaces just like Unit Enums:
-
-<code php>
-enum Suit: string implements Colorful {
-  case Hearts = 'H';
-  case Diamonds = 'D';
-  case Clubs = 'C';
-  case Spades = 'S';
-  
-  public function color(): string {
-    return match($this) {
-      Suit::Hearts, Suit::Diamonds => 'Red',
-      Suit::Clubs, Suit::Spaces => 'Black',
-    };
-  }
-}
-</code>
-
 ==== Value listing ====
 
-The ''UnitEnum'' interface includes a static method ''%%cases()%%''. ''%%cases()%%'' returns a packed array of all defined Cases in the order of declaration.
+Both Pure Enums and Value Enums implement an internal interface named ''IterableEnum''.  ''IterableEnum'' includes a static method ''%%cases()%%''. ''%%cases()%%'' returns a packed array of all defined Cases in the order of declaration.
 
 <code php>
 Suit::cases();
 // Produces: [Suit::Hearts, Suit::Diamonds, Suit::Clubs, Suit:Spades]
 </code>
 
-The ''ScalarEnum'' interface additionally has a property ''%%value%%'' that returns the scalar value for a given case.
-
-<code php>
-'D' == Suit::Diamonds->value; // true
-</code>
-
 Manually defining a ''%%cases()%%'' method on an Enum will result in a fatal error.
+
+Non-iterable Enums are not yet supported, but are expected to be part of the future ADT/Tagged Union RFC.  (Those will not have a finite set of possible values.)
+
+Note that ''IterableEnum'' does not extend ''Iterator'', as the enum case instances themselves are not iterable; it's the Enum type that is iterable.  An Enum could implement ''Iterator'' or ''IteratorAggregate'' if it so chose, however.
 
 ==== Serialization ====
 
@@ -398,9 +374,9 @@ print serialize(Suit::Hearts);
 
 On deserialization, if an enum and case cannot be found to match a serialized value then it will be replaced with a ''%%__Invalid_Enum%%'' instance, similar to ''%%__PHP_Incomplete_Class%%''.  ''%%__Invalid_Enum%%'' will never identity match any valid enum case so will not result in false positives.  It may, however, be tested against with ''%%instanceof __Invalid_Enum%%'' for error handling purposes.
 
-(The reason for this approach is to minimize the breakage of an unserialize as part of ''session_start()'' should stale session data be present after a change in enum configuration  We want to avoid a hard-fail in that case that may result in an unusable application.)
+(The reason for this approach is to minimize the breakage of an ''unserialize()'' as part of ''session_start()'' should stale session data be present after a change in enum configuration  We want to avoid a hard-fail in that case that may result in an unusable application.)
 
-If a UnitEnum is serialized to JSON, an error will be thrown.  If a ScalarEnum is serialized to JSON, it will be represented by its value scalar only, in the appropriate type.  The behavior of both may be overridden by implementing ''%%JsonSerializable%%''.
+If a Pure Enum is serialized to JSON, an error will be thrown.  If a Value Enum is serialized to JSON, it will be represented by its value scalar only, in the appropriate type.  The behavior of both may be overridden by implementing ''%%JsonSerializable%%''.
 
 For ''print_r()'', the output of an enum case has been modified to not confuse it with objects, although it is still similar to objects.
 
@@ -435,7 +411,7 @@ No engine-defined attributes are included.  User-defined attributes can do whate
 
 ==== Match expressions ====
 
-''%%match%%'' expressions offer a natural and convenient way to branch logic depending on the enum value. Since every instance of a Unit Case is a singleton, it will always pass an identity check. Therefore:
+''%%match%%'' expressions offer a natural and convenient way to branch logic depending on the enum value. Since every instance of an Enum is a singleton, it will always pass an identity check. Therefore:
 
 <code php>
 $val = Suit::Diamonds;
@@ -489,7 +465,7 @@ enum SortOrder {
 function query($fields, $filter, SortOrder $order = SortOrder::ASC) { ... }
 </code>
 
-The ''query'' function can now proceed safe in the knowledge that ''$order'' is guaranteed to be either ''SortOrder::ASC'' or ''SortOrder::DESC''.  Any other value would have resulted in a TypeError, so no further error checking or testing is needed.
+The ''query()'' function can now proceed safe in the knowledge that ''$order'' is guaranteed to be either ''SortOrder::ASC'' or ''SortOrder::DESC''.  Any other value would have resulted in a TypeError, so no further error checking or testing is needed.
 
 === Advanced Exclusive values ===
 
@@ -527,13 +503,11 @@ As noted above, this RFC defines two additional internal interfaces.  These inte
 
 <code php>
 
-interface UnitEnum {
-  public string $name;
-  
+interface IterableEnum {
   public static function cases(): array;
 }
 
-interface ScalarEnum extends UnitEnum {
+interface ValueEnum {
   public string $value;
   
   public static function from(int|string $scalar): static;
@@ -545,7 +519,7 @@ interface ScalarEnum extends UnitEnum {
 
 “enum” becomes a language keyword, with the usual potential for naming conflicts with existing global constants.
 
-The global scoped internal interfaces ''UnitEnum'', and ''ScalarEnum'' are defined.
+The global scoped internal interfaces ''IterableEnum'', and ''ValueEnum'' are defined.
 
 The global function ''enum_exists'' is defined.
 
@@ -577,7 +551,7 @@ Adding support for enum sets is a possibility for a future RFC, should an approp
 
 ==== Auto-scalar conversion ====
 
-Whether or not a scalar-backed enum can be viewed as "close enough" to its corresponding scalar value is debatable, and of debatable value.  For instance, is a string-backed enum ''Stringable''?  Should an ''int'' type check accept an int-backed enum value?  Should a string-backed enum work in a print statement?  What about up-converting a scalar to its corresponding enum automatically?
+Whether or not a Value Enum can be viewed as "close enough" to its corresponding scalar value is debatable, and of debatable value.  For instance, is a string-backed enum ''Stringable''?  Should an ''int'' type check accept an int-backed enum value?  Should a string-backed enum work in a print statement?  What about up-converting a scalar to its corresponding enum automatically?
 
 The optimal behavior here, if any, will likely not become apparent until enums see widespread use.  We have therefore opted to omit all auto-conversion at this time.  If clear and compelling use cases for auto-conversion appear in the future, later PHP versions can re-introduce such auto-conversion in a more targeted, well-informed way.
 
@@ -589,7 +563,7 @@ If when the dust settles it appears that ''%%__get%%'' would not cause a conflic
 
 ==== Constant-reference expression values ====
 
-Currently, a Scalar Enum value may only be a constant literal or an arithmetic expression involving only constant literals.  They cannot reference other constant symbols, such as ''const'' constants or other Enum cases.  That is not out of a lack of desire but simply because it turns out to be quite difficult to do.  It's not a blocker for the remainder of the functionality listed here.  If we or someone else can figure out how to make it work in the future it would be a good addition, but for now it is infeasible.
+Currently, a Value Enum value may only be a constant literal or an arithmetic expression involving only constant literals.  They cannot reference other constant symbols, such as ''const'' constants or other Enum cases.  That is not out of a lack of desire but simply because it turns out to be quite difficult to do.  It's not a blocker for the remainder of the functionality listed here.  If we or someone else can figure out how to make it work in the future it would be a good addition, but for now it is infeasible.
 
 ===== Voting =====
 
