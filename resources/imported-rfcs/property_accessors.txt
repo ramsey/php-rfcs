@@ -1,0 +1,563 @@
+====== PHP RFC: Property Accessors ======
+  * Date: 2020-01-27
+  * Author: Nikita Popov <nikic@php.net>
+  * Proposed Version: PHP 8.1
+  * Implementation: TBD
+  * Status: Draft
+
+> **This is an early draft.**
+
+===== Introduction =====
+
+Property accessors allow implementing custom behavior for reading or writing a property. PHP already provides this general functionality through ''%%__get()%%'' and ''%%__set()%%''. However, these methods are non-specific and may be used to intercept all property accesses. This RFC proposes to add per-proprety accessors.
+
+The primary use case for accessors is actually to **not** use them, but retain the ability to do so in the future, should it become necessary. Consider the following class declaration, which might have been considered idiomatic prior to PHP 7.4:
+
+<PHP>
+class User {
+    private $name;
+
+    public function __construct(string $name) {
+        $this->name = $name;
+    }
+
+    public function getName(): string {
+        return $this->name;
+    }
+
+    public function setName(string $name): void {
+        $this->name = $name;
+    }
+}
+</PHP>
+
+With the introduction of typed properties in PHP 7.4, the use of getters and setters in this example no longer serves a useful purpose, and only increases the necessary boilerplate both in the class declaration, and for any consumers of the class. We could instead use a typed public property:
+
+<PHP>
+class User {
+    public string $name;
+
+    public function __construct(string $name) {
+        $this->name = $name;
+    }
+}
+</PHP>
+
+This has one significant disadvantage: What happens if we later, for whatever reason, do want to introduce additional behavior for this property, for example by validating that it is non-empty? We could restore the original getters and setters, but that would constitute an API break. Or we could add the additional behavior through ''%%__get()%%'' and ''%%__set()%%'':
+
+<PHP>
+class User {
+    private string $_name;
+
+    public function __construct(string $name) {
+        $this->name = $name;
+    }
+
+    public function __get(string $propName): mixed {
+        return match ($propName) {
+            'name' => $this->_name,
+            default => throw new Error("Attempt to read undefined property $propName"),
+        };
+    }
+
+    public function __set(string $propName, $value): void {
+        switch ($propName) {
+            case 'name':
+                if (!is_string($value)) {
+                    throw new TypeError("Name must be a string");
+                }
+                if (strlen($value) === 0) {
+                    throw new ValueError("Name must be non-empty");
+                }
+                $this->_name = $value;
+                break;
+            default:
+                throw new Error("Attempt to write undefined property $propName");
+        }
+    }
+
+    public function __isset(string $propName): bool {
+        return $propName === 'name';
+    }
+}
+</PHP>
+
+While doing this is possible, it has many disadvantes. Apart from requiring a lot of additional code, it also breaks reflection and static analysis, as the ''name'' property does not really exist anymore. It is also necessary to reimplement your own type checks, which will not match PHP's behavior (with regard to coercive typing mode).
+
+Property accessors allow you to introduce the additional behavior in a way that is specific to a single property, is reflectible and analyzable, and generally integrates well with the rest of PHP:
+
+<PHP>
+class User {
+    private string $_name;
+
+    public string $name {
+        get {
+            return $this->_name;
+        }
+        set($value) {
+            if (strlen($value) === 0) {
+                throw new ValueError("Name must be non-empty");
+            }
+            $this->_name = $value;
+        }
+    }
+
+    public function __construct(string $name) {
+        $this->name = $name;
+    }
+}
+</PHP>
+
+===== Usage patterns =====
+
+The following section illustrates various usage patterns for accessors. An accessor implementation for PHP should support most or all of these in some fashion, though possibly not using the precise syntax employed here.
+
+=== Asymmetric visibility ===
+
+The likely by far most important use-case for accessors (or a closely related feature) is to restrict visibility of a property asymmetrically, without otherwise changing the behavior:
+
+<PHP>
+class User {
+    public string $name { get; private set; }
+
+    public function __construct(string $name) {
+        $this->name = $name;
+    }
+}
+</PHP>
+
+In this case, the ''name'' property can be accessed from outside the class, but only set inside the class. It is equivalent to defining a getter method, but no setter method. This provides a weak form of read-only properties (publicly read-only).
+
+=== Setter guard ===
+
+The second use-case is the one mentioned in the introduction: To add additional validation checks when setting a property:
+
+<PHP>
+class User {
+    public string $name {
+        guard {
+            if (strlen($value) === 0) {
+                throw new ValueError("Name must be non-empty");
+            }
+        }
+    }
+}
+</PHP>
+
+The guard handler is invoked directly before the property value is set.
+
+=== Lazy initialization ===
+
+Property accessors can be used to lazily initialize the value of a property the first time it is accessed:
+
+<PHP>
+class Test {
+    public string $somethingExpensive {
+        lazy {
+            return computeSomethingExpensive();
+        }
+    }
+}
+</PHP>
+
+On first access, the lazy initializer is invoked and the result is stored. On subsequent accesses, the stored value is used, and the initializer is not invoked again.
+
+=== Synthesized properties ===
+
+Finally, there are "real" accessor properties, which access a synthesized value. This could be in a read-only fashion, or a read-write fashion:
+
+<PHP>
+class Test {
+    public int $value;
+    public int $plusOne {
+        get { return $this->value + 1; }
+    }
+}
+
+class Test {
+    public int $value;
+    public int $plusOne {
+        get {
+            return $this->value + 1;
+        }
+        set($value) {
+            $this->value = $value - 1;
+        }
+    }
+}
+</PHP>
+
+=== Properties in interfaces ===
+
+As accessors make properties a first-class citizen in class APIs, it also needs to be possible to declare properties in interfaces (or as abstract):
+
+<PHP>
+interface UserInterface {
+    // Interface requires that property is public readable.
+    public string $name { get; }
+}
+
+class User implements UserInterface {
+    // Implemented without accessors, but (more than) satisfies the interface.
+    public string $name;
+}
+</PHP>
+
+The interface declares a property that has to be at least readable, while the implementing class implements it in a way that is also writable, by using an ordinary property without accessors.
+
+===== Proposal =====
+
+==== Basic accessors ====
+
+To declare an accessor property, the trailing semicolon of a property declaration is replaced by anaccessor list, which must contain at least one accessor:
+
+<PHP>
+class Test {
+    // Illegal, must define at least one accessor.
+    public $prop { }
+
+    // Read-only property.
+    public $prop { get; }
+
+    // Write-only property. (Of dubious usefulness.)
+    public $prop { set; }
+
+    // Read-write property.
+    public $prop { get; set; }
+}
+</PHP>
+
+The basic accessors are ''get'' and ''set'', which are invoked when the property is read or written respectively. If an accessor is ommitted, then performing the corresponding operation on the property will result in an ''Error'' exception.
+
+The above example uses automatically generated accessors, which are discussed in the "Backing property" section. If an explicit implementation is provided, ''get'' should return the value of the property, which must satisfy the type of the property under the usual rules:
+
+<PHP>
+class Test {
+    public int $prop {
+        get { return 42; }
+
+        // Effectively:
+        public function get(): int { return 42; }
+    }
+}
+
+$test = new Test;
+var_dump($test->prop); // int(42)
+
+// Modification of read-only property throws:
+$test->prop = 1; // Error
+$test->prop += 1; // Error
+</PHP>
+
+The ''set'' handle receives the new value of the property as the ''$value'' variable, which is compatible with the property type:
+
+<PHP>
+class Test {
+    public string $prop {
+        set($value) { echo "Set to $value\n"; }
+
+        // Effectively:
+        public function set(string $value): void { echo "Set to $value\n"; }
+    }
+}
+
+$test = new Test;
+$test->prop = "foobar"; // "Set to foobar\n"
+
+// Reading of write-only property throws:
+var_dump($test->prop); // Error
+var_dump(isset($test->prop)); // Error
+</PHP>
+
+Write-only properties like the above example have dubious usefulness and should possibly be prohibited outright. The more useful case is where a property defines both ''get'' and ''set'':
+
+<PHP>
+class Test {
+    public int $value = 0;
+    public int $valuePlusOne {
+        get { return $value + 1; }
+        set($value) { $this->value = $value - 1; }
+    }
+}
+
+$test = new Test;
+$this->value = 9;
+var_dump($this->valuePlusOne); // int(10)
+$this->valuePlusOne = 42;
+var_dump($this->value); // int(41)
+
+$this->valuePlusOne += 5;
+// Behaves like:
+$this->valuePlusOne = $this->valuePlusOne + 5;
+</PHP>
+
+The explicit argument to the setter can be omitted, in which case ''$value'' is used by default:
+
+<PHP>
+class Test {
+    public string $prop {
+        set { echo "Set to $value\n"; }
+    }
+}
+</PHP>
+
+It is not permitted to specify any explicit types on accessors, as they are inferred from the type of the property. Code like the following is illegal:
+
+<PHP>
+class Test {
+    public string $prop {
+        get(): string { return ""; } // Can't have return type (it's implicit)
+        set(string $value): void { } // Can't have argument or return type (it's implicit)
+    }
+}
+</PHP>
+
+==== Visibility ====
+
+The visibility of the accessors defaults to the visibility of the property, but may be explicitly overridden for individual accessors, resulting in asymmetric visibility:
+
+<PHP>
+class Test {
+    public string $prop { get; private set; }
+
+    // Same as:
+    public string $prop { public get; private set; }
+}
+</PHP>
+
+This causes an odd asymmetry in that the visibility of one accessor is effectively specified on the property, and the other on the accessor itself. A possible alternative would be to require that if visibility for an accessor is specified, it must be specified for all accessors, and the property itself should be declared neutrally as ''var'':
+
+<PHP>
+class Test {
+    var string $prop { public get; private set; }
+}
+</PHP>
+
+==== Implicit implementation and backing property ====
+
+If a property accessor is defined that has neither an explicit ''get'' or ''set'' implementation, then an automatic backing property is generated, and ''get'' and ''set'' are implemented to read and write that backing property.
+
+That is, the following two pieces of code are conceptually equivalent:
+
+<PHP>
+class Test {
+    public string $prop { get; set; }
+}
+
+class Test {
+    public string $_prop;
+    public string $prop {
+        get { return $this->_prop; }
+        set { $this->_prop = $value; }
+    }
+}
+</PHP>
+
+The actual backing property however has the same name as the accessor property, and will appear as such in ''var_dump()'' output and similar.
+
+If either ''get'' or ''set'' has an explicit implementation, then no backing property is generated, in the sense that PHP will not reserve space for optimized access of the property. However, following the recursion behavior of ''%%__get()%%'' and ''%%__set()%%'', the accessors implementations could still operate on a property of the same name:
+
+<PHP>
+class Test {
+    public string $prop {
+        get { return $this->prop; }
+        set { $this->prop = $value; }
+    }
+}
+</PHP>
+
+Just like with ''%%__get()%%'' and ''%%__set()%%'', this would not recursively invoke the accessors and instead operate on an actual property of the same name. As no backing property is generated in this case, the property would be a dynamic one. It is recommended to declare an explicit backing property if you want to implement accessors with non-trivial behavior.
+
+If there is no explicit ''get'' or ''set'' implementation, then a default value for property may be specified:
+
+<PHP>
+class Test {
+    public string $prop = "" { get; set; }
+}
+</PHP>
+
+This default value is the default value of the backing property. If there is an explicit ''get'' or ''set'' implementation, then specifying a default value is illegal.
+
+==== Lazy initialization ====
+
+A lazily initialized property can be implemented using the ''get'' accessors as follows:
+
+<PHP>
+class Test {
+    private ?T $cache = null;
+    public T $lazy {
+        get {
+            if ($this->cache === null) {
+                $this->cache = computeValue();
+            }
+            return $this->cache;
+        }
+        // Optional, depending on whether it should be read-only or not.
+        set { $this->cache = $value; }
+    }
+}
+</PHP>
+
+However, this has a significant disadvantage: Even after the property has been initialized, accessing it still requires invocation of the getter, which is very inefficient. To handle this case more efficiently, a separate ''lazy'' accessor is provided:
+
+<PHP>
+class Test {
+    public T $lazy {
+        lazy {
+            return computeValue();
+        }
+        // Optional, depending on whether it should be read-only or not.
+        set;
+    }
+}
+</PHP>
+
+The ''lazy'' accessor is invoked on first access to the property, and is used to initialize the proprety. All subsequent accesses will read the value directly.
+
+It is not possible to declare both ''lazy'' and ''get''. TODO: Should that be possible? Possibly ''lazy'' should really be ''init'' and be independent of ''get'' entirely?
+
+==== Setter guard ====
+
+It is possible to implement a setter guard, which imposes additional pre-conditions for setting a property, by implementing both ''get'' and ''set'' with a separate underlying property:
+
+<PHP>
+class Test {
+    private string $_name;
+    public string $name {
+        get { return $this->_name; }
+        set {
+            if ($value === '') {
+                throw new ValueError("Name cannot be empty");
+            }
+            $this->_name = $value;
+        }
+    }
+}
+</PHP>
+
+This has the disadvantage that the underlying property has to be explicitly managed, and it is necessary to invoke the getter every time it is read. Once again, a more concise and efficient method to add setter guards is provided:
+
+<PHP>
+class Test {
+    public string $name {
+        guard {
+            if ($value === '') {
+                throw new ValueError("Name cannot be empty");
+            }
+        }
+    }
+}
+</PHP>
+
+The ''guard'' accessor is invoked before the property is actually modified, and it's only purpose is to throw an exception to reject invalid values.
+
+TODO: Once again, how does this interact with ''get'' and ''set''? Probably those should be specified explicitly.
+
+==== Constructor promotion =====
+
+If only implicitly implemented accessors are used, then accessor properties can be used in conjunction with constructor promotion:
+
+<PHP>
+class Test {
+    public function __construct(
+        public string $prop { get; private set; },
+        public int $prop2 = 0 { get; private set; },
+    ) {}
+}
+</PHP>
+
+Constructor promotion cannot be used with explicitly implemented accessors, the following code is illegal:
+
+<PHP>
+class Test {
+    public function __construct(
+        public string $prop {
+            get { return ""; }
+            set { echo "Set!\n"; }
+        }
+    ) {}
+}
+</PHP>
+
+This limitation exists to prevent embedding of very large property declarations in the constructor signature.
+
+==== Isset and unset ====
+
+It is not possible to define ''isset'' or ''unset'' accessors. ''isset($obj->accessorProp)'' is equivalent to ''$obj->accessorProp !== null'' and ''unset($obj->accessorProp)'' always throws an ''Error'' exception.
+
+==== Parent accessors ====
+
+TODO: How should parent accessors be invoked? There's no really clear syntax choice for that. ''parent::get()'' conflicts with a method of the same name. ''parent::$this->prop'' looks like a static property access. ''$this->parent::prop'' would be a possibility.
+
+==== Compatibility between ordinary properties and accessor properties ====
+
+A somewhat tricky question is how ordinary properties and accessor properties interact during inheritance, in terms of which properties are considered "compatible".
+
+<PHP>
+class A {
+    public $prop1;
+    public $prop2 { get; set; }
+}
+class B extends A {
+    public $prop1 { get; set; }
+    public $prop2;
+}
+</PHP>
+
+While it would clearly be legal to replace ''public $prop2 { get; set; }'' with ''public $prop2'', the reverse case is less obvious.
+
+The first complication is the case where the property is indirectly modified, for example because it is used as an array:
+
+<PHP>
+class A {
+    public $prop;
+}
+class B extends A {
+    public $prop { get; set; }
+}
+
+$b = new B;
+$b->prop = [];
+$b->prop[] = 42;
+</PHP>
+
+This will fail, because ''get'' does not return by reference. As such, these properties are technically not compatible. To make this code work, ''get'' would need to return by reference:
+
+<PHP>
+class A {
+    public $prop;
+}
+class B extends A {
+    public $prop { &get; set; }
+}
+
+$b = new B;
+$b->prop = [];
+$b->prop[] = 42;
+</PHP>
+
+However, in that case there is one subtle incompatibility. While this allows acquiring a reference **to** the property, it does not allow storing a reference into the property:
+
+<PHP>
+class A {
+    public $prop;
+}
+class B extends A {
+    public $prop { &get; set; }
+}
+
+$b = new B;
+$b->prop =& $prop; // Treated as $b->prop = $prop.
+$prop = 42; // Does not modify $b->prop!
+</PHP>
+
+This is rather fundamental limitation of property accessors, which prevents them from being fully compatible with ordinary properties.
+
+What does this mean in practice? There's two perspectives to consider here: The first is the perspective of a library author, who replaces a property with an accessor in a minor/patch version. I believe this is acceptable and should not be considered a semver major change (it would defeat the entire proposal if it were), unless the property is explicitly intended to be used in such a fashion.
+
+The other is how this situation is treated by the language itself, during inheritance. It's unclear whether or not we should allow overriding an ordinary property with an accessor property, and whether ''get''-by-reference should be a requirement to do so.
+
+===== Backward Incompatible Changes =====
+
+===== Vote =====
+
