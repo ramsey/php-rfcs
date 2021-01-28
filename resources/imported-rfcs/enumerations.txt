@@ -55,7 +55,7 @@ $b = Suit::Spades;
 
 $a === $b; // true
 
-$a instanceof Suit;         // true
+$a instanceof Suit;  // true
 </code>
 
 It also means that enum values are never ''<'' or ''>'' each other, since those comparisons are not meaningful on objects.  Those comparisons will always return false when working with enum values.
@@ -71,7 +71,7 @@ print Suit::Spades->name;
 // prints "Spades"
 </code>
 
-==== Value Enums ====
+==== Backed Enums ====
 
 By default, Enumerated Cases have no scalar equivalent. They are simply singleton objects. However, there are ample cases where an Enumerated Case needs to be able to round-trip to a database or similar datastore, so having a built-in scalar (and thus trivially serializable) equivalent defined intrinsically is useful.
 
@@ -86,9 +86,9 @@ enum Suit: string {
 }
 </code>
 
-A case that has a scalar equivalent is called a Value Case.  An Enum that contains all Value Cases is called a "Value Enum."  A Value Enum may contain only Value Cases.  A Pure Enum may contain only Pure Cases.
+A case that has a scalar equivalent is called a Backed Case, as it is "Backed" by a simpler value.  An Enum that contains all Backed Cases is called a "Backed Enum."  A Backed Enum may contain only Backed Cases.  A Pure Enum may contain only Pure Cases.
 
-A Value Enum may be backed by types of ''%%int%%'' or ''%%string%%'', and a given enumeration supports only a single type at a time. (That is, no union of ''%%int|string%%''.) If an enumeration is marked as having a scalar equivalent, then all cases must have a unique scalar equivalent defined explicitly.  There are no auto-generated scalar equivalents (e.g., sequential integers).  Value cases must be unique; two value enum cases may not have the same scalar equivalent.  (However, a constant may refer to a case, effectively creating an alias.)
+A Backed Enum may be backed by types of ''%%int%%'' or ''%%string%%'', and a given enumeration supports only a single type at a time. (That is, no union of ''%%int|string%%''.) If an enumeration is marked as having a scalar equivalent, then all cases must have a unique scalar equivalent defined explicitly.  There are no auto-generated scalar equivalents (e.g., sequential integers).  Value cases must be unique; two backed enum cases may not have the same scalar equivalent.  (However, a constant may refer to a case, effectively creating an alias.)
 
 Equivalent values must be literals or literal expressions. Constants and constant expressions are not supported.  That is, ''1+1'' is allowed, but ''1 + SOME_CONST'' is not.  This is primarily due to implementation complexity.  (See Future Scope below.)
 
@@ -106,7 +106,7 @@ In order to enforce the ''value'' property as read-only, a variable cannot be as
 $ref = &Suit::Clubs->value;
 </code>
 
-Value enums implement an internal ''ValueEnum'', which exposes two additional methods:
+Backed enums implement an internal ''BackedEnum'' interface, which exposes two additional methods:
 
   * ''%%from(int|string): self%%'' will take a scalar and return the corresponding Enum Case.  If one is not found, it will throw a ''%%ValueError%%''.  This is mainly useful in cases where the input scalar is trusted and a missing enum value should be considered an application-stopping error.
   * ''%%tryFrom(int|string): ?self%%'' will take a scalar and return the corresponding Enum Case.  If one is not found, it will return ''null''.  This is mainly useful in cases where the input scalar is untrusted and the caller wants to implement their own error handling or default-value logic.
@@ -128,11 +128,11 @@ $suit === Suit::Spades; // True
 print $suit->value;
 </code>
 
-Manually defining a ''%%from()%%'' or ''%%tryFrom()%%'' method on a Value Enum will result in a fatal error.
+Manually defining a ''%%from()%%'' or ''%%tryFrom()%%'' method on a Backed Enum will result in a fatal error.
 
 ==== Enumerated Methods ====
 
-Enums (both Pure Enums and Value Enums) may contain methods, and may implement interfaces.  If an Enum implements an interface, then any type check for that interface will also accept all cases of that Enum.
+Enums (both Pure Enums and Backed Enums) may contain methods, and may implement interfaces.  If an Enum implements an interface, then any type check for that interface will also accept all cases of that Enum.
 
 <code php>
 interface Colorful {
@@ -348,7 +348,7 @@ $mace = new Suit::Club; // error
 
 ==== Value listing ====
 
-Both Pure Enums and Value Enums implement an internal interface named ''IterableEnum''.  ''IterableEnum'' includes a static method ''%%cases()%%''. ''%%cases()%%'' returns a packed array of all defined Cases in the order of declaration.
+Both Pure Enums and Backed Enums implement an internal interface named ''IterableEnum''.  ''IterableEnum'' includes a static method ''%%cases()%%''. ''%%cases()%%'' returns a packed array of all defined Cases in the order of declaration.
 
 <code php>
 Suit::cases();
@@ -376,7 +376,7 @@ On deserialization, if an enum and case cannot be found to match a serialized va
 
 (The reason for this approach is to minimize the breakage of an ''unserialize()'' as part of ''session_start()'' should stale session data be present after a change in enum configuration  We want to avoid a hard-fail in that case that may result in an unusable application.)
 
-If a Pure Enum is serialized to JSON, an error will be thrown.  If a Value Enum is serialized to JSON, it will be represented by its value scalar only, in the appropriate type.  The behavior of both may be overridden by implementing ''%%JsonSerializable%%''.
+If a Pure Enum is serialized to JSON, an error will be thrown.  If a Backed Enum is serialized to JSON, it will be represented by its value scalar only, in the appropriate type.  The behavior of both may be overridden by implementing ''%%JsonSerializable%%''.
 
 For ''print_r()'', the output of an enum case has been modified to not confuse it with objects, although it is still similar to objects.
 
@@ -434,19 +434,50 @@ This usage requires no modification to ''SplObjectStorage'' or ''WeakMap''.  It 
 
 ==== Reflection ====
 
-Enums are reflectable using a ''ReflectionEnum'' class, which extends ''ReflectionClass'' and also contains the following additional methods:
+Enums are reflectable using a ''ReflectionEnum'' class, which extends ''ReflectionClass''.  Their cases are reflectable using ''ReflectionEnumPureCase'' and ''ReflectionEnumBackedCase''.  They are defined as follows:
 
-  * ''hasCase(string $name): bool'' - Returns true if there is a Case defined with that name.  For instance, ''$r->hasCase('Hearts')'' returns true.
-  * ''getCases(): array'' - Returns an array of ''ReflectionEnumUnitCase'' objects.
-  * ''getCase(string $name): ReflectionEnumUnitCase'' - Returns a single ''ReflectionEnumUnitCase'' object for the corresponding case.  If not found, it throws a ''ReflectionException''.
-  * ''hasScalarType(): bool'' - Returns true if the Enum has a scalar equivalent type.  False if not.
-  * ''getScalarType(): null|string'' - Returns the scalar equivalent type of the Enum, if any.  Possible values are "int", "string", and ''null''.
+<code php>
+class ReflectionEnum extends ReflectionClass {
 
-''ReflectionEnumUnitCase'' represents an individual Case in an enumeration.  It extends ''ReflectionClassConstant'' and also has the following methods:
+  // Returns true if there is a Case defined with that name.  
+  // For instance, ''$r->hasCase('Hearts')'' returns true.
+  public function hasCase(string $name): bool {}
 
-  * ''getScalar(): int|string|null'' - Returns the scalar equivalent value defined for the case, if defined.  If one is not defined, it returns ''null''.
-  * The existing method ''getValue()'' can be used to retrieve the corresponding Enum instance for that case.
-  * The ''setValue()'' method is disabled outright to prevent modification of the ''value'' property.
+  // Returns an array of ReflectionEnumCase objects.
+  public function getCases(): array {}
+
+  // Returns a single reflection object for the corresponding case.
+  // If not found, throws, ReflectionException.
+  public function getCase(string $name): ReflectionEnumCase
+
+  // True if this enum has a backing type, false otherwise.
+  public function isBacked(): bool {}
+  
+  // Returns the type of the backing values of this enum, if any.
+  // Possible values are "int", "string", or null.
+  public getBackingType(): ?string {}
+}
+
+class ReflectionEnumCase extends ReflectionClassConstant {
+
+  // Pre-existing. This will return the corresponding enum instance for this case.
+  public function getValue() {}
+
+  // Disabled outright because the case must be immutable.
+  public function setValue() {
+    throw new ReflectionException();
+  }
+}
+
+class ReflectionEnumPureCase extends ReflectionEnumCase {}
+
+class ReflectionEnumBackedCase extends ReflectionEnumPureCase {
+  
+  // Returns the scalar equivalent defind for the case.
+  public function getBackingValue(): int|string {}
+}
+
+</code>
 
 Additionally, a new function ''enum_exists(string $enum, bool $autoload = true): bool'' returns true if the value passed is the name of an Enum class.
 
@@ -507,7 +538,7 @@ interface IterableEnum {
   public static function cases(): array;
 }
 
-interface ValueEnum {
+interface BackedEnum {
   public string $value;
   
   public static function from(int|string $scalar): static;
@@ -519,7 +550,7 @@ interface ValueEnum {
 
 “enum” becomes a language keyword, with the usual potential for naming conflicts with existing global constants.
 
-The global scoped internal interfaces ''IterableEnum'', and ''ValueEnum'' are defined.
+The global scoped internal interfaces ''IterableEnum'', and ''BackedEnum'' are defined.
 
 The global function ''enum_exists'' is defined.
 
@@ -551,7 +582,7 @@ Adding support for enum sets is a possibility for a future RFC, should an approp
 
 ==== Auto-scalar conversion ====
 
-Whether or not a Value Enum can be viewed as "close enough" to its corresponding scalar value is debatable, and of debatable value.  For instance, is a string-backed enum ''Stringable''?  Should an ''int'' type check accept an int-backed enum value?  Should a string-backed enum work in a print statement?  What about up-converting a scalar to its corresponding enum automatically?
+Whether or not a Backed Enum can be viewed as "close enough" to its corresponding scalar value is debatable, and of debatable value.  For instance, is a string-backed enum ''Stringable''?  Should an ''int'' type check accept an int-backed enum value?  Should a string-backed enum work in a print statement?  What about up-converting a scalar to its corresponding enum automatically?
 
 The optimal behavior here, if any, will likely not become apparent until enums see widespread use.  We have therefore opted to omit all auto-conversion at this time.  If clear and compelling use cases for auto-conversion appear in the future, later PHP versions can re-introduce such auto-conversion in a more targeted, well-informed way.
 
@@ -563,7 +594,7 @@ If when the dust settles it appears that ''%%__get%%'' would not cause a conflic
 
 ==== Constant-reference expression values ====
 
-Currently, a Value Enum value may only be a constant literal or an arithmetic expression involving only constant literals.  They cannot reference other constant symbols, such as ''const'' constants or other Enum cases.  That is not out of a lack of desire but simply because it turns out to be quite difficult to do.  It's not a blocker for the remainder of the functionality listed here.  If we or someone else can figure out how to make it work in the future it would be a good addition, but for now it is infeasible.
+Currently, a Backed Enum value may only be a constant literal or an arithmetic expression involving only constant literals.  They cannot reference other constant symbols, such as ''const'' constants or other Enum cases.  That is not out of a lack of desire but simply because it turns out to be quite difficult to do.  It's not a blocker for the remainder of the functionality listed here.  If we or someone else can figure out how to make it work in the future it would be a good addition, but for now it is infeasible.
 
 ===== Voting =====
 
