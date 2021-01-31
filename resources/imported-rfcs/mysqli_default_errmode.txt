@@ -1,5 +1,5 @@
 ====== PHP RFC: Change Default mysqli Error Mode ======
-  * Version: 1.0
+  * Version: 1.1
   * Date: 2021-01-20
   * Author: Kamil Tekiela, dharman@php.net
   * Status: Under Discussion
@@ -21,7 +21,46 @@ mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
 This change will save developers countless hours of debugging. It will also bring the behaviour of this extension in line with PDO and the rest of PHP.
 
-An additional argument for switching the exception mode by default is that since PHP 8.0 a large number of warnings were promoted to Errors. It would make sense to enable automatic error reporting in the form of exception for mysqli errors too. 
+An additional argument for switching the exception mode by default is that since PHP 8.0 a large number of warnings were promoted to Errors. It would make sense to enable automatic error reporting in the form of exception for mysqli errors too.
+
+==== What are mysqli error reporting modes? ==== 
+
+=== MYSQLI_REPORT_OFF === 
+This is the current default. It tells mysqli to do nothing when an error is encountered. The developer is responsible for fetching the error message and handling it appropriately. It usually implies a code looking something like this.
+<code PHP>
+mysqli_report(MYSQLI_REPORT_OFF);
+$mysqli = new mysqli("localhost", "user", "password", "database");
+
+$result = $mysqli->query('SELECT * FROM invalid_table');
+if (false === $result) {
+	my_error_handling_function($mysqli->error);
+}
+</code>
+
+=== MYSQLI_REPORT_ERROR === 
+This will tell mysqli to throw a warning error message when an error is encountered. The code is not stopped and continues to execute.
+
+
+=== MYSQLI_REPORT_STRICT === 
+This will tell mysqli to throw mysqli_sql_exception instead whenever it would throw a warning. It doesn't control whether errors are reported, but instead controls how they are reported. The only code that throws a warning without MYSQLI_REPORT_ERROR is the connection code. 
+ 
+=== MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT === 
+The combination of the other 2 modes causes mysqli to report all problems in the form of exceptions. This simplifies the code as no error checking is required anymore. 
+<code PHP>
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+$mysqli = new mysqli("localhost", "user", "password", "database");
+
+$result = $mysqli->query('SELECT * FROM invalid_table');
+// no checking as the code will stop on the line above. 
+</code>
+
+=== MYSQLI_REPORT_INDEX ===
+This mode tells mysqli to report a bad index used in SQL query as an error. While technically not an error reporting mode, enabling this can help to optimize badly performing SQL. 
+
+=== MYSQLI_REPORT_ALL ===
+A combination of all other modes. 
+
+
 
 ===== Backward Incompatible Changes =====
 Existing code that relies on manual error checking will be affected. Codebase that relied on checking the return value of every single mysqli function call will either need to be cleaned up from no longer necessary checks or the silent mode would have to be switched on explicitly if not already done so. To bring back the old behaviour one needs to add only this line before instantiating mysqli class. 
@@ -29,6 +68,39 @@ Existing code that relies on manual error checking will be affected. Codebase th
 <code PHP>
 mysqli_report(MYSQLI_REPORT_OFF);
 </code>
+
+==== FAQ ====
+
+
+=== Q: How does this proposal address a scenario when it's not up to us to do the necessary changes? ===
+
+The change in default error reporting mode doesn't affect the existing functionality. It only affects the default setting. When using third-party libraries you can set the default mode back to the old setting **before** using the library. Unlike PDO, mysqli's error reporting setting is global and will affect all mysqli code after `mysqli_report()` is called. 
+
+=== Q: What about premade products that rely on the silent default setting e.g. WordPress? ===
+While I can't find many products that would use mysqli or heavily rely on the default setting, WordPress is definitely one. As of now, WordPress doesn't have an explicit setting for mysqli error reporting and when an error happens the message is conveyed to the user using a bespoke error message. When the default setting changes and WordPress doesn't update their code, then users will see a generic WP error message instead. Of course, the change will only impact WordPress in case an error actually happens.
+
+phpMyAdmin is another example of such BC. All database errors are displayed to the user in a special way rather than like all other errors/exceptions. With this RFC database errors will break the application instead of being ignored. Due to phpMyAdmin's heavy reliance on the silent error reporting, this will be a blocker for them. A GH issue has been raised with their team to let them know how to fix it regardless of whether the RFC gets accepted now. 
+
+The only solution for all these products is to stop relying on the default setting and add a line of code that sets the desired error reporting level before the RFC is implemented. 
+
+
+=== Q: I have built my application using manual error checking. Must I use exceptions now? ===
+No. You can continue to use the silent error reporting mode provided that you set it explicitly in your code. The change in this RFC is primarily aimed at new users starting new projects. 
+
+
+=== Q: If this change will affect the error reporting approach of existing projects then why change the default setting at all? ===
+The goal is to educate new users about automatic error reporting. The silent error reporting is an extremely common trap for young developers who quickly grow annoyed with PHP due to the cryptic error messages they receive or no error messages at all. Automatic error reporting is cleaner and more fool-proof than manually checking each mysqli function call. The mysqli extension can throw an error for a number of reasons, none of which are due to the user error (with the exception of tools like phpMyAdmin). However, the developers ought to be informed of the errors when they happen so that the code can be fixed. If mysqli doesn't trigger an automatic exception the code will silently continue execution of the script ignoring all problems or tripping up on the consequent lines of code. 
+
+The default error reporting should be set to automatic exceptions to facilitate debugging activities for developers. Code that wants to ignore these errors should enable the silent mode. 
+
+=== Q: Would it not be a good idea to force everyone to call mysqli_report by deprecating usage of mysqli without calling that function? ===
+While it sounds like a good idea, the actual benefits of this approach are questionable. Projects that haven't set the error reporting mode yet will have to do it either way to fix the deprecation notice. Code that has deprecation notices silenced wouldn't have any motivation to add the call to `mysqli_report()`. The goal of this RFC wouldn't be achieved or would be seriously delayed. 
+
+=== Q: What about the Warning mode (MYSQLI_REPORT_ERROR) and the Warnings as Exception mode only (MYSQLI_REPORT_STRICT)? ===
+We don't talk about them. These two settings are so useless that they have no reason to be the default setting ever. Whoever actually needs this setting would already be aware of mysqli error reporting modes and this RFC wouldn't apply to them. 
+
+=== Q: Will this break the internet? ===
+No. The change will only affect developers. The only time a user would see their product behave differently on PHP 8.1 would be when using a type of product like phpMyAdmin that silences all error reporting and hand-picks mysqli errors to be displayed directly to the user. When the RFC gets accepted mysqli errors will behave just like any other PHP errors unless the mysqli error reporting mode is set differently. Even then, these tools are installed locally and are aimed at the developers. If phpMyAdmin maintainer manage to patch their tool before PHP 8.1 then there should be no observable change at all.
 
 ===== Proposed PHP Version(s) =====
 The aim is to include this change in the next PHP 8.x. 
