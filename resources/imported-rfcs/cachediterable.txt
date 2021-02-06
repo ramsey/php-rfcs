@@ -1,0 +1,132 @@
+====== PHP RFC: CachedIterable (rewindable, allows any key&repeating keys)  ======
+  * Version: 0.1
+  * Date: 2021-02-06
+  * Author: Tyson Andre, tandre@php.net
+  * Status: Draft
+  * Implementation: https://github.com/php/php-src/pull/6655
+  * First Published at: https://wiki.php.net/rfc/cachediterable
+
+===== Introduction =====
+
+Currently, PHP does not provide a built-in way to store the state of an arbitrary iterable for reuse later (when the iterable has arbitrary keys, or when keys might be repeated). It would be useful to do so for many use cases, such as:
+
+  - Creating a rewindable copy of a non-rewindable Traversable (e.g. Generator) before passing that copy to a function that consumes an iterable/Traversable.
+  - Generating an ''IteratorAggregate'' from a class still implementing ''Iterator'' (e.g. ''SplObjectStorage'') so that code can independently iterate over the key-value sequences.
+    (''foreach ($cachingIterable as $k1 => $v1) { foreach ($cachingIterable as $k2 => $v2) { /* process pairs */ } }'')
+  - Providing internal or userland helpers such as ''iterable_flip(iterable $input)'', ''iterable_take(iterable $input, int $limit)'', ''iterable_chunk(iterable $input, int $chunk_size)'' that act on iterables with arbitrary key/value sequences and have return values including iterables with arbitrary key/value sequences
+  - Providing memory-efficient random access to both keys and values of arbitrary key-value sequences (for binary searching on keys and/or values, etc.)
+
+===== Proposal =====
+
+Add a class ''CachedIterable'' that contains an immutable copy of the keys and values of the iterable it was constructed from. (references inside of arrays within those keys/values will remain modifiable references, and objects within those keys/values will remain mutable)
+
+<code php>
+final class CachedIterable implements IteratorAggregate, Countable
+{
+    public function __construct(iterable $iterator) {}
+    public function getIterator(): InternalIterator {}
+    public function count(): int {}
+    public static function fromPairs(array $pairs): CachedIterable;
+
+    public function __serialize(): array {}  // [$k1, $v1, $k2, $v2,...]
+    public function __unserialize(array $data): void {}
+
+    // useful for converting iterables back to arrays for further processing
+    public function keys(): array {}
+    public function values(): array {}
+    // useful to efficiently get offsets at the middle/end of a long iterable
+    public function keyAt(int $offset): mixed {}
+    public function valueAt(int $offset): mixed {}
+    // dynamic properties are forbidden
+}
+</code>
+
+CachedIterables can easily be created from arrays for use cases where objects(Traversable) are required.
+
+<code php>
+$x = new CachedIterable([0 => 100, 'key' => 'value']);
+foreach ($x as $key1 => $value1) {
+    echo "$key1 $value1:\n";
+    foreach ($x as $key2 => $value2) {
+        echo "- $key2 $value2\n";
+    }
+}
+/*
+0 100:
+- 0 100
+- key value
+key value:
+- 0 100
+- key value
+ */
+</code>
+
+==== CachedIterables can be used to cache and efficiently process results of Traversables ====
+
+CachedIterables can also be created from Traversables. They eagerly evaluate the results of Traversables (e.g. Generators) and store an exact copy of the keys and values that can be processed in many ways.
+
+<code php>
+function my_generator() {
+    yield from ['first array'];
+    yield from ['repeated key is allowed'];
+    yield '0' => 'string key is preserved';
+    yield ['an array'] => null;
+    echo "Finished iterating over the generator\n";
+}
+
+$x = new CachedIterable(my_generator());
+foreach ($x as $k => $v) {
+    printf("%s: %s\n", json_encode($k), json_encode($v));
+}
+/*
+Finished iterating over the generator
+0: 'first array'
+0: 'repeated key is allowed'
+'0': 'string key is preserved'
+["an array"]: null
+ */
+
+printf("Keys: %s\n", json_encode($x->keys()));
+printf("Values: %s\n", json_encode($x->values()));
+/*
+Keys: [0,0,"0",["an array"]]
+Values: ["first array","repeated key is allowed","string key is preserved",null]
+ */
+printf("Last key: %s\n", json_encode($x->keyAt(count($x) - 1)));
+// Last key: ["an array"]
+</code>
+
+==== CachedIterables are immutable ====
+
+CachedIterable is a final class.
+
+Dynamic properties are forbidden on CachedIterables.
+
+The keys and values of the CachedIterable cannot be modified or appended to after it is constructed, though objects and references within those values can be modified.
+
+===== Backward Incompatible Changes =====
+None, except that the class name ''CachingIterable'' will be declared by PHP and conflict with applications declaring the same class name in that namespace.
+
+===== Proposed PHP Version(s) =====
+8.1
+
+===== Future Scope =====
+
+  * This will enable adding internal iterable functions such as ''PHP\iterable\take(iterable $input, int $limit): CachingIterator'' or ''someiterableprefix_flip(iterable $input): CachingIterator''
+  * More methods may be useful to add to CachingIterable, e.g. for returning a sorted copy, returning a slice(range of entries), returning a copy sorted by keys/values, quickly returning the index/corresponding value of the first occurrence of ''mixed $key'' etc.
+
+===== Proposed Voting Choices =====
+Yes/No, requiring a 2/3 majority.
+
+===== References =====
+
+[[https://externals.io/message/113061#113066|Proposal: Add ReverseArrayIterator and ForwardArrayIterator to SPL]]
+
+===== Rejected Features =====
+
+==== Rejected: ArrayAccess ====
+
+From https://github.com/php/php-src/pull/6655#issuecomment-770444285
+<blockquote>
+I think ''ArrayAccess'' would lead to more bugs in application code for those expecting ''$cachedIt[$i]'' to find the value corresponding to the first key occurrence of ''$i'' - adding ''keyAt(int $offset): mixed'', ''valueAt(int $offset): mixed'', ''keyIndex(mixed $key): int'', ''valueIndex(mixed $value): int'' would be my preference for fetching values.
+</blockquote>
