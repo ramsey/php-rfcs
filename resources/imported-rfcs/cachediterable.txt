@@ -10,9 +10,8 @@
 
 Currently, PHP does not provide a built-in way to store the state of an arbitrary iterable for reuse later (when the iterable has arbitrary keys, or when keys might be repeated). It would be useful to do so for many use cases, such as:
 
-  - Creating a rewindable copy of a non-rewindable Traversable (e.g. Generator) before passing that copy to a function that consumes an iterable/Traversable.
-  - Generating an ''IteratorAggregate'' from a class still implementing ''Iterator'' (e.g. ''SplObjectStorage'') so that code can independently iterate over the key-value sequences.
-    (''foreach ($cachingIterable as $k1 => $v1) { foreach ($cachingIterable as $k2 => $v2) { /* process pairs */ } }'')
+  - Creating a rewindable copy of a non-rewindable Traversable (e.g. a ''Generator'') before passing that copy to a function that consumes an iterable/Traversable. (''new CachedIterator(my_generator())'')
+  - Generating an ''IteratorAggregate'' from a class still implementing ''Iterator'' (e.g. ''SplObjectStorage'') so that code can independently iterate over the key-value sequences. \\ (e.g. ''foreach ($cachingIterable as $k1 => $v1) { foreach ($cachingIterable as $k2 => $v2) { /* process pairs */ } }'')
   - Providing internal or userland helpers such as ''iterable_flip(iterable $input)'', ''iterable_take(iterable $input, int $limit)'', ''iterable_chunk(iterable $input, int $chunk_size)'' that act on iterables with arbitrary key/value sequences and have return values including iterables with arbitrary key/value sequences
   - Providing memory-efficient random access to both keys and values of arbitrary key-value sequences (for binary searching on keys and/or values, etc.)
 
@@ -27,14 +26,15 @@ final class CachedIterable implements IteratorAggregate, Countable, JsonSerializ
     public function getIterator(): InternalIterator {}
     public function count(): int {}
     // [[$key1, $value1], [$key2, $value2]]
-    public static function fromPairs(array $pairs): CachedIterable;
-
+    public static function fromPairs(array $pairs): CachedIterable {}
+    // [[$key1, $value1], [$key2, $value2]]
+    public function toPairs(): array{} 
     public function __serialize(): array {}  // [$k1, $v1, $k2, $v2,...]
     public function __unserialize(array $data): void {}
 
     // useful for converting iterables back to arrays for further processing
-    public function keys(): array {}
-    public function values(): array {}
+    public function keys(): array {}  // [$k1, $k2, ...]
+    public function values(): array {}  // [$v1, $v2, ...]
     // useful to efficiently get offsets at the middle/end of a long iterable
     public function keyAt(int $offset): mixed {}
     public function valueAt(int $offset): mixed {}
@@ -45,7 +45,7 @@ final class CachedIterable implements IteratorAggregate, Countable, JsonSerializ
 }
 </code>
 
-CachedIterables can easily be created from arrays for use cases where objects(Traversable) are required.
+CachedIterables are IteratorAggregates, so foreach loops do not interfere with each other.
 
 <code php>
 $x = new CachedIterable([0 => 100, 'key' => 'value']);
@@ -67,14 +67,14 @@ key value:
 
 ==== CachedIterables can be used to cache and efficiently process results of Traversables ====
 
-CachedIterables can also be created from Traversables. They eagerly evaluate the results of Traversables (e.g. Generators) and store an exact copy of the keys and values that can be processed in many ways.
+CachedIterables can be created from any iterable (arrays or Traversables). They eagerly evaluate the results of Traversables (e.g. Generators) and store an exact copy of the keys and values that can be processed in many ways.
 
 <code php>
 function my_generator() {
     yield from ['first array'];
     yield from ['repeated key is allowed'];
     yield '0' => 'string key is preserved';
-    yield ['an array'] => null;
+    yield ['an array'] => null;  // any type can be used as keys
     echo "Finished iterating over the generator\n";
 }
 
@@ -106,11 +106,11 @@ CachedIterable is a final class.
 
 Dynamic properties are forbidden on CachedIterables.
 
-The keys and values of the CachedIterable cannot be modified or appended to after it is constructed, though objects and references within those values can be modified.
+The keys and values of the CachedIterable cannot be modified or appended to after an instance is constructed, though objects and references within those values can be modified.
 
 ==== CachedIterables can be created from pairs ====
 
-This can be done imperatively, to avoid the need to manually create a generator with the sequence of keys and values to pass to the constructor.
+This can be done imperatively, to avoid the need to manually create a generator with the sequence of keys and values to pass to the constructor. The values of an iterable (array or Traversable) can be used.
 
 <code php>
 $it = CachedIterable::fromPairs([['first', 'x'], [(object)['key' => 'value'], null]]);
@@ -134,7 +134,172 @@ object(CachedIterable)#2 (1) {
 }
 */
 php > echo json_encode((array)$it), "\n";
-[["first","x"]]
+[["first","x"],[{"key":"value},null]]
+</code>
+
+CachedIterables can also be converted back into pairs for further processing (e.g. using the wide array of helper methods php has for processing arrays):
+
+<code php>
+php > $reversedIt = CachedIterable::fromPairs(array_reverse($it->toPairs()));
+php > echo json_encode($reversedIt->toPairs());
+[[{"key":"value"},null],["first","x"]]
+</code>
+
+==== CachedIterables are memory-efficient ====
+
+Similarly to how ''SplFixedArray'' is a memory-efficient way to store a list of values, ''CachedIterable'' is a memory-efficient way to store a sequence of keys and values (allowing repeated keys of any type).
+
+<code php>
+<?php
+
+function show_array_memory(int $n) {
+    gc_collect_cycles();
+    $before = memory_get_usage();
+    $result = array_flip(range(10, 10 + $n - 1));
+    $after = memory_get_usage();
+    printf("array memory:          (n=%5d) %7d bytes\n", $n, $after - $before);
+}
+function show_cachediterable_memory(int $n) {
+    gc_collect_cycles();
+    $before = memory_get_usage();
+    $result = new CachedIterable(array_flip(range(10, 10 + $n - 1)));
+    $after = memory_get_usage();
+    printf("CachedIterable memory: (n=%5d) %7d bytes\n", $n, $after - $before);
+}
+foreach ([1, 8, 12, 16, 2**16] as $n) {
+    show_array_memory($n);
+    show_cachediterable_memory($n);
+}
+/*
+array memory:          (n=    1)     480 bytes
+CachedIterable memory: (n=    1)     160 bytes
+array memory:          (n=    8)     480 bytes
+CachedIterable memory: (n=    8)     416 bytes
+array memory:          (n=   12)    1632 bytes
+CachedIterable memory: (n=   12)     544 bytes
+array memory:          (n=   16)    1632 bytes
+CachedIterable memory: (n=   16)     736 bytes
+array memory:          (n=65536) 4198592 bytes
+CachedIterable memory: (n=65536) 2097344 bytes
+ */
+</code>
+
+==== CachedIterables are much more efficient than a polyfill ====
+
+For a simple example, this uses much less time to construct. It is also 6 times faster to iterate over and process results than a polyfill, and uses half as much additional memory.
+
+<code php>
+<?php
+/*
+Time to construct PolyfillIterator: 0.246372, Time to iterate: 0.617741, result 999000000, memory usage: 67117600
+Time to construct   CachedIterable: 0.130583, Time to iterate: 0.095657, result 999000000, memory usage: 32002240
+ */
+
+// Not an IteratorAggregate for simplicity but still rewindable - unimportant to performance
+class PolyfillIterator implements Iterator {
+    public $i = 0;
+    public $count = 0;
+    public $keys;
+    public $values;
+    public function __construct(iterable $data) {
+        $keys = [];
+        $values = [];
+        foreach ($data as $key => $value) {
+            $keys[] = $key;
+            $values[] = $value;
+        }
+        $this->keys = $keys;
+        $this->values = $values;
+        $this->count = count($keys);
+    }
+    public function rewind() { $this->i = 0; }
+    public function valid(): bool { return $this->i < $this->count; }
+    public function key() { return $this->keys[$this->i]; }
+    public function current() { return $this->values[$this->i]; }
+    public function next(): void { $this->i++; }
+}
+
+function a_generator() {
+    for ($i = 0; $i < 1000; $i++) {
+        for ($j = 0; $j < 1000; $j++) {
+            yield $j => $i;
+        }
+    }
+}
+
+function benchmark(string $class) {
+    gc_collect_cycles();
+    $memory_usage_1 = memory_get_usage();
+    $t1 = microtime(true);
+    $it = new $class(a_generator());
+    $t2 = microtime(true);
+    $total = 0;
+    foreach ($it as $k => $v) {
+        $total += $k + $v;
+    }
+    $t3 = microtime(true);
+    gc_collect_cycles();
+    $memory_usage_2 = memory_get_usage();
+    printf("Time to construct %16s: %.6f, Time to iterate: %.6f, result %d, memory usage: %d\n",
+        $class, $t2 - $t1, $t3 - $t2, $total, $memory_usage_2 - $memory_usage_1);
+}
+benchmark(PolyfillIterator::class);
+benchmark(CachedIterable::class);
+
+</code>
+==== CachedIterables support constant-time access to keys and values ====
+
+CachedIterables support constant-time access to keys and values, allowing the result to be used in a wide variety of ways in an applicat.
+For example, it is possible to do binary search on keys (and/or values) without using any additional time or memory to create a copy of the keys.
+(Same for values).
+
+<code php>
+<?php
+/**
+ * @return int the offset of the first key in $it that is >= $target.
+ * Returns count($it) if all keys are smaller than $target.
+ */
+function do_binary_search_on_key(CachedIterable $it, int $target) {
+    $lowOffset = 0;
+    $highOffset = count($it) - 1;
+    while ($lowOffset <= $highOffset) {
+        $mid = $lowOffset + (($highOffset - $lowOffset) >> 1);
+        $key = $it->keyAt($mid);
+        if ($key < $target) {
+            echo "at offset $mid: $key <= $target\n";
+            $lowOffset = $mid + 1;
+        } else {
+            echo "at offset $mid: $key > $target\n";
+            $highOffset = $mid - 1;
+        }
+    }
+    echo "offset $lowOffset has the first key ({$it->keyAt($lowOffset)}) >= $target : associated value={$it->valueAt($lowOffset)}\n";
+    return $lowOffset;
+}
+
+mt_srand(123);
+$data = [];
+$N = 1000;
+for ($i = 0; $i < $N; $i++) {
+    $data[mt_rand()] = "value$i";
+}
+ksort($data);
+$it = new CachedIterable($data);
+
+do_binary_search_on_key($it, mt_rand());
+/*
+at offset 499: 1039143806 > 457052171
+at offset 249: 595271545 > 457052171
+at offset 124: 262516026 <= 457052171
+at offset 186: 438739745 <= 457052171
+at offset 217: 511637778 > 457052171
+at offset 201: 468958912 > 457052171
+at offset 193: 442664110 <= 457052171
+at offset 197: 455906707 <= 457052171
+at offset 199: 462794419 > 457052171
+at offset 198: 459587085 > 457052171
+offset 198 has the first key (459587085) >= 457052171 : associated value=value530
+ */
 </code>
 
 ===== Backward Incompatible Changes =====
