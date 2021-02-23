@@ -1,0 +1,178 @@
+====== PHP RFC: Static variables in inherited methods ======
+  * Date: 2021-02-23
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Under Discussion
+  * Target Version: PHP 8.1
+
+===== Introduction =====
+
+When a method containing static variables is inherited, the inherited method currently uses an independent set of static variables. This RFC proposes to only have one set of static variables per method.
+
+The current behavior of static variables is illustrated in the following example:
+
+<PHP>
+class A {
+    public static function counter() {
+        static $i = 0;
+        return ++$i;
+    }
+}
+class B extends A {}
+
+var_dump(A::counter()); // int(1)
+var_dump(A::counter()); // int(2)
+var_dump(B::counter()); // int(1)
+var_dump(B::counter()); // int(2)
+</PHP>
+
+When ''A::counter()'' is inherited into class ''B'', a separate set of static variables is used, and ''A::counter()'' and ''B::counter()'' will manage an independent counter.
+
+This RFC proposed to instead have only one set of static variables per method, regardless of whether it is inherited:
+
+<PHP>
+class A {
+    public static function counter() {
+        static $i = 0;
+        return ++$i;
+    }
+}
+class B extends A {}
+
+var_dump(A::counter()); // int(1)
+var_dump(A::counter()); // int(2)
+var_dump(B::counter()); // int(3)
+var_dump(B::counter()); // int(4)
+</PHP>
+
+Based on a perusal of bug reports relating to static variables, this appears to be the intuitively expected behavior. Notably, it matches how static class properties already behave:
+
+<PHP>
+class A {
+    private static $i = 0;
+    public static function counter() {
+        return ++static::$i;
+    }
+}
+class B extends A {}
+
+var_dump(A::counter()); // int(1)
+var_dump(A::counter()); // int(2)
+var_dump(B::counter()); // int(3)
+var_dump(B::counter()); // int(4)
+</PHP>
+
+It also matches the behavior of other languages:
+
+<code cpp>
+#include <iostream>
+
+class A {
+public:
+    static int counter() {
+        static int i = 0;
+        return ++i;
+    }
+};
+class B : public A {
+};
+
+int main() {
+    std::cout << A::counter() << std::endl; // 1
+    std::cout << A::counter() << std::endl; // 2
+    std::cout << B::counter() << std::endl; // 3
+    std::cout << B::counter() << std::endl; // 4
+    return 0;
+}
+</code>
+
+A problem with the current semantics is that there is no way to preserve them when overriding the method and invoking ''parent::'':
+
+<PHP>
+class A {
+    public static function counter() {
+        static $i = 0;
+        return ++$i;
+    }
+}
+class B extends A {
+    public static function counter() {
+        return parent::counter();
+    }
+}
+
+var_dump(A::counter()); // int(1)
+var_dump(A::counter()); // int(2)
+var_dump(B::counter()); // int(3)
+var_dump(B::counter()); // int(4)
+</PHP>
+
+The general expectation is that overriding a method and calling the parent method will not change program behavior. Under the previous semantics, it does, because there is no longer a separate static variable scope associated with ''B::counter()''. There is no way to make the semantics match short of copying the implementation. Under the proposed semantics, the behavior is consistent.
+
+Finally, there are some outright bugs in the handling of static variables. For example, if static variables are declared inside a constructor (and some other magic methods), then they do end up sharing a single static variable scope:
+
+<PHP>
+class A {
+    public function __construct() {
+        static $i = 0;
+        var_dump(++$i);
+    }
+}
+class B extends A {}
+
+new A; // int(1)
+new A; // int(2)
+new B; // int(3)
+new B; // int(4)
+</PHP>
+
+In this case, the buggy behavior under current semantics, coincides with correct behavior under the proposed semantics. Of course, if this proposal is not accepted, then the behavior should be fixed for current semantics.
+
+===== Proposal =====
+
+When a method containing static variables is inherited, the inherited method will share the same static variable scope:
+
+<PHP>
+class A {
+    public static function counter() {
+        static $i = 0;
+        return ++$i;
+    }
+}
+class B extends A {}
+
+var_dump(A::counter()); // int(1)
+var_dump(A::counter()); // int(2)
+var_dump(B::counter()); // int(3)
+var_dump(B::counter()); // int(4)
+</PHP>
+
+However, static variables inside trait methods will continue to use a separate static variable scope for each use of the trait:
+
+<PHP>
+trait T {
+    public static function counter() {
+        static $i = 0;
+        return ++$i;
+    }
+}
+class A {
+    use T;
+}
+class B {
+    use T;
+}
+var_dump(A::counter()); // int(1)
+var_dump(A::counter()); // int(2)
+var_dump(B::counter()); // int(1)
+var_dump(B::counter()); // int(2)
+</PHP>
+
+This is consistent with the general semantics of traits as "compiler-assisted copy and paste". The code behaves as-if the method definition was literally pasted into both classes. This is also consistent with the behavior of static properties in traits.
+
+===== Backward Incompatible Changes =====
+
+The behavior of static variables in methods changes as described above. The current behavior of static variables is not documented. I consider it to be borderline buggy.
+
+===== Vote =====
+
+Yes/No.
