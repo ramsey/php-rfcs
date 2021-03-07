@@ -1,6 +1,6 @@
 ====== PHP RFC: Fibers ======
 
-  * Date: 2021-01-06
+  * Date: 2021-03-07
   * Authors: Aaron Piotrowski <trowski@php.net>, Niklas Keller <kelunik@php.net>
   * Status: Under Discussion
   * First Published at: http://wiki.php.net/rfc/fibers
@@ -114,9 +114,9 @@ final class Fiber
     public function isTerminated(): bool { }
 
     /**
-     * @return mixed Return value of the fiber callback.
+     * @return mixed Return value of the fiber callback. NULL is returned if the fiber does not have a return statement.
      *
-     * @throws FiberError If the fiber has not terminated or did not return a value.
+     * @throws FiberError If the fiber has not terminated or the fiber threw an exception.
      */
     public function getReturn(): mixed { }
 
@@ -140,23 +140,25 @@ final class Fiber
 }
 </code>
 
-A ''Fiber'' object is created using ''new Fiber(callable $callback)'' with any callable. The callable need not call ''Fiber::suspend()'' directly, it may be in a deeply nested call, far down the call stack (or perhaps never call ''Fiber::suspend()'' at all). The returned ''Fiber'' may be started using ''Fiber->start(mixed ...$args)'' with a variadic argument list that is provided as arguments to the callable used when creating the ''Fiber''.
+A ''Fiber'' object is created using ''new Fiber(callable $callback)'' with any callable. The callable need not call ''Fiber::suspend()'' directly, it may be in a deeply nested call, far down the call stack (or perhaps never call ''Fiber::suspend()'' at all). The new ''Fiber'' may be started using ''Fiber->start(mixed ...$args)'' with a variadic argument list that is provided as arguments to the callable used when creating the ''Fiber''.
+
+''Fiber::suspend()'' suspends execution of the current fiber and returns execution to the call to ''Fiber->start()'', ''Fiber->resume()'', or ''Fiber->throw()''. Consider ''Fiber::suspend()'' to be similar to a generator using ''yield'', which returns execution to the call that advanced the generator.
 
 A suspended fiber may be resumed in one of two ways:
 
   * returning a value from ''Fiber::suspend()'' using ''Fiber->resume()''
   * throwing an exception from ''Fiber::suspend()'' using ''Fiber->throw()''
 
-''Fiber::suspend()'' suspends execution of the current fiber and returns execution to the call to ''Fiber->start()'', ''Fiber->resume()'', or ''Fiber->throw()''. Consider ''Fiber::suspend()'' to be similar to a generator using ''yield'', which returns execution to the call that advanced the generator.
+''Fiber->getReturn()'' returns the value returned from a terminated fiber (''NULL'' is returned if the fiber did not return a value). This function will throw an instance of ''FiberError'' if the fiber has not completed execution or threw an exception.
 
-''Fiber::this()'' returns the currently executing ''Fiber'' instance. This allows a fiber to store a reference to itself elsewhere, such as within an event loop callback or an array of awaiting fibers.
+''Fiber::this()'' returns the currently executing ''Fiber'' instance or ''NULL'' if called from ''{main}''. This allows a fiber to store a reference to itself elsewhere, such as within an event loop callback or an array of awaiting fibers.
 
 ==== ReflectionFiber ====
 
-''ReflectionFiber'' is used to inspect executing fibers. A ''ReflectionFiber'' object can be created from any ''Fiber'' object, even if it has not been started or if it has been finished. This reflection class is similar to ''ReflectionGenerator''.
+''ReflectionFiber'' is used to inspect executing fibers. A ''ReflectionFiber'' object can be created from any ''Fiber'' object, even if it has not been started or if it has terminated. This reflection class is similar to ''ReflectionGenerator''.
 
 <code php>
-class ReflectionFiber
+final class ReflectionFiber
 {
     /**
      * @param Fiber $fiber Any Fiber object, including those that are not started or have
@@ -165,16 +167,17 @@ class ReflectionFiber
     public function __construct(Fiber $fiber) { }
 
     /**
+     * @return Fiber The reflected Fiber object.
+     */
+    public function getFiber(): Fiber { }
+
+    /**
      * @return string Current file of fiber execution.
-     *
-     * @throws ReflectionException If the fiber has not been started or has terminated.
      */
     public function getExecutingFile(): string { }
 
     /**
      * @return int Current line of fiber execution.
-     *
-     * @throws ReflectionException If the fiber has not been started or has terminated.
      */
     public function getExecutingLine(): int { }
 
@@ -183,8 +186,6 @@ class ReflectionFiber
      *
      * @return array Fiber backtrace, similar to {@see debug_backtrace()}
      *               and {@see ReflectionGenerator::getTrace()}.
-     *
-     * @throws ReflectionException If the fiber has not been started or has terminated.
      */
     public function getTrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT): array { }
 
@@ -205,7 +206,7 @@ class ReflectionFiber
 
     /**
      * @return bool True if the fiber has completed execution (either returning or
-     *              throwing an exception).
+     *              throwing an exception), false otherwise.
      */
     public function isTerminated(): bool { }
 }
@@ -213,11 +214,11 @@ class ReflectionFiber
 
 === Unfinished Fibers ===
 
-Fibers that are not finished (do not complete execution) are destroyed similarly to unfinished generators, executing any pending ''finally'' blocks. ''Fiber::suspend()'' may not be invoked in a force-closed fiber, just as ''yield'' cannot be used in a force-closed generator. Fibers are destroyed when there are no references to the ''Fiber'' object. An exception to this is the ''{main}'' fiber, where removing all references to the ''Fiber'' object that resumes the main fiber will result in a ''FiberExit'' exception to be thrown from the call to ''Fiber::suspend()'', resulting in a fatal error.
+Fibers that are not finished (do not complete execution) are destroyed similarly to unfinished generators, executing any pending ''finally'' blocks. ''Fiber::suspend()'' may not be invoked in a force-closed fiber, just as ''yield'' cannot be used in a force-closed generator. Fibers are destroyed when there are no references to the ''Fiber'' object.
 
 === Fiber Stacks ===
 
-Each fiber is allocated a separate C stack and VM stack on the heap. The C stack is allocated using ''mmap'' if available, meaning physical memory is used only on demand (if it needs to be allocated to a stack value) on most platforms. Each fiber stack is allocated 1M maximum of memory by default, settable with an ini setting ''fiber.stack_size''. Note that this memory is used for the C stack and is not related to the memory available to PHP code. VM stacks for each fiber are allocated in a similar way to generators and use a similar amount of memory and CPU. VM stacks are able to grow dynamically, so only a single VM page (4K) is initially allocated.
+Each fiber is allocated a separate C stack and VM stack on the heap. The C stack is allocated using ''mmap'' if available, meaning physical memory is used only on demand (if it needs to be allocated to a stack value) on most platforms. Each fiber stack is allocated a maximum of 8M if memory by default, settable with an ini setting ''fiber.stack_size''. Note that this memory is used for the C stack and is not related to the memory available to PHP code. VM stacks for each fiber are allocated in a similar way to generators and use a similar amount of memory and CPU. VM stacks are able to grow dynamically, so only a single VM page (4K) is initially allocated.
 
 ===== Backward Incompatible Changes =====
 
