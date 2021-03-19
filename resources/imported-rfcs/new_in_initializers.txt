@@ -89,7 +89,8 @@ Initializer expressions could always contain side-effects through autoloaders or
   * Attribute arguments are evaluated from left to right on every call of ''ReflectionAttribute::getArguments()'' or ''ReflectionAttribute::newInstance()''.
   * Parameter default values are evaluated from left to right on every call to the function where the parameter is not explicitly passed.
   * Property default values are evaluated in order of declaration (with parent properties before properties declared in the class) when the object is instantiated. This happens before the constructor is invoked. If an exception is thrown during evaluation, the object destructor will not be invoked.
-  * The time of evaluation for static properties and class constants is unspecified. Currently, all static property and class constant initializers are evaluated on certain first uses of the class. (TODO?)
+  * When a class is declared, all class constants and then all static properties are evaluated (constants and properties from parents are already evaluated at this point). If an exception is thrown during evaluation, then subsequent uses of the class will also throw an ''Error'' exception (this matches what currently happens on evaluation failure).
+  * As an exception, static properties in traits (class constants are not supported in the first place) are not evaluated at declaration time. Evaluation is delayed to the first direct access of a static property on the trait. Static properties in traits should only ever be accessed through a using class. Due to an implementation bug, it is currently possible to access static properties directly on traits, however this possibility will be removed in the future. At that point, static properties in traits will never be evaluated.
 
 ==== Interaction with reflection ====
 
@@ -101,7 +102,7 @@ Initializers, or values based on initializers, can be accessed through Reflectio
   * ''ReflectionClassConstant::getValue()'', ''ReflectionClass::getConstants()'' and ''ReflectionClass::getConstant()'': Returns value of the class constant(s), evaluating the initializer if this has not happened yet. (The returned value is the same as the actual value of the class constant, not a separate evaluation.)
   * ''ReflectionClass::getDefaultProperties()'' and ''ReflectionProperty::getDefaultValue()'': Evaluates initializers for both static and non-static properties on each call. (NOTE: Due to a pre-existing implementation bug, if opcache is not used, the current value is used instead of the default value for static properties. This is  incorrect, and should be fixed.)
   * ''ReflectionAttribute::getArguments()'' and ''ReflectionAttribute::newInstance()'': Evaluate attribute arguments on each call.
-  * ''ReflectionObject::newInstanceWithoutConstructor()'': Evaluates and assigns default values, even though the constructor is not invoked. (TODO?)
+  * ''ReflectionObject::newInstanceWithoutConstructor()'': Evaluates and assigns default values, even though the constructor is not invoked.
 
 ==== Recursion protection ====
 
@@ -135,11 +136,41 @@ class B {
 
 These properties are not compatible, because trait compatibility is determined using identity comparison (''==='') and both properties hold different instances of the same object. However, we do not want the compatibility check to actually evaluate the ''new'' expressions (and the side-effects this may entail). These should only be evaluated when an object is instantiated.
 
-Initializer expressions are separated into two categories: Non-dynamic (all existing expression types) and dynamic (containing ''new'' -- or other side-effecting expression types in the future). If the initializer of a trait property is dynamic, then it will not be evaluated an always considered incompatible.
+Initializer expressions are separated into two categories: Non-dynamic (all existing expression types) and dynamic (containing ''new'' -- or other side-effecting expression types in the future). If the initializer of a trait property is dynamic, then it will not be evaluated and always considered incompatible.
+
+==== Nested attributes ====
+
+It is worth mentioning explicitly that this RFC effectively adds support for nested attributes, which were omitted from the original attributes RFC. For example, attributes of the following form are now possible:
+
+<PHP>
+#[Assert\All(new Assert\NotNull, new Assert\Length(max: 6))]
+</PHP>
 
 ===== Backward Incompatible Changes =====
 
-None.
+This RFC introduces a well-defined order for the evaluation of initializers, which differs from the order used in previous PHP versions. In particular, class constant and static property initializers are now evaluated when the class is declared, rather than on first use (where only certain uses of the class are considered). This means that any symbols used in class constant or static property initializers have to be available or loadable at the time of declaration.
+
+The following code will no longer work:
+
+<PHP>
+class X {
+    const C = Y;
+}
+define('Y', 1);
+var_dump(X::C);
+</PHP>
+
+Instead, it should be written as:
+
+<PHP>
+define('Y', 1);
+class X {
+    const C = Y;
+}
+var_dump(X::C);
+</PHP>
+
+For the same reason, classes that have unresolved initializers will not be early-bound. That is, in the above example the declaration of class ''X'' is not hoisted to the top of the script, as doing so would place it before the constant ''define()''.
 
 ===== Future Scope =====
 
