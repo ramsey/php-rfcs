@@ -16,7 +16,7 @@ The current RFC aims to solve the last problem by providing a longer term, gradu
 
 ===== Proposal =====
 
-Non-final internal method return types - when possible - are declared tentatively in PHP 8.1, and they will become enforced in PHP 9.0. It means that in PHP 8.x versions, a "strict standards" notice is raised during inheritance checks when an internal method is overridden in a way that the return types are incompatible, and PHP 9.0 will make these a fatal error. A few examples:
+Non-final internal method return types - when possible - are declared tentatively in PHP 8.1, and they will become enforced in PHP 9.0. It means that in PHP 8.x versions, a "deprecated" notice is raised during inheritance checks when an internal method is overridden in a way that the return types are incompatible, and PHP 9.0 will make these a fatal error. A few examples:
 
 The overriding method doesn't declare any return type (PHP 8.1):
 
@@ -26,7 +26,7 @@ class MyDateTime extends DateTime
     public function modify(string $modifier) { return false; }
 }
 
-// Strict standards: Declaration of MyDateTime::modify(string $modifier) should be
+// Deprecated: Declaration of MyDateTime::modify(string $modifier) should be
 // compatible with DateTime::modify(string $modifier): DateTime|false
 </code>
 
@@ -50,7 +50,7 @@ class MyDateTime extends DateTime
     public function modify(string $modifier): ?DateTime { return null; }
 }
 
-// Strict standards: Declaration of MyDateTime::modify(string $modifier): ?DateTime should be
+// Deprecated: Declaration of MyDateTime::modify(string $modifier): ?DateTime should be
 // compatible with DateTime::modify(string $modifier): DateTime|false
 </code>
 
@@ -66,9 +66,7 @@ class MyDateTime extends DateTime
 // compatible with DateTime::modify(string $modifier): DateTime|false
 </code>
 
-The rationale behind resurrecting a currently extinct error category (''E_STRICT'') for the notices about future return type changes is to allow users the freedom to handle these problems separately from deprecations and other more serious issues, like warnings.
-
-Unfortunately, union return types impose a compatibility challenge for libraries: as this construct is only supported since PHP 8.0, libraries would have to accept the fact by default that their code triggers ''E_STRICT'' notices on PHP 8.1 if they also want to support PHP versions below 8.0. As a remedy, this RFC proposes to add a ''SuppressReturnTypeNotice'' attribute which could be used to suppress the related ''E_STRICT'' notices. Thanks to the backward compatible syntax of attributes, this can be done in code which is compatible with PHP 7 and below.
+Unfortunately, union return types impose a compatibility challenge for libraries: as this construct is only supported since PHP 8.0, libraries would have to accept the fact by default that their code triggers ''E_DEPRECATED'' notices on PHP 8.1 if they also want to support PHP versions below 8.0. As a remedy, this RFC proposes to add a ''SuppressReturnTypeNotice'' attribute which could be used to suppress the related ''E_DEPRECATED'' notices. Thanks to the backward compatible syntax of attributes, this can be done in code which is compatible with PHP 7 and below.
 
 <code php>
 class MyDateTime extends DateTime
@@ -85,27 +83,89 @@ class MyDateTime extends DateTime
 
 ====== Reflection ======
 
-Two new methods are proposed for addition to the ''ReflectionMethod'' class in order to provide reflection information about tentative return types:
-
-<code php>
-class ReflectionMethod
-{
-    public function hasTentativeReturnType(): bool {}
-    public function getTentativeReturnType(): ?ReflectionType {}
-}
-</code>
-
-As tentative return types are considered similarly as PHPDoc return type hints, ''ReflectionMethod::hasReturnType()'' and ''ReflectionMethod::getReturnType()'' returns ''false'' and ''null'', respectively, for methods with tentative return type.
+As the tentative return type declarations in question wouldn't be enforced in PHP 8 versions, ''ReflectionMethod::hasReturnType()'' and ''ReflectionMethod::getReturnType()'' won't take these into account until PHP 9.0.
 
 ===== Backward Incompatible Changes =====
 
-In PHP 8.1, an ''E_STRICT'' notice would be raised for each method which has an incompatible return type with its overridden internal method. In PHP 9.0, incompatible return types would always trigger a fatal error.
+In PHP 8.1, an ''E_DEPRECATED'' notice would be raised for each method which has an incompatible return type with its overridden internal method. In PHP 9.0, incompatible return types would always trigger a fatal error.
 
+===== Exposing tentative return types to userland =====
 
-===== Future Scope =====
+The same mechanism can be exposed for userland methods so that libraries can also benefit from it when preparing for adding return type declarations. For this purpose, a ''TentativeReturnType'' attribute is proposed:
 
-Tentative return types could be extended to user-land methods by using a ''TentativeReturnType'' attribute. This would be useful for libraries that want to add return types gradually.
+<code php>
+class Foo
+{
+    #[TentativeReturnType]
+    public function bar(): string
+    {
+        return "bar";
+    }
+}
+
+class Foo2 extends Foo
+{
+    public function bar()
+    {
+    }
+}
+
+class Foo3 extends Foo
+{
+    #[SuppressReturnTypeNotice]
+    public function bar(): string|false
+    {
+        return [];
+    }
+}
+
+$foo2 = new Foo2();
+var_dump($foo2->bar());
+
+$foo3 = new Foo3();
+var_dump($foo3->bar());
+
+// Deprecated: Declaration of Foo2::bar() should be compatible with Foo::bar(): string
+// NULL
+// Fatal error: Uncaught TypeError: a(): Return value must be of type string|false, array returned
+</code>
+
+It should also be highlighted that ''TentativeReturnType'' and ''SuppressReturnType'' is only effective for immediate children:
+
+<code php>
+class Foo
+{
+    #[TentativeReturnType]
+    public function bar(): string
+    {
+        return "bar";
+    }
+}
+
+class Foo2 extends Foo
+{
+    #[SuppressReturnTypeNotice]
+    public function bar(): array
+    {
+        return [];
+    }
+}
+
+class Foo3 extends Foo2
+{
+    public function bar(): string
+    {
+        return "bar";
+    }
+}
+
+// Fatal error: Declaration of Foo3::bar() must be compatible with Foo2::bar(): array
+</code>
+
+This behaviour is useful to keep backward compatibility: so that ''Foo3'' can't override the return type of ''Foo2'' with types that clients are not prepared for.
 
 ===== Vote =====
 
-Add return type declarations for internal methods? The vote requires 2/3 majority to be accepted.
+Primary vote: Add return type declarations tentatively for internal methods? The vote requires 2/3 majority to be accepted.
+
+Secondary vote: Add the ''TentativeReturnType'' attribute? The vote requires 2/3 majority to be accepted.
