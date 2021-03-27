@@ -1,0 +1,86 @@
+====== PHP RFC: Resolve Symlinks Config Flag ======
+  * Version: 0.9
+  * Date: 2021-03-27
+  * Author: Rasmus Lerdorf, rasmus@php.net
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/resolve_symlinks
+
+===== Introduction =====
+//resolve_symlinks// is a config option to stop PHP from calling realpath() on paths. Being able to turn off this realpath() call is useful in cases where you want to deploy a new version of code to a different path and re-use Opcache entries for files whose modification times have not changed from one version to the next.
+
+Deploying PHP efficiently in an atomic manner on live busy web servers is a juggling act. You have to be very aware of how Opcache works to get it right. For continuous integration sites that push new code frequently it is important to preserve the cache entries for unmodified files across code pushes. By flipping a symlink between a live and a non-live docroot directory you can have two copies of the site in opcache at all times and only recompile and re-cache changed files. For more background on one such strategy, see [[https://codeascraft.com/2013/07/01/atomic-deploys-at-etsy/]]. The strategy described there relies on always using two paths, **/var/www/A** and **/var/www/B** and flipping a **/var/www/current** symlink back and forth between them. So deploys look like this:
+
+<code>
+                    /var/www/B   Version 11
+/var/www/current -> /var/www/A   Version 12
+</code>
+
+to deploy version 13, we rsync or somehow copy the changed code to **/var/www/B** and flip the symlink so it now becomes:
+
+<code>
+                    /var/www/A   Version 12
+/var/www/current -> /var/www/B   Version 13
+</code>
+
+If instead of modifying existing code we want to mount read-only images, for example, then this strategy won't work and this is where the resolve_symlinks config option comes in. By turning off PHP's internal realpath() we can now have the above look like this:
+
+<code>
+                                   /var/www/packages/Version10
+                    /var/www/B  -> /var/www/packages/Version11
+/var/www/current -> /var/www/A  -> /var/www/packages/Version12
+</code>
+
+and when we deploy version 13 by copying the entire new version, while preserving mtimes, to the server it becomes:
+
+<code>
+                                   /var/www/packages/Version10
+                                   /var/www/packages/Version11
+                    /var/www/A  -> /var/www/packages/Version12
+/var/www/current -> /var/www/B  -> /var/www/packages/Version13
+</code>
+
+So we still have two copies of the site in Opcache with **A** and **B** keys for each file. This is necessary for atomicity in that when we flip the **current** symlink to **B** in the middle of a request, requests that started on **A** need to be able to finish on **A**. What //resolve_symlinks// allows us to do is make **A** and **B** point to something else. Without it PHP would turn these into full paths and each version would need to be recompiled and re-cached into Opcache, not just the changed files.
+
+===== Proposal =====
+Add a //resolve_symlinks// config option to stop PHP from resolving symlinks. Paths will still have **/./** and **/../** components normalized, just symlinks will stay as-is.
+
+<code>
+; Whether PHP should resolve symlinks or not.
+; The default is On
+;resolve_symlinks=On
+</code>
+
+
+===== Backward Incompatible Changes =====
+By turning off symlinks some applications could end up using more Opcache entries than they would with symlinks resolved. For example, if you had:
+<code>
+/var/www/site1/htdocs/includes/common -> /var/www/common
+/var/www/site2/htdocs/includes/common -> /var/www/common
+</code>
+With **resolve_symlinks=On** if you did ''include "includes/common/footer.php";'' you would end up with a single Opcache entry for **/var/www/common/footer.php**. With **resolve_symlinks=Off** you would get two identical entries. One for **/var/site1/htdocs/includes/common/footer.php** and a second for **/var/site2/htdocs/includes/common/footer.php**. This is obviously a situation where you would not want to turn //resolve_symlinks// off.
+
+===== Proposed PHP Version(s) =====
+8.1
+
+===== RFC Impact =====
+==== To SAPIs ====
+//resolve_symlinks// will work the same way across all SAPIs although the use-case for cli is limited.
+
+
+==== To Opcache ====
+Not resolving symlinks has no direct impact on Opcache. The entire reason for this mode is to have better control over
+opcache keys in order to reuse cache entries across deploys.
+
+
+==== php.ini Defaults ====
+//resolve_symlinks// will default to On in both production and development which means nothing changes for existing environments.
+
+===== Open Issues =====
+
+===== Patches and Tests =====
+The patch itself it trivial:
+
+https://gist.github.com/bd7f1eab6b3df8a9318ec2e099f3fdd4
+
+I'll add a couple of simple tests as well and stub entries for php.ini-*
+
