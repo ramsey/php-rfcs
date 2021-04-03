@@ -1,6 +1,6 @@
 ====== PHP RFC: Deprecate and Remove utf8_encode and utf8_decode ======
-  * Version: 0.1
-  * Date: 2021-04-02
+  * Version: 0.2
+  * Date: 2021-04-03
   * Author: Rowan Tommins <rowan.collins@gmail.com>
   * Status: Draft
   * First Published at: https://wiki.php.net/rfc/remove_utf8_decode_and_utf8_encode
@@ -11,20 +11,20 @@ The built-in functions utf8_encode and utf8_decode convert strings encoded in IS
 
   * Their names suggest a more general use than their implementation actually allows.
   * The Latin 1 encoding is commonly confused with other encodings, particularly Windows Code Page 1252.
-  * They are implemented in such a way that incorrect use never produces any messages to the user, and is only spotted later when text has been corrupted, possibly unrecoverably.
+  * The lack of error messages means that incorrect use is not easy to spot.
 
-This RFC takes the view that their inclusion under the current name does more harm than good, and that users should be encouraged to find more appropriate functions for their use cases.
+This RFC takes the view that their inclusion under the current name does more harm than good, and that removing them will encourage users to find more appropriate functions for their use cases.
 
 ===== Proposal =====
 
   * In PHP 8.1, all uses of utf8_encode and utf8_decode will raise an E_DEPRECATED diagnostic. [TODO: Specify custom message?]
   * In PHP 9.0, the utf8_encode and utf8_decode functions will be removed from the language.
 
-===== Historical background =====
+===== Historical note =====
 
-The functions were originally added as internal functions in the XML extension, and were [[https://github.com/php/php-src/commit/e79e9fade6694ab8485c8722dfdc84b0c866ccc1|exposed to userland in 2006]]. They remained part of that extension (and thus technically optional) until [[https://github.com/php/php-src/pull/2160|Andrea Faulds moved them to ext/standard in PHP 7.2]]. At the same time, [[https://github.com/php/doc-en/commit/838941f6cce51f3beda16012eb497b26295a8238|she reworded the documentation page]] which previously consisted mostly of a long explanation of UTF-8, and little explanation of the functions themselves.
+The functions were originally added as internal functions in the XML extension, and were [[https://github.com/php/php-src/commit/e79e9fade6694ab8485c8722dfdc84b0c866ccc1|exposed to userland in 2006]].
 
-This was the result of initial discussion on [[https://wiki.php.net/rfc/remove_utf_8_decode_encode|a previous RFC by Yasuo Ohgaki]] which was abandoned without a vote.
+They remained part of that extension (and thus technically optional) until [[https://github.com/php/php-src/pull/2160|Andrea Faulds moved them to ext/standard in PHP 7.2]]. At the same time, [[https://github.com/php/doc-en/commit/838941f6cce51f3beda16012eb497b26295a8238|she reworded the documentation page]] which previously consisted mostly of a long explanation of UTF-8, and little explanation of the functions themselves.
 
 ===== Problems with the current functions =====
 
@@ -32,7 +32,7 @@ This was the result of initial discussion on [[https://wiki.php.net/rfc/remove_u
 
 Character encoding issues are often poorly understood, and users will often look for a "quick fix" that just makes their UTF-8 "work properly". The names "utf8_encode" and "utf8_decode" suggest functions that will do exactly that, and these functions are frequently used in functions called things like "fix_utf8" or "ensure_utf8".
 
-While the language can never protect users from ever misunderstanding, it is at best unfortunate to include functions whose functionality could not be guessed without looking at the manual.
+While the language can never protect users from all misunderstanding, it is at best unfortunate to include functions whose functionality could not be guessed without looking at the manual.
 
 ==== Confusion around Latin-1 encoding ====
 
@@ -40,22 +40,49 @@ While the language can never protect users from ever misunderstanding, it is at 
 
 There are two closely related encodings:
 
-  * [[https://en.wikipedia.org/wiki/ISO/IEC_8859-15|ISO-8859-15]] ("Latin 9") is an official replacement standard, replacing some printable characters with others that were deemed more useful. For instance, the "universal currency symbol" (¤, U+00A4) is replaced with the Euro symbol (€, U+20AC).
+  * [[https://en.wikipedia.org/wiki/ISO/IEC_8859-15|ISO-8859-15]] ("Latin 9") is an official replacement standard, replacing some printable characters with others that were deemed more useful. For instance, the "universal currency symbol" (¤, U+00A4) is replaced with the Euro symbol (€, U+20AC) at position 0xA4.
   * [[https://en.wikipedia.org/wiki/Windows-1252|Windows Code Page 1252]] is a proprietary encoding developed by Microsoft which adds //additional// printable characters in place of the rarely used "C1 control characters". For instance, the Euro sign is placed at position 0x80.
 
-All three encodings specify all 256 possible 8-bit values, so any sequence of bytes is a valid string in all three. However, the control characters are effectively unused, so a string labelled "Latin 1" but containing values in the range 0x80 to 0x9F is often assumed to actually be in Windows Code Page 1252. The WHATWG HTML specification [[https://encoding.spec.whatwg.org/#ref-for-windows-1252%E2%91%A0|specifies that browsers should treat Latin 1 as a synonym for Windows 1252]].
+All three encodings specify all 256 possible 8-bit values, so any sequence of bytes is a valid string in all three. However, the "C1 control characters" are effectively unused, so a string labelled "Latin 1" but containing values in the range 0x80 to 0x9F is often assumed to actually be in Windows Code Page 1252. The WHATWG HTML specification [[https://encoding.spec.whatwg.org/#ref-for-windows-1252%E2%91%A0|specifies that browsers should treat Latin 1 as a synonym for Windows 1252]].
 
 The PHP utf8_encode and utf8_decode functions do **not** handle the additional characters of Windows 1252, which may be surprising to users whose "Latin 1" text displays these characters in browsers.
 
 ==== Error handling ====
 
-Since any byte is valid in Latin 1 and has an unambiguous mapping to a Unicode code point, utf8_encode has no error conditions. On the other hand, the vast majority of Unicode code points do not have a mapping to Latin 1, and many sequences of bytes do not form a valid UTF-8 string; utf8_decode handles both of these situations by silently inserting a '?' in the destination string.
+By nature and design, neither function raises any errors:
 
-Although sometimes useful, this lack of error messages compounds the above problems, because incorrect uses of both functions can easily go unnoticed.
+  * Both Latin 1 and UTF-8 are designed to be "ASCII compatible", so bytes up to 0x7F are always left unchanged.
+  * Any byte is valid in Latin 1 and has an unambiguous mapping to a Unicode code point, so utf8_encode has no error conditions.
+  * The vast majority of Unicode code points do not have a mapping to Latin 1; utf8_decode handles these by substituting a '?' (0x3F)
+  * Many byte sequences do not form a valid UTF-8 string; utf8_decode handles these by silently inserting a '?' (0x3F)
 
-===== Common uses =====
+This lack of feedback to the user compounds the above problems, because incorrect uses of both functions can easily go unnoticed.
 
-Of the top 1000 packages by popularity on Packagist, 37 mention one or both of these functions. Of these, only 4 use them with an obvious intent to work with Latin 1 encoding, while 18 simply use them for all non-UTF-8 input, and will likely have bugs when users actually have strings in other encodings.
+===== Usage =====
+
+==== In popular Composer packages ====
+
+Of the top 1000 packages by popularity on Packagist, 37 mention one or both of these functions. These uses can be roughly categorised as follows (some packages have uses in more than one category):
+
+   * 4 libraries clearly using them correctly
+   * 21 using them without clear understanding
+   * 7 using utf8_decode to count codepoints in a UTF-8 string
+   * 1 using them as "armour" (explained below)
+   * 3 using them in context where they will do nothing because the input is guaranteed to be ASCII ([[https://packagist.org/packages/aws/aws-sdk-php|aws/aws-sdk-php]] on the output of ''sha1()''; [[https://packagist.org/packages/ccampbell/chromephp|ccampbell/chromephp]] and [[https://packagist.org/packages/monolog/monolog|monolog/monolog]] on the output of ''json_encode()'' with no flags)
+   * 2 providing polyfill implementations of the functions ([[https://packagist.org/packages/patchwork/utf8|patchwork/utf8]] and [[https://packagist.org/packages/symfony/polyfill-php72|symfony/polyfill-php72]])
+   * 4 providing stubs for static analysis
+
+==== Intended Usage ====
+
+The correct use of these functions is to convert //specifically// between Latin 1 and UTF-8. This can be used as a fallback if other extensions are unavailable //only if// the source/target encoding is in fact Latin 1. Of the libraries analysed, only 4 incorporated or documented this condition.
+
+The far more common case is to use utf8_encode for //all// non-UTF-8 inputs, implicitly assuming that anything other than UTF-8 is Latin 1. While this assumption may be valid in some cases, context often suggests otherwise; for instance:
+
+  * Use as a fallback from calling mb_convert_encoding with no source parameter, which is not equivalent because it uses the global "internal encoding" setting (e.g. [[https://packagist.org/packages/phing/phing|phing/phing]], [[https://packagist.org/packages/sebastian/phpcpd|sebastian/phpcpd]])
+  * Treating UTF-8 as the default encoding, but calling utf8_encode anyway, e.g. [[https://packagist.org/packages/pdepend/pdepend|pdepend/pdepend]]
+
+
+
 
 ===== Backward Incompatible Changes =====
 Yep, all of them...
@@ -100,7 +127,10 @@ After the project is implemented, this section should contain
   - a link to the language specification section (if any)
 
 ===== References =====
-Links to external references, discussions or RFCs
+
+  * [[https://wiki.php.net/rfc/remove_utf_8_decode_encode|Abandoned RFC on the same topic from 2016]]
+  * [[https://bugs.php.net/bug.php?id=60429|Feature Request on bugs.php.net suggesting their removal]]
+  * [[https://externals.io/message/113645|Pre-RFC mailing list discussion]]
 
 ===== Rejected Features =====
 Keep this updated with features that were discussed on the mail lists.
