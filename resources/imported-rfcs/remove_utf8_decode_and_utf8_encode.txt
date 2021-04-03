@@ -1,5 +1,5 @@
 ====== PHP RFC: Deprecate and Remove utf8_encode and utf8_decode ======
-  * Version: 0.2
+  * Version: 0.3
   * Date: 2021-04-03
   * Author: Rowan Tommins <rowan.collins@gmail.com>
   * Status: Draft
@@ -65,27 +65,99 @@ This lack of feedback to the user compounds the above problems, because incorrec
 Of the top 1000 packages by popularity on Packagist, 37 mention one or both of these functions. These uses can be roughly categorised as follows (some packages have uses in more than one category):
 
    * 4 libraries clearly using them correctly
-   * 21 using them without clear understanding
+   * 20 using them without clear understanding
+   * 1 using on the output of strftime, which may be correct
    * 7 using utf8_decode to count codepoints in a UTF-8 string
    * 1 using them as "armour" (explained below)
-   * 3 using them in context where they will do nothing because the input is guaranteed to be ASCII ([[https://packagist.org/packages/aws/aws-sdk-php|aws/aws-sdk-php]] on the output of ''sha1()''; [[https://packagist.org/packages/ccampbell/chromephp|ccampbell/chromephp]] and [[https://packagist.org/packages/monolog/monolog|monolog/monolog]] on the output of ''json_encode()'' with no flags)
+   * 3 using them in context where they will do nothing
    * 2 providing polyfill implementations of the functions ([[https://packagist.org/packages/patchwork/utf8|patchwork/utf8]] and [[https://packagist.org/packages/symfony/polyfill-php72|symfony/polyfill-php72]])
    * 4 providing stubs for static analysis
 
-==== Intended Usage ====
+==== For character conversion ====
 
-The correct use of these functions is to convert //specifically// between Latin 1 and UTF-8. This can be used as a fallback if other extensions are unavailable //only if// the source/target encoding is in fact Latin 1. Of the libraries analysed, only 4 incorporated or documented this condition.
+The correct use of these functions is to convert //specifically// between Latin 1 and UTF-8. This can be used as a fallback if other extensions are unavailable //only if// the source/target encoding is in fact Latin 1. Of the libraries analysed, **only 4 clearly incorporate or document this condition**.
 
-The far more common case is to use utf8_encode for //all// non-UTF-8 inputs, implicitly assuming that anything other than UTF-8 is Latin 1. While this assumption may be valid in some cases, context often suggests otherwise; for instance:
+The far more common case is to use utf8_encode for //all// non-UTF-8 inputs, implicitly assuming that anything other than UTF-8 is Latin 1. While this assumption may be valid in some cases, context often suggests it was simply not considered. Some clear misuses:
 
   * Use as a fallback from calling mb_convert_encoding with no source parameter, which is not equivalent because it uses the global "internal encoding" setting (e.g. [[https://packagist.org/packages/phing/phing|phing/phing]], [[https://packagist.org/packages/sebastian/phpcpd|sebastian/phpcpd]])
-  * Treating UTF-8 as the default encoding, but calling utf8_encode anyway, e.g. [[https://packagist.org/packages/pdepend/pdepend|pdepend/pdepend]]
+  * Treating UTF-8 as the default encoding, but falling back to utf8_encode anyway, e.g. [[https://packagist.org/packages/pdepend/pdepend|pdepend/pdepend]]
+
+==== On output of strftime ====
+
+...
+
+==== For counting code points ====
+
+If ''$string'' is a valid UTF-8 string, ''strlen(utf8_decode($string))'' can be used to count the number of code points it contains. This works because any unmappable code point is replaced with the single byte '?' in the output.
+
+Although convenient, this is mostly used as a fallback from more specific functions, and a pure PHP implementation is also possible, as discussed below.
+
+==== As "armour" for a binary value ====
+
+Passing any string of bytes to utf8_encode produces a valid UTF-8 string; and the original bytes can be recovered using utf8_decode. This makes it possible to "armour" arbitrary binary data for transmission or storage as UTF-8 strings, similar to how [[https://en.wikipedia.org/wiki/Base64|Base64]] or [[https://en.wikipedia.org/wiki/Quoted-printable|quoted printable]] encoding are used where ASCII is required.
+
+It's likely that users discover this through trial-and-error, rather than understanding why it works. Examples include [[https://packagist.org/packages/cache/adapter-common|cache/adapter-common]] and [[https://externals.io/message/113645#113673|two contributors to the php-internals list]].
+
+==== Doing nothing ====
+
+Some of the clearest misuses occur when running either function on text which is guaranteed to be ASCII, so will be returned unchanged. For instance:
+
+  * [[https://packagist.org/packages/aws/aws-sdk-php|aws/aws-sdk-php]] calls utf8_encode on the output of ''sha1()'', which formats its output in hexadecimal
+  * [[https://packagist.org/packages/ccampbell/chromephp|ccampbell/chromephp]] and [[https://packagist.org/packages/monolog/monolog|monolog/monolog]] call utf8_encode on the output of json_encode, whose default mode encodes all non-ASCII characters as ''\u....'' escape strings.
+
+==== Detecting UTF-8 ====
+
+An [[https://stackoverflow.com/a/3479658/157957|answer on Stack Overflow with 17 upvotes]] suggests this incredibly broken function:
+
+<code php>
+function isUTF8($string) {
+    return (utf8_encode(utf8_decode($string)) == $string);
+}
+</code>
+
+This will return true for any ASCII string, and any UTF-8 string which contains only code points below U+00FF. For any other UTF-8 string, it will return false.
+
+==== Throwing the kitchen sink at it ====
+
+It is easy to find examples online of using utf8_encode and utf8_decode as part of a brute force attempt to fix problems that aren't understood. Here are a few found on Stack Overflow:
+
+  * This user wrote a function to strip "invalid" UTF-8, then passed it the output of utf8_encode, which is guaranteed to be valid UTF-8: https://stackoverflow.com/a/57871683/157957
+  * This user tried a number of seemingly unrelated commands until one "fixed" an undefined problem they were having: https://stackoverflow.com/a/15183803/157957
+  * This user sums up a similar trial-and-error approach: "I've tried a lot of functions, html_entities_decode, utf8_encode and decode, decoding the hex codes, but I always get the error "JSON_ERROR_UTF8": https://stackoverflow.com/q/10199017/157957
+  * This user called utf8_encode on the same CSV file every time they processed it, eventually ending up with cells of [[https://en.wikipedia.org/wiki/Mojibake|mojibake]] 32kB long: https://stackoverflow.com/q/63814648/157957
 
 
+===== Alternatives to Removed Functionality =====
 
+Removing these functions will break some code that is operating correctly. However, replacement is straight-forward in most cases.
 
-===== Backward Incompatible Changes =====
-Yep, all of them...
+==== For character conversion ====
+
+If the exact error-handling behaviour is not important, and the relevant extension is installed, any of the following can be used:
+
+  * ''$utf8 = mb_convert_encoding($latin1, 'UTF-8', 'ISO-8859-1');'' and ''$latin1 = mb_convert_encoding($utf8, 'ISO-8859-1', 'UTF-8');'' (from ext/mbstring)
+  * ''$utf8 = iconv('ISO-8859-1', 'UTF-8', $latin1);'' and ''$latin1 = iconv('UTF-8', 'ISO-8859-1', $utf8);'' (from ext/iconv)
+  * ''$utf8 = UConverter::transcode($latin1, 'UTF8', 'ISO-8859-1');'' and ''$latin1 = UConverter::transcode($utf8, 'ISO-8859-1', 'UTF8');'' (from ext/intl)
+
+An exact replacement is also straight-forward to implement in pure PHP; examples are available in [[https://packagist.org/packages/patchwork/utf8|patchwork/utf8]] and [[https://packagist.org/packages/symfony/polyfill-php72|symfony/polyfill-php72]]
+
+==== For code point counting ====
+
+Alternatives in bundled extensions:
+
+  * ''$count = mb_strlen($string, 'UTF-8');'' (from ext/mbstring)
+  * ''$count = iconv_strlen($string, 'UTF-8');'' (from ext/iconv)
+
+Because of UTF-8's "self-synchronizing" design, code points can be counted without fully decoding the string, by counting bytes in the range 0x00 to 0x7F (ASCII) or 0xC2 to 0xF4 (leading bytes of a multi-byte sequence).
+
+Examples of pure PHP implementations can be found in [[https://packagist.org/packages/dompdf/dompdf|dompdf/dompdf]], [[https://packagist.org/packages/masterminds/html5|masterminds/html5]], [[https://packagist.org/packages/patchwork/utf8|patchwork/utf8]], and [[https://packagist.org/packages/symfony/polyfill-iconv|symfony/polyfill-iconv]].
+
+==== As "armour" for a binary value ====
+
+If the exact functionality needs to be retained, any of the character conversion functions above will work fine.
+
+If the requirement is just for safe transport of binary data, a more standard mechanism such as base64_encode / base64_decode should be preferred.
+
 
 ===== Proposed PHP Version(s) =====
 List the proposed PHP versions that the feature will be included in.  Use relative versions such as "next PHP 8.x" or "next PHP 8.x.y".
