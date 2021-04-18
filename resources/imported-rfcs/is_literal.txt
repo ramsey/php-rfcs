@@ -1,6 +1,6 @@
 ====== PHP RFC: Is Literal Check ======
 
-  * Version: 0.3
+  * Version: 0.4
   * Date: 2020-03-21
   * Updated: 2021-02-19
   * Author: Craig Francis, craig#at#craigfrancis.co.uk
@@ -10,34 +10,47 @@
 
 ===== Introduction =====
 
-Add an //is_literal()// function, so developers/frameworks can check if a given variable is **safe**.
+This RFC proposes a new function, //is_literal(string $string)//, to help enforce a separation of hard-coded logic from user-supplied data. This addresses some of the same use cases as "taint flags", but is both simpler and stricter: it does not address how user data is transmitted or escaped, only whether it has been passed to a particular library function separately from the fixed data.
 
-As in, at runtime, being able to check if a variable has been created by literals, defined within a PHP script, by a trusted developer.
+The clearest example is a database library which supports parametrised queries at the driver level. The correct usage would be something like ''$db->query("Select * From users Where id = ?", [$_GET['id']]);'' but the user could also write ''$db->query("Select * From users Where id = " . $_GET['id']);'' By rejecting the SQL if it was not written as a literal, the library can provide extra protection against this incorrect use.
 
-This check can be used to warn or completely block (by default) many, if not all, injection based vulnerabilities.
 
-See the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification.md|justification for why this is important]].
+===== Examples =====
 
-In short, abstractions like Doctrine could identify [[https://www.doctrine-project.org/projects/doctrine-orm/en/2.7/reference/security.html|common mistakes]], like this [[https://www.doctrine-project.org/projects/doctrine-orm/en/2.7/reference/query-builder.html#high-level-api-methods|Query Builder]] SQL Injection vulnerability:
+The [[https://www.doctrine-project.org/projects/doctrine-orm/en/current/reference/query-builder.html#high-level-api-methods|Doctrine Query Builder]] allows custom Where clauses to be provided as strings. This is intended for use with literals and placeholders, but does not protect against this simple mistake:
 
 <code php>
-$users = $queryBuilder
-  ->select('u')
-  ->from('User', 'u')
-  ->where('u.id = ' . $_GET['id'])
-  ->getQuery()
-  ->getResult();
+// INSECURE
+$qb->select('u')
+   ->from('User', 'u')
+   ->where('u.id = ' . $_GET['id'])
 </code>
 
-Or Twig could project against HTML Injection vulnerabilities (aka XSS), like this flawed [[https://twig.symfony.com/doc/2.x/recipes.html#loading-a-template-from-a-string|HTML Template]]:
+The definition of the ''where'' method could check with ''is_literal'' and throw an exception advising the programmer to replace it with a safer use of placeholders:
 
 <code php>
+$qb->select('u')
+   ->from('User', 'u')
+   ->where('u.id = :identifier')
+   ->setParameter('identifier', $_GET['id']);
+</code>
+
+Similarly, Twig allows [[https://twig.symfony.com/doc/2.x/recipes.html#loading-a-template-from-a-string|loading a template from a string]], which could allow accidentally skipping the default escaping functionality:
+
+<code php>
+// INSECURE
 echo $twig->createTemplate('<p>Hi ' . $_GET['name'] . '</p>')->render();
+</code>
+
+If ''createTemplate'' checked with ''is_literal'', the programmer could be advised to write this instead:
+
+<code php>
+echo $twig->createTemplate('<p>Hi {{ name }}</p>')->render(['name' => $_GET['name']]);
 </code>
 
 ===== Proposal =====
 
-Literals are safe values, defined within the PHP script, for example:
+A literal is defined as any value which is entirely under the control of the programmer. The value may be passed between functions, as long as it is not modified in any way other than string concatenation.
 
 <code php>
 is_literal('Example'); // true
@@ -61,20 +74,31 @@ is_literal(sprintf('LIMIT %d', 3)); // false
 
 $c = count($ids);
 $a = 'WHERE id IN (' . implode(',', array_fill(0, $c, '?')) . ')';
-is_literal($a); // true, the one exception that involves functions.
+is_literal($a); // true, the one exception that involves functions. [TODO: this exception is controversial]
 </code>
+
+Note that there is no way to manually mark a string as "safe" (i.e. no equivalent to ''untaint()''); as soon as the value has been manipulated in any way, it is no longer marked as a literal.
+
+
+===== Implementation Notes =====
+
+(Most of what's in this section probably doesn't need to be in the final RFC.)
 
 Ideally string concatenation would be allowed, but [[https://github.com/Danack/RfcLiteralString/issues/5|Danack]] suggested this might raise performance concerns, and an array implode like function could be used instead (or a query builder).
 
-Thanks to [[https://chat.stackoverflow.com/transcript/message/51565346#51565346|NikiC]], it looks like we can reuse the GC_PROTECTED flag for strings.
+Thanks to [[https://chat.stackoverflow.com/transcript/message/51565346#51565346|NikiC]], it looks like we can reuse the GC_PROTECTED flag for strings. 
 
 As an aside, [[https://news-web.php.net/php.internals/87396|Xinchen Hui]] found the Taint extension was complex in PHP5, but "with PHP7's new zend_string, and string flags, the implementation will become easier". Also, [[https://chat.stackoverflow.com/transcript/message/48927813#48927813|MarkR]] suggested that it might be possible to use the fact that "interned strings in PHP have a flag", which is there because these "can't be freed".
 
-Unlike the Taint extension, there must **not** be an equivalent //untaint()// function, or support any kind of escaping.
+===== Comparison to Taint Tracking =====
+
+Some languages implement a "taint flag" which tracks whether values are considered "safe". There is a [[https://github.com/laruence/taint|Taint extension for PHP]] by Xinchen Hui, and [[rfc/taint|a previous RFC proposing it be added to the language]].
+
+These solutions rely on the assumption that the output of an escaping function is safe for a particular context. This sounds reasonable in theory, but the operation of escaping functions, and the context for which their output is safe, are very hard to define. This leads to a feature that is both complex and unreliable.
+
+The current proposal avoids this complexity by addressing a different part of the problem: separating inputs supplied by the programmer from inputs supplied by the user.
 
 ===== Previous Work =====
-
-There is the [[https://github.com/laruence/taint|Taint extension]] by Xinchen Hui, but in contrast to this, there must **not** be an equivalent //untaint()// function, or support any kind of escaping (see the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification.md|justification page]]).
 
 Google currently uses a [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification.md#go-implementation|similar approach in Go]] which uses "compile time constants", [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification.md#perl-implementation|Perl has a Taint Mode]] (but uses regular expressions to un-taint data), and there are discussions about [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification.md#javascript-implementation|adding it to JavaScript]] to support Trusted Types.
 
