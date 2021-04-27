@@ -2,7 +2,7 @@
   * Date: 2021-01-27
   * Author: Nikita Popov <nikic@php.net>
   * Proposed Version: PHP 8.1
-  * Implementation: TBD
+  * Implementation: https://github.com/php/php-src/pull/6873 (WIP)
   * Status: Draft
 
 > **This is an early draft.**
@@ -40,6 +40,14 @@ class User {
     public function __construct(string $name) {
         $this->name = $name;
     }
+}
+</PHP>
+
+Or even make use of constructor property promotion:
+
+<PHP>
+class User {
+    public function __construct(public string $name) {}
 }
 </PHP>
 
@@ -114,7 +122,7 @@ The following section illustrates various usage patterns for accessors. An acces
 
 === Asymmetric visibility ===
 
-The likely by far most important use-case for accessors (or a closely related feature) is to restrict visibility of a property asymmetrically, without otherwise changing the behavior:
+The likely most important use-case for accessors (or a closely related feature) is to restrict visibility of a property asymmetrically, without otherwise changing the behavior:
 
 <PHP>
 class User {
@@ -128,13 +136,32 @@ class User {
 
 In this case, the ''name'' property can be accessed from outside the class, but only set inside the class. It is equivalent to defining a getter method, but no setter method. This provides a weak form of read-only properties (publicly read-only).
 
+=== Init-only property ===
+
+Closely related to asymmetric visibility are properties that can only be assigned once:
+
+<PHP>
+class User {
+    public string $name { get; private init; }
+
+    public function __construct(string $name) {
+        $this->name = $name;
+    }
+}
+</PHP>
+
+This is the closest that PHP can have to a "read-only" property. The initialization in the constructor will be permitted, but any further writes are prohibited, even from within the same class.
+
+For most read-only properties, the use of this "init only" approach is appropriate. However, for classes that use "wither" methods implemented using a "clone and set" paradigm, the use of "private set" is necessary.
+
 === Setter guard ===
 
-The second use-case is the one mentioned in the introduction: To add additional validation checks when setting a property:
+This is the use-case mentioned in the introduction: Adding additional validation checks when setting a property:
 
 <PHP>
 class User {
     public string $name {
+        get; set;
         guard {
             if (strlen($value) === 0) {
                 throw new ValueError("Name must be non-empty");
@@ -148,11 +175,12 @@ The guard handler is invoked directly before the property value is set.
 
 === Lazy initialization ===
 
-Property accessors can be used to lazily initialize the value of a property the first time it is accessed:
+For values that are expensive to compute, it may be useful to lazily initialize a property the first time it is accessed:
 
 <PHP>
 class Test {
     public string $somethingExpensive {
+        get;
         lazy {
             return computeSomethingExpensive();
         }
@@ -209,7 +237,7 @@ The interface declares a property that has to be at least readable, while the im
 
 ==== Basic accessors ====
 
-To declare an accessor property, the trailing semicolon of a property declaration is replaced by anaccessor list, which must contain at least one accessor:
+To declare an accessor property, the trailing semicolon of a property declaration is replaced by accessor list, which must contain at least one accessor:
 
 <PHP>
 class Test {
@@ -227,7 +255,7 @@ class Test {
 }
 </PHP>
 
-The basic accessors are ''get'' and ''set'', which are invoked when the property is read or written respectively. If an accessor is ommitted, then performing the corresponding operation on the property will result in an ''Error'' exception.
+The basic accessors are ''get'' and ''set'', which are invoked when the property is read or written respectively. If an accessor is omitted, then performing the corresponding operation on the property will result in an ''Error'' exception.
 
 The above example uses automatically generated accessors, which are discussed in the "Backing property" section. If an explicit implementation is provided, ''get'' should return the value of the property, which must satisfy the type of the property under the usual rules:
 
@@ -254,7 +282,7 @@ The ''set'' handle receives the new value of the property as the ''$value'' vari
 <PHP>
 class Test {
     public string $prop {
-        set($value) { echo "Set to $value\n"; }
+        set { echo "Set to $value\n"; }
 
         // Effectively:
         public function set(string $value): void { echo "Set to $value\n"; }
@@ -269,14 +297,24 @@ var_dump($test->prop); // Error
 var_dump(isset($test->prop)); // Error
 </PHP>
 
-Write-only properties like the above example have dubious usefulness and should possibly be prohibited outright. The more useful case is where a property defines both ''get'' and ''set'':
+The default name of ''$value'' can be changed by explicitly specifying the parameter name:
+
+<PHP>
+class Test {
+    public string $prop {
+        set($someOtherName) { echo "Set to $someOtherName\n"; }
+    }
+}
+</PHP>
+
+Write-only properties like the above example have dubious usefulness. The more typical case is where a property defines both ''get'' and ''set'':
 
 <PHP>
 class Test {
     public int $value = 0;
     public int $valuePlusOne {
         get { return $value + 1; }
-        set($value) { $this->value = $value - 1; }
+        set { $this->value = $value - 1; }
     }
 }
 
@@ -291,15 +329,6 @@ $this->valuePlusOne += 5;
 $this->valuePlusOne = $this->valuePlusOne + 5;
 </PHP>
 
-The explicit argument to the setter can be omitted, in which case ''$value'' is used by default:
-
-<PHP>
-class Test {
-    public string $prop {
-        set { echo "Set to $value\n"; }
-    }
-}
-</PHP>
 
 It is not permitted to specify any explicit types on accessors, as they are inferred from the type of the property. Code like the following is illegal:
 
@@ -312,6 +341,17 @@ class Test {
 }
 </PHP>
 
+The following signatures are also illegal:
+
+<PHP>
+get() {}       // Must not have parameter list
+set() {}       // Must have exactly one parameter
+set($a, $b) {} // ... if a parameter list is specified
+set(...$a) {}  // Cannot be variadic
+set(&$a) {}    // Cannot be by-reference
+set($a = 1) {} // Cannot have default
+</PHP>
+
 ==== Visibility ====
 
 The visibility of the accessors defaults to the visibility of the property, but may be explicitly overridden for individual accessors, resulting in asymmetric visibility:
@@ -319,17 +359,19 @@ The visibility of the accessors defaults to the visibility of the property, but 
 <PHP>
 class Test {
     public string $prop { get; private set; }
-
-    // Same as:
-    public string $prop { public get; private set; }
 }
 </PHP>
 
-This causes an odd asymmetry in that the visibility of one accessor is effectively specified on the property, and the other on the accessor itself. A possible alternative would be to require that if visibility for an accessor is specified, it must be specified for all accessors, and the property itself should be declared neutrally as ''var'':
+Visibility on individual accessors must either be omitted, or strictly smaller than the property visibility:
 
 <PHP>
 class Test {
-    var string $prop { public get; private set; }
+    // Illegal: "public get" has higher visibility than "private $prop".
+    private string $prop { public get; set; }
+    
+    // Illegal: "public get" has same visibility as "public $prop".
+    // This visibility modifier is redundant and must be omitted.
+    public string $prop { public get; private set; }
 }
 </PHP>
 
