@@ -644,54 +644,39 @@ class Test {
 
 A default value is not legal if there is an explicit ''get'' or ''set'' implementation.
 
-==== Backing property ====
-
-PHP reserves a slot for each declared property on an object. These properties take up much less memory, and can be accessed more efficiently than dynamic (not declared) properties.
-
-For accessor properties that are fully synthesized (i.e. use a separate property for storage or don't need any storage at all), allocating such a slot would be a waste of memory, as it will never be used.
-
-A backing property is only allocated if at least one accessor uses an implicit implementation.
+It is not possible to mix an implicit get with an explicit set, or vice versa:
 
 <PHP>
 class Test {
-    // Has backing property (uses implicit accessors)
-    public string $implicitProp { get; set; }
+    // Illegal: Implicit get, explicit set.
+    public string $prop { get; set {} }
+    // Illegal: Implicit set, explicit get.
+    public string $prop { get {} set; }
+}
+</PHP>
 
-    // Normal property...
-    private string $_prop;
-    // Does not have backing property.
+Accessor properties that do not use implicit implementation will also not have an implicit backing property. This means that such properties take up no space in the object (by themselves). The programmer is required to manage any necessary backing storage themselves.
+
+==== Recursion ====
+
+If an accessor ends up accessing the property recursively, an ''Error'' is thrown:
+
+<PHP>
+class Test {
     public string $prop {
-        get { return $this->_prop; }
-        set { $this->_prop = $value; }
-    }
-}
-</PHP>
-
-An open question is what happens if the property is accessed recursively from the accessor:
-
-<PHP>
-class Test {
-    public $prop {
         get { return $this->prop; }
-        set { $this->prop = $prop; }
+        set { $this->prop = $value; }
     }
 }
+
+$test = new Test;
+$test->prop = 1; // Error: Cannot recursively write Test::$prop in accessor
+$test->prop; // Error: Cannot recursively read Test::$prop in accessor
 </PHP>
 
-It would be in line with ''%%__get%%''/''%%__set%%'' behavior to make recursive access bypass the accessor. Without a backing property, this would mean that ''$this->prop'' would be created as a dynamic property, which would be very inefficient. I believe it would be better to throw an Error instead.
+This differs from the behavior of ''%%__get()%%'' and ''%%__set()%%'' on recursion, where we would instead fall back to behaving as is the ''%%__get()%%''/''%%__set()%%'' accessor were not present.
 
-Another situation to consider is the case where implicit and explicit accessors are mixed:
-
-<PHP>
-class Test {
-    public int $prop {
-        get { return $this->prop * 2; }
-        set;
-    }
-}
-</PHP>
-
-Here we use default write behavior, but return the value multiplied by two on read. TODO: Should this be allowed?
+As we can only enter this kind of recursion if no backing property is present, using the same behavior as magic get/set would mean that a dynamic property with the same name of the accessor should be created. This is very inefficient, would make for confusing debug output, and is unlikely to be what the programmer intended. For that reason, we prohibit this kind of recursion instead.
 
 ==== Lazy initialization ====
 
