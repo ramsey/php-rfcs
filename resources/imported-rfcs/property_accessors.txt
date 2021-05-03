@@ -9,7 +9,7 @@
 
 ===== Introduction =====
 
-Property accessors allow implementing custom behavior for reading or writing a property. PHP already provides this general functionality through ''%%__get()%%'' and ''%%__set()%%''. However, these methods are non-specific and may be used to intercept all property accesses. This RFC proposes to add per-proprety accessors.
+Property accessors allow implementing custom behavior for reading or writing a property. PHP already provides this general functionality through ''%%__get()%%'' and ''%%__set()%%''. However, these methods are non-specific and may be used to intercept all property accesses. This RFC proposes to add per-property accessors.
 
 The primary use case for accessors is actually to **not** use them, but retain the ability to do so in the future, should it become necessary. Consider the following class declaration, which might have been considered idiomatic prior to PHP 7.4:
 
@@ -118,11 +118,11 @@ class User {
 
 ===== Usage patterns =====
 
-The following section illustrates various usage patterns for accessors. An accessor implementation for PHP should support most or all of these in //some// fashion, though possibly not using the exact syntax used here, and possibly not in the initial proposal. Examples in this section should be considered non-normative.
+The following section illustrates various usage patterns for accessors. This section is motivational and not normative: Not all examples are supported by the proposal in its current form, though it's possible to achieve them in other ways.
 
 === Read-only property ===
 
-One of the most important use-cases for accessors are read-only properties without additional behavior changes. These can be achieved by using only an automatically implemented ''get'' accessor:
+One of the most important use-cases for accessors are read-only properties without additional behavior changes. These can be achieved by using an automatically implemented ''get'' accessor only:
 
 <PHP>
 class User {
@@ -160,12 +160,11 @@ In this case, the assignment in ''withName()'' works because a ''private set'' a
 
 === Setter guard ===
 
-This is the use-case mentioned in the introduction: Adding additional validation checks when setting a property:
+This is the use-case mentioned in the introduction: Adding additional validation checks when setting a property. It would be possible to support this using a first-class ''guard'' accessor, which is invoked before the value is set. It would allow introducing an additional check, while retaining automatic management of the property storage. This is not part of the current proposal.
 
 <PHP>
 class User {
     public string $name {
-        get; set;
         guard {
             if (strlen($value) === 0) {
                 throw new ValueError("Name must be non-empty");
@@ -175,24 +174,20 @@ class User {
 }
 </PHP>
 
-The guard handler is invoked directly before the property value is set.
-
 === Lazy initialization ===
 
-For values that are expensive to compute, it may be useful to lazily initialize a property the first time it is accessed:
+For values that are expensive to compute, it may be useful to lazily initialize a property the first time it is accessed. This could be handled through a first-class ''lazy'' accessor, that is invoked the first time a property is read. This is not part of the current proposal.
 
 <PHP>
 class Test {
     public string $somethingExpensive {
-        get;
         lazy {
             return computeSomethingExpensive();
         }
+        set;
     }
 }
 </PHP>
-
-On first access, the lazy initializer is invoked and the result is stored. On subsequent accesses, the stored value is used, and the initializer is not invoked again.
 
 === Synthesized properties ===
 
@@ -720,83 +715,6 @@ $test->prop; // Error: Cannot recursively read Test::$prop in accessor
 This differs from the behavior of ''%%__get()%%'' and ''%%__set()%%'' on recursion, where we would instead fall back to behaving as is the ''%%__get()%%''/''%%__set()%%'' accessor were not present.
 
 As we can only enter this kind of recursion if no backing property is present, using the same behavior as magic get/set would mean that a dynamic property with the same name of the accessor should be created. This is very inefficient, would make for confusing debug output, and is unlikely to be what the programmer intended. For that reason, we prohibit this kind of recursion instead.
-
-==== Lazy initialization ====
-
-A lazily initialized property can be implemented using the ''get'' accessors as follows:
-
-<PHP>
-class Test {
-    private ?T $cache = null;
-    public T $lazy {
-        get {
-            if ($this->cache === null) {
-                $this->cache = computeValue();
-            }
-            return $this->cache;
-        }
-        // Optional, depending on whether it should be read-only or not.
-        set { $this->cache = $value; }
-    }
-}
-</PHP>
-
-However, this has a significant disadvantage: Even after the property has been initialized, accessing it still requires invocation of the getter, which is very inefficient. To handle this case more efficiently, a separate ''lazy'' accessor is provided:
-
-<PHP>
-class Test {
-    public T $lazy {
-        lazy {
-            return computeValue();
-        }
-        // Optional, depending on whether it should be read-only or not.
-        set;
-    }
-}
-</PHP>
-
-The ''lazy'' accessor is invoked on first access to the property, and is used to initialize the proprety. All subsequent accesses will read the value directly.
-
-It is not possible to declare both ''lazy'' and ''get''. TODO: Should that be possible? Possibly ''lazy'' should really be ''init'' and be independent of ''get'' entirely?
-
-TODO: Girgias suggests that we should allow ''init'' + manually implemented ''set''. In this case ''set'' will be called with the value returned by ''init'' on first access. My own view here is that it is only used to initialize the backing property.
-
-==== Setter guard ====
-
-It is possible to implement a setter guard, which imposes additional pre-conditions for setting a property, by implementing both ''get'' and ''set'' with a separate underlying property:
-
-<PHP>
-class Test {
-    private string $_name;
-    public string $name {
-        get { return $this->_name; }
-        set {
-            if ($value === '') {
-                throw new ValueError("Name cannot be empty");
-            }
-            $this->_name = $value;
-        }
-    }
-}
-</PHP>
-
-This has the disadvantage that the underlying property has to be explicitly managed, and it is necessary to invoke the getter every time it is read. Once again, a more concise and efficient method to add setter guards is provided:
-
-<PHP>
-class Test {
-    public string $name {
-        guard {
-            if ($value === '') {
-                throw new ValueError("Name cannot be empty");
-            }
-        }
-    }
-}
-</PHP>
-
-The ''guard'' accessor is invoked before the property is actually modified, and it's only purpose is to throw an exception to reject invalid values.
-
-TODO: Once again, how does this interact with ''get'' and ''set''? Probably those should be specified explicitly.
 
 ==== Constructor promotion =====
 
