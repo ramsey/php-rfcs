@@ -14,17 +14,17 @@ A new function, //is_literal(string $string)//, to identify variables that have 
 
 This takes the concept of "taint checking" and makes it simpler and stricter.
 
-It does not allow a variable to be marked as untainted, and it does not allowing escaping (important).
+It does not allow a variable to be marked as untainted, and it does not allow escaping (important).
 
-For example, a database library that supports parametrised queries at the driver level, today a programmer could use either of these:
+For example, take a database library that supports parametrised queries at the driver level, today a programmer could use either of these:
 
 <code php>
-$db->query('SELECT * FROM users WHERE id = ' . $_GET['id']); // INSECURE
-
 $db->query('SELECT * FROM users WHERE id = ?', [$_GET['id']]);
+
+$db->query('SELECT * FROM users WHERE id = ' . $_GET['id']); // INSECURE
 </code>
 
-By rejecting the SQL that was not written as a literal (first example), and only accepting a literal string (written by the programmer), the library can provide an "inherently safe API".
+If the library only accepted a literal SQL string (written by the programmer), and simply rejected the second example (not written as a literal), the library can provide an "inherently safe API".
 
 This definition of an "inherently safe API" comes from Christoph Kern, who did a talk in 2016 about [[https://www.youtube.com/watch?v=ccfEu-Jj0as|Preventing Security Bugs through Software Design]] (also at [[https://www.usenix.org/conference/usenixsecurity15/symposium-program/presentation/kern|USENIX Security 2015]]), which covers how this is used at Google. The idea is that we "Don't Blame the Developer, Blame the API"; where we need to put the burden on libraries (written once, used by many) to ensure that it's impossible for the developer to make these mistakes.
 
@@ -32,11 +32,15 @@ By adding a way for libraries to check if the strings they receive came from the
 
 ===== Why =====
 
-The [[https://owasp.org/www-project-top-ten/|OWASP Top 10]] lists common vulnerabilities sorted by prevalence, exploitability, detectability, and impact.
+The [[https://owasp.org/www-project-top-ten/|OWASP Top 10]] lists common vulnerabilities sorted by prevalence, exploitability, detectability, and impact. Each ranked out of 3.
 
-**Injection vulnerabilities** remain at the top of the list (common prevalence, easy for attackers to detect/exploit, severe impact); and **XSS** comes in at 7 (widespread prevalence, easy for attackers to detect/exploit, moderate impact).
+**A1: Injection** - common prevalence (2), easy for attackers to detect/exploit (3), severe impact (3).
 
-This is because injection mistakes are very easy to make, and hard to identify - is_literal() addresses this.
+**A7: XSS** - widespread prevalence (3), easy for attackers to detect/exploit (3), moderate impact (2).
+
+And these two have always been listed: 2003 (A6/A4), 2004 (A6/A4), 2007 (A2/A1), 2010 (A1/A2), 2013 (A1/A3), 2017 (A1/A7).
+
+It's because these mistakes are very easy to make, and hard to identify - is_literal() directly addresses this problem.
 
 ===== Examples =====
 
@@ -93,7 +97,7 @@ Developers should use parameterised queries (e.g. SQL), or a well tested library
 
 Some languages implement a "taint flag" which tracks whether values are considered "safe".
 
-There is a [[https://github.com/laruence/taint|Taint extension for PHP]] by Xinchen Hui, and [[https://wiki.php.net/rfc/taint|a previous RFC proposing it be added to the language]].
+There is a [[https://github.com/laruence/taint|Taint extension for PHP]] by Xinchen Hui, and [[https://wiki.php.net/rfc/taint|a previous RFC proposing it be added to the language]] by Wietse Venema.
 
 These solutions rely on the assumption that the output of an escaping function is safe for a particular context. This sounds reasonable in theory, but the operation of escaping functions, and the context for which their output is safe, are very hard to define. This leads to a feature that is both complex and unreliable.
 
@@ -123,11 +127,12 @@ But the biggest problem is that Static Analysis is simply not used by most devel
 
 ===== Proposal =====
 
-This RFC proposes adding three functions:
+This RFC proposes adding four functions:
 
   * //is_literal(string $string): bool// to check if a variable represents a value written into the source code or not.
-  * //literal_combine(string $piece, string $pieces): string// to allow concatenating literal strings.
-  * //literal_implode(string $glue, array $pieces): string// to implode an array of literals, with a literal.
+  * //literal_implode(string $glue, array $pieces): string// - implode an array of literals, with a literal.
+  * //literal_combine(string $piece, string ...$pieces): string// - allow concatenating literal strings.
+  * //literal_sprintf(string $format, string ...$values): string// - a version of sprintf that uses literals.
 
 A literal is defined as a value (string) which has been written by the programmer. The value may be passed between functions, as long as it is not modified in any way.
 
@@ -138,19 +143,18 @@ $a = 'Hello';
 $b = 'World';
 
 is_literal($a); // true
-is_literal($a . $b); // false, no concat at run time (details below).
+is_literal($a . $b); // TBC, details below.
 
-is_literal(literal_combine($a, $b)); // true
+$c = literal_combine($a, $b);
+is_literal($c); // true
 
 is_literal($_GET['id']); // false
 is_literal('WHERE id = ' . intval($_GET['id'])); // false
 is_literal(rand(0, 10)); // false
-is_literal(sprintf('LIMIT %d', 3)); // false, should use parameters
+is_literal(sprintf('LIMIT %d', 3)); // false
 </code>
 
 There is no way to manually mark a string as a literal (i.e. no equivalent to //untaint()//); as soon as the value has been manipulated in any way, it is no longer marked as a literal.
-
-*Technical detail: Strings that are concatenated in place at compile time are treated as a literal.*
 
 ===== Previous Work =====
 
@@ -235,9 +239,9 @@ $sql = literal_combine('WHERE id IN (', where_in_sql(count($ids)), ')');
 
 ==== Naming ====
 
-Literal string is the standard name for strings in source code. See https://www.google.com/search?q=what+is+literal+string+in+php
+Literal string is the standard name for strings in source code. See [[https://www.google.com/search?q=what+is+literal+string+in+php|Google]].
 
-> A string literal is the notation for representing a string value within the text of a computer program. In PHP, strings can be created with single quotes, double quotes or using the heredoc or the nowdoc syntax. ... The heredoc preserves the line breaks and other whitespace (including indentation) in the text.
+> A string literal is the notation for representing a string value within the text of a computer program. In PHP, strings can be created with single quotes, double quotes or using the heredoc or the nowdoc syntax...
 
 Alternatives suggestions have included //is_from_literal()// from [[https://news-web.php.net/php.internals/109197|Jakob Givoni]]. I think //is_safe_string()// might be asking for trouble. Other terms have included "compile time constants" and "code string".
 
@@ -251,19 +255,25 @@ It's also a very low value feature, where there might not be space for a flag to
 
 ==== Supporting Concatenation ====
 
-Unfortunately early testing suggests there will be too much of a performance impact, and is why //literal_combine()// or //literal_implode()// exists.
+This is the big question.
 
-It isn't needed for most libraries, like an ORM or Query Builder, where their methods nearly always take a small literal string.
+Máté Kocsis has done some [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/kocsismate.pdf|primary testing on supporting string concat]], and found a 0.124% performance hit for the Laravel Demo app, 0.161% for Symfony, and a more severe -3.719% when running this [[https://github.com/kocsismate/php-version-benchmarks/blob/main/app/zend/concat.php#L25|concat test]].
 
-It was considered because it would have made it easier for existing projects currently using string concatenation to adopt.
+In my own [[https://github.com/craigfrancis/php-is-literal-rfc/tree/main/tests|simplistic testing]], where I included a basic version that did not support string concat. The [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/local.pdf|results]] found:
 
-Joe Watkins has created a version that does support string concatenation, which we might re-consider at a later date (Joe's implementation also sets the literal flag, and was used as the basis for this implementation).
+    Laravel Demo App: +0.30% with, vs +0.18% without concat.
+    Symfony Demo App: +0.06% with, vs +0.06% without concat.
+    My Concat Test:   +4.36% with, vs +2.23% without concat.
 
-Máté Kocsis did the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/kocsismate.pdf|primary testing on the string concat version]], and found a 0.124% performance hit for the Laravel Demo app, 0.161% for Symfony, and a more severe -3.719% when running this [[https://github.com/kocsismate/php-version-benchmarks/blob/main/app/zend/concat.php#L25|concat test]].
+In my basic test, I used a RAM Disk, and disabled the processors Turbo Boost. With the Demo Apps, I used ///sapi/cgi/php-cgi "-T10"// to get the timings (so would include the compilation), and ///sapi/cli/php// for [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/001.phpt|My Concat Test]].
 
-In my own [[https://github.com/craigfrancis/php-is-literal-rfc/tree/main/tests|simplistic testing]], the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/local.pdf|results]] found a 0.42% performance hit for the Laravel Demo app, 0.40% for Symfony, and 1.81% when running my [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/001.phpt|concat test]] via //./cli/php//.
+There is still a small impact without concat because the //concat_function()// in "zend_operators.c" uses //zend_string_extend()// (where the literal flag needs to be removed). And in "zend_vm_def.h", it has a similar version; and supports a quick concat with an empty string, which doesn't create a new variable (x2) and would need it's flag removed as well.
 
-Dan Ackroyd also notes that the use of //literal_combine()// or //literal_implode()// will make it easier to identify exactly where mistakes are made, rather than it being picked up at the end of a potentially long script, after multiple string concatenations, e.g.
+Technically string concat isn't needed for most libraries, like an ORM or Query Builder, where their methods nearly always take a small literal string. But it would make adoption of is_literal() easier for existing projects that are currently using string concat for their SQL, HTML Templates, etc.
+
+And supporting runtime concat would make the literal check easier to understand, as it would be consistent (e.g. compiler vs runtime concat, where the compiler can concat two strings to create a single literal that has the literal flag set).
+
+The non-concat version would use //literal_combine()// or //literal_implode()// as special functions to avoid most of the work during runtime contact. Where Dan Ackroyd notes that these functions would make it easier to identify exactly where mistakes are made, rather than it being picked up at the end of a potentially long script, after multiple string concatenations, e.g.
 
 <code php>
 $sortOrder = 'ASC';
@@ -285,11 +295,9 @@ $sql = literal_combine($sql, ' ORDER BY name ', $sortOrder);
 
 ==== Performance ====
 
-The proposed implementation has:
+TBC
 
-    [TODO]
-
-Also, see the section above, where string concatenation support would have introduced a ~1% performance hit.
+See the section above.
 
 ==== Values from INI/JSON/YAML ====
 
@@ -297,7 +305,7 @@ As noted by [[https://news-web.php.net/php.internals/87667|Dennis Birkholz]], Sy
 
 ==== Existing String Functions ====
 
-Trying to determine if the //is_literal// flag should be passed through functions like //str_repeat()//, or //substr()// etc is difficult. Having a security feature be difficult to reason about, gives a much higher chance of making a mistake.
+Trying to determine if the //is_literal// flag should be passed through functions like //str_repeat()//, or //substr()// etc is difficult. Having a security feature be difficult to reason about, gives a much higher chance of mistakes.
 
 For any use-case where dynamic strings are required, it would be better to build those strings with an appropriate query builder, or by using //literal_combine()/////literal_implode()//.
 
@@ -355,7 +363,7 @@ N/A
 
 Dan Ackroyd has [[https://github.com/php/php-src/compare/master...Danack:is_literal_attempt_two|started an implementation]], which uses functions like [[https://github.com/php/php-src/compare/master...Danack:is_literal_attempt_two#diff-2b0486443df74cd919c949f33f895eacf97c34b8490e7554e032e770ab11e4d8R2761|literal_combine()]] to avoid performance concerns.
 
-Joe Watkins has [[https://github.com/php/php-src/compare/master...krakjoe:literals|created an implementation]] which includes string concat. As noted above, the performance impact is probably too much for it to be accepted.
+Joe Watkins has [[https://github.com/php/php-src/compare/master...krakjoe:literals|created an implementation]] which supports string concat at runtime.
 
 ===== References =====
 
@@ -368,7 +376,8 @@ N/A
 ===== Thanks =====
 
   - **Dan Ackroyd**, DanAck, for starting the first implementation (which made this a reality), and followup on the version that uses functions instead of string concat.
-  - **Joe Watkins**, krakjoe, for finding how to set the literal flag (tricky), and creating the implementation that does support string concat.
+  - **Joe Watkins**, krakjoe, for finding how to set the literal flag (tricky), and creating the implementation that supports string concat.
+  - **Máté Kocsis**, mate-kocsis, for setting up and doing the performance testing.
   - **Rowan Tommins**, IMSoP, for re-writing this RFC to focus on the key features, and putting it in context of how it can be used by libraries.
   - **Nikita Popov**, NikiC, for suggesting where the literal flag could be stored. Initially this was going to be the "GC_PROTECTED flag for strings", which allowed Dan to start the first implementation.
   - **Mark Randall**, MarkR, for alternative ideas, and noting that "interned strings in PHP have a flag", which started the conversation on how this could be implemented.
