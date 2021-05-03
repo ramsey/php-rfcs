@@ -349,37 +349,6 @@ set(&$a) {}    // Cannot be by-reference
 set($a = 1) {} // Cannot have default
 </PHP>
 
-=== Visibility ===
-
-The visibility of the accessors defaults to the visibility of the property, but may be explicitly overridden for individual accessors, resulting in asymmetric visibility:
-
-<PHP>
-class Test {
-    public string $prop { get; private set; }
-
-    public function __construct(string $prop) {
-        $this->prop = $prop;
-    } 
-}
-
-$test = new Test("foo");
-var_dump($test->prop); // Works.
-$test->prop = "bar"; // Error: Call to private accessor Test::$prop::set() from global scope
-</PHP>
-
-Visibility on individual accessors must either be omitted, or strictly smaller than the property visibility:
-
-<PHP>
-class Test {
-    // Illegal: "public get" has higher visibility than "private $prop".
-    private string $prop { public get; set; }
-    
-    // Illegal: "public get" has same visibility as "public $prop".
-    // This visibility modifier is redundant and must be omitted.
-    public string $prop { public get; private set; }
-}
-</PHP>
-
 === By-reference getter ===
 
 Similar to ''%%__get()%%'', the ''get'' accessor can either return by value or by reference:
@@ -436,9 +405,68 @@ class Test {
 
 While nominally well-defined, such an accessor would not have particularly useful semantics: It would be possible to change the property value arbitrarily, but only by writing ''$ref =& $test->prop; $ref = $value'' rather than ''$test->prop = $value''.
 
-==== Isset and unset ====
+=== Isset and unset ===
 
 It is not possible to define ''isset'' or ''unset'' accessors. ''isset($obj->accessorProp)'' is equivalent to ''$obj->accessorProp !== null'' and ''unset($obj->accessorProp)'' always throws an ''Error'' exception.
+
+==== Visibility ====
+
+The visibility of the accessors defaults to the visibility of the property, but may be explicitly overridden for individual accessors, resulting in asymmetric visibility:
+
+<PHP>
+class Test {
+    public string $prop { get; private set; }
+
+    public function __construct(string $prop) {
+        $this->prop = $prop;
+    } 
+}
+
+$test = new Test("foo");
+var_dump($test->prop); // Works.
+$test->prop = "bar"; // Error: Call to private accessor Test::$prop::set() from global scope
+</PHP>
+
+Visibility on individual accessors must either be omitted, or strictly smaller than the property visibility:
+
+<PHP>
+class Test {
+    // Illegal: "public get" has higher visibility than "private $prop".
+    private string $prop { public get; set; }
+    
+    // Illegal: "public get" has same visibility as "public $prop".
+    // This visibility modifier is redundant and must be omitted.
+    public string $prop { public get; private set; }
+}
+</PHP>
+
+=== Interaction with magic methods ===
+
+If a property is not visible, then interactions with it will fall back to calling ''%%__get()%%'' and ''%%__set()%%'' magic methods. This also holds true if the property as a whole is visible, but an individual accessor is not:
+
+<PHP>
+class Test {
+    public $prop { get; private set; }
+    
+    public function __construct($prop) {
+        $this->prop = $prop;
+    }
+    
+    public function __get($name) {
+        echo "__get($name)\n";
+        return $this->$name;
+    }
+    
+    public function __set($name, $value) {
+        echo "__set($name, $value)\n";
+        $this->$name = $value;
+    }
+}
+
+$test = new Test(1);
+$test->prop = 2; // Calls Test::__set("prop", 2) and then Test::$prop::set(2)
+var_dump($test->prop); // Calls Test::$prop::get()
+</PHP>
 
 ==== Inheritance ====
 
@@ -761,6 +789,34 @@ class Test {
 }
 </PHP>
 
+=== Constructor promotion ===
+
+If only implicitly implemented accessors are used, then accessor properties can be used in conjunction with constructor promotion:
+
+<PHP>
+class Test {
+    public function __construct(
+        public string $prop { get; private set; },
+        public int $prop2 = 0 { get; },
+    ) {}
+}
+</PHP>
+
+Constructor promotion cannot be used with explicitly implemented accessors. The following code is illegal:
+
+<PHP>
+class Test {
+    public function __construct(
+        public string $prop {
+            get { return ""; }
+            set { echo "Set!\n"; }
+        }
+    ) {}
+}
+</PHP>
+
+This limitation exists to prevent embedding of very large property declarations in the constructor signature.
+
 ==== Recursion ====
 
 If an accessor ends up accessing the property recursively, an ''Error'' is thrown:
@@ -781,34 +837,6 @@ $test->prop; // Error: Cannot recursively read Test::$prop in accessor
 This differs from the behavior of ''%%__get()%%'' and ''%%__set()%%'' on recursion, where we would instead fall back to behaving as is the ''%%__get()%%''/''%%__set()%%'' accessor were not present.
 
 As we can only enter this kind of recursion if no backing property is present, using the same behavior as magic get/set would mean that a dynamic property with the same name of the accessor should be created. This is very inefficient, would make for confusing debug output, and is unlikely to be what the programmer intended. For that reason, we prohibit this kind of recursion instead.
-
-==== Constructor promotion =====
-
-If only implicitly implemented accessors are used, then accessor properties can be used in conjunction with constructor promotion:
-
-<PHP>
-class Test {
-    public function __construct(
-        public string $prop { get; private set; },
-        public int $prop2 = 0 { get; private set; },
-    ) {}
-}
-</PHP>
-
-Constructor promotion cannot be used with explicitly implemented accessors, the following code is illegal:
-
-<PHP>
-class Test {
-    public function __construct(
-        public string $prop {
-            get { return ""; }
-            set { echo "Set!\n"; }
-        }
-    ) {}
-}
-</PHP>
-
-This limitation exists to prevent embedding of very large property declarations in the constructor signature.
 
 ===== Backward Incompatible Changes =====
 
