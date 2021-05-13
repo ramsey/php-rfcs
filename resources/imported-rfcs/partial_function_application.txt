@@ -8,10 +8,22 @@
 ===== Introduction =====
 Partial function application is the process of fixing (or applying) only some of the arguments to a function call and leaving the remainder to be provided at a later point, either by further application or invocation.
 
-===== Proposal =====
-Support partial application via the argument placeholder ''?'': Any call site in which one or more of the arguments is an argument placeholder results in a ''Closure'' object being created, no call being performed, and turns the call site into an application site.
+This technique has two main, complementary benefits:
 
-The resulting ''Closure'' will have a prototype that matches the function being invoked at the application site, with the applied arguments removed:
+  - It allows developers to "fill in" a function call over time as its arguments become available, in any order.
+  - It allows developers to reference a function directly, by name, with or without providing some of its arguments in the process.
+
+A simple example of where that is beneficial would be in array application functions, for example: 
+
+<code php>
+$result = array_map(do_stuff(?), $arr);
+</code>
+
+===== Proposal =====
+
+This RFC adds support for partial application via a new argument placeholder, ''?''.  At any given call site (where one would call a function, method, or any other ''callable''), the developer may replace one or more of the function arguments with an argument placeholder.  If so, then rather than applying arguments to the function in-place, the engine will instead construct and return a ''Closure'' object that captures the evaluated arguments by value.  That ''Closure'' object will have a signature that matches the original function being invoked, with the applied arguments removed.
+
+The ''Closure'' may then be invoked at a later time with the remaining arguments.
 
 <PHP>
 function whole($one, $two) {
@@ -28,6 +40,12 @@ function($one) {
    /* ... */
 }
 </PHP>
+
+this process is logically equivalent to:
+
+<code php>
+$partial = fn($one) => whole($one, 2);
+</code>
 
 At the call site (when the Closure is invoked), the engine will invoke the function originally being called at the application site, with the arguments positioned as resolved at the application site (this is important for named parameters). The arguments provided at the call site will be taken for any missing or extra arguments:
 
@@ -291,9 +309,76 @@ print $p('World', 'How are you.');
 print $p(stmt: 'How are you.', name: 'World');
 </code>
 
+==== Evaluation order ====
+
+One subtle difference between the existing short lambda syntax and the partial application syntax is that argument expressions are evaluated in advance.  That is:
+
+<code php>
+function getArg() {
+  print __FUNCTION__ . PHP_EOL;
+  return 'hi';
+}
+
+function speak(string $who, string $msg) {
+  sprintf("%s: %s\n", $who, $msg);
+}
+
+$arrow = fn($who) => speak($who, getArg());
+print "Mark\n";
+$arrow('Larry');
+
+/* Prints:
+Mark
+getArg
+Larry: hi
+*/
+
+$partial = speak(?, getArg());
+print "Mark\n";
+$partial('Larry');
+
+/* Prints:
+getArg
+Mark
+Larry: hi
+*/
+</code>
+
+The reason is that in the partial application case, the arguments are all evaluated first, and then the engine detects that some have placeholders.  In the short lambda case, the closure object is created first around an expression body that just so happens to include a function call that will happen later.
+
+==== Constructors ====
+
+Another caveat is around constructors.  While constructors are supported in partial application, the behavior of ''$this'' is significant.  Specifically, the ''Closure'' created by the partial application will already have a ''$this'' created, but the constructor has not yet been invoked.  That means calling the same partially applied constructor multiple times will not create a new object each time but rerun ''__construct()'' on the same object multiple times.
+
+In some cases that behavior is acceptable, but only if the partially applied constructor can be guaranteed to be called once and only once.  If it needs to be called multiple times, the use of a named static constructor will avoid this issue.
+
+<code php>
+class Point {
+  public function __construct(private int $x, private int $y) {}
+  
+  public static function create(...$args) {
+    return new static(...$args);
+  }
+}
+
+$data = [
+  [1, 2],
+  [4, 6],
+  [3, 9],
+  [7, 4],
+];
+
+// This works fine.
+$points = array_map(Point::create(?, ?), $data);
+
+// This would create and re-invoke the constructor on only a single object.
+// Don't do this.
+$points = array_map(new Point(?, ?), $data);
+</code>
+
 ==== Use as an identifier ====
 
-Although not the primary goal, this feature would also provide a way to reference a function as a callable if needed in a given context.  Specifically, omitting all parameters during application would result in a callable with the same arity as the original.  For example:
+Although not the primary goal, this feature also provides a way to reference a function as a callable if needed in a given context.  Specifically, omitting all parameters during application would result in a callable with the same arity and signature as the original.  For example:
 
 <PHP>
 function by5(int $x) { return $x * 5; }
@@ -332,6 +417,18 @@ $three(5);
 ===== Reflection =====
 
 Because a partially applied function is implemented using the existing ''Closure'' object, no additional reflection logic is necessary.  Once created, a partially applied function is identical to a manually created equivalent closure, and may be reflected upon the same way.
+
+===== Comparison to other languages =====
+
+Partial function application is a common pattern in computer science generally.  In practice, though, few mainstream languages have a dedicated syntax for it, relying instead on user-space implementations similar to "just write your own arrow function."
+
+The languages that do have native support for it are generally highly functional languages such as Haskell or OCaml, in which all functions are automatically curried to single argument functions anyway.  In those languages, calling a function with fewer arguments than it specifies will automatically partially apply it with just those arguments, returning a function that expects the remaining arguments.  One limitation of that approach, however, is that functions may be partially applied only from left to right.  There is no way to "pre fill" just the right-most argument.
+
+The notable exception is Racket (formerly known as Perl 6), which has an ''assuming'' method that prefills arguments left to right as well.
+
+The net result is that the functionality described here would give PHP the most robust and powerful and robust partial application syntax of any significant language on the market today.  Which is pretty damned cool, frankly.
+
+Source: https://rosettacode.org/wiki/Partial_function_application
 
 ===== Syntax choices =====
 
