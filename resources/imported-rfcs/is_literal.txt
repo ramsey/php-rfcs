@@ -32,19 +32,17 @@ By adding a way for libraries to check if the strings they receive came from the
 
 ===== Why =====
 
-The [[https://owasp.org/www-project-top-ten/|OWASP Top 10]] lists common vulnerabilities sorted by prevalence, exploitability, detectability, and impact. Each ranked out of 3. The current list (2017) continues to list these issues:
+The [[https://owasp.org/www-project-top-ten/|OWASP Top 10]] lists common vulnerabilities scored out of 3 for prevalence, exploitability, detectability, and impact.
 
-**A1: Injection** - common prevalence (2), easy for attackers to detect/exploit (3), severe impact (3).
+The current list (2017) puts **Injection** vulnerabilities at the top (common prevalence, 2; easy for attackers to detect/exploit, 3; severe impact, 3); and **XSS** at 7 (widespread prevalence, 3; easy for attackers to detect/exploit, 3; moderate impact, 2).
 
-**A7: XSS** - widespread prevalence (3), easy for attackers to detect/exploit (3), moderate impact (2).
+And they have always been on the list - 2003 (A6/A4), 2004 (A6/A4), 2007 (A2/A1), 2010 (A1/A2), 2013 (A1/A3), 2017 (A1/A7).
 
-These have always been listed: 2003 (A6/A4), 2004 (A6/A4), 2007 (A2/A1), 2010 (A1/A2), 2013 (A1/A3), 2017 (A1/A7).
-
-It's because these mistakes are very easy to make, and hard to identify - is_literal() directly addresses these vulnerabilities.
+These vulnerabilities are easy to make, and hard to identify - is_literal() directly addresses this.
 
 ===== Examples =====
 
-The [[https://www.doctrine-project.org/projects/doctrine-orm/en/current/reference/query-builder.html#high-level-api-methods|Doctrine Query Builder]] allows a custom WHERE clause to be provided as a string. This is intended for use with literals and placeholders, but does not protect against this simple mistake:
+The [[https://www.doctrine-project.org/projects/doctrine-orm/en/current/reference/query-builder.html#high-level-api-methods|Doctrine Query Builder]] allows a custom WHERE clause to be provided as a string. This is intended for use with literals and placeholders, but it cannot protect against this simple mistake:
 
 <code php>
 // INSECURE
@@ -77,15 +75,13 @@ echo $twig->createTemplate('<p>Hi {{ name }}</p>')->render(['name' => $_GET['nam
 
 ===== Alternatives =====
 
-What follows are some alternatives, which have been around for years.
-
-They have barely made any difference to the amount of Injection or XSS vulnerabilities.
+These have been around for years, and haven't worked.
 
 ==== Education ====
 
 Developer training simply does not scale (people start programming every day), and learning about every single issue is difficult.
 
-Keeping in mind that programmers will frequently do just enough to complete their task (busy), where they often copy/paste a solution to their problem they find online (risky), modify it for their needs (risky), then move on.
+Keeping in mind that programmers will frequently do just enough to complete their task (busy), where they often download a library or copy/paste something (risky), don't really understand it (risky), modify it for their needs (risky), then move on.
 
 We cannot keep saying they 'need to be careful', and rely on them to never make a mistake.
 
@@ -250,7 +246,7 @@ Literal string is the standard name for strings in source code. See [[https://ww
 
 > A string literal is the notation for representing a string value within the text of a computer program. In PHP, strings can be created with single quotes, double quotes or using the heredoc or the nowdoc syntax...
 
-Alternatives suggestions have included //is_from_literal()// from [[https://news-web.php.net/php.internals/109197|Jakob Givoni]]. I think //is_safe_string()// might be asking for trouble. Other terms have included "compile time constants" and "code string".
+Alternative suggestions have included //is_from_literal()// from [[https://news-web.php.net/php.internals/109197|Jakob Givoni]]. I think //is_safe_string()// might be asking for trouble. Other terms have included "compile time constants" and "code string".
 
 ==== Int/Float/Boolean Values. ====
 
@@ -264,19 +260,21 @@ It's also a very low value feature, and there might not be space for a flag to b
 
 To do this testing, Máté Kocsis has created a [[https://github.com/kocsismate/php-version-benchmarks/|php benchmark]] to replicate the old [[https://01.org/node/3774|Intel Tests]].
 
-The [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/kocsismate.pdf|preliminary testing on this implementation]] has found a 0.124% performance hit for the Laravel Demo app, 0.161% for Symfony (rounds 4-6, which involved 5000 requests). These tests do not connect to a database, which would have made the difference even less.
+The [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/kocsismate.pdf|preliminary testing on this implementation]] has found a 0.124% performance hit for the Laravel Demo app, 0.161% for Symfony (rounds 4-6, which involved 5000 requests). These tests do not connect to a database, as the variability introduced makes it impossible to measure the difference.
 
 There is a more severe 3.719% when running this [[https://github.com/kocsismate/php-version-benchmarks/blob/main/app/zend/concat.php#L25|concat test]], which is not representative of a typical PHP script (it's not normal to concatenate 4 strings, 5 million times, with no other actions).
 
 ==== String Concatenation ====
 
-Dan Ackroyd has been looking at an approach that does not use string concatenation at run time. The intention is to reduce the performance impact, and it might help developers identify their mistakes.
+Dan Ackroyd has considered an approach that does not use string concatenation at run time. The intention was to reduce the performance impact even further; where the //literal_concat()// or //literal_implode()// support functions can make it easier for developers identify their mistakes.
 
 Performance wise, I made up a test patch (not properly checked), to skip string concat at runtime, and with my own [[https://github.com/craigfrancis/php-is-literal-rfc/tree/main/tests|simplistic testing]] the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/local.pdf|results]] found:
 
     Laravel Demo App: +0.30% with, vs +0.18% without concat.
     Symfony Demo App: +0.06% with, vs +0.06% without concat.
     My Concat Test:   +4.36% with, vs +2.23% without concat.
+    -
+    Website with 22 SQL queries: Inconclusive, too variable.
 
 There is still a small impact without concat because the //concat_function()// in "zend_operators.c" uses //zend_string_extend()// (where the literal flag needs to be removed). And in "zend_vm_def.h", it has a similar version; and supports a quick concat with an empty string, which doesn't create a new variable (x2) and would need its flag removed as well.
 
@@ -364,15 +362,11 @@ And, for a bit of silliness (Spaß ist verboten), MarkR would like a //is_figura
 
 Accept the RFC. Yes/No
 
-===== Patches and Tests =====
-
-N/A
-
 ===== Implementation =====
 
-Joe Watkins has [[https://github.com/php/php-src/compare/master...krakjoe:literals|created an implementation]], which supports string concat at runtime.
+[[https://github.com/craigfrancis/php-src/tree/is_literal-with-functions|Available on GitHub]].
 
-Dan Ackroyd has [[https://github.com/php/php-src/compare/master...Danack:is_literal_attempt_two|started an implementation]], which provides the [[https://github.com/php/php-src/compare/master...Danack:is_literal_attempt_two#diff-2b0486443df74cd919c949f33f895eacf97c34b8490e7554e032e770ab11e4d8R2761|literal_concat() and literal_implode()]] functions.
+It includes [[https://github.com/php/php-src/compare/master...krakjoe:literals|Joe Watkin's implementation]], which applies the literal flags, and supports string concat at runtime. And [[https://github.com/php/php-src/compare/master...Danack:is_literal_attempt_two|Dan Ackroyd's implementation]], which provides //literal_concat()// and //literal_implode()//.
 
 ===== References =====
 
@@ -384,7 +378,7 @@ N/A
 
 ===== Thanks =====
 
-  - **Dan Ackroyd**, DanAck, for starting the first implementation (which made this a reality), and followup on the version that uses functions instead of string concat.
+  - **Dan Ackroyd**, DanAck, for starting the first implementation (which made this a reality), and followup on the version that provides //literal_concat()// and //literal_implode()//.
   - **Joe Watkins**, krakjoe, for finding how to set the literal flag, and creating the implementation that supports string concat.
   - **Máté Kocsis**, mate-kocsis, for setting up and doing the performance testing.
   - **Rowan Tommins**, IMSoP, for re-writing this RFC to focus on the key features, and putting it in context of how it can be used by libraries.
