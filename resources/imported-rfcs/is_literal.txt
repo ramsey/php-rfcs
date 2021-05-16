@@ -249,6 +249,8 @@ function where_in_sql($count) { // Should check for 0
 $sql = literal_concat('WHERE id IN (', where_in_sql(count($ids)), ')');
 </code>
 
+And for a real edge case, where the end user provides the table/field names. That would require the database abstraction to take those values separately, so it can ensure the marjority of the SQL is a literal, and it can check/escape those table/field names [[https://gist.github.com/craigfrancis/901aa0479379fe9c261ccb2e33ebdcd7|basic example]].
+
 ===== Considerations =====
 
 ==== Naming ====
