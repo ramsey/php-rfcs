@@ -49,13 +49,14 @@ $partial = fn($one) => whole($one, 2);
 
 At the call site (when the Closure is invoked), the engine will invoke the function originally being called at the application site, with the arguments positioned as resolved at the application site (this is important for named parameters). The arguments provided at the call site will be taken for any missing or extra arguments:
 
-
 <PHP>
 function whole($one, $two) { /* ... */ }
 
 // equivalent to calling whole(1, 2, 3)
 $result = whole(?, 2)(1, 3); 
 </PHP>
+
+Note that for the purposes of this RFC, "function" refers to any callable.  Named function, named method, named static method, anonymous function, short-anonymous function, etc.  Partial application applies to all of them.
 
 ==== Types ====
 
@@ -97,25 +98,89 @@ $f = function($value) use (&$ref) {
 };
 </PHP>
 
+==== Argument handling ====
 
-==== Optional Parameters ====
+In an argument list, positional arguments always must come first, followed by named arguments, if present.  (This is the case already in PHP 8.0.)  The positional argument list consists of the parameters of the underlying function, excluding any that appear in the named argument list.
 
-Optional parameters remain optional, inheriting defaults.
+The presence of at least one ''?'' in the positional argument list indicates that the expression is a partial application, not a function call, regardless of how many parameters the underlying function has.
 
-<PHP>
-function f($a = 0, $b = 1) {}
+The function signature of the underlying function is copied to the created ''Closure'', in order, including types and default values.
 
-$f = f(?, 2);
-</PHP>
+Any positional argument other than ''?'' will be bound to that argument in the underlying function, and not appear in the signature of the partially applied function.
 
-is equivalent to
+A ''?'' is used to skip over parameters which you do not want to bind values for, and leaves the parameter information copied from the underlying function.
 
-<PHP>
-$f = function($a = 0) {
-    return f($a, 2);
-};
-</PHP>
+A ''?'' is not allowed in the named argument list.
 
+No more than one trailing ''?'' is allowed at the end of the positional argument list, but one is always allowed even if there is no parameter in that position.
+
+Invoking a partially applied function with more arguments than is necessary will result in the extra arguments being passed through to the underlying function unchanged.  They will be accessible via ''func_get_args()'' et al if desired, just like if they were passed directly to the function.
+
+That results in the following examples:
+
+<code php>
+function four(int $a, int $b, int $c, int $d) {
+    print "$a, $b, $c, $d\n";
+}
+
+// These all print "1, 2, 3, 4"
+four(?)(1, 2, 3, 4);
+four(1, 2, ?)(3, 4);
+four(1, 2, 3, ?)(4);
+four(1, ?, ?, 4)(2,3);
+four(1, 2, 3, 4, ?)();
+four(?, d: 4, b: 2, a: 1)(3);
+four(?, d: 4, a: 1)(2, 3);
+
+function zero() { print "hello\n"; }
+
+zero(?)(); // prints "hello\n"
+
+function two(int $a = 1, $b = 2) {
+    print "$a, $b\n";
+}
+
+// These all print "1, 2"
+two(?)(1, 2);
+two(?)();
+two(1, ?)();
+
+// The following, however, are all errors:
+
+four(?, ?, ?, ?); // Too many trailing ?
+four(a: 1, ?); // Positional argument after named argument.
+four(?)(1, 2); // Too few arguments provided to the partial call.
+four(a: 1, b: ?, c: ?, d: 4); // Cannot use placeholders on named arguments.
+
+
+// Heavy use of named arguments
+function message(string $salutation, string $name, string $stmt): string {
+    return "$salutation, $name. $stmt" . PHP_EOL;
+}
+
+$p = message(?, salutation: "Hello");
+// Both of these have the same effect.
+print $p('World', 'How are you.');
+print $p(stmt: 'How are you.', name: 'World');
+</code>
+
+
+As an implication of this design, a callable of any arity can be partially applied without any binding with a single ''?''.  That is:
+
+<code php>
+class Foo {
+  public function bar($a, $b, $c, $d, $e, $f, $g, $h): string { ... }
+}
+
+$f = new Foo();
+$p = $f->bar(?);
+
+// $p is now a partially applied function with the same 8 arguments
+// as Foo::bar. Effectively there is no difference between now calling 
+// $p(1, 2, 3, 4, 5, 6, 7, 8) and $foo->bar(1, 2, 3, 4, 5, 6, 7, 8).
+</code>
+
+That is especially useful when trying to use a method as a callable.
 
 ==== func_num_args et al. ====
 
@@ -177,76 +242,6 @@ $p2 = $a->volume(3, 5, ?);
 print $p2(9); // Prints 135
 </code>
 
-==== Extra Arguments ====
-
-You can pass as many additional arguments as you like when calling a function in PHP, beyond what's specified in the signature. When you pass extra arguments to the closure, or during partial application, they are passed along to the wrapped function.
-
-<PHP>
-function f($a, $b) {
-    print_r(func_get_args());
-}
-
-$f = f(?, 2);
-</PHP>
-
-is actually akin to:
-
-<PHP>
-$f = function($a, ...$extraArgs) {
-    return f($a, 2, ...$extraArgs);
-};
-</PHP>
-
-(Though without unnecessary packing/unpacking, or ''$extraArgs'' appearing in reflection.)
-
-So calling: ''$f(1, 3, 4)'' results in:
-
-<PHP>
-Array
-(
-    [0] => 1
-    [1] => 2
-    [2] => 3
-    [3] => 4
-)
-</PHP>
-
-
-==== Trailing Placeholders ====
-
-At least one argument placeholder is necessary to indicate partial application; additional argument placeholders may be present but are unnecessary. This eases partial application of functions with long lists of optional parameters.
-
-<PHP>
-function f($m, $n, $o, $x = 0, $y = 0, $z = 0) {}
-
-$f = f(1, ?);
-</PHP>
-
-The above snippet is roughly (minding the ''func_num_args'' section above) equivalent to:
-
-<PHP>
-$f = function($n, $o, $x = 0, $y = 0, $z = 0) {
-    return f(1, $n, $o, $x, $y, $z);
-};
-</PHP>
-
-As a side effect, that means that a callable of any arity can be partially applied without any binding with a single ''?''.  That is:
-
-<code php>
-class Foo {
-  public function bar($a, $b, $c, $d, $e, $f, $g, $h): string { ... }
-}
-
-$f = new Foo();
-$p = $f->bar(?);
-
-// $p is now a partially applied function with the same 8 arguments
-// as Foo::bar. Effectively there is no difference between now calling 
-// $p(1, 2, 3, 4, 5, 6, 7, 8) and $foo->bar(1, 2, 3, 4, 5, 6, 7, 8).
-</code>
-
-That is especially useful when trying to use a method as a callable.
-
 ==== Extra Trailing Placeholders ====
 
 Additional placeholders beyond a function's signature do not cause an error and have no additional impact, though effectively allow you to apply all arguments to a function to be called later.
@@ -264,7 +259,6 @@ $log10ofn = function() use ($n) {
     return log10($n);
 }
 </PHP>
-
 
 ==== Variadic Functions ====
 
@@ -291,23 +285,6 @@ Array
     [4] => 6
 )
 </PHP>
-
-==== Named arguments ====
-
-Named arguments may be used when creating a partial, or when calling it later.  The parameter names inherit to the partialed function.  However, regardless of the order the arguments were given when creating the partial the order in the partial is the same as the original function.
-
-That is, in the following example the function (''message'') is partially applied using named arguments out of order, but the resulting partial function (''$p'') still has its parameters in the original order.  It may, of course, be called with named arguments itself if desired.
-
-<code php>
-function message(string $salutation, string $name, string $stmt): string {
-    return "$salutation, $name. $stmt" . PHP_EOL;
-}
-
-$p = message(stmt: ?, name: ?, salutation: "Hello");
-// Both of these have the same effect.
-print $p('World', 'How are you.');
-print $p(stmt: 'How are you.', name: 'World');
-</code>
 
 ==== Evaluation order ====
 
