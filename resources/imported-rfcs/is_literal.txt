@@ -155,6 +155,17 @@ is_literal($_GET['id']); // false
 is_literal('WHERE id = ' . intval($_GET['id'])); // false
 is_literal(rand(0, 10)); // false
 is_literal(sprintf('LIMIT %d', 3)); // false
+
+function example($input) {
+  if (!is_literal($input)) {
+    throw new Exception('Non-literal detected!');
+  }
+  return $input;
+}
+
+example('hello'); // OK
+example(example('hello')); // OK, still the same literal.
+example(strtoupper('hello')); // Exception thrown.
 </code>
 
 There is no way to manually mark a string as a literal (i.e. no equivalent to //untaint()//); as soon as the value has been manipulated in any way, it is no longer marked as a literal.
