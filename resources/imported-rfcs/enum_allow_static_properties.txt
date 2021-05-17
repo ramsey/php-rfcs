@@ -13,7 +13,17 @@ Although enums are immutable objects, it is often useful to have functions or me
 ===== Proposal =====
 Allow static properties to be declared on enums or to be inherited by using traits. Continue to forbid instance properties. Additionally, update error messages to mention that only instance properties are forbidden on enums.
 
+==== Use cases ====
+
+=== Tracking shared state in functions/methods related to immutable enum instances ===
+
 This is useful in cases where shared state involving immutable instances is used, e.g.
+
+
+  - [[Memoization|https://en.wikipedia.org/wiki/Memoization]] of expensive operations (use of disk, cpu-intensive, service/db calls
+  - Keeping track of which enum case reflects the current state of a state machine or system
+
+For example, one way to represent fetching the current environment (of a known enumeration of environments) would be a static method on the environment enum itself. The environment instance is immutable, but the environment being loaded depends on a file.
 
 <code php>
 enum Environment {
@@ -29,7 +39,7 @@ enum Environment {
      */
     public static function current(): Environment {
         if (!isset(self::$currentEnvironment)) {
-            $info = json_decode(file_get_contents(__DIR__ . '/../../config.json'));
+            $info = json_decode(file_get_contents(__DIR__ . '/../../config.json'), true);
             self::$currentEnvironment = match($info['env']) {
                 'dev' => self::DEV,
                 'stage' => self::STAGE,
@@ -43,14 +53,56 @@ enum Environment {
 printf("Current environment is %s\n", Environment::current()->name);
 </code>
 
-Compared to alternatives such as global variables and local static variables, this is a useful option to have for the following reasons:
+=== This is better than alternative ways that can be used to store shared state ===
 
-  - Property types can be used.
-  - Visibility is easier to enforce.
-  - It is easier to reset static properties in unit tests.
+While I expect that a majority of enum declarations won't need shared state at all, some will benefit from shared state in code involving instances of those enums or static methods of those enums.
+
+Compared to alternatives such as global variables and local static variables or static properties of placeholder classes, this is a useful option to have for the following reasons:
+
+  - Property types can be used and enforced at runtime (and checked by type checkers).
+  - Visibility is easier to enforce and read (compared to global variables or static properties declared in other classes).
+  - It is easier to reset static properties in unit tests (compared to static variables).
   - This can result in more concise and easier to understand code.
 
 This is also useful because it allows enums to ''use'' traits that contain static properties, which was previously a fatal error.
+
+=== This minimizes the backward compatibility impact of adding static properties to traits ===
+
+From the perspective of an end user of a library, adding a property to a trait (that previously had no instance properties) would be a new type of backwards compatibility break because if an enum were to use that trait, it would become an unavoidable backwards compatibility break because using that trait would become a fatal error at compile time.
+
+For example, consider this trait
+
+<code php>
+// StdoutLogger 1.0
+trait StdoutLogger {
+    private static function log(string $message) {
+        printf("%s: %s\n", date(DATE_RFC2822), $message);
+    }
+}
+</code>
+
+If a subsequent release of the library providing the trait were to add a static property, then enums using that trait would have an unavoidable fatal error at compile time.
+
+<code php>
+// StdoutLogger 1.1
+trait StdoutLogger {
+    // each class directly using this trait has different storage for property values
+    private static bool $loggingEnabled = true;
+    
+    // self within a trait refers to the class that directly uses a trait for methods inherited by a class
+    private static function log(string $message): void {
+        if (self::$loggingEnabled) { printf("%s: %s\n", date(DATE_RFC2822), $message); }
+    }
+    
+    public static function setLoggingEnabled(bool $enabled): void {
+        self::$loggingEnabled = $enabled;
+    }
+}
+</code>
+
+The backwards compatibility break of adding static properties to traits would be minimized by allowing enums to contain static properties.
+
+(Instance properties in traits would continue to be an issue if used by enums) 
 
 ===== Backward Incompatible Changes =====
 None
@@ -67,6 +119,34 @@ None
 
 ===== Unaffected PHP Functionality =====
 Instance properties continue to be forbidden on enums.
+
+===== Discussion =====
+
+==== Rare use case but no technical reason to forbid static properties ====
+
+From Ilija Tovilo, co-author of the enums RFC
+
+https://github.com/php/php-src/pull/6997#issuecomment-842356465
+
+<blockquote>
+I'm not super convinced by the use case (of ''enum Environment''). Using static variables in enums would certainly not be great. Methods will behave differently in different environments even if the case is the same. This is certainly less than optimal.
+
+On the other hand, I do think that needlessly restricting the language to babysit developers is not good unless there's a technical reason to do so, which doesn't seem to be the case here.
+</blockquote>
+
+==== 
+
+From Larry Garfield, co-author of the enums RFC
+
+https://externals.io/message/114494#114497
+
+<blockquote>
+I would agree. Static properties are ugly to begin with. They're globals with extra syntax. I have no desire to see them on enums.
+
+Also a clarification, since it wasn't entirely clear in Tyson's original email: Static methods on Enums are already supported. They were included in the original Enum RFC. The change proposed here is just about static properties.
+</blockquote>
+
+
 
 ===== Proposed Voting Choices =====
 Yes/No, requiring a 2/3 majority
