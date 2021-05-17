@@ -197,22 +197,22 @@ How a library could implement:
 
 <code php>
 class db {
-  protected $level = 2; // Probably should default to 1 at first.
+  protected $protection_level = 2; // Should default to 1 at first.
   function literal_check($var) {
     if (!function_exists('is_literal') || is_literal($var)) {
-      // Not supported, or is a programmer defined string.
+      // Not supported (PHP 8.0), or is a programmer defined string.
     } else if ($var instanceof unsafe_sql) {
       // Not ideal, but at least you know this one is unsafe.
-    } else if ($this->level === 0) {
+    } else if ($this->protection_level === 0) {
       // Programmer aware, and is choosing to bypass this check.
-    } else if ($this->level === 1) {
+    } else if ($this->protection_level === 1) {
       trigger_error('Non-literal detected!', E_USER_WARNING);
     } else {
       throw new Exception('Non-literal detected!');
     }
   }
   function unsafe_disable_injection_protection() {
-    $this->level = 0; // Not recommended, try unsafe_sql for special cases.
+    $this->protection_level = 0; // Use unsafe_sql for special cases.
   }
   function where($sql, $parameters = []) {
     $this->literal_check($sql);
