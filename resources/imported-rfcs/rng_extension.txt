@@ -1,0 +1,180 @@
+====== PHP RFC: Add RNG extension and deprecate mt_srand() ======
+  * Version: 0.1
+  * Date: 2021-05-18
+  * Author: Go Kudo <zeriyoshi@gmail.com>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/object_scope_prng
+
+===== Introduction =====
+PHP is currently having problems with RNG reproducibility.
+
+PHP's RNG has been unified into an implementation using the Mersenne twister, with the rand() and srand() functions becoming aliases for mt_rand() and mt_srand() respectively in PHP 7.1.
+
+But, these functions still store the state in the global state of PHP and are not easily reproducible. Look at the following example.
+
+<code php>
+echo foo(1234, function (): void {}) . PHP_EOL; // Result: 1480009472
+echo foo(1234, function (): void { mt_rand(); }) . PHP_EOL; // Result: 1747253290
+
+function foo(int $seed, callable $bar): int {
+    mt_srand($seed);
+    $result = mt_rand();
+    $bar();
+    $result += mt_rand();
+    return $result;
+}
+</code>
+
+As mentioned above, the reproducibility of random numbers can easily be lost if additional processing is added later.
+
+In addition, the fiber extension was introduced in PHP 8.1. This makes it more difficult to keep track of the execution order. However, this problem has existed since the inception of Generator.
+
+There is also the problem of functions that implicitly use the state stored in PHP's global state. shuffle(), str_shuffle(), and array_rand() functions implicitly advance the state of a random number. This means that the following code is not reproducible, but it is difficult for the user to notice this.
+
+<code php>
+mt_srand(1234);
+echo mt_rand() . PHP_EOL; // Result: 411284887
+
+mt_srand(1234);
+str_shuffle('foobar');
+echo mt_rand() . PHP_EOL; // Result: 1314500282
+</code>
+
+===== Proposal =====
+Implements RNG extension provides a class-based random number generator and deprecate some functions.
+
+RNG extension is provided as ext/rng in PHP core and provides the following interfaces and classes.
+
+<code php>
+namespace RNG;
+
+interface Source
+{
+    /**
+      * Generate random bytes
+      */
+    public function next(): string
+}
+
+/** compatible MT_RAND_MT19937 */
+class MT19937 implements Source
+{
+    public function next(): string;
+    public function __serialize(): array;
+    public function __unserialize(array $data): void;
+}
+
+/** compatible MT_RAND_PHP */
+class MT19937PHP implements Source
+{
+    public function next(): string;
+    public function __serialize(): array;
+    public function __unserialize(array $data): void;
+}
+
+/** XorShift128+ */
+class XorShift128Plus implements Source
+{
+    public function next(): string;
+    public function __serialize(): array;
+    public function __unserialize(array $data): void;
+}
+
+/** OS provided random source (e.g. /dev/random) */
+class PlatformProvided implements Source
+{
+    public function next(): string
+}
+
+class Randomizer
+{
+    public function __construct(protected Source $source) {}
+    public function getSource(): Source {}
+    public function generateBytes(int $length): string {}
+    public function generateFloat(): float {}
+    public function generateBool(): bool {}
+    public function generateInt(): int {} // replaceable mt_rand()
+    public function generateInt(int $min, int $max): int {} // replaceable mt_rand($min, $max)
+    public function arrayShuffle(array &$array): bool {} // replaceable shuffle()
+    public function stringShuffle(string $string): string {} // replaceable str_shuffle()
+    public function arrayRandom(array $array, int $num = 1): int|string|array {} // replaceable array_rand()
+}
+</code>
+
+This makes it possible to simply replace existing code.
+
+<code php>
+
+function before(int $seed): int
+{
+    mt_srand($seed);
+    return mt_rand();
+}
+
+function after(int $seed): int
+{
+    $mt = new RNG\MT19937($seed);
+    return (new RNG\Randomizer($mt))->generateInt();
+}
+</code>
+
+The following functions to deprecation.
+
+  * mt_srand()
+  * srand()
+
+These functions are used to manipulate the global state of PHP. Their existence will become unnecessary when a fully replaceable object-scoped RNG is implemented.
+
+Also, change the following function to use the same method as random_byte() (the php_random_bytes() internal function) for processing, instead of PHP's global state.
+
+  * shuffle()
+  * str_shuffle()
+  * array_rand()
+
+These functions are simple and useful if you want to get truly random results. The algorithm used will be changed from MT to give more truly random results.
+
+===== Backward Incompatible Changes =====
+The following functions, which used to depend on the PHP's global MT state, Always return truly random results.
+
+  * shuffle()
+  * str_shuffle()
+  * array_rand()
+
+But, the following fully compatible alternative implementations will be available.
+
+  * RNG\Randomizer::arrayShuffle()
+  * RNG\Randomizer::stringShuffle()
+  * RNG\Randomizer::arrayRandom()
+
+===== Proposed PHP Version(s) =====
+8.1
+
+===== RFC Impact =====
+==== To SAPIs ====
+none
+
+==== To Existing Extensions ====
+none
+
+==== To Opcache ====
+none
+
+==== New Constants ====
+none
+
+==== php.ini Defaults ====
+none
+
+===== Open Issues =====
+none
+
+===== Vote =====
+Voting opens 2021-MM-DD and 2021-YY-MM at 00:00:00 EDT. 2/3 required to accept.
+
+<doodle title="Add RNG extension and deprecate and change some functions?" auth="zeriyoshi" voteType="single" closed="true"> 
+   * Yes
+   * No
+</doodle>
+
+===== Patches and Tests =====
+TBD
