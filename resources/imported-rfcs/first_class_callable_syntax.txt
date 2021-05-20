@@ -1,0 +1,148 @@
+====== PHP RFC: First-class callable syntax ======
+  * Date: 2021-05-20
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Target Version: PHP 8.1
+
+===== Introduction =====
+
+This RFC proposes the introduction of a first-class callable syntax, which supersedes existing encodings using strings and arrays. The advantage is that the new syntax is accessible to static analysis, and respects the scope at the point where the callable is created.
+
+<PHP>
+$fn = Closure::fromCallable('strlen');
+$fn = strlen(...);
+
+$fn = Closure::fromCallable([$this, 'method']);
+$fn = $this->method(...)
+
+$fn = Closure::fromCallable([Foo::class, 'method']);
+$fn = Foo::method(...);
+</PHP>
+
+In this example, each pair of expressions is equivalent. The ''strlen(...)'' syntax creates a ''Closure'' that refers to the ''strlen()'' function, and so on.
+
+===== Proposal =====
+
+The syntax ''CallableExpr(...)'' is used to create a ''Closure'' object that refers to ''CallableExpr'' with the same semantics as ''Closure::fromCallable()''.
+
+''CallableExpr'' can be any expression that can be directly called in the PHP grammar. The following provides a non-exhaustive list of possible syntaxes:
+
+<PHP>
+strlen(...);
+$closure(...);
+$invokableObject(...);
+$obj->method(...);
+$obj->$methodStr(...);
+($obj->property)(...);
+Foo::method(...);
+$classStr::$methodStr(...);
+self::{$complex . $expression}(...);
+'strlen'(...);
+[$obj, 'method'](...);
+[Foo::class, 'method'](...);
+</PHP>
+
+==== Scope ====
+
+And advantage of the first-class callable syntax is that it uses the scope at the point where the callable is acquired. Consider the following example:
+
+<PHP>
+class Test {
+    public function getPrivateMethod() {
+        return [$this, 'privateMethod']; // does not work
+        return Closure::fromCallable([$this, 'privateMethod']); // works, bug ugly
+        return $this->privateMethod(...); // works
+    }
+    
+    private function privateMethod() {
+        echo __METHOD__, "\n";
+    }
+}
+
+$test = new Test;
+$privateMethod = $test->getPrivateMethod();
+$privateMethod();
+</PHP>
+
+If a classical array callable like ''[$this, 'privateMethod']'' is used, then visibility will be checked at the point where the call is performed. If the new ''$this->privateMethod(...)'' syntax is used, then the visibility is checked at the point where the callable is created. ''Closure::fromCallable()'' already allows you to use those semantics now, with more syntactical boilerplate.
+
+==== Object creation ====
+
+The ''new Foo()'' syntax is not considered a call, and as such also not supported by the ''new Foo(...)'' syntax. It should be noted that there is also no way to express object creation with traditional callable syntax, and it is thus also not supported by ''Closure::fromCallable()''.
+
+The general expectation is that ''new Foo(...)'' would be creating a new instance of ''Foo'' on each call, rather than creating a single instance of ''Foo'' and then repeatedly calling the constructor. To support this, it would effectively be necessary to generate a trampoline function of the form
+
+<PHP>
+fn(...$args) => new Foo(...$args)
+</PHP>
+
+and acquire a callable to that trampoline instead. While certainly possible, this takes a step backwards from the straightforward semantics of the ''foo(...)'' syntax for ordinary calls.
+
+===== Rationale =====
+
+==== Partial Function Application ====
+
+This RFC is intended as an alternative to the [[rfc:partial_function_application|partial functions application (PFA)]] RFC. I believe that PFA use-cases can be divided into roughly three categories:
+
+The first is the use of PFA to acquire a callable, without partially applying any arguments. I believe that the vast majority of PFA uses would be for this purposes. This RFC proposes to provide special support for this use-case **only**.
+
+The second is use in conjunction with the [[rfc:pipe-operator-v2|Pipe Operator (V2)]] proposal. Taking an example from the RFC:
+
+<PHP>
+$result = $var
+ |> step_one(?)
+ |> step_two(?, 'config')
+ |> $obj->stepThree('param', ?);
+</PHP>
+
+However, PFA is only required for this particular form of the pipe operator. The [[rfc:pipe-operator|Pipe Operator (V1)]] proposal instead used a syntax that is specific to the pipe operator:
+
+<PHP>
+$result = $var
+ |> step_one($$)
+ |> step_two($$, 'config')
+ |> $obj->stepThree('param', $$);
+</PHP>
+
+If this definition of the pipe operator is adopted, then PFA is no longer needed for use with the pipe operator. Both approaches to the pipe operator have their advantages. The ''$$'' based variant allows using more than plain function calls in each pipeline step (e.g. you could have ''$$->getName()'' as a step, something not possible with PFA), and is also trivially free. A PFA-based optimization would entail significant overhead relative to simple function calls, unless special optimization for the pipe operator usage is introduced (which may not be possible, depending on precise semantics).
+
+Finally, while these two are the primary use-cases of PFA, there will also be the occasional usage in other contexts. For example:
+
+<PHP>
+$array = array_filter($array, str_contains(?, 'foo'));
+</PHP>
+
+Under this proposal, no dedicated syntax would be available for this use-case, and one would have to use an arrow function:
+
+<PHP>
+$array = array_filter($array, fn($s) => str_contains($s, 'foo'));
+</PHP>
+
+I think that the existing syntax is already sufficiently concise that there is no strong need to introduce an even shorter one.
+
+As such, I believe that adding a first-class callable syntax, and using the original approach to the pipe operator, would give us most of the benefit of PFA at a much lower complexity cost. The PFA proposal has gone through many iterations, because nailing down the precise semantics turned out to be surprisingly hard. According to Joe Watkins (the implementer of the PFA RFC), final semantics we have arrived at (which, at the time of this writing, are not reflected in the PFA proposal itself) will also carry a lot of implementation complexity.
+
+==== Syntax choice ====
+
+The proposed syntax is forward-compatible with the latest iteration of the PFA proposal (which, at the time of this writing, is not yet reflected in the RFC). As such, it would be possible to expand it into a full PFA feature in the future.
+
+The call-based syntax also has the advantage that it is unambiguous: It represents exactly the callable that would be invoked by a direct call of the same syntax. This cannot be said of some other syntax choices that have been discussed in the past, for example:
+
+<PHP>
+// Proposed syntax is unambiguous and follows existing semantics:
+$this->foo(...);   // Refers to a method
+($this->foo)(...); // Refers to a callable stored in a property
+
+// What does this mean?
+$this->foo::callable;
+</PHP>
+
+I am generally open to using a different syntax though, as I don't think forward-compatibility with a potential PFA feature is critical.
+
+===== Backward Incompatible Changes =====
+
+None.
+
+===== Vote =====
+
+Yes/No.
