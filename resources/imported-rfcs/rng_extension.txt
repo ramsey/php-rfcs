@@ -1,5 +1,5 @@
-====== PHP RFC: Add RNG extension and deprecate mt_srand() ======
-  * Version: 0.1
+====== PHP RFC: Add Randomizer class ======
+  * Version: 0.2
   * Date: 2021-05-18
   * Author: Go Kudo <zeriyoshi@gmail.com>
   * Status: Draft
@@ -41,119 +41,73 @@ echo mt_rand() . PHP_EOL; // Result: 1314500282
 </code>
 
 ===== Proposal =====
-Implements RNG extension provides a class-based random number generator and deprecate some functions.
+Implements Randomizer class.
 
-RNG extension is provided as ext/rng in PHP core and provides the following interfaces and classes.
+This class implement to ext/standard, always bundled PHP core.
+
+The PHP code that represents the implementation is as follows:
 
 <code php>
-namespace RNG;
-
-interface Source
-{
-    /**
-      * Generate random bytes
-      */
-    public function next(): string
-}
-
-/** compatible MT_RAND_MT19937 */
-class MT19937 implements Source
-{
-    public function next(): string;
-    public function __serialize(): array;
-    public function __unserialize(array $data): void;
-}
-
-/** compatible MT_RAND_PHP */
-class MT19937PHP implements Source
-{
-    public function next(): string;
-    public function __serialize(): array;
-    public function __unserialize(array $data): void;
-}
-
-/** XorShift128+ */
-class XorShift128Plus implements Source
-{
-    public function next(): string;
-    public function __serialize(): array;
-    public function __unserialize(array $data): void;
-}
-
-/** OS provided random source (e.g. /dev/random) */
-class PlatformProvided implements Source
-{
-    public function next(): string
-}
+const RANDOMIZER_XORSHIFT128PLUS = 'xorshift128+'; // fast, lightweight, default
+const RANDOMIZER_MT19937 = 'mt19937 '; // for compatibility
+const RANDOMIZER_SECURE = 'secure'; // required Cryptographically-Secure PRNG
+const RANDOMIZER_USER = 'user'; // userland implementation
 
 class Randomizer
 {
-    public function __construct(protected Source $source) {}
-    public function getSource(): Source {}
-    public function generateBytes(int $length): string {}
-    public function generateFloat(): float {}
-    public function generateBool(): bool {}
-    public function generateInt(): int {} // replaceable mt_rand()
-    public function generateInt(int $min, int $max): int {} // replaceable mt_rand($min, $max)
-    public function arrayShuffle(array &$array): bool {} // replaceable shuffle()
-    public function stringShuffle(string $string): string {} // replaceable str_shuffle()
-    public function arrayRandom(array $array, int $num = 1): int|string|array {} // replaceable array_rand()
+    public function __construct(string $algo = RANDOMIZER_XORSHIFT128PLUS, ?int $seed = null);
+
+    // For user.
+    public function int(?int $min = PHP_INT_MIN, ?int $max = PHP_INT_MAX): int;
+    public function bytes(int $length): string;
+    public function shuffle(array|string $target): array|string;
+
+    // For serialize / unserialize. (but, NOT always available.)
+    public function __serialize(): array;
+    public function __unserialize(array $data): void;
+
+    // MUST override in RANDOMIZER_USER.
+    protected function next(): int;
 }
 </code>
 
-This makes it possible to simply replace existing code.
+This single class is used to provide the processing using PRNG.
+
+This class switches the PRNG implementation to be used by the constructor argument $algo. It is just like the password_hash() function.
+
+Similarly, several C APIs have been added to the PHP core. This can be used to add non-standard PRNGs.
+
+<code c>
+typedef struct _php_randomizer_algo {
+    const char *ident;
+    void (*seed)(const zend_long *seed);
+    uint64_t (*next)(void);
+    int (*serialize)(zval *data); // allows NULL.
+    int (*unserialize)(zval *data); // allows NULL.
+} php_randomizer_algo;
+
+int php_randomizer_algo_register(const char *ident, const php_rng_algo *algo);
+void php_randomizer_algo_unregister(const char *ident);
+</code>
+
+In php_randomizer_algo, the implementation of serialize / unserialize is optional. If the RNG you implement does not support it, you can specify NULL as a member of the structure, In that case, an exception will be thrown during serialization.
+
+This class also supports the RNG implementation of userland. This is useful for tests that want to fix the expected calculation cost.
 
 <code php>
-
-function before(int $seed): int
+class FixedNumberForTest extends Randomizer
 {
-    mt_srand($seed);
-    return mt_rand();
-}
+    protected int $current = 0;
 
-function after(int $seed): int
-{
-    $mt = new RNG\MT19937($seed);
-    return (new RNG\Randomizer($mt))->generateInt();
+    protected function next(): int
+    {
+        return ++$this->current;
+    }
 }
 </code>
 
-The following functions to deprecation.
-
-  * mt_srand()
-  * srand()
-  * mt_rand()
-  * rand()
-
-These functions are used to manipulate the global state of PHP. Their existence will become unnecessary when a fully replaceable object-scoped RNG is implemented.
-
-Also, change the following function to use the same method as random_byte() (the php_random_bytes() internal function) for processing, instead of PHP's global state.
-
-  * shuffle()
-  * str_shuffle()
-  * array_rand()
-
-These functions are simple and useful if you want to get truly random results. The algorithm used will be changed from MT to give more truly random results.
-
 ===== Backward Incompatible Changes =====
-The following functions to deprecate.
-
-  * mt_srand()
-  * srand()
-  * mt_rand()
-  * rand()
-
-The following functions, which used to depend on the PHP's global MT state, Always return truly random results.
-
-  * shuffle()
-  * str_shuffle()
-  * array_rand()
-
-But, the following fully compatible alternative implementations will be available.
-
-  * RNG\Randomizer::arrayShuffle()
-  * RNG\Randomizer::stringShuffle()
-  * RNG\Randomizer::arrayRandom()
+The class name Randomizer is reserved and will not be available in userland.
 
 ===== Proposed PHP Version(s) =====
 8.1
@@ -175,7 +129,38 @@ none
 none
 
 ===== Open Issues =====
-none
+
+=== Why not take an object oriented approach? ===
+This is because it is overly complex and difficult to use, See my previous proposal and the discussion in the internals ML for more details.
+
+  * https://wiki.php.net/rfc/object_scope_prng
+  * https://externals.io/message/114378
+  * https://externals.io/message/112819
+
+=== Why XorShift128+ as the default algorithm? ===
+This algorithm is capable of generating 64-bit random numbers, is used by major browsers, and is well validated. On the other hand, MT19937, currently used by PHP, can only generate 32-bit random numbers.
+
+=== Why keep the MT19937 implementation?　===
+This is for compatibility. It facilitates quick and easy migration.
+
+=== What algorithm does RANDOMIZER_SECURE use exactly? ===
+It uses php_random_bytes() internally. This API is guaranteed to be a CSPRNG under any circumstances.
+
+=== Why support CSPRNG? Isn't random_int() good enough? ===
+The goal is to be able to migrate all RNG provided functions to this class in the future.
+In other words, to be able to write code without using any of the following functions:
+
+  * srand()
+  * rand()
+  * mt_srand()
+  * mt_rand()
+  * shuffle()
+  * str_shuffle()
+  * array_rand()
+  * random_int()
+  * random_bytes()
+
+In order to use these functions properly, you need to understand PHP core. For many users, this can be difficult.
 
 ===== Vote =====
 Voting opens 2021-MM-DD and 2021-YY-MM at 00:00:00 EDT. 2/3 required to accept.
