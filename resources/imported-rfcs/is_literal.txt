@@ -1,8 +1,8 @@
 ====== PHP RFC: Is Literal Check ======
 
-  * Version: 0.6
+  * Version: 0.7
   * Date: 2020-03-21
-  * Updated: 2021-04-30
+  * Updated: 2021-05-22
   * Author: Craig Francis, craig#at#craigfrancis.co.uk
   * Status: Draft
   * First Published at: https://wiki.php.net/rfc/is_literal
@@ -14,7 +14,7 @@ A new function, //is_literal(string $string)//, to identify variables that have 
 
 This takes the concept of "taint checking" and makes it simpler and stricter.
 
-It does not allow a variable to be marked as untainted, and it does not allow escaping (important).
+It does not allow a variable to be marked as untainted (important).
 
 For example, take a database library that supports parametrised queries at the driver level, today a programmer could use either of these:
 
@@ -26,9 +26,11 @@ $db->query('SELECT * FROM users WHERE id = ' . $_GET['id']); // INSECURE
 
 If the library only accepted a literal SQL string (written by the programmer), and simply rejected the second example (not written as a literal), the library can provide an "inherently safe API".
 
-This definition of an "inherently safe API" comes from Christoph Kern, who did a talk in 2016 about [[https://www.youtube.com/watch?v=ccfEu-Jj0as|Preventing Security Bugs through Software Design]] (also at [[https://www.usenix.org/conference/usenixsecurity15/symposium-program/presentation/kern|USENIX Security 2015]]), which covers how this concept is used at Google. The idea is that we "Don't Blame the Developer, Blame the API"; where we need to put the burden on libraries (written once, used by many) to ensure that it's impossible for the developer to make these mistakes.
+Do not confuse this by saying the string is "safe" (more on this later).
 
-By adding a way for libraries to check if the strings they receive came from the developer (from trusted PHP source code), it allows the library to check they are being used in a safe way.
+This definition of an "inherently safe API" comes from Christoph Kern, who did a talk in 2016 about [[https://www.youtube.com/watch?v=ccfEu-Jj0as|Preventing Security Bugs through Software Design]] (also at [[https://www.usenix.org/conference/usenixsecurity15/symposium-program/presentation/kern|USENIX Security 2015]]), which covers how this concept is used at Google. The idea is that we "Don't Blame the Developer, Blame the API"; where we need to put the burden on libraries (written once, used by many) to ensure that it's impossible for the developer to make these common injection mistakes.
+
+By adding a way for libraries to check if the strings they receive came from the developer (from trusted PHP source code), it allows the library to check they are being //used// in a safe way (no user data being //injected//).
 
 ===== Why =====
 
@@ -36,9 +38,9 @@ The [[https://owasp.org/www-project-top-ten/|OWASP Top 10]] lists common vulnera
 
 The current list (2017) puts **Injection** vulnerabilities at the top (common prevalence, 2; easy for attackers to detect/exploit, 3; severe impact, 3); and **XSS** at 7 (widespread prevalence, 3; easy for attackers to detect/exploit, 3; moderate impact, 2).
 
-And they have always been on the list - 2003 (A6/A4), 2004 (A6/A4), 2007 (A2/A1), 2010 (A1/A2), 2013 (A1/A3), 2017 (A1/A7).
+And they have **always** been on the list - 2003 (A6/A4), 2004 (A6/A4), 2007 (A2/A1), 2010 (A1/A2), 2013 (A1/A3), 2017 (A1/A7).
 
-These vulnerabilities are easy to make, and hard to identify - is_literal() directly addresses this.
+These vulnerabilities are **easy to make**, and **hard to identify** - is_literal() directly addresses this.
 
 ===== Examples =====
 
@@ -51,7 +53,7 @@ $qb->select('u')
    ->where('u.id = ' . $_GET['id'])
 </code>
 
-The definition of the //where()// method could check with //is_literal()// and throw an exception, advising the programmer to replace it with a safer use of placeholders:
+The definition of the //where()// method could check with //is_literal()// and throw an exception, advising the programmer to use placeholders:
 
 <code php>
 $qb->select('u')
@@ -75,7 +77,7 @@ echo $twig->createTemplate('<p>Hi {{ name }}</p>')->render(['name' => $_GET['nam
 
 ===== Alternatives =====
 
-These have been around for years, and haven't worked.
+These have been around for years, and have not worked.
 
 ==== Education ====
 
@@ -87,7 +89,7 @@ We cannot keep saying they 'need to be careful', and rely on them to never make 
 
 ==== Escaping ====
 
-Escaping is //hard//, and //error prone//.
+Escaping is **hard**, and **error prone**.
 
 There is a long list of common [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification.md#common-mistakes|escaping mistakes]].
 
@@ -99,21 +101,29 @@ Some languages implement a "taint flag" which tracks whether values are consider
 
 There is a [[https://github.com/laruence/taint|Taint extension for PHP]] by Xinchen Hui, and [[https://wiki.php.net/rfc/taint|a previous RFC proposing it be added to the language]] by Wietse Venema.
 
-These solutions rely on the assumption that the output of an escaping function is safe for a particular context. This sounds reasonable in theory, but the operation of escaping functions, and the context for which their output is safe, are very hard to define. This leads to a feature that is both complex and unreliable.
+These solutions assume the output of an escaping function is safe for a particular context. This sounds reasonable in theory, but the operation of escaping functions, and the context for which their output is safe, are very hard to define. This leads to a feature that is both complex and unreliable.
 
-This proposal avoids the complexity by addressing a different part of the problem: separating inputs supplied by the programmer, from inputs supplied by the user.
+<code php>
+$sql = 'SELECT * FROM users WHERE id = ' . $db->real_escape_string($id);
+$html = "<img src=" . htmlentities($url) . " alt='' />";
+$html = "<a href='" . htmlentities($url) . "'>...";
+</code>
+
+The first two need the values to be quoted, but would be considered "untained" (wrong). The third example, well htmlentities, before PHP 8.1 ([[https://github.com/php/php-src/commit/50eca61f68815005f3b0f808578cc1ce3b4297f0|thank you very much]]) does not escape single quotes by default, and it not does it consider what happens with 'javascript:' URLs.
+
+This proposal avoids the complexity by addressing a different part of the problem: separating the inputs written by the programmer, from inputs supplied by the user.
 
 ==== Static Analysis ====
 
 While I agree with [[https://news-web.php.net/php.internals/109192|Tyson Andre]], it is highly recommended to use Static Analysis.
 
-The //biggest// problem is that Static Analysis is simply not used by most developers, especially those who are new to programming (usage tends to be higher by those writing well tested libraries).
+The **biggest** problem is that Static Analysis is simply not (and will not) used by most developers, especially those who are new to programming (usage tends to be higher by those writing well tested libraries). It is simply an extra step they cannot be bothered to do.
 
-And they really focus on other issues (type checking, basic logic flaws, code formatting, etc).
+And these tools currently focus on other issues (type checking, basic logic flaws, code formatting, etc).
 
 Those that do attempt to address injection vulnerabilities, do so via Taint Checking (see above), and are [[https://github.com/vimeo/psalm/commit/2122e4a1756dac68a83ec3f5abfbc60331630781|often incomplete]].
 
-For a quick example, psalm, even in its strictest errorLevel (1), and/or running //--taint-analysis//, will not notice the missing quote marks in this SQL, and will incorrectly assume this is perfectly safe:
+For a quick example, Psalm, even in its strictest errorLevel (1), and/or running //--taint-analysis// (I bet you don't use this), will raise a load of false positives, and will not notice the missing quote marks in this SQL, incorrectly assuming this is safe:
 
 <code php>
 $db = new mysqli('...');
@@ -123,7 +133,7 @@ $id = (string) ($_GET['id'] ?? 'id'); // Keep the type checker happy.
 $db->prepare('SELECT * FROM users WHERE id = ' . $db->real_escape_string($id));
 </code>
 
-When psalm comes to taint checking the usage of a library (like Doctrine), it assumes all methods are safe, because none of them note the sinks (and even if they did, you're back to escaping being an issue).
+Then, when Psalm comes to taint checking the usage of a library (like Doctrine), it just assumes all methods are safe, because none of them have noted the sinks (and even if they did, you're back to escaping being an issue).
 
 ===== Proposal =====
 
@@ -137,7 +147,7 @@ This RFC proposes adding four functions:
 
 A literal is defined as a value (string) which has been written by the programmer.
 
-The value may be passed between functions, as long as it is not modified in any way.
+The value may be passed between functions, as long as the content is not modified.
 
 <code php>
 is_literal('Example'); // true
@@ -146,14 +156,10 @@ $a = 'Hello';
 $b = 'World';
 
 is_literal($a); // true
-is_literal($a . $b); // true, details below.
-
-$c = literal_concat($a, $b);
-is_literal($c); // true, details below.
 
 is_literal($_GET['id']); // false
 is_literal('WHERE id = ' . intval($_GET['id'])); // false
-is_literal(rand(0, 10)); // false
+is_literal(rand(1, 10)); // false
 is_literal(sprintf('LIMIT %d', 3)); // false
 
 function example($input) {
@@ -163,22 +169,52 @@ function example($input) {
   return $input;
 }
 
-example('hello'); // OK
-example(example('hello')); // OK, still the same literal.
-example(strtoupper('hello')); // Exception thrown.
+example($a); // OK
+example(example($a)); // OK, still the same literal.
+example(strtoupper($a)); // Exception thrown.
 </code>
 
-There is no way to manually mark a string as a literal (i.e. no equivalent to //untaint()//); as soon as the value has been manipulated in any way, it is no longer marked as a literal.
+Because so much existing code uses string concatenation (details below), and because it does not modify what the programmer has written, concatenated literals will keep their flag - which includes the use of //str_repeat()//, //str_pad()//, //implode()//, //join()//, //array_pad()//, and //array_fill()//.
+
+<code php>
+is_literal($a . $b); // true
+
+is_literal(str_repeat($a, 10)); // true
+is_literal(str_repeat($a, rand(1, 10))); // true
+is_literal(str_repeat(rand(1, 10), 10)); // false, non-literal input
+
+is_literal(str_pad($a, 10, '-')); // true
+is_literal(str_pad($a, 10, rand(1, 10))); // false
+
+is_literal(implode(' AND ', [$a, $b])); // true
+is_literal(implode(' AND ', [$a, rand(1, 10)])); // false
+
+is_literal(array_pad([$a], 10, $b)); // true
+is_literal(array_pad([$a], rand(1, 10), $b)); // true
+is_literal(array_pad([$a], 10, rand(1, 10))); // false
+is_literal(array_pad([$a, rand(1, 10)], 10, $b)); // false
+
+is_literal(array_fill(0, 10, $a)); // true
+is_literal(array_fill(0, 10, rand(1, 10))); // false
+
+$c = literal_concat($a, $b); // Exception thrown with non-literal inputs.
+is_literal($c); // true
+
+$c = literal_implode(' AND ', [$a, $b]); // Exception thrown with non-literal inputs.
+is_literal($c); // true
+</code>
+
+There is **no way** to mark a string as a literal (i.e. no equivalent to //untaint()//); as soon as the value has been manipulated or includes anything that is not from a literal (e.g. user data), it is no longer marked as a literal (important).
 
 ===== Previous Work =====
 
-Google uses "compile time constants" in Go, which isn't as good as a run time solution (e.g. the //WHERE IN// issue), but it works, and is used by [[https://blogtitle.github.io/go-safe-html/|go-safe-html]] and [[https://github.com/google/go-safeweb/tree/master/safesql|go-safesql]].
+Google uses "compile time constants" in **Go**, which isn't as good as a run time solution (e.g. the //WHERE IN// issue), but it works, and is used by [[https://blogtitle.github.io/go-safe-html/|go-safe-html]] and [[https://github.com/google/go-safeweb/tree/master/safesql|go-safesql]].
 
-Google also uses [[https://errorprone.info/|Error Prone]] in Java to augment the compiler's type analysis, where [[https://errorprone.info/bugpattern/CompileTimeConstant|@CompileTimeConstant]] ensures method parameters can only use "compile-time constant expressions" (this isn't a complete solution either).
+Google also uses [[https://errorprone.info/|Error Prone]] in **Java** to augment the compiler's type analysis, where [[https://errorprone.info/bugpattern/CompileTimeConstant|@CompileTimeConstant]] ensures method parameters can only use "compile-time constant expressions" (this isn't a complete solution either).
 
-Perl has a [[https://perldoc.perl.org/perlsec#Taint-mode|Taint Mode]], via the -T flag, where all input is marked as "tainted", and cannot be used by some methods (like commands that modify files), unless you use a regular expression to match and return known-good values (where regular expressions are easy to get wrong).
+**Perl** has a [[https://perldoc.perl.org/perlsec#Taint-mode|Taint Mode]], via the -T flag, where all input is marked as "tainted", and cannot be used by some methods (like commands that modify files), unless you use a regular expression to match and return known-good values (where regular expressions are easy to get wrong).
 
-[[https://github.com/tc39/proposal-array-is-template-object|JavaScript might get isTemplateObject]] to "Distinguishing strings from a trusted developer from strings that may be attacker controlled" (intended to be [[https://github.com/mikewest/tc39-proposal-literals|used with Trusted Types]]).
+**JavaScript** is looking to implement [[https://github.com/tc39/proposal-array-is-template-object|isTemplateObject]] for "Distinguishing strings from a trusted developer from strings that may be attacker controlled" (intended to be [[https://github.com/mikewest/tc39-proposal-literals|used with Trusted Types]]).
 
 As noted above, there is the [[https://github.com/laruence/taint|Taint extension for PHP]] by Xinchen Hui.
 
@@ -189,37 +225,52 @@ And there is the [[https://wiki.php.net/rfc/sql_injection_protection|Automatic S
   * It would have effected every SQL function, such as //mysqli_query()//, //$pdo->query()//, //odbc_exec()//, etc (concerns raised by [[https://news-web.php.net/php.internals/87436|Lester Caine]] and [[https://news-web.php.net/php.internals/87650|Anthony Ferrara]]);
   * Each of those functions would need a bypass for cases where unsafe SQL was intentionally being used (e.g. phpMyAdmin taking SQL from POST data) because some applications intentionally "pass raw, user submitted, SQL" (Ronald Chmara [[https://news-web.php.net/php.internals/87406|1]]/[[https://news-web.php.net/php.internals/87446|2]]).
 
-I also agree that "SQL injection is almost a solved problem [by using] prepared statements" ([[https://news-web.php.net/php.internals/87400|Scott Arciszewski]]), and this is where //is_literal()// can be used to check that no mistakes are made when using prepared statements.
+I also agree that "SQL injection is almost a solved problem [by using] prepared statements" ([[https://news-web.php.net/php.internals/87400|Scott Arciszewski]]), and this is the point of //is_literal()// - so we can check that no mistakes have been made.
 
 ===== Usage =====
 
-How a library could implement:
+==== Basic ====
+
+How a library could use is_literal():
 
 <code php>
 class db {
-  protected $protection_level = 2; // Should default to 1 at first.
+
+  protected $protection_level = 1; // Just warnings (1), maybe Exceptions (2) in a few years.
+
   function literal_check($var) {
     if (!function_exists('is_literal') || is_literal($var)) {
-      // Not supported (PHP 8.0), or is a programmer defined string.
+      // Fine - Cannot check in PHP 8.0, or this is a programmer defined string.
     } else if ($var instanceof unsafe_sql) {
-      // Not ideal, but at least you know this one is unsafe.
+      // Fine - Not ideal, but at least they know this one is unsafe.
     } else if ($this->protection_level === 0) {
-      // Programmer aware, and is choosing to bypass this check.
+      // Fine - Programmer aware, and is choosing to disable this check everwhere.
     } else if ($this->protection_level === 1) {
       trigger_error('Non-literal detected!', E_USER_WARNING);
     } else {
       throw new Exception('Non-literal detected!');
     }
   }
+
+  function enforce_injection_protection() {
+    $this->protection_level = 2;
+  }
+
   function unsafe_disable_injection_protection() {
     $this->protection_level = 0; // Use unsafe_sql for special cases.
   }
-  function where($sql, $parameters = []) {
+
+  function where($sql, $parameters = [], $aliases = []) {
     $this->literal_check($sql);
     // ...
   }
-}
 
+}
+</code>
+
+You will notice this library supports an //unsafe_sql// value-object which bypasses this check. This should only be a temporary thing, as there are much safer ways of handling these exceptions.
+
+<code php>
 class unsafe_sql {
   private $value = '';
   function __construct($unsafe_sql) {
@@ -231,15 +282,41 @@ class unsafe_sql {
 }
 </code>
 
-Which would be used:
+And how this library would be used:
 
 <code php>
 $db = new db();
 $db->where('id = ?'); // OK
-$db->where('id = ' . $_GET['id']); // Exception thrown
+$db->where('id = ' . $_GET['id']); // Mistake detected (warning given)
 </code>
 
-Table and Fields in SQL, which cannot use parameters; for example //ORDER BY//:
+==== WHERE IN ====
+
+When you have an undefined number of parameters; for example //WHERE IN//:
+
+<code php>
+function where_in_sql($count) { // Should check for 0
+  $sql = '?';
+  for ($k = 1; $k < $count; $k++) {
+    $sql .= ',?';
+  }
+  return $sql;
+}
+
+$sql = 'WHERE id IN (', where_in_sql(count($ids)), ')';
+</code>
+
+And, because implode/join is just a form of string concat, you can still use this approach, as mentioned on the PDO [[https://www.php.net/manual/en/pdostatement.execute.php#example-1019|execute]] page and by [[https://stackoverflow.com/a/23641033/538216|Levi Morrison]]:
+
+<code php>
+$place_holders = implode(',', array_fill(0, count($params), '?'));
+</code>
+
+This pushes everyone to using parameters. You should not implode() user values, and include them directly in the SQL, because it's easy to get wrong.
+
+==== Non Parameterised Values ====
+
+Adding Table and Fields in SQL cannot use parameters (for example //ORDER BY//), but you can //still// use literals:
 
 <code php>
 $order_fields = [
@@ -253,20 +330,15 @@ $order_id = array_search(($_GET['sort'] ?? NULL), $order_fields);
 $sql = literal_concat(' ORDER BY ', $order_fields[$order_id]);
 </code>
 
-Undefined number of parameters; for example //WHERE IN//:
+By using an allow-list we also ensure the user (attacker) cannot use anything unexpected.
 
-<code php>
-function where_in_sql($count) { // Should check for 0
-  $sql = '?';
-  for ($k = 1; $k < $count; $k++) {
-    $sql .= ',?';
-  }
-  return $sql;
-}
-$sql = literal_concat('WHERE id IN (', where_in_sql(count($ids)), ')');
-</code>
+==== Special Cases ====
 
-And for a real edge case, where the end user provides the table/field names. That would require the database abstraction to take those values separately, so it can ensure the marjority of the SQL is a literal, and it can check/escape those table/field names [[https://gist.github.com/craigfrancis/901aa0479379fe9c261ccb2e33ebdcd7|basic example]].
+And for real edge cases, where the end user must provide the table/field names (maybe a weird CMS that changes the table structure).
+
+This would require the database abstraction to handle those special values separately. This ensures the majority of the SQL is a literal, and it also checks/escapes when it applies those table/field names to the SQL.
+
+[[https://gist.github.com/craigfrancis/5b057414de4119bcc80163ac669a7360#file-is_literal-php-L235|How this can work]].
 
 ===== Considerations =====
 
@@ -276,7 +348,11 @@ Literal string is the standard name for strings in source code. See [[https://ww
 
 > A string literal is the notation for representing a string value within the text of a computer program. In PHP, strings can be created with single quotes, double quotes or using the heredoc or the nowdoc syntax...
 
-Alternative suggestions have included //is_from_literal()// from [[https://news-web.php.net/php.internals/109197|Jakob Givoni]]. I think //is_safe_string()// might be asking for trouble. Other terms have included "compile time constants" and "code string".
+Alternative suggestions have included //is_from_literal()// from [[https://news-web.php.net/php.internals/109197|Jakob Givoni]].
+
+Other terms have included "compile time constants" and "code string".
+
+We cannot call it //is_safe_string()// because we do not know that it is "safe". For example the command //'rm -rf ?'// is not safe if it's given a path to something that shouldn't be deleted (insert classic //rm -rf /// joke here).
 
 ==== Int/Float/Boolean Values. ====
 
@@ -308,11 +384,17 @@ Performance wise, I made up a test patch (not properly checked), to skip string 
 
 There is still a small impact without concat because the //concat_function()// in "zend_operators.c" uses //zend_string_extend()// (where the literal flag needs to be removed). And in "zend_vm_def.h", it has a similar version; and supports a quick concat with an empty string, which doesn't create a new variable (x2) and would need its flag removed as well.
 
-Technically runtime concat isn't needed for most libraries, like an ORM or Query Builder, where their methods nearly always take a small literal string. But it would make adoption of //is_literal()// easier for existing projects that are currently using string concat for their SQL, HTML Snippets, etc.
+Technically runtime concat isn't needed for most libraries, like an ORM or Query Builder, where their methods nearly always take a small literal string. But it does make the adoption of //is_literal()// easier for existing projects that are currently using string concat for their SQL, HTML Snippets, etc.
 
 Supporting runtime concat would make the is_literal() easier to understand, as it would be consistent with compiler vs runtime concat (because the compiler can sometimes concat strings, creating a single literal that would have the literal flag set).
 
-As to helping developers identify their mistakes - by using //literal_concat()// or //literal_implode()//, Dan Ackroyd notes these functions would make it easier to identify where mistakes are made, rather than it being picked up at the end of a potentially long script, after multiple string concatenations, e.g.
+==== Support Functions ====
+
+The //literal_concat()// or //literal_implode()// functions.
+
+These do not need to be used, but they can help developers identify their mistakes.
+
+As noted by Dan Ackroyd, rather than waiting to the end, after multiple string concatenations, any mistakes would be picked up much earlier when using these functions. For example:
 
 <code php>
 $sortOrder = 'ASC';
@@ -326,7 +408,7 @@ $sql .= ' ORDER BY name ' . $sortOrder;
 $db->query($sql);
 </code>
 
-If a developer changed the literal //'ASC'// to //$_GET['order']//, the error raised by //$db->query()// would not be clear where the mistake was made. Whereas using //literal_concat()// would raise an exception, and highlight exactly where the issue happened:
+If a developer changed the literal //'ASC'// to //$_GET['order']//, the error would be noticed by //$db->query()//, but it's not clear where the mistake was made. Whereas, if they were using //literal_concat()//, it would raise an exception much earlier, and highlight exactly where the mistake happened:
 
 <code php>
 $sql = literal_concat($sql, ' ORDER BY name ', $sortOrder);
@@ -338,13 +420,13 @@ As noted by [[https://news-web.php.net/php.internals/87667|Dennis Birkholz]], so
 
 And Larry Garfield notes that in Drupal's ORM "the table name itself is user-defined" (not in the PHP script).
 
-While some systems will be able to use literals entirely, those that cannot will be able to use a Query Builder - one that validates the majority of its input are literals, and the exceptions can be accepted via appropriate validation (i.e. does this string match a known table name).
+While most systems will be able to use literals entirely, those that cannot will be able to use a Query Builder - one that validates the majority of its input are literals, and the exceptions can be accepted via appropriate validation and escaping (i.e. does this string match the format, or is a known, table name).
+
+Have a look at [[https://gist.github.com/craigfrancis/5b057414de4119bcc80163ac669a7360|this example gist]] to see all the different ways this can be done.
 
 ==== Existing String Functions ====
 
-Trying to determine if the //is_literal// flag should be passed through functions like //str_repeat()//, or //substr()// etc is difficult. Having a security feature be difficult to reason about, gives a much higher chance of mistakes.
-
-For any use-case where dynamic strings are required, it would be better to build those strings with an appropriate query builder, or by using //literal_concat()/////literal_implode()//.
+Trying to determine if the //is_literal// flag should be passed through functions like //substr()// etc is difficult. Having a security feature be difficult to reason about, gives a much higher chance of mistakes.
 
 ===== Backward Incompatible Changes =====
 
