@@ -1,5 +1,5 @@
 ====== PHP RFC: Add Randomizer class ======
-  * Version: 0.2
+  * Version: 0.3
   * Date: 2021-05-18
   * Author: Go Kudo <zeriyoshi@gmail.com>
   * Status: Draft
@@ -58,9 +58,10 @@ class Randomizer
     public function __construct(string $algo = RANDOMIZER_XORSHIFT128PLUS, ?int $seed = null);
 
     // For user.
-    public function int(?int $min = PHP_INT_MIN, ?int $max = PHP_INT_MAX): int;
-    public function bytes(int $length): string;
-    public function shuffle(array|string $target): array|string;
+    public function getInt(int $min = PHP_INT_MIN, int $max = PHP_INT_MAX): int;
+    public function getBytes(int $length): string;
+    public function shuffleArray(array $array): array;
+    public function shuffleString(string $string): string;
 
     // For serialize / unserialize. (but, NOT always available.)
     public function __serialize(): array;
@@ -75,13 +76,36 @@ This single class is used to provide the processing using PRNG.
 
 This class switches the PRNG implementation to be used by the constructor argument $algo. It is just like the password_hash() function.
 
+This allows us to rewrite the first example as follows:
+
+<code php>
+// example 1
+echo foo(1234, function (): void {}) . PHP_EOL; // Result: 1480009472
+echo foo(1234, function (): void { mt_rand(); }) . PHP_EOL; // Result: 1747253290
+
+function foo(int $seed, callable $bar): int {
+    $randomizer = new Randomizer(RANDOMIZER_MT19937, $seed);
+    $result = $randomizer->getInt(0, 2147483647);
+    $bar();
+    $result += $randomizer->getInt(0, 2147483647);
+    return $result;
+}
+
+// example 2
+$randomizer = new Randomizer(RANDOMIZER_MT19937, 1234);
+echo $randomizer->getInt(0, 2147483647) . PHP_EOL; // Result: 411284887
+
+$randomizer = new Randomizer(RANDOMIZER_MT19937, 1234);
+str_shuffle('foobar');
+echo $randomizer->getInt(0, 2147483647) . PHP_EOL; // Result: 411284887
+</code>
+
 Similarly, several C APIs have been added to the PHP core. This can be used to add non-standard PRNGs.
 
 <code c>
 typedef struct _php_randomizer_algo {
-    const char *name;
-    void (*seed)(const zend_long *seed);
-    uint64_t (*next)(void);
+    // Note: The field list is tentative until start implementing it.
+    void (*seed)(const zend_long *seed); // allows NULL.
     int (*serialize)(zval *data); // allows NULL.
     int (*unserialize)(zval *data); // allows NULL.
 } php_randomizer_algo;
@@ -91,6 +115,8 @@ void php_randomizer_algo_unregister(const char *ident);
 </code>
 
 In php_randomizer_algo, the implementation of serialize / unserialize is optional. If the RNG you implement does not support it, you can specify NULL as a member of the structure, In that case, an exception will be thrown during serialization.
+
+Also, for RNGs that do not (or cannot) use seed values, the function pointer for seed is optional. If this is passed to a null RNG, an exception will be thrown if a seed value is passed.
 
 This class also supports the RNG implementation of userland. This is useful for tests that want to fix the expected calculation cost.
 
@@ -137,6 +163,10 @@ none
 none
 
 ===== Open Issues =====
+
+=== Why cancelled new Extension? ===
+As a result of discussions during the draft, the functions became a single class and no longer need to be separated.
+The functionality for random numbers is now included in ext/standard and will conform to this. (e.g. rand.c random.c)
 
 === Why not take an object oriented approach? ===
 This is because it is overly complex and difficult to use, See my previous proposal and the discussion in the internals ML for more details.
