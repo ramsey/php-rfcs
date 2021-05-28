@@ -34,13 +34,24 @@ By adding a way for libraries to check if the strings they receive came from the
 
 ===== Why =====
 
-The [[https://owasp.org/www-project-top-ten/|OWASP Top 10]] lists common vulnerabilities scored out of 3 for prevalence, exploitability, detectability, and impact.
+Injection and XSS vulnerabilities are still **easy to make**, **hard to identify**, and **very common**.
 
-The current list (2017) puts **Injection** vulnerabilities at the top (common prevalence, 2; easy for attackers to detect/exploit, 3; severe impact, 3); and **XSS** at 7 (widespread prevalence, 3; easy for attackers to detect/exploit, 3; moderate impact, 2).
+This is why these two issues have always been on the [[https://owasp.org/www-project-top-ten/|OWASP Top 10]]; a list designed to raise awareness of common issues, which are ranked based on their prevalence, exploitability, detectability, and impact.
 
-And they have **always** been on the list - 2003 (A6/A4), 2004 (A6/A4), 2007 (A2/A1), 2010 (A1/A2), 2013 (A1/A3), 2017 (A1/A7).
+Injection and XSS have **always** been on the list, and ranked:
 
-These vulnerabilities are **easy to make**, and **hard to identify** - is_literal() directly addresses this.
+^  Year   ^  Injection Position  ^  XSS Position  ^
+|  2003   |  6                   |  4             |
+|  2004   |  6                   |  4             |
+|  2007   |  2                   |  **1**         |
+|  2010   |  **1**               |  2             |
+|  2013   |  **1**               |  3             |
+|  2017   |  **1**               |  7             |
+
+
+We like to think all developers read the documentation, and never directly include (inject) user values into their SQL, HTML, OS Command, etc. But that's clearly not the case. By using is_literal(), libraries can identify when this happens, and warn the developer immediately.
+
+And when we come to "Phase 2", this concept can be used by the relevant PHP functions as well.
 
 ===== Examples =====
 
@@ -53,7 +64,7 @@ $qb->select('u')
    ->where('u.id = ' . $_GET['id'])
 </code>
 
-The definition of the //where()// method could check with //is_literal()// and advise the programmer to use placeholders:
+The definition of the //where()// method could use //is_literal()// and advise the programmer to use placeholders:
 
 <code php>
 $qb->select('u')
@@ -292,27 +303,24 @@ $db->where('id = ' . $_GET['id']); // Mistake detected (warning given)
 
 ==== WHERE IN ====
 
-When you have an undefined number of parameters; for example //WHERE IN//:
+When you have an undefined number of parameters; for example //WHERE IN//.
+
+You should already be following the advice from [[https://stackoverflow.com/a/23641033/538216|Levi Morrison]], [[https://www.php.net/manual/en/pdostatement.execute.php#example-1012|PDO Execute]], and [[https://www.drupal.org/docs/7/security/writing-secure-code/database-access#s-multiple-arguments|Drupal Multiple Arguments]]:
 
 <code php>
-function where_in_sql($count) { // Should check for 0
-  $sql = '?';
-  for ($k = 1; $k < $count; $k++) {
-    $sql .= ',?';
-  }
-  return $sql;
+$sql = 'WHERE id IN (' . join(',', array_fill(0, count($ids), '?')) . ')';
+</code>
+
+Or, if you prefer to see the concatenation in action:
+
+<code php>
+$sql = '?';
+for ($k = 1; $k < $count; $k++) {
+  $sql .= ',?';
 }
-
-$sql = 'WHERE id IN (', where_in_sql(count($ids)), ')';
 </code>
 
-And, because implode/join is just a form of string concat, you can still use the approach mentioned on the PDO [[https://www.php.net/manual/en/pdostatement.execute.php#example-1019|execute]] page and by [[https://stackoverflow.com/a/23641033/538216|Levi Morrison]]:
-
-<code php>
-$place_holders = implode(',', array_fill(0, count($params), '?'));
-</code>
-
-This pushes everyone to use parameters. You should not implode() user values, and include them directly in the SQL, because it's easy to get wrong.
+This will push everyone to use parameters properly, rather than using implode() on user values, to include them directly in the SQL, because it's easy to get wrong.
 
 ==== Non Parameterised Values ====
 
@@ -330,15 +338,15 @@ $order_id = array_search(($_GET['sort'] ?? NULL), $order_fields);
 $sql = literal_concat(' ORDER BY ', $order_fields[$order_id]);
 </code>
 
-By using an allow-list we also ensure the user (attacker) cannot use anything unexpected.
+And by using an allow-list, we ensure the user (attacker) cannot use anything unexpected.
 
 ==== Special Cases ====
 
-And for real edge cases, where the end user must provide the table/field names (maybe a weird CMS that changes the table structure).
+And for a real edge case, where the end user must provide the table/field names (maybe a weird CMS that changes the table structure).
 
-This would require the database abstraction to handle those special values separately. This ensures the majority of the SQL is a literal, and it will check/escape them when applying those table/field names to the SQL.
+This would require the database abstraction to handle those values separately. This ensures the majority of the SQL is a literal (good), and it will check/escape those table/field names when applying them to the SQL (also good).
 
-[[https://gist.github.com/craigfrancis/5b057414de4119bcc80163ac669a7360#file-is_literal-php-L235|How this can be done]].
+[[https://gist.github.com/craigfrancis/5b057414de4119bcc80163ac669a7360#file-is_literal-php-L235|How it can be done]].
 
 ===== Considerations =====
 
@@ -428,6 +436,10 @@ Have a look at [[https://gist.github.com/craigfrancis/5b057414de4119bcc80163ac66
 
 Trying to determine if the //is_literal// flag should be passed through functions like //substr()// etc is difficult. Having a security feature be difficult to reason about, gives a much higher chance of mistakes.
 
+==== Reflection API ====
+
+It might be possible for the Reflection API to say if a the code calling a method used a literal string, but that's all it could do. It will not be able to support variables; or provide any future scope for these checks (aka "Phase 2").
+
 ===== Backward Incompatible Changes =====
 
 No known BC breaks, except for code-bases that already contain userland functions //is_literal()//, //literal_implode()// or //literal_concat()//.
@@ -462,7 +474,7 @@ None known
 
 As noted by MarkR, the biggest benefit will come when it can be used by PDO and similar functions (//mysqli_query//, //preg_match//, //exec//, etc). But the basic idea can be used immediately by frameworks and general abstraction libraries, and they can give feedback for future work.
 
-**Phase 2** could introduce a way for programmers to specify certain PHP function/method arguments can only accept literals, and/or specific value-objects their project trusts (this idea comes from [[https://web.dev/trusted-types/|Trusted Types]] in JavaScript).
+**Phase 2** could introduce a way for programmers to specify certain PHP function/method arguments can only accept literals, and/or specific value-objects their project trusts (this idea comes from [[https://web.dev/trusted-types/|Trusted Types]] in JavaScript, and their [[https://www.youtube.com/watch?v=po6GumtHRmU&t=92s|60+ Injection Sinks]] - like innerHTML).
 
 For example, a project could require the second argument for //pg_query()// only accept literals or their //query_builder// object (which provides a //__toString// method); and that any output (print, echo, readfile, etc) must use the //html_output// object that's returned by their trusted HTML Templating system (using //ob_start()// might be useful here).
 
