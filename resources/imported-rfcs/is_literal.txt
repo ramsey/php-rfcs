@@ -10,13 +10,13 @@
 
 ===== Introduction =====
 
-A new function, //is_literal(string $string)//, to identify variables that have been created from a programmer defined string.
+A new function, //is_literal(string $string)//, to identify variables that have been created from programmer defined strings.
 
 This takes the concept of "taint checking" and makes it simpler and stricter.
 
-It does not allow a variable to be marked as untainted (important).
+It does not allow a variable to be marked as untainted (important, and not needed).
 
-For example, take a database library that supports parametrised queries at the driver level, today a programmer could use either of these:
+As an example, take a database library that supports parametrised queries at the driver level, today a programmer could use either of these:
 
 <code php>
 $db->query('SELECT * FROM users WHERE id = ?', [$_GET['id']]);
@@ -24,7 +24,7 @@ $db->query('SELECT * FROM users WHERE id = ?', [$_GET['id']]);
 $db->query('SELECT * FROM users WHERE id = ' . $_GET['id']); // INSECURE
 </code>
 
-If the library only accepted a literal SQL string (written by the programmer), and simply rejected the second example (not written as a literal), the library can provide an "inherently safe API".
+If the library only accepted a literal SQL string (written by the programmer), and warned or rejected the second example (not written as a literal), the library can provide an "inherently safe API".
 
 Do not confuse this by saying the string is "safe" (more on this later).
 
@@ -36,22 +36,19 @@ By adding a way for libraries to check if the strings they receive came from the
 
 Injection and XSS vulnerabilities are still **easy to make**, **hard to identify**, and **very common**.
 
-This is why these two issues have always been on the [[https://owasp.org/www-project-top-ten/|OWASP Top 10]]; a list designed to raise awareness of common issues, which are ranked based on their prevalence, exploitability, detectability, and impact.
+This is why these two issues have **always** been on the [[https://owasp.org/www-project-top-ten/|OWASP Top 10]]; a list designed to raise awareness of common issues, ranked on their prevalence, exploitability, detectability, and impact.
 
-Injection and XSS have **always** been on the list, and ranked:
+^  Year           ^  Injection Position  ^  XSS Position  ^
+|  2017 - Latest  |  **1**               |  7             |
+|  2013           |  **1**               |  3             |
+|  2010           |  **1**               |  2             |
+|  2007           |  2                   |  **1**         |
+|  2004           |  6                   |  4             |
+|  2003           |  6                   |  4             |
 
-^  Year   ^  Injection Position  ^  XSS Position  ^
-|  2003   |  6                   |  4             |
-|  2004   |  6                   |  4             |
-|  2007   |  2                   |  **1**         |
-|  2010   |  **1**               |  2             |
-|  2013   |  **1**               |  3             |
-|  2017   |  **1**               |  7             |
+We like to think all developers read the documentation, and never directly include (inject) user values into their SQL, HTML, OS Command, etc. But that's clearly not the case. By using //is_literal()//, libraries can identify when this happens, and warn developers immediately.
 
-
-We like to think all developers read the documentation, and never directly include (inject) user values into their SQL, HTML, OS Command, etc. But that's clearly not the case. By using is_literal(), libraries can identify when this happens, and warn the developer immediately.
-
-And when we come to "Phase 2", this concept can be used by the relevant PHP functions as well.
+And "Phase 2" (a future RFC) will allow the relevant PHP functions to use this check as well (details below).
 
 ===== Examples =====
 
@@ -104,7 +101,7 @@ Escaping is **hard**, and **error prone**.
 
 There is a long list of common [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification.md#common-mistakes|escaping mistakes]].
 
-Developers should use parameterised queries (e.g. SQL), or a well tested library that knows how to escape values based on their context (e.g. HTML).
+Developers should use parameterised queries (e.g. SQL), or a well tested library that knows how to escape values based on their context (e.g. HTML). The //is_literal()// function works with this approach, to warn (or ensure) developers do it correctly.
 
 ==== Taint Checking ====
 
@@ -122,7 +119,7 @@ $html = "<a href='" . htmlentities($url) . "'>...";
 
 The first two need the values to be quoted, but would be considered "untained" (wrong). The third example, htmlentities before PHP 8.1 ([[https://github.com/php/php-src/commit/50eca61f68815005f3b0f808578cc1ce3b4297f0|fixed]]) does not escape single quotes by default, and it does not consider what happens with 'javascript:' URLs.
 
-This proposal avoids this complexity by addressing a different part of the problem: to keep the inputs written by the programmer separate from inputs supplied by the user.
+//is_literal()// avoids this complexity by addressing a different part of the problem: simply keeping inputs written by the programmer separate from inputs supplied by the user, allowing the database or library to check that the developer has not make any mistakes.
 
 ==== Static Analysis ====
 
@@ -150,7 +147,7 @@ Then, when Psalm comes to taint checking the usage of a library (like Doctrine),
 
 This RFC proposes adding four functions:
 
-  * //is_literal(string $string): bool// to check if a variable represents a value written into the source code or not.
+  * //is_literal(string $string): bool// to check if a variable represents a value written in the source code.
 
   * //literal_implode(string $glue, array $pieces): string// - implode an array of literals, with a literal.
   * //literal_concat(string $piece, string ...$pieces): string// - concatenating literal strings.
@@ -242,7 +239,7 @@ I also agree that "SQL injection is almost a solved problem [by using] prepared 
 
 ==== Basic ====
 
-How a library could use is_literal():
+How a library could use //is_literal()//:
 
 <code php>
 class db {
@@ -320,11 +317,11 @@ for ($k = 1; $k < $count; $k++) {
 }
 </code>
 
-This will push everyone to use parameters properly, rather than using implode() on user values, to include them directly in the SQL, because it's easy to get wrong.
+This will push everyone to use parameters properly, rather than using implode() on user values, to include them directly in the SQL, which is easy to get wrong.
 
 ==== Non Parameterised Values ====
 
-Adding Table and Fields in SQL cannot use parameters, but you can //still// use literals:
+Table and Fields in SQL cannot use parameters, but you can //still// use literals, even if it's dependent on user input:
 
 <code php>
 $order_fields = [
@@ -338,13 +335,13 @@ $order_id = array_search(($_GET['sort'] ?? NULL), $order_fields);
 $sql = literal_concat(' ORDER BY ', $order_fields[$order_id]);
 </code>
 
-And by using an allow-list, we ensure the user (attacker) cannot use anything unexpected.
+By using an allow-list, we ensure the user (attacker) cannot use anything unexpected.
 
 ==== Special Cases ====
 
 And for a real edge case, where the end user must provide the table/field names (maybe a weird CMS that changes the table structure).
 
-This would require the database abstraction to handle those values separately. This ensures the majority of the SQL is a literal (good), and it will check/escape those table/field names when applying them to the SQL (also good).
+The database abstraction can simply accept those values separately. This ensures the majority of the SQL is a literal (good), and it will check/escape those table/field names when applying them to the SQL (also good).
 
 [[https://gist.github.com/craigfrancis/5b057414de4119bcc80163ac669a7360#file-is_literal-php-L235|How it can be done]].
 
@@ -394,7 +391,7 @@ There is still a small impact without concat because the //concat_function()// i
 
 Technically runtime concat isn't needed for most libraries, like an ORM or Query Builder, where their methods nearly always take a small literal string. But it does make the adoption of //is_literal()// easier for existing projects that are currently using string concat for their SQL, HTML Snippets, etc.
 
-Supporting runtime concat would make the is_literal() easier to understand, as it would be consistent with compiler vs runtime concat (because the compiler can sometimes concat strings, creating a single literal that would have the literal flag set).
+Supporting runtime concat would make //is_literal()// easier to understand, as it would be consistent with compiler vs runtime concat (because the compiler can sometimes concat strings, creating a single literal that would have the literal flag set).
 
 ==== Support Functions ====
 
@@ -428,7 +425,7 @@ As noted by [[https://news-web.php.net/php.internals/87667|Dennis Birkholz]], so
 
 And Larry Garfield notes that in Drupal's ORM "the table name itself is user-defined" (not in the PHP script).
 
-While most systems will be able to use literals entirely, those that cannot will be able to use a Query Builder - one that validates the majority of its input are literals, and the exceptions can be accepted via appropriate validation and escaping (i.e. does this string match the format, or is a known, table name).
+While most systems will be able to use literals entirely, those that cannot will be able to use a Query Builder - one that validates the majority of its input are literals, and the exceptions can be accepted via appropriate validation and escaping (i.e. does this string match a known table name, or a valid format).
 
 Have a look at [[https://gist.github.com/craigfrancis/5b057414de4119bcc80163ac669a7360|this example gist]] to see all the different ways this can be done.
 
@@ -438,7 +435,7 @@ Trying to determine if the //is_literal// flag should be passed through function
 
 ==== Reflection API ====
 
-It might be possible for the Reflection API to say if a the code calling a method used a literal string, but that's all it could do. It will not be able to support variables; or provide any future scope for these checks (aka "Phase 2").
+The Reflection API currently allows you to "introspect classes, interfaces, functions, methods and extensions"; it's not currently setup for object methods to inspect the code calling it. Even if that was to be added (unlikely), it could only check if the literal was defined there, it couldn't handle variables (tracking back to their source), nor could it provide any future scope for these checks (aka "Phase 2").
 
 ===== Backward Incompatible Changes =====
 
