@@ -4,6 +4,7 @@
   * Date: 2020-03-21
   * Updated: 2021-05-22
   * Author: Craig Francis, craig#at#craigfrancis.co.uk
+  * Contributors: Joe Watkins, Dan Ackroyd, Máté Kocsis, Rowan Tommins
   * Status: Draft
   * First Published at: https://wiki.php.net/rfc/is_literal
   * GitHub Repo: https://github.com/craigfrancis/php-is-literal-rfc
@@ -14,9 +15,7 @@ A new function, //is_literal(string $string)//, to identify variables that have 
 
 This takes the concept of "taint checking" and makes it simpler and stricter.
 
-It does not allow a variable to be marked as untainted (important, and not needed).
-
-As an example, take a database library that supports parametrised queries at the driver level, today a programmer could use either of these:
+Take a database library that supports parametrised queries, today a programmer could use either of these:
 
 <code php>
 $db->query('SELECT * FROM users WHERE id = ?', [$_GET['id']]);
@@ -24,13 +23,13 @@ $db->query('SELECT * FROM users WHERE id = ?', [$_GET['id']]);
 $db->query('SELECT * FROM users WHERE id = ' . $_GET['id']); // INSECURE
 </code>
 
-If the library only accepted a literal SQL string (written by the programmer), and warned or rejected the second example (not written as a literal), the library can provide an "inherently safe API".
+If the library checked the SQL was written as a literal string (written by the programmer), and warned or rejected the second example (not written as a literal), the library can provide an "inherently safe API".
 
-Do not confuse this by saying the string is "safe" (more on this later).
+Do not confuse this by saying the string is "safe". For example, //'DELETE FROM table WHERE date >= ?'//, while it is not vulnerable to SQL injection, it's not "safe" if the parameter was accidentally set to "0000-00-00".
 
-This definition of an "inherently safe API" comes from Christoph Kern, who did a talk in 2016 about [[https://www.youtube.com/watch?v=ccfEu-Jj0as|Preventing Security Bugs through Software Design]] (also at [[https://www.usenix.org/conference/usenixsecurity15/symposium-program/presentation/kern|USENIX Security 2015]]), which covers how this concept has been successfully used at Google. The idea is that we "Don't Blame the Developer, Blame the API"; where we need to put the burden on libraries (written once, used by many) to ensure that it's impossible for the developer to make these common injection mistakes.
+This definition of an "inherently safe API" comes from Christoph Kern, who did a talk in 2016 about [[https://www.youtube.com/watch?v=ccfEu-Jj0as|Preventing Security Bugs through Software Design]] (also at [[https://www.usenix.org/conference/usenixsecurity15/symposium-program/presentation/kern|USENIX Security 2015]]), which covers how this concept has been successfully used at Google. In short, "Don't Blame the Developer, Blame the API"; where we need to put the burden on libraries (written once, used by many) to ensure it's impossible for the developer to make these common injection mistakes.
 
-By adding a way for libraries to check if the strings they receive came from the developer (from trusted PHP source code), it allows the library to check they are being //used// in a safe way (no user data being //injected//).
+By providing a quick/simple way for libraries to check if the strings they receive came from the developer (from trusted PHP source code), it allows the library to check they are being //used// in a safe way (no user data being //injected//).
 
 ===== Why =====
 
@@ -52,7 +51,7 @@ And "Phase 2" (a future RFC) will allow the relevant PHP functions to use this c
 
 ===== Examples =====
 
-The [[https://www.doctrine-project.org/projects/doctrine-orm/en/current/reference/query-builder.html#high-level-api-methods|Doctrine Query Builder]] allows a custom WHERE clause to be provided as a string. This is intended for use with literals and placeholders, but it cannot protect against this simple mistake:
+The [[https://www.doctrine-project.org/projects/doctrine-orm/en/current/reference/query-builder.html#high-level-api-methods|Doctrine Query Builder]] allows a custom WHERE clause to be provided as a string. This is intended for use with literals and placeholders, but it cannot currently protect against this simple mistake:
 
 <code php>
 // INSECURE
@@ -101,7 +100,7 @@ Escaping is **hard**, and **error prone**.
 
 There is a long list of common [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification.md#common-mistakes|escaping mistakes]].
 
-Developers should use parameterised queries (e.g. SQL), or a well tested library that knows how to escape values based on their context (e.g. HTML). The //is_literal()// function works with this approach, to warn (or ensure) developers do it correctly.
+Developers should use parameterised queries (e.g. SQL), or a well tested library that knows how to escape values based on their context (e.g. HTML). The //is_literal()// function works with this approach, allowing libraries to warn (or ensure) developers do it correctly.
 
 ==== Taint Checking ====
 
@@ -119,7 +118,7 @@ $html = "<a href='" . htmlentities($url) . "'>...";
 
 The first two need the values to be quoted, but would be considered "untained" (wrong). The third example, htmlentities before PHP 8.1 ([[https://github.com/php/php-src/commit/50eca61f68815005f3b0f808578cc1ce3b4297f0|fixed]]) does not escape single quotes by default, and it does not consider what happens with 'javascript:' URLs.
 
-//is_literal()// avoids this complexity by addressing a different part of the problem: simply keeping inputs written by the programmer separate from inputs supplied by the user, allowing the database or library to check that the developer has not make any mistakes.
+//is_literal()// avoids this complexity by addressing a different part of the problem: It allows the library to check that every single developer using it hasn't broken the principal of keeping sensitive (SQL/HTML/etc) inputs written by the programmer, separate from inputs supplied by the user.
 
 ==== Static Analysis ====
 
@@ -129,9 +128,9 @@ The **biggest** problem is that Static Analysis is simply not (and will not) be 
 
 And these tools currently focus on other issues (type checking, basic logic flaws, code formatting, etc).
 
-Those that do attempt to address injection vulnerabilities, do so via Taint Checking (see above), and are [[https://github.com/vimeo/psalm/commit/2122e4a1756dac68a83ec3f5abfbc60331630781|often incomplete]].
+And those that do attempt to address injection vulnerabilities, do so via Taint Checking (see above), and are [[https://github.com/vimeo/psalm/commit/2122e4a1756dac68a83ec3f5abfbc60331630781|often incomplete]].
 
-For a quick example, Psalm, even in its strictest errorLevel (1), and/or running //--taint-analysis// (I bet you don't use this), will raise a load of false positives, and will not notice the missing quote marks in this SQL, incorrectly assuming this is safe:
+For a quick example, Psalm, even in its strictest errorLevel (1), and/or running //--taint-analysis// (I bet you don't use this), will not notice the missing quote marks in this SQL, and incorrectly assume this is safe:
 
 <code php>
 $db = new mysqli('...');
@@ -147,7 +146,7 @@ Then, when Psalm comes to taint checking the usage of a library (like Doctrine),
 
 This RFC proposes adding four functions:
 
-  * //is_literal(string $string): bool// to check if a variable represents a value written in the source code.
+  * //is_literal(string $string): bool// checks if a variable contains a string defined in the PHP script.
 
   * //literal_implode(string $glue, array $pieces): string// - implode an array of literals, with a literal.
   * //literal_concat(string $piece, string ...$pieces): string// - concatenating literal strings.
@@ -182,7 +181,7 @@ example(example($a)); // OK, still the same literal.
 example(strtoupper($a)); // Exception thrown.
 </code>
 
-Because so much existing code uses string concatenation (as noted by Benjamin Eberlei as being important in Doctrine), and because it does not modify what the programmer has written, concatenated literals will keep their flag - which includes the use of //str_repeat()//, //str_pad()//, //implode()//, //join()//, //array_pad()//, and //array_fill()//.
+Because so much existing code uses string concatenation (as noted by Benjamin Eberlei), and because it does not modify what the programmer has written, concatenated literals will keep their flag - which includes the use of //str_repeat()//, //str_pad()//, //implode()//, //join()//, //array_pad()//, and //array_fill()//.
 
 <code php>
 is_literal($a . $b); // true
@@ -341,7 +340,7 @@ By using an allow-list, we ensure the user (attacker) cannot use anything unexpe
 
 And for a real edge case, where the end user must provide the table/field names (maybe a weird CMS that changes the table structure).
 
-The database abstraction can simply accept those values separately. This ensures the majority of the SQL is a literal (good), and it will check/escape those table/field names when applying them to the SQL (also good).
+The database abstraction can simply accept those values separately (like how parameters are accepted separately). This ensures the majority of the SQL is a literal (good), then it can consistently check/escape those table/field names when applying them to the SQL (also good).
 
 [[https://gist.github.com/craigfrancis/5b057414de4119bcc80163ac669a7360#file-is_literal-php-L235|How it can be done]].
 
@@ -357,7 +356,7 @@ Alternative suggestions have included //is_from_literal()// from [[https://news-
 
 Other terms have included "compile time constants" and "code string".
 
-We cannot call it //is_safe_string()// because we do not know that it is "safe". For example, the command //'rm -rf ?'// is not safe if given a path to something that shouldn't be deleted (insert classic //rm -rf /// joke here).
+We cannot call it //is_safe_string()// because we do not know that it is "safe". As another example, the command //'rm -rf ?'//, while it not affected by an injection vulnerability (good), it's not "safe" if given a path to something that shouldn't be deleted (insert classic //rm -rf /// joke here).
 
 ==== Int/Float/Boolean Values. ====
 
