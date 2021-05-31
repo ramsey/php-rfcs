@@ -1,8 +1,9 @@
 ====== PHP RFC: Add Random class ======
-  * Version: 0.3
+  * Version: 1.0
   * Date: 2021-05-18
   * Author: Go Kudo <zeriyoshi@gmail.com>
-  * Status: Draft
+  * Status: Under Discussion
+  * Implementation: https://github.com/php/php-src/pull/7079
   * First Published at: http://wiki.php.net/rfc/object_scope_prng
 
 ===== Introduction =====
@@ -27,7 +28,7 @@ function foo(int $seed, callable $bar): int {
 
 As mentioned above, the reproducibility of random numbers can easily be lost if additional processing is added later.
 
-In addition, the fiber extension was introduced in PHP 8.1. This makes it more difficult to keep track of the execution order. However, this problem has existed since the inception of Generator.
+In addition, the fiber extension was introduced in PHP 8.1. This makes it more difficult to keep track of the execution order. However, this problem has existed since the introduced of Generator.
 
 There is also the problem of functions that implicitly use the state stored in PHP's global state. shuffle(), str_shuffle(), and array_rand() functions implicitly advance the state of a random number. This means that the following code is not reproducible, but it is difficult for the user to notice this.
 
@@ -48,95 +49,104 @@ This class implement to ext/standard, always bundled PHP core.
 The PHP code that represents the implementation is as follows:
 
 <code php>
-const RANDOM_XORSHIFT128PLUS = 'xorshift128plus'; // fast, lightweight, default
-const RANDOM_MT19937 = 'mt19937'; // for compatibility
-const RANDOM_SECURE = 'secure'; // required Cryptographically-Secure PRNG
+const RANDOM_XORSHIFT128PLUS = 'xorshift128plus'; // 64-bit, fast, default
+const RANDOM_MT19937 = 'mt19937'; // 32-bit, for backward compatibility
+const RANDOM_SECURE = 'secure'; // Cryptographically-Secure PRNG
 const RANDOM_USER = 'user'; // userland implementation
 
 class Random
 {
-    public function __construct(string $algo = RANDOM_XORSHIFT128PLUS, ?int $seed = null);
+    /**
+     * Get registered algorithm in array.
+     */
+    public static function getAlgos(): array;
+    
+    /**
+     * Get algorithm information in array.
+     * if not registered, returns null.
+     */
+    public static function getAlgoInfo(string $algo): ?array;
 
-    // For user.
-    public static function getNonBiasedMax(string $algo): int;
-    public function getInt(int $min = PHP_INT_MIN, int $max = PHP_INT_MAX): int;
-    public function getBytes(int $length): string;
-    public function shuffleArray(array $array): array;
-    public function shuffleString(string $string): string;
+    /**
+     * Constructor.
+     * if $seed is null, generating seed by php_random_bytes(), but whether to use depends to algo.
+     */
+    public function __construct(string $algo = RANDOM_XORSHIFT128PLUS, ?int $seed = null) {}
 
-    // For serialize / unserialize. (but, NOT always available.)
-    public function __serialize(): array;
-    public function __unserialize(array $data): void;
+    /**
+     * Returns raw generated number by RNG.
+     * if on the 32-bit machine, then uses 64-bit RNG throw Exception.
+     * but can implicating truncate on random.ignore_generated_size_exceeded=1 INI directive.
+     */
+    public function nextInt(): int {}
 
-    // MUST override in RANDOM_USER.
-    protected function next(): int;
+    /**
+     * Generates a number within a given range.
+     * similar random_int() function.
+     */
+    public function getInt(int $min, int $max): int {}
+
+    /**
+     * Generates a string within a given range.
+     * similar random_bytes() function.
+     */
+    public function getBytes(int $length): string {}
+
+    /**
+     * Shuffling the given array items.
+     * similar shuffle(), but non-pass-by-reference.
+     */
+    public function shuffleArray(array $array): array {}
+
+    /**
+     * Shuffling the given string characters.
+     * similar str_shuffle().
+     */
+    public function shuffleString(string $string): string {}
+
+    /**
+     * Serializing state to string if algo's supported.
+     */
+    public function __serialize(): array {}
+
+    /**
+     * Unseriialize state from string in algo's supported.
+     */
+    public function __unserialize(array $data): void {}
+
+    /**
+     * Must override user-defined RNG class.
+     * only uses inherits from the Random class with RANDOM_USER argument.
+     */
+    protected function next(): int {}
 }
+
 </code>
 
-This single class is used to provide the processing using PRNG.
+This class retrieves and uses the RNG algorithm registered in the core, based on the string passed in the constructor argument $algo.
 
-This class switches the PRNG implementation to be used by the constructor argument $algo. It is just like the password_hash() function.
+The bundled RNGs are as follows:
 
-Also, the static method getNonBiasedMax() allows the user to get the non-biased RNG range.
+  * XorShift128+: 64-bit, reproducible, PRNG.
+  * MT19937: 32-bit, reproducible, PRNG, compatible mt_srand() / mt_rand().
+  * secure: 64-bit, non-reproducible, CSPRNG, uses php_random_bytes() internally.
+  * user: user defined.
 
-This allows us to rewrite the first example as follows:
+By default, XorShift128+ is used. It can generate 64-bit values, is used by major browsers, and is fast and reliable. On the other hand, MT19937 is retained for compatibility.
+
+"secure" is practically equivalent to random_int(), but can be used to shuffle arrays and strings. Also, since it is an object, it is easy to exchange implementations.
+
+"user" is special, and in order to use it, you need to inherit from the Random class and implement the next(): int method. This can be used to implement a generic RNG in userland, and can be used for unit tests where you want to generate a fixed number.
 
 <code php>
-// example 1
-echo foo(1234, function (): void {}) . PHP_EOL; // Result: 1480009472
-echo foo(1234, function (): void { mt_rand(); }) . PHP_EOL; // Result: 1480009472
 
-function foo(int $seed, callable $bar): int {
-    $random = new Random(RANDOM_MT19937, $seed);
-    $max = Random::getNonBiasedMax(RANDOM_MT19937);
-    $result = $random->getInt(0, $max);
-    $bar();
-    $result += $random->getInt(0, $max);
-    return $result;
-}
-
-// example 2
-$random = new Random(RANDOM_MT19937, 1234);
-$max = Random::getNonBiasedMax(RANDOM_MT19937);
-echo $random->getInt(0, $max) . PHP_EOL; // Result: 411284887
-
-$random = new Random(RANDOM_MT19937, 1234);
-$max = Random::getNonBiasedMax(RANDOM_MT19937);
-str_shuffle('foobar');
-echo $random->getInt(0, $max) . PHP_EOL; // Result: 411284887
-</code>
-
-Similarly, several C APIs have been added to the PHP core. This can be used to add non-standard PRNGs.
-
-<code c>
-// Note: The detailed implementation is tentative.
-typedef struct _php_random_class_algo {
-    int64_t max;
-    int64_t (*next)(void *state);
-    void (*seed)(void *state, const zend_long *seed); // allows NULL.
-    int (*serialize)(void *state, zval *data); // allows NULL.
-    int (*unserialize)(void *state, zval *data); // allows NULL.
-    void *state;
-} php_random_class_algo;
-
-int php_random_class_algo_register(const char *ident, const php_random_class_algo *algo);
-void php_random_class_algo_unregister(const char *ident);
-</code>
-
-In php_random_class_algo, the implementation of serialize / unserialize is optional. If the RNG you implement does not support it, you can specify NULL as a member of the structure, In that case, an exception will be thrown during serialization.
-
-Also, for RNGs that do not (or cannot) use seed values, the function pointer for seed is optional. If this is passed to a null RNG, an exception will be thrown if a seed value is passed.
-
-This class also supports the RNG implementation of userland. This is useful for tests that want to fix the expected calculation cost.
-
-<code php>
-class FixedNumberForTest extends Random
+class FixedNumberRandom extends Random
 {
     protected int $current = 0;
 
     public function __construct()
     {
-        parent::__construct(RANDOM_USER, null);
+        parent::__construct(RANDOM_USER);
     }
 
     protected function next(): int
@@ -144,10 +154,83 @@ class FixedNumberForTest extends Random
         return ++$this->current;
     }
 }
+
+function foobar(Random $random): void {
+    for ($i = 0; $i < 9; $i++) {
+        echo $random->nextInt();
+    }
+}
+
+foobar(new FixedNumberRandom()); // Results: 123456789
+</code>
+
+Algorithms can be registered and unregistered using PHP's C API, and new implementations can be added via Extension. The following APIs are provided:
+
+<code c>
+/* Register new RNG algo */
+int php_random_class_algo_register(const php_random_class_algo *algo);
+
+/* Unregister RNG algo */
+void php_random_class_algo_unregister(const char *ident);
+
+/* Find and get registered algo */
+const php_random_class_algo* php_random_class_algo_find(const zend_string *ident);
+</code>
+
+Also, as with MT, various alternative APIs using object scope RNGs will be provided.
+
+<code c>
+/* similar php_mt_rand() */
+uint64_t php_random_class_next(php_random_class *random_class, zend_object *obj);
+
+/* similar php_mt_rand_range() */
+zend_long php_random_class_range(php_random_class *random_class, zend_object *obj, zend_long min, zend_long max);
+
+/* similar php_array_data_shuffle() */
+void php_random_class_array_data_shuffle(php_random_class *random_class, zend_object *obj, zval *array);
+
+/* similar php_string_shuffle() */
+void php_random_class_string_shuffle(php_random_class *random_class, zend_object *obj, char *str, zend_long len);
+</code>
+
+Random class can be serialized or cloned if the algorithm supports it. This is useful for storing and reusing state.
+
+<code php>
+// serialize
+$foo = new Random();
+for ($i = 0; $i < 10; $i++) { $foo->nextInt(); }
+var_dump(unserialize(serialize($foo))->nextInt() === $foo->nextInt()); // true
+
+// clone
+$bar = new Random();
+for ($i = 0; $i < 10; $i++) { $bar->nextInt(); }
+$baz = clone $bar;
+var_dump($baz->nextInt() === $bar->nextInt()); // true
+</code>
+
+Using this feature, the first example can be rewritten as follows:
+
+<code php>
+echo foo(1234, function (): void {}) . PHP_EOL; // Result: 1480009472
+echo foo(1234, function (): void { mt_rand(); }) . PHP_EOL; // Result: 1480009472
+
+function foo(int $seed, callable $bar): int {
+    $random = new Random(RANDOM_MT19937, $seed);
+    $result = $random->nextInt();
+    $bar();
+    $result += $random->nextInt();
+    return $result;
+}
 </code>
 
 ===== Backward Incompatible Changes =====
-The class name Random is reserved and will not be available in userland.
+The following items will no longer be available:
+
+  - "Random" class name
+  - "RANDOM_XORSHIFT128PLUS" constant
+  - "RANDOM_MT19937" constant
+  - "RANDOM_SECURE" constant
+  - "RANDOM_USER" constant
 
 ===== Proposed PHP Version(s) =====
 8.1
@@ -169,73 +252,12 @@ none
   * RANDOM_USER
 
 ==== php.ini Defaults ====
-none
+  * random.ignore_generated_size_exceeded=0
+
+If 1, implicit truncation will be performed when a 64-bit value is generated in a 32-bit environment. If 0, an exception will be thrown.
 
 ===== Open Issues =====
-
-=== When $seed is null, what is used for the seed value? ===
-Depends on the implementation of algo, but basically it is using internal php_random_int().
-It is similar to mt_srand() from PHP 8.1.
-
-- https://github.com/php/php-src/commit/53ee3f7f897f7ee33a4c45210014648043386e13
-
-=== Why cancelled RNG Extension? ===
-As a result of discussions during the draft, the functions became a single class and no longer need to be separated.
-The functionality for random numbers is now included in ext/standard and will conform to this. (e.g. rand.c random.c)
-
-=== Why not take an object oriented approach? ===
-This is because it is overly complex and difficult to use, See my previous proposal and the discussion in the internals ML for more details.
-
-  * https://wiki.php.net/rfc/object_scope_prng
-  * https://externals.io/message/114378
-  * https://externals.io/message/112819
-
-=== Why XorShift128+ as the default algorithm? ===
-This algorithm is capable of generating 64-bit random numbers, is used by major browsers, and is well validated. On the other hand, MT19937, currently used by PHP, can only generate 32-bit random numbers.
-
-=== Why keep the MT19937 implementation?　===
-This is for compatibility. It facilitates quick and easy migration.
-
-=== What algorithm does RANDOM_SECURE use exactly? ===
-It uses php_random_bytes() internally. This API is guaranteed to be a CSPRNG under any circumstances.
-
-=== Why support CSPRNG? Isn't random_int() good enough? ===
-The goal is to be able to migrate all RNG provided functions to this class in the future.
-In other words, to be able to write code without using any of the following functions:
-
-  * srand()
-  * rand()
-  * mt_srand()
-  * mt_rand()
-  * shuffle()
-  * str_shuffle()
-  * array_rand()
-  * random_int()
-  * random_bytes()
-
-In order to use these functions properly, you need to understand PHP core. For many users, this can be difficult.
-
-=== Why isn't there a drop-in replacement API? ===
-There is no API that can simply replace the following functions:
-
-  * shuffle()
-  * array_rand()
-
-The approach of these functions is not compatible with recent implementations.
-shuffle() uses pass-by-reference, and array_rand() is too complex.
-
-=== Why stop deprecation for some functions? ===
-The following functions have been removed from deprecation:
-
-  * srand()
-  * rand()
-  * mt_srand()
-  * mt_rand()
-
-This is because it is still too early and inappropriate include it in one RFC.
-
-=== What will be the concrete C implementation? ===
-Please wait. If the discussion in ML is good, I' ll start the implementation.
+none
 
 ===== Vote =====
 Voting opens 2021-MM-DD and 2021-MM-DD at 00:00:00 EDT. 2/3 required to accept.
@@ -246,4 +268,4 @@ Voting opens 2021-MM-DD and 2021-MM-DD at 00:00:00 EDT. 2/3 required to accept.
 </doodle>
 
 ===== Patches and Tests =====
-TBD
+  * https://github.com/php/php-src/pull/7079
