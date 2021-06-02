@@ -38,6 +38,37 @@ Supporting intersection types in the language allows us to move more type inform
   * Types are available through Reflection.
   * The syntax is a lot less boilerplate-y than phpdoc.
 
+===== Motivation =====
+
+It is possible to emulate intersection types by creating a new interface which inherits from multiple ones, one such case is the built in ''%%SeekableIterator%%'' which extends the ''%%Iterator%%'' interface by adding a ''%%seek()%%'' method on it. However, an iterator can also be countable, an if a function needs to type against such a requirement the only possible way is to currently create a new interface:
+
+<code php>
+interface CountableIterator extends Iterator, Countable {}
+</code>
+This works, but what if we want an iterator that is countable //and// seekable? We need to create another interface:
+
+<code php>
+interface SeekableCountableIterator extends CountableIterator, SeekableIterator {}
+</code>
+As such, each new requirement necessitates the creation of various new interfaces taking into account all possible combinations.
+
+Moreover, the class needs to implement the specific interface and cannot rely on just implementing the base interfaces, meaning the introduction of such interfaces need to be propagated to all relevant classes, something which can be error prone. See this non-example:
+
+<code php>
+interface A {}
+interface B {}
+interface AB extends A, B {}
+
+class Test implements A, B {}
+
+function foo(AB $v) {
+    var_dump($v);
+}
+
+foo(new Test());
+</code>
+Intersection types solve these issues.
+
 ===== Proposal =====
 
 Add support for pure intersection types are specified using the syntax ''%%T1&T2&...%%'' and can be used in all positions where types are currently accepted:
@@ -60,7 +91,17 @@ This means it would //not// be possible to mix intersection and union types toge
 
 ==== Supported types ====
 
-Only class types (interfaces and class names) are supported by intersection types, this is because it is impossible for a value to be 2 different standard types at the same time.
+Only class types (interfaces and class names) are supported by intersection types.
+
+The rationale is that for nearly all standard types using them in an intersection type result in a type which can never be satisfied (e.g. ''%%int&string%%'').
+
+Usage of ''%%mixed%%'' in an intersection type is redundant as ''%%mixed&T%%'' corresponds to ''%%T%%'', as such this is disallowed.
+
+Similarly using ''%%iterable%%'' in an intersection results in a redundant invalid type, this can be seen by expanding the type expression ''%%iterable&T = (array|Traversable)&T = (array&T) | (Traversable&T) =  Traversable&T%%''
+
+Although an intersection with ''%%callable%%'' //can// make sense (e.g. string&callable), we think it is unwise and points to a bug.
+
+Similarly ''%%parent%%'', ''%%self%%'', and ''%%static%%'' are technically feasible and //could// be used as part of an intersection, but impose strange restrictions on a child class which the base class violates or the base class already satisfies the type requirements in which case it is redundant. Therefore those 3 types are also forbidden because they likely point to a design issue.
 
 === Duplicate and redundant types ===
 
@@ -104,9 +145,6 @@ intersection_type:
 
 </code>
 
-As this change drops the ''T_AMPERSAND'' token the PHP constant is aliased to
-''T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG'' to keep existing tooling functioning with this change.
-
 ==== Variance ====
 
 Intersection types follow standard PHP variance rules that are already used for inheritance and type checking:
@@ -115,9 +153,10 @@ Intersection types follow standard PHP variance rules that are already used for 
   * Parameter types are contravariant (child must be supertype).
   * Property types are invariant (child must be subtype and supertype).
 
-The only change is in how intersection types interact with subtyping, with one additional rule:
+The only change is in how intersection types interact with subtyping, with two additional rules:
 
-  * An intersection ''%%I_1&...&I_n%%'' is a subtype of ''%%J_1&...&J_m%%'' if for all ''%%J_k%%'', ''%%I_l%%'' is not a supertype of ''%%J_k%%''.
+  * ''%%A%%'' is a subtype of ''%%B_1&...&B_n%%'' if for all ''%%B_i%%'', ''%%A%%'' is a subtype of ''%%B_i%%''
+  * ''%%A_1&...&A_n%%'' is a subtype of ''%%B%%'' if there exists an ''%%A_i%%'' such that ''%%A_i%%'' is a subtype of ''%%B%%''
 
 In the following, some examples of what is allowed and what isn't are given.
 
