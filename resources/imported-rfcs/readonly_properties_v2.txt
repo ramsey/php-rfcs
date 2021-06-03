@@ -192,7 +192,7 @@ class B extends A {
 }
 </PHP>
 
-Here, initialization of ''B::$prop'' would be permitted both from inside ''A'' and ''B'', as both classes declare the property. A possible alternative would be to allow initialization only from ''B''. (Open question?)
+Here, initialization of ''B::$prop'' would be permitted both from inside ''A'' and ''B'', as both classes declare the property. A possible alternative would be to allow initialization only from ''B'', though that would mean that a redeclaration in a child class could break usage in a parent class.
 
 When the same property is imported from two traits, the ''readonly'' modifiers must match:
 
@@ -211,7 +211,7 @@ class C {
 
 One could argue that it should be possible to merge with a readonly and a readwrite property into a readwrite property. However, other modifiers currently also require strict equality, for example it is not possible to merge a public and a protected property. If these rules should be relaxed, they should be relaxed consistently.
 
-Types on readonly properties remain invariant. (Open question?) One could argue that types of readonly properties should be covariant instead:
+Types on readonly properties remain invariant. One could argue that types of readonly properties should be covariant instead:
 
 <PHP>
 class A {
@@ -222,15 +222,94 @@ class B extends A {
 }
 </PHP>
 
-Covariance would hold for reads from the property, but not for the initializing assignment, which is permitted from both ''A'' and ''B'' here. If covariance is allowed, we should probably only permit initialization from ''B'', as it would be strictly correct then.
+Covariance would hold for reads from the property, but not for the initializing assignment, which is permitted from both ''A'' and ''B'' here. I believe that covariance would only be truly correct if the parent property were abstract, which is currently not supported. A relaxation to covariant semantics would always be possible in the future.
 
 ==== Unset ====
 
-TBD
+Readonly properties cannot be unset once they are initialized:
+
+<PHP>
+class Test {
+    public readonly int $prop;
+
+    public function __construct() {
+        $this->prop = 1;
+        unset($this->prop);
+        // Error: Cannot unset readonly property Test::$prop
+    }
+}
+</PHP>
+
+However, it is possible to unset a readonly property prior to initialization, from the scope where the property has been declared. Just like with normal typed properties, explicitly unsetting the property makes it visibile to magic methods. In particular, this enabled the usual lazy initialization pattern to work:
+
+<PHP>
+class Test {
+    public readonly int $prop;
+
+    public function __construct() {
+        unset($this->prop);
+    }
+
+    public function __get($name) {
+        if ($name === 'prop') {
+            $this->prop = $this->lazilyComputeProp();
+        }
+        return $this->$name;
+    }
+}
+</PHP>
+
+==== Reflection ====
+
+A ''ReflectionProperty::isReadOnly()'' method is added, which reports whether a property is declared as read-only. ''ReflectionProperty::getModifiers()'' will also report a ''ReflectionProperty::IS_READONLY'' flag.
 
 ===== Rationale =====
 
-TBD
+The readonly property concept introduced in this proposal provides strong immutability guarantees, which apply both inside and outside the class. Once a property has been initialized, it cannot be changed under any circumstances.
+
+These guarantees are //too// strong for certain use-cases. For example, some classes may wish to have properties that are publicly readable, but can only be written from within the class. This is a much weaker guarantee, as the value of a property can change during the lifetime of an object. //Both// variants can be useful depending on the situation, and the addition of readonly properties neither precludes nor discourages the addition of asymmetric property visibility.
+
+A special case worth mentioning are classes using clone-based withers:
+
+<PHP>
+class Point {
+    public function __construct(
+        public readonly float $x,
+        public readonly float $y,
+        public readonly float $z,
+    ) {}
+
+    public function withX(float $x): static {
+        // This implementation works:
+        return new static($x, $this->y, $this->z);
+
+        // This implementation does not:
+        $clone = clone $this;
+        $clone->x = $x;
+        return $clone;
+    }
+}
+</PHP>
+
+The clone-based implementation will result in an error, because the ''x'' property on the cloned object is already initialized, and modification is thus rejected. This is by design: The property does indeed get modified post-initialization, and the fact that this is only "temporary" is ultimately irrelevant.
+
+In the future, a [[https://externals.io/message/112624|clone with]] construct, which allows setting properties during the cloning process, would make such implementation compatible with readonly properties. The important difference is that the new value for the property is assigned directly, without assigning the old cloned value first.
+
+Alternatively, such properties could use a future asymmetric visibility concept, though it does not express the actual invariant as precisely.
+
+This proposal is very similar to the previously declined [[rfc:write_once_properties|Write-Once Properties]] RFC. I think that a key mistake of that RFC was specifically the "write-once" framing. While maybe technically accurate, it makes for confusing messaging, as the intended API contract is that of "read-only", not "write-once". It stands to reason that a readonly property still needs to be initialized at some point, and there is no need to put a particular focus on that initialization.
+
+This proposal does deviate from the write-once properties RFC in one significant respect: Initialization is only allowed from within the declaring class (modulo the usual rebinding and reflection workarounds). This ensures that these properties are always read-only from a public API perspective, even if they don't get initialized in the class constructor. The "write-once" limitation is intended specifically for initialization, not as a one-shot communication channel.
+
+This also ensures that a potential future "clone with" implementation will only be able to modify readonly properties from private scope and thus cannot bypass additional invariants imposed by the implementation when used from a different scope.
+
+This RFC overlaps with the [[rfc:property_accessors|Property Accessors RFC]]. In particular, it implements the "only implicit get" aspect, though not with the exact same semantics. As mentioned on the RFC, I'm not convinced that the full complexity of accessors is truly warranted. Supporting readonly properties and asymmetric visibility would cover a signficant portion of the use-cases, at a lower language complexity cost.
+
+It is worth noting that having a readonly property feature does not preclude introduction of accessors. C# supports both readonly properties and accessors. C# provides properties with implicit backing storage through accessor syntax, but this is not the only way to do it. For example, Swift has special syntax for asymmetric visibility, rather than specifying visibility on implicitly implemented accessors.
+
+Even if we have property accessors, I believe it may be worthwhile to limit them to computed properties only, and solve use-cases that involve engine-managed storage through other mechanisms, such as readonly properties and property-level asymmetric visibility. This avoids confusion relating to the two kinds of accessors, and also allows us to make their behavior independent of accessor constraints. For example, a first-class asymmetric visibility feature would shield the user from considering distinctions such as ''get;'' vs ''&get;'' accessors. These are externalities of the general accessor feature and not needed for asymmetric visibility.
+
+A separate implementation can also be more efficient. After initialization, a readonly property will have the same performance characteristics as a normal property. Accessor-based properties, even with implicit storage, still carry a performance penalty.
 
 ===== Backward Incompatible Changes =====
 
