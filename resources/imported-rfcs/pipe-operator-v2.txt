@@ -1,5 +1,5 @@
 ====== PHP RFC: Pipe Operator v2 ======
-  * Version: 0.4
+  * Version: 2
   * Date: 2020-04-20
   * Author: Larry Garfield <larry@garfieldtech.com>
   * Status: Under Discussion
@@ -24,7 +24,7 @@ $mostExpensiveItem = mostExpensiveItem($shoppingList, ['exclude' => 'onSale']);
 $promotions = getPromotions($mostExpensiveItem, $holiday);
 </code>
 
-That, however, is still rather verbose and requires defining intermediary variables, and thus either coming up with  names for them or using generic placeholder names like `$x`.  The result is still error prone and it is possible to get confused by the variable names without realizing it.
+That, however, is still rather verbose and requires defining intermediary variables, and thus either coming up with  names for them or using generic placeholder names like `$x`.  The result is still error prone and it is possible to get confused by the variable names without realizing it.  It's also not intuitively obvious that what's happening is passing the output of one function to the next.
 
 In OOP, it's common to answer "well use a fluent interface," which might look like this:
 
@@ -41,7 +41,7 @@ This RFC aims to improve this type of code with the introduction of a "Pipe Oper
 
 ===== Proposal =====
 
-This RFC introduces a new operator `|>`, "pipe".  Pipe evaluates left to right by passing the value (or expression result) on the left as the first parameter to the callable on the right.  That is, the following two code fragments are exactly equivalent:
+This RFC introduces a new operator ``|>``, "pipe".  Pipe evaluates left to right by passing the value (or expression result) on the left as the first parameter to the callable on the right.  That is, the following two code fragments are exactly equivalent:
 
 <code php>
 $result = "Hello World" |> 'strlen';
@@ -69,33 +69,60 @@ $result = array_filter(
     );
 </code>
 
-Or, more practically, the example at the start of this RFC could be written as:
+The left-hand side of the pipe may be any value or expression.  The right-hand side may be any valid PHP callable that takes a single parameter, or any expression that evaluates to such a callable.  Functions with more than one required parameter are not allowed and will fail as if the function were called normally with insufficient arguments.  If the right-hand side does not evaluate to a valid callable it will throw an Error.
+
+While any callable style may be used, in practice the [[rfc:partial_function_application|Partial Function Application]] RFC will enable a very clear and readable syntax for use with pipes.  For instance, the previous example could instead be written:
+
+
+<code php>
+$result = "Hello World"
+    |> htmlentities(?)
+    |> explode(?)
+    |> array_map(strtoupper(?), ?)
+    |> array_filter(?, fn($v) => $v != 'O');
+</code>
+
+And the example from the start of this RFC could be written as:
 
 <code php>
 $holiday = "Lincoln's Birthday";
 $result = getCurrentUser()
-   |> fn($x) => getShoppingList($x, 'wishlist')
-   |> fn($x) => mostExpensiveItem($x, ['exclude' => 'onSale'])
-   |> fn($x) => getPromotions($x, $holiday);
+   |> getShoppingList(?, 'wishlist')
+   |> mostExpensiveItem(?, ['exclude' => 'onSale'])
+   |> getPromotions(?, $holiday);
 </code>
 
-The left-hand side of the pipe may be any value or expression.  The right-hand side may be any valid PHP callable that takes a single parameter, or any expression that evaluates to such a callable.  Functions with more than one required parameter are not allowed and will fail as if the function were called normally with insufficient arguments.  If the right-hand side does not evaluate to a valid callable it will throw an Error.
-
 Functions that accept their first parameter by reference are supported, and will behave exactly as if they were called in the normal "inside out" fashion.  However, unless they return a value as well they are not of much use.
+
+
 
 The pipe operator evaluates immediately.  It does not produce a new function.  However, it is simple to produce a new function by writing an arrow function:
 
 <code php>
 $holiday = "Lincoln's Birthday";
 $new_function = fn($user) => $user
-   |> fn($x) => getShoppingList($x, 'wishlist')
-   |> fn($x) => mostExpensiveItem($x, ['exclude' => 'onSale'])
-   |> fn($x) => getPromotions($x, $holiday);
+   |> getShoppingList(?, 'wishlist')
+   |> mostExpensiveItem(?, ['exclude' => 'onSale'])
+   |> getPromotions(?, $holiday);
 
 $new_function(getCurrentUser());
 </code>
 
 ===== More robust example with PSR-7 =====
+
+With partial functions:
+
+<code php>
+ServerRequest::fromGlobals()
+    |> authenticate(?)
+    |> $router->resolveAction(?)
+    |> fn($request) => $request->getAttribute('action')($request)
+    |> renderResult(?)
+    |> buildResponse(?)
+    |> emit(?);
+</code>
+
+Without partial functions:
 
 <code php>
 ServerRequest::fromGlobals()
@@ -133,7 +160,10 @@ function itfilter(callable $c) {
 }
 
 // And now comprehension-like behavior can be written using pipes:
-$new_list = $list |> itmap(fn($x) => $x*2) |> itfilter(fn($x) => $x %2) |> 'iterator_to_array';
+$new_list = $list 
+  |> itmap(fn($x) => $x*2) 
+  |> itfilter(fn($x) => $x %2) 
+  |> iterator_to_array(?);
 </code>
 
 Any combination of map, filter, reduce, or other array-oriented operation can be wrapped up this way and added to a pipe chain, allowing a similar result to comprehensions without a one-off syntax, and can be mixed-and-matched with any other callable as appropriate.
@@ -154,7 +184,7 @@ Several languages already support a pipe operator, using similar or identical sy
 
 Hack has [[https://docs.hhvm.com/hack/expressions-and-operators/pipe|very similar functionality]], also using the `|>` operator.  However, in Hack the operator's right-hand side is an arbitrary expression in which a special placeholder, `$$` is used to indicate where the left-hand side should be injected.  Effectively it becomes a one-off form of partial application.
 
-That is atypical among languages with such functionality and introduces additional questions about what sigil to use and other implementation details.  The RFC authors opted to avoid the one-off partial application in favor of a narrower implementation for simplicity.  A more holistic approach to partial application would be naturally beneficial here, however.  (See "Future work", below.)
+That is atypical among languages with such functionality and introduces additional questions about what sigil to use and other implementation details.  The RFC authors believe that a fully-fleshed out partial function application syntax (in a separate RFC) is superior, and integrates cleanly with this RFC.
 
 The Hack syntax was the subject of the [[https://wiki.php.net/rfc/pipe-operator|v1 Pipe Operator RFC]].
 
@@ -194,31 +224,7 @@ A pipeline operator `|>` has been [[https://developer.mozilla.org/en-US/docs/Web
 
 This RFC is deliberately kept small and contained.  However, it naturally complements other RFCs under consideration, by design.
 
-* [[https://wiki.php.net/rfc/partial_function_application|Generic partial application]].  An RFC for this already exists, but does not yet have an implementation.  This approach would allow for folding almost any multi-parameter function into a single-parameter function, including offering a clean way to reference a single parameter function by name.  That would resolve the issues around referencing functions by name in the pipe right-hand side.
-
-For instance, the above examples could be rewritten as follows:
-
-<code php>
-$holiday = "Lincoln's Birthday";
-$result = getCurrentUser()
-   |> getShoppingList(?, 'wishlist')
-   |> mostExpensiveItem(?, ['exclude' => 'onSale'])
-   |> getPromotions(?, $holiday);
-   
-ServerRequest::fromGlobals()
-    |> authenticate(?)
-    |> $router->resolveAction(?)
-    |> fn($request) => $request->getAttribute('action')($request)
-    |> renderResult(?)
-    |> buildResponse(?)
-    |> emit(?);
-    
-$new_list = $list 
-  |> itmap(fn($x) => $x*2) 
-  |> itfilter(fn($x) => $x %2) 
-  |> iterator_to_array(?);
-</code>
-
+* [[https://wiki.php.net/rfc/partial_function_application|Generic partial application]].  This RFC already exists, and will hopefully be approved in the near future.  It allows virtually any function to be partially applied to produce a single-parameter function, which is then compatible with ''|>'', as well as referencing an existing single-parameter function by name.  The examples further up show how the two RFCs complement each other nicely.
 
 * [[rfc:short-functions|Short functions]].  The short-functions RFC would combine with pipe to make writing named functions that simply invoke a pipeline of other functions trivial and nicely compact, like so:
 
