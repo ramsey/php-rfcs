@@ -103,7 +103,7 @@ Because so much existing code uses string concatenation, and because it does not
 
 [[https://3v4l.org/#focus=rfc.literals|Have a play with it on 3v4l.org]]
 
-[[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4|How it can be used by libraries]] - Notice how this example library provides an //"unsafe_value"// value-object to bypass the //is_literal()// check, but doesn't need to use it (it's useful as a temporary thing, but there are much safer/better solutions, which developers are/should already be using). And note how it just raises a warning, to simply let the developer know about the issue, **without breaking anything.**
+[[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4|How it can be used by libraries]] - Notice how this example library just raises a warning, to simply let the developer know about the issue, **without breaking anything**. And it provides an //"unsafe_value"// value-object to bypass the //is_literal()// check, but none of the examples need to use it (can be useful as a temporary thing, but there are much safer/better solutions, which developers are/should already be using).
 
 ===== FAQ's =====
 
@@ -316,7 +316,7 @@ $sql = literal_concat($sql, ' ORDER BY name ', $sortOrder);
 
 ==== Other Functions ====
 
-**Why not support other string functions?** It would make the implementation far too complicated. For example //strtoupper()// might seem reasonable, but its output varies based on the current locale (no longer a string written by the developer); and functions like //str_shuffle()// would create unpredictable results ;-)
+**Why not support other string functions?** We might do, but like [[#string_splitting|String Splitting]], we can't find any use cases, and don't want to make this complicated (just identifying strings defined in the PHP source code). For example //strtoupper()// might be reasonable, but we will need to consider how it would be used (good and bad), and check for any oddities (e.g. output varying based on the current locale). Also, functions like //str_shuffle()// create unpredictable results.
 
 ==== Int/Float/Boolean Values ====
 
