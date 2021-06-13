@@ -1,5 +1,5 @@
-====== PHP RFC: CachedIterable (rewindable, allows any key&repeating keys)  ======
-  * Version: 0.2
+====== PHP RFC: ImmutableKeyValueSequence (immutable, rewindable, memory-efficient, allows any key&repeating keys)  ======
+  * Version: 0.3
   * Date: 2021-02-06
   * Author: Tyson Andre, tandre@php.net
   * Status: Under Discussion
@@ -11,7 +11,7 @@
 Currently, PHP does not provide a built-in way to store the state of an arbitrary iterable for reuse later (when the iterable has arbitrary keys, or when keys might be repeated). It would be useful to do so for many use cases, such as:
 
   - Creating a rewindable copy of a non-rewindable Traversable (e.g. a ''Generator'') before passing that copy to a function that consumes an iterable/Traversable. (''new CachedIterator(my_generator())'')
-  - Generating an ''IteratorAggregate'' from a class still implementing ''Iterator'' (e.g. ''SplObjectStorage'') so that code can independently iterate over the key-value sequences. \\ (e.g. ''foreach ($cachedIterable as $k1 => $v1) { foreach ($cachedIterable as $k2 => $v2) { /* process pairs */ } }'')
+  - Generating an ''IteratorAggregate'' from a class still implementing ''Iterator'' (e.g. ''SplObjectStorage'') so that code can independently iterate over the key-value sequences. \\ (e.g. ''foreach ($immutableKeyValueSequence as $k1 => $v1) { foreach ($immutableKeyValueSequence as $k2 => $v2) { /* process pairs */ } }'')
   - Providing internal or userland helpers such as ''iterable_flip(iterable $input)'', ''iterable_take(iterable $input, int $limit)'', ''iterable_chunk(iterable $input, int $chunk_size)'' that act on iterables with arbitrary key/value sequences and have return values including iterables with arbitrary key/value sequences
   - Providing constant time access to both keys and values of arbitrary key-value sequences at any offset (for binary searching on keys and/or values, etc.)
 
@@ -19,18 +19,18 @@ Having this implemented as an internal class would also allow it to be [[#benchm
 
 ===== Proposal =====
 
-Add a class ''CachedIterable'' that contains an immutable copy of the keys and values of the iterable it was constructed from. (references inside of arrays within those keys/values will remain modifiable references, and objects within those keys/values will remain mutable)
+Add a class ''ImmutableKeyValueSequence'' that contains an immutable copy of the keys and values of the iterable it was constructed from. (references inside of arrays within those keys/values will remain modifiable references, and objects within those keys/values will remain mutable)
 
 <code php>
-final class CachedIterable implements IteratorAggregate, Countable, JsonSerializable
+final class ImmutableKeyValueSequence implements IteratorAggregate, Countable, JsonSerializable
 {
     public function __construct(iterable $iterator) {}
     public function getIterator(): InternalIterator {}
     public function count(): int {}
     // [[$key1, $value1], [$key2, $value2]]
-    public static function fromPairs(array $pairs): CachedIterable {}
+    public static function fromPairs(array $pairs): ImmutableKeyValueSequence {}
     // [[$key1, $value1], [$key2, $value2]]
-    public function toPairs(): array{} 
+    public function toPairs(): array{}
     public function __serialize(): array {}  // [$k1, $v1, $k2, $v2,...]
     public function __unserialize(array $data): void {}
 
@@ -40,17 +40,17 @@ final class CachedIterable implements IteratorAggregate, Countable, JsonSerializ
     // useful to efficiently get offsets at the middle/end of a long iterable
     public function keyAt(int $offset): mixed {}
     public function valueAt(int $offset): mixed {}
-    
+
     // '[["key1","value1"],["key2","value2"]]' instead of '{...}'
     public function jsonSerialize(): array {}
     // dynamic properties are forbidden
 }
 </code>
 
-CachedIterables are IteratorAggregates, so foreach loops do not interfere with each other.
+ImmutableKeyValueSequences are IteratorAggregates, so foreach loops do not interfere with each other.
 
 <code php>
-$x = new CachedIterable([0 => 100, 'key' => 'value']);
+$x = new ImmutableKeyValueSequence([0 => 100, 'key' => 'value']);
 foreach ($x as $key1 => $value1) {
     echo "$key1 $value1:\n";
     foreach ($x as $key2 => $value2) {
@@ -67,9 +67,15 @@ key value:
  */
 </code>
 
-==== CachedIterables can be used to cache and efficiently process results of Traversables ====
+==== ImmutableKeyValueSequences can be used to cache and efficiently process results of Traversables ====
 
-CachedIterables can be created from any iterable (arrays or Traversables). They eagerly evaluate the results of Traversables (e.g. Generators) and store an exact copy of the keys and values that can be processed in many ways.
+ImmutableKeyValueSequences can be created from any iterable (arrays or Traversables). They eagerly evaluate the results of Traversables (e.g. Generators) and store an exact copy of the keys and values that can be processed in many ways.
+
+In comparison to php's ''array''/''ArrayObject'' type:
+  
+  * Arrays can only store integers and strings
+  * Arrays coerce stringified integers to integers, potentially causing unexpected Errors/notices (especially when ''strict_types=1'')
+  * Arrays cannot represent repeated keys
 
 <code php>
 function my_generator() {
@@ -80,7 +86,7 @@ function my_generator() {
     echo "Finished iterating over the generator\n";
 }
 
-$x = new CachedIterable(my_generator());
+$x = new ImmutableKeyValueSequence(my_generator());
 foreach ($x as $k => $v) {
     printf("%s: %s\n", json_encode($k), json_encode($v));
 }
@@ -102,20 +108,22 @@ printf("Last key: %s\n", json_encode($x->keyAt(count($x) - 1)));
 // Last key: ["an array"]
 </code>
 
-==== CachedIterables are immutable ====
+==== ImmutableKeyValueSequences are immutable ====
 
-CachedIterable is a final class.
+ImmutableKeyValueSequence is a final class.
 
-Dynamic properties are forbidden on CachedIterables.
+Dynamic properties are forbidden on ImmutableKeyValueSequences.
 
-The keys and values of the CachedIterable cannot be modified or appended to after an instance is constructed, though objects and references within those values can be modified.
+The keys and values of the ImmutableKeyValueSequence cannot be modified or appended to after an instance is constructed, though objects and references within those values can be modified.
 
-==== CachedIterables can be created from pairs ====
+This makes it useful for returning to wrap the keys and values that would be returned by a generator or single-use ''Iterator'' (it can't be modified after being constructed by other applications or libraries)
+
+==== ImmutableKeyValueSequences can be created from pairs ====
 
 This can be done imperatively, to avoid the need to manually create a generator with the sequence of keys and values to pass to the constructor. The values of an iterable (array or Traversable) can be used.
 
 <code php>
-$it = CachedIterable::fromPairs([['first', 'x'], [(object)['key' => 'value'], null]]);
+$it = ImmutableKeyValueSequence::fromPairs([['first', 'x'], [(object)['key' => 'value'], null]]);
 foreach ($it as $key => $value) {
     printf("key=%s value=%s\n", json_encode($key), json_encode($value));
 }
@@ -125,7 +133,7 @@ key={"key":"value"} value=null
 */
 var_dump($it);
 /*
-object(CachedIterable)#2 (1) {
+object(ImmutableKeyValueSequence)#2 (1) {
   [0]=>
   array(2) {
     [0]=>
@@ -139,19 +147,19 @@ php > echo json_encode((array)$it), "\n";
 [["first","x"],[{"key":"value},null]]
 </code>
 
-CachedIterables can also be converted back into pairs for further processing (e.g. using the wide array of helper methods php has for processing arrays):
+ImmutableKeyValueSequences can also be converted back into pairs for further processing (e.g. using the wide array of helper methods php has for processing arrays):
 
 <code php>
-php > $reversedIt = CachedIterable::fromPairs(array_reverse($it->toPairs()));
+php > $reversedIt = ImmutableKeyValueSequence::fromPairs(array_reverse($it->toPairs()));
 php > echo json_encode($reversedIt->toPairs());
 [[{"key":"value"},null],["first","x"]]
 </code>
 
 ===== Benchmarks =====
 
-==== CachedIterables are memory-efficient ====
+==== ImmutableKeyValueSequences are memory-efficient ====
 
-Similarly to how ''SplFixedArray'' is a memory-efficient way to store a list of values, ''CachedIterable'' is a memory-efficient way to store a sequence of arbitrary keys and values.
+Similarly to how ''SplFixedArray'' is a memory-efficient way to store a list of values, ''ImmutableKeyValueSequence'' is a memory-efficient way to store a sequence of arbitrary keys and values.
 
 <code php>
 <?php
@@ -166,10 +174,10 @@ function show_array_memory(int $n) {
 function show_cachediterable_memory(int $n) {
     gc_collect_cycles();
     $before = memory_get_usage();
-    // create a CachedIterable from an **associative** array of size $n
-    $result = new CachedIterable(array_flip(range(10, 10 + $n - 1)));
+    // create a ImmutableKeyValueSequence from an **associative** array of size $n
+    $result = new ImmutableKeyValueSequence(array_flip(range(10, 10 + $n - 1)));
     $after = memory_get_usage();
-    printf("CachedIterable memory: (n=%5d) %7d bytes\n", count($result), $after - $before);
+    printf("ImmutableKeyValueSequence memory: (n=%5d) %7d bytes\n", count($result), $after - $before);
 }
 foreach ([1, 8, 12, 16, 2**16] as $n) {
     show_array_memory($n);
@@ -177,28 +185,28 @@ foreach ([1, 8, 12, 16, 2**16] as $n) {
 }
 /*
 array memory:          (n=    1)     376 bytes
-CachedIterable memory: (n=    1)      88 bytes
+ImmutableKeyValueSequence memory: (n=    1)      88 bytes
 array memory:          (n=    8)     376 bytes
-CachedIterable memory: (n=    8)     312 bytes
+ImmutableKeyValueSequence memory: (n=    8)     312 bytes
 array memory:          (n=   12)    1336 bytes
-CachedIterable memory: (n=   12)     440 bytes
+ImmutableKeyValueSequence memory: (n=   12)     440 bytes
 array memory:          (n=   16)    1336 bytes
-CachedIterable memory: (n=   16)     568 bytes
+ImmutableKeyValueSequence memory: (n=   16)     568 bytes
 array memory:          (n=65536) 4198480 bytes
-CachedIterable memory: (n=65536) 2097232 bytes
+ImmutableKeyValueSequence memory: (n=65536) 2097232 bytes
  */
 </code>
 
-==== CachedIterables are much more efficient than a polyfill object ====
+==== ImmutableKeyValueSequences are much more efficient than a polyfill object ====
 
 For a simple example, this uses much less time to construct. It is almost 6 times faster to iterate over and process results than a polyfill in that example, and uses half as much additional memory.
 
 <code php>
 <?php
 /*
-Time to construct PolyfillIterator: 0.087226, Time to iterate: 0.183351, memory usage: 67117328
+Time to construct PolyfillKeyValueSequence: 0.087226, Time to iterate: 0.183351, memory usage: 67117328
 result:999000000
-Time to construct   CachedIterable: 0.051358, Time to iterate: 0.021905, memory usage: 32002128
+Time to construct   ImmutableKeyValueSequence: 0.051358, Time to iterate: 0.021905, memory usage: 32002128
 result:999000000
  */
 
@@ -206,11 +214,11 @@ result:999000000
  * THIS IS AN INCOMPLETE POLYFILL THAT ONLY SUPPORTS ITERATION, AND DOES NOT INCLUDE ERROR HANDLING.
  *
  * Barely any of the functionality in the proposal is implemented.
- * This is just here to compare a fast (in terms of time to iterate) userland polyfill against CachedIterable.
- * 
+ * This is just here to compare a fast (in terms of time to iterate) userland polyfill against ImmutableKeyValueSequence.
+ *
  * Not an IteratorAggregate for simplicity.
  */
-class PolyfillIterator implements Iterator {
+class PolyfillKeyValueSequence implements Iterator {
     public $i = 0;
     public $count = 0;
     public $keys;
@@ -257,12 +265,12 @@ function benchmark(string $class) {
     printf("Time to construct %16s: %.6f, Time to iterate: %.6f, memory usage: %d\nresult:%d\n",
         $class, $t2 - $t1, $t3 - $t2, $memory_usage_2 - $memory_usage_1, $total);
 }
-benchmark(PolyfillIterator::class);
-benchmark(CachedIterable::class);
+benchmark(PolyfillKeyValueSequence::class);
+benchmark(ImmutableKeyValueSequence::class);
 </code>
-==== CachedIterables support constant-time access to keys and values ====
+==== ImmutableKeyValueSequences support constant-time access to keys and values ====
 
-CachedIterables support constant-time access to keys and values, allowing the result to be used in a wide variety of ways in an applicat.
+ImmutableKeyValueSequences support constant-time access to keys and values, allowing the result to be used in a wide variety of ways in an applicat.
 For example, it is possible to do binary search on keys (and/or values) without using any additional time or memory to create a copy of the keys.
 (Same for values).
 
@@ -272,7 +280,7 @@ For example, it is possible to do binary search on keys (and/or values) without 
  * @return int the offset of the first key in $it that is >= $target.
  * Returns count($it) if all keys are smaller than $target.
  */
-function do_binary_search_on_key(CachedIterable $it, int $target) {
+function do_binary_search_on_key(ImmutableKeyValueSequence $it, int $target) {
     $lowOffset = 0;
     $highOffset = count($it) - 1;
     while ($lowOffset <= $highOffset) {
@@ -297,7 +305,7 @@ for ($i = 0; $i < $N; $i++) {
     $data[mt_rand()] = "value$i";
 }
 ksort($data);
-$it = new CachedIterable($data);
+$it = new ImmutableKeyValueSequence($data);
 
 do_binary_search_on_key($it, mt_rand());
 /*
@@ -316,16 +324,17 @@ offset 198 has the first key (459587085) >= 457052171 : associated value=value53
 </code>
 
 ===== Backward Incompatible Changes =====
-None, except that the class name ''CachedIterable'' will be declared by PHP and conflict with applications declaring the same class name in that namespace.
+None, except that the class name ''ImmutableKeyValueSequence'' will be declared by PHP and conflict with applications declaring the same class name in that namespace.
 
 ===== Proposed PHP Version(s) =====
 8.1
 
 ===== Future Scope =====
 
-  * This will enable adding internal iterable functions such as ''*take(iterable $input, int $limit): CachedIterable'' or ''*flip(iterable $input): CachedIterable'' or 
-  * More methods may be useful to add to ''CachedIterable'', e.g. for returning a sorted copy, returning a slice(range of entries), returning a copy sorted by keys/values, quickly returning the index/corresponding value of the first occurrence of ''mixed $key'' etc.
+  * This will enable adding internal iterable functions such as ''*take(iterable $input, int $limit): ImmutableKeyValueSequence'' or ''*flip(iterable $input): ImmutableKeyValueSequence'' or
+  * More methods may be useful to add to ''ImmutableKeyValueSequence'', e.g. for returning a sorted copy, returning a slice(range of entries), returning a copy sorted by keys/values, quickly returning the index/corresponding value of the first occurrence of ''mixed $key'' etc.
   * This may or may not be useful for future data types, e.g. a ''MapObject'' (hash map on any key type) type and may potentially be useful for converting some existing internal/user-defined ''Iterable'' types to ''IteratorAggregate'' types.
+    * A new ''IterableAggregate'' subclass such as ''CachedIterator'' could be added to compute values [[https://en.wikipedia.org/wiki/Lazy_evaluation|lazily(on-demand)]] in contrast to ''ImmutableKeyValueSequence'', which [[https://en.wikipedia.org/wiki/Eager_evaluation|evaluates the entire iterable in the constructor]].
 
 ===== Proposed Voting Choices =====
 Yes/No, requiring a 2/3 majority.
@@ -333,7 +342,7 @@ Yes/No, requiring a 2/3 majority.
 ===== References =====
 
   * [[https://externals.io/message/113061#113066|Proposal: Add ReverseArrayIterator and ForwardArrayIterator to SPL]]
-  * [[rfc:cachediterable_straw_poll|Straw poll: Namespace to use for CachedIterable and iterable functionality]]
+  * [[rfc:cachediterable_straw_poll|Straw poll: Namespace to use for ImmutableKeyValueSequence and iterable functionality]]
 
 ===== Rejected Features =====
 
@@ -344,6 +353,80 @@ From https://github.com/php/php-src/pull/6655#issuecomment-770444285
 I think ''ArrayAccess'' would lead to more bugs in application code for those expecting ''$cachedIt[$i]'' to find the value corresponding to the first key occurrence of ''$i'' - adding ''keyAt(int $offset): mixed'', ''valueAt(int $offset): mixed'', ''keyIndex(mixed $key): int'', ''valueIndex(mixed $value): int'' would be my preference for fetching values.
 </blockquote>
 
+==== Rejected: Lazy Evaluation ====
+
+''ImmutableKeyValueSequence'' evaluates the entire iterable in its constructor ([[https://en.wikipedia.org/wiki/Eager_evaluation|eagerly]] instead of [[https://en.wikipedia.org/wiki/Lazy_evaluation|lazily]]) for the following reasons:
+
+  * Exceptions will be thrown during construction instead of during iteration or call to count()/keyAt()/valueAt() - it would be unintuitive for those to throw ''SomeUserlandFrameworkException''
+  * This is easier to understand, debug, serialize, and represent
+  * If the underlying iterable (e.g. a Generator) has side effects, having those side effects take place immediately instead of being interleaved with other parts of the program may be easier to reason about.
+  * The majority of use cases of ''Traversable''s would iterate over the entire Traversable at some point.
+  * Eagerly evaluating iterables reduces the memory needed by the implementation. The amount of memory needed to represent this is much lower (without the need to store the underlying iterable, potentially the most recent exception(s) thrown by the undlying iterable, etc).
+
+The addition of an iterable library class that evaluates arguments on-demand is mentioned in the "future scope" section.
+
+https://externals.io/message/114805#114798
+
+<blockquote>
+<blockquote>
+2) Userland library/application authors that are interested in lazy generators could use or implement something
+such as https://github.com/nikic/iter instead. My opinion is that the standard library should provide
+something that is easy to understand, debug, serialize or represent, etc.
+I expect the inner iterable may be hidden entirely in a (lazy) CachedIterable from var_dump as an implementation detail.
+
+3) It would be harder to understand why SomeFrameworkException is thrown in code unrelated to that framework
+when a lazy (instead of eager) iterable is passed to some function that accepts a generic iterable,
+and harder to write correct exception handling for it if done in a lazy generation style.
+
+Many RFCs have been rejected due to being perceived as being likely to be misused in userland or
+to make code harder to understand.
+
+4) It is possible to implement a lazy alternative to (ImmutableKeyValueSequence) that only loads values as needed.
+However, I hadn't proposed it due to doubts that 2/3 of voters would consider it widely useful
+enough to be included in php rather than as a userland or PECL library.
+</blockquote>
+
+CachedIterable should load from the underlying
+datastore lazily -- there is hardly any visible impact from the user
+if this happens, because for the most part it looks and behaves the
+same as it does today. The only visible changes are around loading
+data from the underlying iterable.
+
+For example, if the user calls the count method on the CachedIterable,
+it would then load the remainder of the underlying data-store (and
+then drop its reference to it). If the user asks for valueAt($n) and
+it's beyond what's already loaded and we haven't finished consuming
+the underlying iterable, then it would load until $n is found or the
+end of the store is reached.
+
+I understand your concerns with map, filter, etc. CachedIterable
+is different because it holds onto the data, can be iterated over more
+than once, including the two nested loop cases, even if it loads data
+from the underlying iterable on demand.
+</blockquote>
+
+<blockquote>
+<blockquote>
+Thanks for explaining 4 months ago about my concern.
+I think I understand the main real impact of an eager iterable cache vs a lazy iterable cache from a functional point of view:
+
+  * exceptions are thrown during construction vs during the first iteration
+  * predictable performance also on the first iteration.
+
+How did you gather the information that eager implementation is more valuable than lazy one? I'm mostly curious also how to assess this as technically to me it also looks the other way around. Maybe mention that in the RFC.
+I was even thinking that CachedIterable should be lazy and an EagerCachedIterable would be built upon that with more methods. Or have it in the same class with a constructor parameter.
+</blockquote>
+
+One of the reasons was size/efficiency. Adding the functionality to support lazy evaluation would require extra properties to track internal state and extra checks at runtime,
+point to the original iterable and the functions being applied to that iterable - so an application that creates lots of small/empty cached iterables would have a higher memory usage.
+
+Having a data structure that tries to do everything would do other things poorly
+(potentially not support serialization, use more memory than necessary,
+have unintuitive behaviors when attempting to var_export/var_dump it,
+surprisingly throw when being iterated over, etc)
+</blockquote>
+
 ==== Changelog ====
 
   * 0.2: Use optimized build with opcache enabled for benchmark timings
+  * 0.3: Rename from CachedIterable to ImmutableKeyValueSequence (the lack of clarity about the functionality associated with the name CachedIterable being eagerly evalulated was mentioned *after* most of the responses to the straw poll were already submitted)
