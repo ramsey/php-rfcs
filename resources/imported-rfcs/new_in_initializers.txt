@@ -7,7 +7,7 @@
 
 ===== Introduction =====
 
-This RFC proposes to allow use of ''new'' expressions inside initializer expressions, including for property and parameter default values.
+This RFC proposes to allow use of ''new'' expressions inside parameter default values, attribute arguments, static variable initializers and global constant initializers.
 
 Currently, code such as the following is not permitted:
 
@@ -35,11 +35,11 @@ class Test {
 
 This makes the actual default value less obvious (from an API contract perspective), and requires the use of a nullable argument.
 
-This RFC proposes to relax this restriction and allow the use of ''new'' inside all initializer expressions.
+This RFC proposes to relax this restriction and allow the use of ''new'' inside certain initializer expressions.
 
 ===== Proposal =====
 
-''new'' expressions are allowed as part of initializer expressions. It is possible to pass arguments to the constructor, including the use of named arguments:
+''new'' expressions are allowed as part of certain initializer expressions. It is possible to pass arguments to the constructor, including the use of named arguments:
 
 <PHP>
 // All allowed:
@@ -63,80 +63,50 @@ function test(
 ) {}
 </PHP>
 
-Affected positions are static variable intializers, constant and class constant initializers, static and non-static property intializers, parameter default values, as well as attribute arguments:
+New expressions are allowed in parameter default values, attribute arguments, static variable initializers and global class constant initializers. Parameter default values also include defaults for promoted properties:
 
 <PHP>
 static $x = new Foo;
 
 const C = new Foo;
 
+function test($param = new Foo) {}
+
 #[AnAttribute(new Foo)]
 class Test {
-    const C = new Foo;
-    public static $prop = new Foo;
-    public $prop = new Foo;
+    public function __construct(
+        public $prop = new Foo,
+    ) {}
 }
-
-function test($param = new Foo) {}
 </PHP>
+
+==== Unsupported positions ====
+
+New expressions continue to not be supported in (static and non-static) property initializers and class constant initializers. The reasons for this are twofold:
+
+For non-static property initializers, the initializer expression needs to be evaluated on each object creation. There are currently two places where this could happen: As part of object creation, and as part of the constructor call. Doing this as part of object creation can create issues for unserialization and any other process that is based on ''newInstanceWithoutConstructor()'' and generally does not want to implicitly execute potential side-effects.
+
+Performing the initialization by injecting code in the constructor avoids the issue, but requires that constructor to actually be called. In particular, this would necessitate generating constructors for classes that do not explicitly declare them, and the disciplined invocation of such constructors from potential parent constructors. The third option would be to introduce an additional initialization phase between creation and construction.
+
+For static property initializers and class constant initializers a different evaluation order issue arises. Currently, these initializers are evaluated lazily the first time a class is used in a certain way. Once initializers can contain potentially side-effecting expressions, it would be preferable to have a more well-defined evaluation order. However, the straightforward approach of evaluating initilizers when the class is declared would break certain existing code patterns. In particular, referencing a class that is declared later in the same file would no longer work.
+
+The discussion has not yielded a satisfactory solution for these concerns, as such support in these contexts is delayed until such a time as a consensus on the preferred behavior can be reached.
 
 ==== Order of evaluation ====
 
-Initializer expressions could always contain side-effects through autoloaders or error handlers. However, support for ''new'' and the accompanying construct calls make side-effect a more first-class citizen in initializer expressions, so it is worthwhile to specify when and in what order they are evaluated. This depends on the type of initializer:
+Initializer expressions could always contain side-effects through autoloaders or error handlers. However, support for ''new'' and the accompanying constructor calls make side-effect a more first-class citizen in initializer expressions, so it is worthwhile to specify when and in what order they are evaluated. For the contexts where ''new'' is supported under this proposal:
 
   * Static variable initializers are evaluated when control flow reaches the static variable declaration.
   * Global constant initializers are evaluated when control flow reaches the constant declaration.
   * Attribute arguments are evaluated from left to right on every call of ''ReflectionAttribute::getArguments()'' or ''ReflectionAttribute::newInstance()''.
   * Parameter default values are evaluated from left to right on every call to the function where the parameter is not explicitly passed.
-  * Property default values are evaluated in order of declaration (with parent properties before properties declared in the class) when the object is instantiated. This happens before the constructor is invoked. If an exception is thrown during evaluation, the object destructor will not be invoked.
-  * When a class is declared, all class constants and then all static properties are evaluated (constants and properties from parents are already evaluated at this point). If an exception is thrown during evaluation, then subsequent uses of the class will also throw an ''Error'' exception (this matches what currently happens on evaluation failure).
-  * As an exception, static properties in traits (class constants are not supported in the first place) are not evaluated at declaration time. Evaluation is delayed to the first direct access of a static property on the trait. Static properties in traits should only ever be accessed through a using class. Due to an implementation bug, it is currently possible to access static properties directly on traits, however this possibility will be removed in the future. At that point, static properties in traits will never be evaluated.
 
-==== Interaction with reflection ====
-
-Initializers, or values based on initializers, can be accessed through Reflection in various ways. This section specifies how the different methods behave:
+Additionally, initializers can be accessed through Reflection, in which case the following evaluation semantics apply:
 
   * ''ReflectionFunctionAbstract::getStaticVariables()'': Returns the current value of the static variables and also forces evaluation of any initializers that haven't been reached yet.
   * ''ReflectionParameter::getDefaultValue()'': Evaluates the default value (on each call).
   * ''ReflectionParameter::isDefaultValueConstant()'' and ''ReflectionParameter::getDefaultValueConstantName()'': Do not evaluate the default value.
-  * ''ReflectionClassConstant::getValue()'', ''ReflectionClass::getConstants()'' and ''ReflectionClass::getConstant()'': Returns value of the class constant(s), evaluating the initializer if this has not happened yet. (The returned value is the same as the actual value of the class constant, not a separate evaluation.)
-  * ''ReflectionClass::getDefaultProperties()'' and ''ReflectionProperty::getDefaultValue()'': Evaluates initializers for both static and non-static properties on each call. (NOTE: Due to a pre-existing implementation bug, if opcache is not used, the current value is used instead of the default value for static properties. This is  incorrect, and should be fixed.)
   * ''ReflectionAttribute::getArguments()'' and ''ReflectionAttribute::newInstance()'': Evaluate attribute arguments on each call.
-  * ''ReflectionObject::newInstanceWithoutConstructor()'': Evaluates and assigns default values, even though the constructor is not invoked.
-
-==== Recursion protection ====
-
-If the evaluation of an object property default value results in recursion, an ''Error'' exception is thrown:
-
-<PHP>
-class Test {
-    public $test = new Test;
-}
-
-new Test;
-// Error: Trying to recursively instantiate Test while evaluating default value for Test::$test
-</PHP>
-
-==== Trait property compatibility ====
-
-When two traits declaring the same property are used in a class, a compatibility check is performed, which requires that both use the same initializer. Consider the following example:
-
-<PHP>
-trait T1 {
-    public $prop = new A;
-}
-trait T2 {
-    public $prop = new A;
-}
-
-class B {
-    use T1, T2;
-}
-</PHP>
-
-These properties are not compatible, because trait compatibility is determined using identity comparison (''==='') and both properties hold different instances of the same object. However, we do not want the compatibility check to actually evaluate the ''new'' expressions (and the side-effects this may entail). These should only be evaluated when an object is instantiated.
-
-Initializer expressions are separated into two categories: Non-dynamic (all existing expression types) and dynamic (containing ''new'' -- or other side-effecting expression types in the future). If the initializer of a trait property is dynamic, then it will not be evaluated and always considered incompatible.
 
 ==== Nested attributes ====
 
@@ -148,29 +118,7 @@ It is worth mentioning explicitly that this RFC effectively adds support for nes
 
 ===== Backward Incompatible Changes =====
 
-This RFC introduces a well-defined order for the evaluation of initializers, which differs from the order used in previous PHP versions. In particular, class constant and static property initializers are now evaluated when the class is declared, rather than on first use (where only certain uses of the class are considered). This means that any symbols used in class constant or static property initializers have to be available or loadable at the time of declaration.
-
-The following code will no longer work:
-
-<PHP>
-class X {
-    const C = Y;
-}
-define('Y', 1);
-var_dump(X::C);
-</PHP>
-
-Instead, it should be written as:
-
-<PHP>
-define('Y', 1);
-class X {
-    const C = Y;
-}
-var_dump(X::C);
-</PHP>
-
-For the same reason, classes that have unresolved initializers will not be early-bound. That is, in the above example the declaration of class ''X'' is not hoisted to the top of the script, as doing so would place it before the constant ''define()''.
+This RFC does not introduce any backwards-incompatible changes, and also should not break any major assumptions. The only case where something genuinely new is possible are nested attributes.
 
 ===== Future Scope =====
 
