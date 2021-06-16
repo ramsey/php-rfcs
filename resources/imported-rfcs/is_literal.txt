@@ -244,6 +244,20 @@ While most systems can use literals entirely, these special non-literal values s
 
 [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4#L194|How this can be done with aliases]], or the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4#L229|example Query Builder]].
 
+==== Faking it ====
+
+**What happens if I really want a non-literal to appear as one?**
+
+This implementation does not provide a way for a developer to mark anything they want as a literal. This is on purpose. We do not want to recreate the biggest flaw of Taint Checking. It would be very easy for a naive developer to mark escaped values as a literal, incorrectly seeing this as a "safe" flag.
+
+That said, developers could use this monstrosity in userland:
+
+<code php>
+function unsafe_pretend_this_is_a_literal(&$value) {
+  eval('$value = ' . var_export($value, true) . ';');
+}
+</code>
+
 ==== Usage by Libraries ====
 
 **Could libraries use is_literal() internally?** Yes, they could.
@@ -377,7 +391,8 @@ None known
 
 ===== Open Issues =====
 
-None
+  - Supporting Integers/Interned values.
+  - The name.
 
 ===== Unaffected PHP Functionality =====
 
@@ -385,7 +400,9 @@ None known
 
 ===== Future Scope =====
 
-As noted by MarkR, the biggest benefit will come when this flag can be used by PDO and similar functions (//mysqli_query//, //preg_match//, //exec//, etc).
+1) As noted by someniatko, having a dedicated type would be useful in the future, as "it would serve clearer intent", which can be used by IDEs, Static Analysis, etc. It was agreed to do via a separate RFC as it leads into the next point...
+
+2) As noted by MarkR, the biggest benefit will come when this flag can be used by PDO and similar functions (//mysqli_query//, //preg_match//, //exec//, etc).
 
 First we need libraries to start using //is_literal()// to check their inputs, and use the appropriate escaping. This can result in strings that are no longer literals, but can still be trusted.
 
