@@ -244,20 +244,6 @@ While most systems can use literals entirely, these special non-literal values s
 
 [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4#L194|How this can be done with aliases]], or the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4#L229|example Query Builder]].
 
-==== Faking it ====
-
-**What happens if I really want a non-literal to appear as one?**
-
-This implementation does not provide a way for a developer to mark anything they want as a literal. This is on purpose. We do not want to recreate the biggest flaw of Taint Checking. It would be very easy for a naive developer to mark escaped values as a literal, incorrectly seeing this as a "safe" flag.
-
-That said, developers could use this monstrosity in userland:
-
-<code php>
-function unsafe_pretend_this_is_a_literal(&$value) {
-  eval('$value = ' . var_export($value, true) . ';');
-}
-</code>
-
 ==== Usage by Libraries ====
 
 **Could libraries use is_literal() internally?** Yes, they could.
