@@ -276,6 +276,29 @@ While the first two cannot include Injection Vulnerabilities, the parameters cou
 
 Also, this name is unlikely to clash with any userland functions.
 
+==== Integer Values ====
+
+**Can you support Integer values?** This is being considered.
+
+Matthew Brown wants to support integer values, simply because so much code already includes them, and we cannot find a single way that integers can cause issues from an Injection Vulnerability point of view (but if anyone can, we absolutely welcome their input).
+
+==== Other Values ====
+
+**Why don't you support Boolean/Float values?** It's a very low value feature, and we cannot be sure of the security implications.
+
+For example, the value you put in often is not always the same as what you get out:
+
+<code php>
+var_dump((string) true);  // "1"
+var_dump((string) false); // ""
+var_dump(2.3 * 100);      // 229.99999999999997
+
+setlocale(LC_ALL, 'de_DE.UTF-8');
+var_dump(sprintf('%.3f', 1.23)); // "1,230"
+ // Note the comma, which can be bad for SQL.
+ // Pre 8.0 this also happened with string casting.
+</code>
+
 ==== Support Functions ====
 
 **What about other support functions?** We did consider //literal_concat()// and //literal_implode()// functions (see [[#string_concatenation|String Concatenation]] above), but these can be userland functions:
@@ -320,9 +343,13 @@ $sql = literal_concat($sql, ' ORDER BY name ', $sortOrder);
 
 **Why not support other string functions?** We might do, but like [[#string_splitting|String Splitting]], we can't find any use cases, and don't want to make this complicated (just identifying strings defined in the PHP source code). For example //strtoupper()// might be reasonable, but we will need to consider how it would be used (good and bad), and check for any oddities (e.g. output varying based on the current locale). Also, functions like //str_shuffle()// create unpredictable results.
 
-==== Int/Float/Boolean Values ====
+==== Faking it ====
 
-**Why don't you support values other than strings?** It's a very low value feature. And when converting these values to a string, they aren't guaranteed (and often don't) have the exact same value they have in source code. e.g. //TRUE// and //true// when cast to a string give "1".
+**What happens if I really want a non-literal to appear as one?**
+
+This implementation does not provide a way for a developer to mark anything they want as a literal. This is on purpose. We do not want to recreate the biggest flaw of Taint Checking. It would be very easy for a naive developer to mark escaped values as a literal, incorrectly seeing this as a "safe" flag.
+
+That said, we do not pretend there aren't ways around this (e.g. using var_export), but doing so is clearly the developer doing something wrong. We want to provide safety rails, there is nothing stopping the developer from jumping over them.
 
 ==== Extensions ====
 
