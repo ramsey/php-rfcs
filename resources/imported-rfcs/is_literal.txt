@@ -1,4 +1,4 @@
-====== PHP RFC: Is_Trusted ======
+====== PHP RFC: Is_Noble ======
 
   * Version: 0.9
   * Date: 2020-03-21
@@ -11,13 +11,13 @@
 
 ===== Introduction =====
 
-Add the function //is_trusted()//, so developers can check if a variable can be trusted to not contain an Injection Vulnerability.
+Add the function //is_noble()//, so developers can check if a variable is at risk of containing an Injection Vulnerability.
 
-By trusting integers and literals (strings defined by the programmer), we can provide a lightweight, simple, and very effective way to prevent Injection Vulnerabilities.
+If a variable is crated from integers and literals (strings defined by the programmer), we can provide a lightweight, simple, and very effective way to prevent Injection Vulnerabilities.
 
 It avoids the "false sense of security" that comes with the flawed "Taint Checking" approach, [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/escaping.php?ts=4|because escaping is very difficult to get right]]. It's much safer for developers to use parameterised queries, and well-tested libraries.
 
-These libraries require certain sensitive values to only come from the developer; but because it's [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/mistakes.php?ts=4|easy to incorrectly include user values]], Injection Vulnerabilities are still introduced by the thousands of developers using these libraries incorrectly. You will notice the linked examples are based on examples found in the Libraries' official documentation, they still "work", and are typically shorter/easier than doing it correctly (I've found many of them on live websites, and it's why I'm here). A simple Query Builder example being:
+These libraries require certain sensitive values to come from the developer; but because it's [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/mistakes.php?ts=4|easy to incorrectly include user values]], Injection Vulnerabilities are still introduced by the thousands of developers using these libraries incorrectly. You will notice the linked examples are based on examples found in the Libraries' official documentation, they still "work", and are typically shorter/easier than doing it correctly (I've found many of them on live websites, and it's why I'm here). A simple Query Builder example being:
 
 <code php>
 $qb->select('u')
@@ -25,7 +25,7 @@ $qb->select('u')
    ->where('u.id = ' . $_GET['id']); // INSECURE
 </code>
 
-The "Future Scope" section explains why a dedicated type should come later, and how native functions could use the //trusted// flag as well.
+The "Future Scope" section explains why a dedicated type should come later, and how native functions could use this flag as well.
 
 ===== Background =====
 
@@ -55,7 +55,7 @@ It's been so successful Krzysztof Kotowicz (Information Security Engineer at Goo
 
 ==== Usage in PHP ====
 
-Libraries would be able to use //is_trusted()// immediately, allowing them to warn developers about Injection Issues as soon as they receive any non-trusted values. Some already plan to implement this, for example:
+Libraries would be able to use //is_noble()// immediately, allowing them to warn developers about Injection Issues as soon as they receive a value that is not considered //is_noble()//. Some already plan to implement this, for example:
 
 **Propel** (Mark Scherer): "given that this would help to more safely work with user input, I think this syntax would really help in Propel."
 
@@ -65,7 +65,7 @@ Libraries would be able to use //is_trusted()// immediately, allowing them to wa
 
 ===== Proposal =====
 
-Add the function //is_trusted()//, where "trusted" is defined as:
+Add the function //is_noble()//, where "noble" is defined as:
 
   - Strings defined by the programmer (literals),
   - Strings defined by the engine (interned strings),
@@ -77,33 +77,33 @@ No input values are interned; instead an interned string includes:
   - Strings defined in the source code of php,
   - Strings defined by the engine (either at compile or runtime), with known values.
 
-Any function or instruction that is aware of trusted variables shall produce a trusted string if all input would pass //is_trusted()//. This includes //sprintf()//, //str_repeat()//, //str_pad()//, //implode()//, //join()//, //array_pad()//, and //array_fill()//.
+Any function or instruction that is aware of "noble" variables shall produce a "noble" string if all input would pass //is_noble()//. This includes //sprintf()//, //str_repeat()//, //str_pad()//, //implode()//, //join()//, //array_pad()//, and //array_fill()//.
 
 <code php>
-is_trusted('Example'); // true
+is_noble('Example'); // true
 
 $a = 'Hello';
 $b = 'World';
 
-is_trusted($a); // true
-is_trusted($a . $b); // true
-is_trusted("Hi $b"); // true
+is_noble($a); // true
+is_noble($a . $b); // true
+is_noble("Hi $b"); // true
 
-is_trusted($_GET['id']); // false
-is_trusted(sprintf('Hi %s', $_GET['name'])); // false
-is_trusted('/bin/rm -rf ' . $_GET['path']); // false
-is_trusted('<img src=' . htmlentities($_GET['src']) . ' />'); // false
-is_trusted('WHERE id = ' . $db->real_escape_string($_GET['id'])); // false
+is_noble($_GET['id']); // false
+is_noble(sprintf('Hi %s', $_GET['name'])); // false
+is_noble('/bin/rm -rf ' . $_GET['path']); // false
+is_noble('<img src=' . htmlentities($_GET['src']) . ' />'); // false
+is_noble('WHERE id = ' . $db->real_escape_string($_GET['id'])); // false
 
 function example($input) {
-  if (!is_trusted($input)) {
+  if (!is_noble($input)) {
     throw new Exception('Non-trusted value detected!');
   }
   return $input;
 }
 
 example($a); // OK
-example(example($a)); // OK, still the same trusted value.
+example(example($a)); // OK, still the same value.
 example(strtoupper($a)); // Exception thrown.
 </code>
 
@@ -111,7 +111,7 @@ example(strtoupper($a)); // Exception thrown.
 
 [[https://3v4l.org/#focus=rfc.literals|Have a play with it on 3v4l.org]]
 
-[[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4|How it can be used by libraries]] - Notice how this example library just raises a warning, to simply let the developer know about the issue, **without breaking anything**. And it provides an //"unsafe_value"// value-object to bypass the //is_trusted()// check, but none of the examples need to use it (can be useful as a temporary thing, but there are much safer/better solutions, which developers are/should already be using).
+[[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4|How it can be used by libraries]] - Notice how this example library just raises a warning, to simply let the developer know about the issue, **without breaking anything**. And it provides an //"unsafe_value"// value-object to bypass the //is_noble()// check, but none of the examples need to use it (can be useful as a temporary thing, but there are much safer/better solutions, which developers are/should already be using).
 
 ===== FAQ's =====
 
@@ -129,9 +129,9 @@ $html = "<a href='" . htmlentities($url) . "'>..."; // INSECURE
 
 All three examples would be incorrectly considered "safe" (untainted). The first two need the values to be quoted. The third example, //htmlentities()// does not escape single quotes by default before PHP 8.1 ([[https://github.com/php/php-src/commit/50eca61f68815005f3b0f808578cc1ce3b4297f0|fixed]]), and it does not consider the issue of 'javascript:' URLs.
 
-In comparison, //is_trusted()// doesn't have an equivalent of //untaint()//, or support escaping. Instead PHP will set the trusted flag, and as soon as the value has been manipulated or includes anything that is not trusted (e.g. user data), the trusted flag is lost.
+In comparison, //is_noble()// doesn't have an equivalent of //untaint()//, or support escaping. Instead PHP will set the noble flag, and as soon as the value has been manipulated or includes anything does not have the noble flag set (e.g. user data), the noble flag will be lost.
 
-This allows libraries to use //is_trusted()// to check the sensitive values they receive from the developer. Then it's up to the library to handle the escaping (if it's even needed). The "Future Scope" section notes how native functions will be able to use the trusted flag as well.
+This allows libraries to use //is_noble()// to check the sensitive values they receive from the developer. Then it's up to the library to handle the escaping (if it's even needed). The "Future Scope" section notes how native functions will be able to use the noble flag as well.
 
 ==== Education ====
 
@@ -163,7 +163,7 @@ $db->prepare('SELECT * FROM users WHERE id = ' . $db->real_escape_string($id)); 
 
 **What about the performance impact?**
 
-These stats from an early version of the implementation (new tests will be completed soon).
+These stats are from an early version of the implementation (new tests will be completed soon).
 
 Máté Kocsis has created a [[https://github.com/kocsismate/php-version-benchmarks/|php benchmark]] to replicate the old [[https://01.org/node/3774|Intel Tests]], and the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/kocsismate.pdf|preliminary testing on this implementation]] has found a 0.124% performance hit for the Laravel Demo app, and 0.161% for Symfony (rounds 4-6, which involved 5000 requests). These tests do not connect to a database, as the variability introduced makes it impossible to measure that low of a difference.
 
@@ -175,9 +175,9 @@ Joe Watkins has also noted that further optimisations are possible (the implemen
 
 **Is string concatenation supported?**
 
-Yes. The trusted flag is preserved when two trusted values are concatenated; this makes it easier to use //is_trusted()//, especially by developers that use concatenation for their SQL/HTML/CLI/etc.
+Yes. The "noble" flag is preserved when two "noble" values are concatenated; this makes it easier to use //is_noble()//, especially by developers that use concatenation for their SQL/HTML/CLI/etc.
 
-Previously we tried a version that only supported concatenation at compile-time (not run-time), to see if it would reduce the performance impact even further. The idea was to require everyone to use special //trusted_concat()// and //trusted_implode()// functions, which would raise exceptions to highlight where mistakes were made. These two functions can still be implemented by developers themselves (see [[#support_functions|Support Functions]] below), as they can be useful; but requiring everyone to use them would have required big changes to existing projects, and exceptions are not a graceful way of handling mistakes.
+Previously we tried a version that only supported concatenation at compile-time (not run-time), to see if it would reduce the performance impact even further. The idea was to require everyone to use special //noble_concat()// and //noble_implode()// functions, which would raise exceptions to highlight where mistakes were made. These two functions can still be implemented by developers themselves (see [[#support_functions|Support Functions]] below), as they can be useful; but requiring everyone to use them would have required big changes to existing projects, and exceptions are not a graceful way of handling mistakes.
 
 Performance wise, my [[https://github.com/craigfrancis/php-is-literal-rfc/tree/main/tests|simplistic testing]] found there was still [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/local.pdf|a small impact without run-time concat]]:
 
@@ -187,7 +187,7 @@ Performance wise, my [[https://github.com/craigfrancis/php-is-literal-rfc/tree/m
     -
     Website with 22 SQL queries: Inconclusive, too variable.
 
-(This is because //concat_function()// in "zend_operators.c" uses //zend_string_extend()// which needs to remove the trusted flag. Also "zend_vm_def.h" does the same; and supports a quick concat with an empty string (x2), which would need its flag removed as well).
+(This is because //concat_function()// in "zend_operators.c" uses //zend_string_extend()// which needs to remove the "noble" flag. Also "zend_vm_def.h" does the same; and supports a quick concat with an empty string (x2), which would need its flag removed as well).
 
 And by supporting both forms of concatenation, it makes it easier for developers to understand (many are not aware of the difference).
 
@@ -197,7 +197,7 @@ And by supporting both forms of concatenation, it makes it easier for developers
 
 In short, we can't find any real use cases (security features should try to keep the implementation as simple as possible).
 
-Also, the security considerations are different. Concatenation joins known/fixed units together, whereas if you're starting with a trusted string, and the program allows the Evil-User to split the string (e.g. setting the length in substr), then they get considerable control over the result (it creates an untrusted modification).
+Also, the security considerations are different. Concatenation joins known/fixed units together, whereas if you're starting with a "noble" string, and the program allows the Evil-User to split the string (e.g. setting the length in substr), then they get considerable control over the result (it creates an untrusted modification).
 
 These are unlikely to be written by a programmer, but consider these:
 
@@ -209,7 +209,7 @@ $html   = substr('<a href="#">#</a>', 0, $length);
 
 If that URL was used in a Content-Security-Policy, then it's necessary to remove the query string, but as more of the string is removed, the more resources can be included ("https:" basically allows resources from anywhere). With the HTML example, moving from the tag content to the attribute can be a problem (technically the HTML Templating Engine should be fine, but unfortunately libraries like Twig are not currently context aware, so you need to change from the default 'html' encoding to explicitly using 'html_attr' encoding).
 
-Or in other words; trying to determine if the //trusted// flag should be passed through functions like //substr()// is difficult. Having a security feature be difficult to reason about, gives a much higher chance of mistakes.
+Or in other words; trying to determine if the "noble" flag should be passed through functions like //substr()// is difficult. Having a security feature be difficult to reason about, gives a much higher chance of mistakes.
 
 Krzysztof Kotowicz has confirmed that, at Google, with "go-safe-html", splitting is explicitly not supported because it "can cause issues"; for example, "arbitrary split position of a HTML string can change the context".
 
@@ -217,9 +217,7 @@ Krzysztof Kotowicz has confirmed that, at Google, with "go-safe-html", splitting
 
 **What about an undefined number of parameters, e.g. //WHERE id IN (?, ?, ?)//?**
 
-If the values are explicitly cast to integers, there is no need to make a change.
-
-That said, ideally you would still follow the advice from [[https://stackoverflow.com/a/23641033/538216|Levi Morrison]], [[https://www.php.net/manual/en/pdostatement.execute.php#example-1012|PDO Execute]], and [[https://www.drupal.org/docs/7/security/writing-secure-code/database-access#s-multiple-arguments|Drupal Multiple Arguments]], and implement as such:
+Ideally you would still follow the advice from [[https://stackoverflow.com/a/23641033/538216|Levi Morrison]], [[https://www.php.net/manual/en/pdostatement.execute.php#example-1012|PDO Execute]], and [[https://www.drupal.org/docs/7/security/writing-secure-code/database-access#s-multiple-arguments|Drupal Multiple Arguments]], and implement as such:
 
 <code php>
 $sql = 'WHERE id IN (' . join(',', array_fill(0, count($ids), '?')) . ')';
@@ -233,6 +231,8 @@ for ($k = 1; $k < $count; $k++) {
   $sql .= ',?';
 }
 </code>
+
+That said, if the values are explicitly cast to integers, there is no need to make a change.
 
 ==== Non-Parameterised Values ====
 
@@ -254,37 +254,33 @@ $sql .= ' ORDER BY ' . $order_fields[$order_id];
 
 By using an allow-list, we ensure the user (attacker) cannot use anything unexpected.
 
-==== Non-Trusted Values ====
+==== Non-Noble Values ====
 
-**How does this work in cases where you can't use trusted values?**
+**How does this work in cases where you can't use "noble" values?**
 
 For example [[https://news-web.php.net/php.internals/87667|Dennis Birkholz]] noted that some Systems/Frameworks currently define some variables (e.g. table name prefixes) without the use of a literal (e.g. ini/json/yaml). And Larry Garfield noted that in Drupal's ORM "the table name itself is user-defined" (not in the PHP script).
 
-While most systems can use trusted values entirely, these special non-trusted values should still be handled separately (and carefully). This approach allows the library to ensure the majority of the input (SQL) is trusted, and then it can consistently check/escape those special values (e.g. does it match a valid table/field name, which can be included safely).
+While most systems can use "noble" values entirely, these special non-"noble" values should still be handled separately (and carefully). This approach allows the library to ensure the majority of the input (SQL) is not at risk from Injection Vulnerabilities, and then it can consistently check/escape those special values (e.g. does it match a valid table/field name, which can be included safely).
 
 [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4#L194|How this can be done with aliases]], or the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4#L229|example Query Builder]].
 
 ==== Usage by Libraries ====
 
-**Could libraries use is_trusted() internally?**
+**Could libraries use //is_noble()// internally?**
 
 Yes, they could.
 
-It would be fantastic if they did use additional //is_trusted()// checks after receiving the values from developers (it ensures the library hasn't introduced a vulnerability either); but this isn't a priority, simply because libraries are rarely the source of Injection Vulnerabilities.
-
-That said, consider the Drupalgeddon vulnerability; where //$db->expandArguments()// allowed unsafe/non-trusted values to be used as placeholders with //IN (:arg_0, :arg_1)//. By using something like the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/example.php?ts=4#L229|example Query Builder]], //is_trusted()// could have been used to check the raw SQL, and then the non-trusted field/parameter names would be checked and applied separately.
-
-Zend also had a couple of issues with ORDER BY, where it didn't check the inputs either ([[https://framework.zend.com/security/advisory/ZF2014-04|1]]/[[https://framework.zend.com/security/advisory/ZF2016-03|2]]).
+It would be fantastic if they did use additional //is_noble()// checks after receiving the values from developers (it ensures the library hasn't introduced a vulnerability either); but this isn't a priority, simply because libraries are rarely the source of Injection Vulnerabilities.
 
 ==== Integer Values ====
 
 **Can you support Integer values?**
 
-Yes, support for integers is now included.
+[To be confirmed]
 
-It was noted by Matthew Brown (and others) that a lot of existing code and tutorials uses integers directly, and they do not cause a security issue.
+It was noted by Matthew Brown (and others) that a lot of existing code and tutorials uses integers directly, and they cannot cause an Injection Vulnerability.
 
-We tried to flag integers defined in the source code, in the same way we are doing with strings. Unfortunately [[https://news-web.php.net/php.internals/114964|it would require a big change to add a trusted flag on integers]]. Changing how integers work internally would have made a big performance impact, and potentially affected every part of PHP (including extensions).
+We tried to flag integers defined in the source code, in the same way we are doing with strings. Unfortunately [[https://news-web.php.net/php.internals/114964|it would require a big change to add a "noble" flag on integers]]. Changing how integers work internally would have made a big performance impact, and potentially affected every part of PHP (including extensions).
 
 That said, while it's not as philosophically pure, we can still trust all integers in regards to Injection Vulnerabilities, no matter where they came from.
 
@@ -315,22 +311,20 @@ var_dump(sprintf('%.3f', 1.23)); // "1,230"
 
 ==== Naming ====
 
-**Why is it called is_trusted()?**
+**Why is it called is_noble()?**
 
-First, there is no perfect name.
-
-We did start with //is_literal()// as a placeholder name (at a time we only trusted literals). This name wasn't perfect, but it would have allowed developers to search and get an idea of what a literal was. When [[#integer_values|integer values]] were deemed necessary to help adoption, the name became more of a problem. We also need to keep to a single word name (to support a dedicated type in the future). This is where //is_trusted()// and //is_known()// was proposed. We had a [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/name/2021-07-20.png|vote on the name]], which gave us a 18 to 3 result in favour of //is_trusted()//.
+[This section is being replaced]
 
 ==== Support Functions ====
 
 **What about other support functions?**
 
-We did consider //trusted_concat()// and //trusted_implode()// functions (see [[#string_concatenation|String Concatenation]] above), but these can be userland functions:
+We did consider //noble_concat()// and //noble_implode()// functions (see [[#string_concatenation|String Concatenation]] above), but these can be userland functions:
 
 <code php>
-function trusted_implode($separator, $array) {
+function noble_implode($separator, $array) {
   $return = implode($separator, $array);
-  if (!is_trusted($return)) {
+  if (!is_noble($return)) {
       // You will probably only want to raise
       // an exception on your development server.
     throw new Exception('Non-trusted value detected!');
@@ -338,8 +332,8 @@ function trusted_implode($separator, $array) {
   return $return;
 }
 
-function trusted_concat(...$a) {
-  return trusted_implode('', $a);
+function noble_concat(...$a) {
+  return noble_implode('', $a);
 }
 </code>
 
@@ -357,10 +351,10 @@ $sql .= ' ORDER BY name ' . $sortOrder;
 $db->query($sql);
 </code>
 
-If a developer changed the literal //'ASC'// to //$_GET['order']//, the error would be noticed by //$db->query()//, but it's not clear where the non-trusted value was introduced. Whereas, if they used //trusted_concat()//, that would raise an exception much earlier, and highlight exactly where the mistake happened:
+If a developer changed the literal //'ASC'// to //$_GET['order']//, the error would be noticed by //$db->query()//, but it's not clear where the non-"noble" value was introduced. Whereas, if they used //noble_concat()//, that would raise an exception much earlier, and highlight exactly where the mistake happened:
 
 <code php>
-$sql = trusted_concat($sql, ' ORDER BY name ', $sortOrder);
+$sql = noble_concat($sql, ' ORDER BY name ', $sortOrder);
 </code>
 
 ==== Other Functions ====
@@ -373,7 +367,7 @@ Like [[#string_splitting|String Splitting]], we can't find any real use cases, a
 
 **Does this mean the value is completely safe?**
 
-While these values can be trusted to not contain an Injection Vulnerability, they cannot be completely safe from every kind of issue, For example:
+While these values have no risk of containing an Injection Vulnerability, they cannot be completely safe from every kind of issue, For example:
 
 <code php>
 $cli = 'rm -rf ?'; // RISKY
@@ -386,9 +380,9 @@ There's no single RFC that can completely solve all developer errors, but this t
 
 ==== Faking it ====
 
-**What if I really want to mark a value as trusted?**
+**What if I really want to mark a value as "noble"?**
 
-This implementation does not provide a way for a developer to mark anything they want as trusted. This is on purpose. We do not want to recreate the biggest flaw of Taint Checking. It would be very easy for a naive developer to mark all escaped values as trusted ([[#taint_checking|wrong]]).
+This implementation does not provide a way for a developer to mark anything they want as "noble". This is on purpose. We do not want to recreate the biggest flaw of Taint Checking. It would be very easy for a naive developer to mark all escaped values as "noble" ([[#taint_checking|wrong]]).
 
 That said, we do not pretend there aren't ways around this (e.g. using [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/is-trusted-bypass.php|var_export]]), but doing so is clearly the developer doing something wrong. We want to provide safety rails, but there is nothing stopping the developer from jumping over them if that's their choice.
 
@@ -396,17 +390,17 @@ That said, we do not pretend there aren't ways around this (e.g. using [[https:/
 
 **Extensions create and manipulate strings, won't this break the flag on strings?**
 
-Strings have multiple flags already that are off by default - this is the correct behaviour when extensions create their own strings (should not be flagged as trusted). If an extension is found to be already using the flag we're using for is_trusted (unlikely), that's the same as any new flag being introduced into PHP, and will need to be updated in the same way.
+Strings have multiple flags already that are off by default - this is the correct behaviour when extensions create their own strings (should not be flagged as "noble"). If an extension is found to be already using the flag we're using for //is_noble()// (unlikely), that's the same as any new flag being introduced into PHP, and will need to be updated in the same way.
 
 ==== Reflection API ====
 
 **Why don't you use the Reflection API?**
 
-This allows you to "introspect classes, interfaces, functions, methods and extensions"; it's not currently set up for object methods to inspect the code calling it. Even if that was to be added (unlikely), it could only check if the trusted value was defined there, it couldn't handle variables (tracking back to their source), nor could it provide any future scope for a dedicated type, nor could native functions work with this (see "Future Scope").
+This allows you to "introspect classes, interfaces, functions, methods and extensions"; it's not currently set up for object methods to inspect the code calling it. Even if that was to be added (unlikely), it could only check if the "noble" value was defined there, it couldn't handle variables (tracking back to their source), nor could it provide any future scope for a dedicated type, nor could native functions work with this (see "Future Scope").
 
 ==== Interned Strings ====
 
-**Why does the output from //chr()// appear as trusted?**
+**Why does the output from //chr()// appear as "noble"?**
 
 This was noticed by Claude Pache, and on a technical level is due to the [[https://news-web.php.net/php.internals/114877|use of Interned Strings]], an optimisation used by //RETURN_CHAR// that re-uses single character values. It's effectively the same as calling //sprintf('%c', $i)//, which is also not an issue, as the developer is choosing to do this.
 
@@ -429,13 +423,13 @@ And there is the [[https://wiki.php.net/rfc/sql_injection_protection|Automatic S
   * It would have effected every SQL function, such as //mysqli_query()//, //$pdo->query()//, //odbc_exec()//, etc (concerns raised by [[https://news-web.php.net/php.internals/87436|Lester Caine]] and [[https://news-web.php.net/php.internals/87650|Anthony Ferrara]]);
   * Each of those functions would need a bypass for cases where unsafe SQL was intentionally being used (e.g. phpMyAdmin taking SQL from POST data) because some applications intentionally "pass raw, user submitted, SQL" (Ronald Chmara [[https://news-web.php.net/php.internals/87406|1]]/[[https://news-web.php.net/php.internals/87446|2]]).
 
-All of these concerns have been addressed by //is_trusted()//.
+All of these concerns have been addressed by //is_noble()//.
 
-I also agree with [[https://news-web.php.net/php.internals/87400|Scott Arciszewski]], "SQL injection is almost a solved problem [by using] prepared statements", where //is_trusted()// is essential for identifying the mistakes developers are still making.
+I also agree with [[https://news-web.php.net/php.internals/87400|Scott Arciszewski]], "SQL injection is almost a solved problem [by using] prepared statements", where //is_noble()// is essential for identifying the mistakes developers are still making.
 
 ===== Backward Incompatible Changes =====
 
-No known BC breaks, except for code-bases that already contain the userland function //is_trusted()// which is unlikely.
+No known BC breaks, except for code-bases that already contain the userland function //is_noble()// which is unlikely.
 
 ===== Proposed PHP Version(s) =====
 
@@ -461,13 +455,13 @@ None
 
 ===== Future Scope =====
 
-1) As noted by someniatko and Matthew Brown, having a dedicated type would be useful in the future, as "it would serve clearer intent", which can be used by IDEs, Static Analysis, etc. It was [[https://externals.io/message/114835#114847|agreed we would add this type later]], via a separate RFC, so this RFC can focus on the trusted flag, and provide libraries a simple backwards-compatible function, where they can decide how to handle non-trusted values.
+1) As noted by someniatko and Matthew Brown, having a dedicated type would be useful in the future, as "it would serve clearer intent", which can be used by IDEs, Static Analysis, etc. It was [[https://externals.io/message/114835#114847|agreed we would add this type later]], via a separate RFC, so this RFC can focus on the "noble" flag, and provide libraries a simple backwards-compatible function, where they can decide how to handle non-"noble" values.
 
 2) As noted by MarkR, the biggest benefit will come when this flag can be used by PDO and similar functions (//mysqli_query//, //preg_match//, //exec//, etc).
 
-However, first we need libraries to start using //is_trusted()// to check their inputs. The library can then do their thing, and apply the appropriate escaping, which can result in a value that no longer has the trusted flag set, but should still be trusted.
+However, first we need libraries to start using //is_noble()// to check their inputs. The library can then do their thing, and apply the appropriate escaping, which can result in a value that no longer has the "noble" flag set.
 
-With a future RFC, we could potentially introduce checks for the native functions. For example, if we use the [[https://web.dev/trusted-types/|Trusted Types]] concept from JavaScript (which protects [[https://www.youtube.com/watch?v=po6GumtHRmU&t=92s|60+ Injection Sinks]], like innerHTML), the libraries create a stringable object as their output. These objects can be added to a list of trusted objects for the relevant native functions. The native functions could then **warn** developers when they do not receive a value with the trusted flag, or one of the trusted objects. These warnings would **not break anything**, they just make developers aware of the mistakes they have made, and we will always need a way of switching them off entirely (e.g. phpMyAdmin).
+With a future RFC, we could potentially introduce checks for the native functions. For example, if we use the [[https://web.dev/trusted-types/|Trusted Types]] concept from JavaScript (which protects [[https://www.youtube.com/watch?v=po6GumtHRmU&t=92s|60+ Injection Sinks]], like innerHTML), the libraries create a stringable object as their output. These objects can be added to a list of objects that can be trusted for the relevant native functions. The native functions could then **warn** developers when they do not receive a value with the "noble" flag, or one of the trusted objects. These warnings would **not break anything**, they just make developers aware of the mistakes they have made, and we will always need a way of switching them off entirely (e.g. phpMyAdmin).
 
 ===== Proposed Voting Choices =====
 
@@ -495,4 +489,4 @@ N/A
   - **Rowan Tommins**, IMSoP, for re-writing this RFC to focus on the key features, and putting it in context of how it can be used by libraries.
   - **Nikita Popov**, NikiC, for suggesting where the flag could be stored. Initially this was going to be the "GC_PROTECTED flag for strings", which allowed Dan to start the first implementation.
   - **Mark Randall**, MarkR, for suggestions, and noting that "interned strings in PHP have a flag", which started the conversation on how this could be implemented.
-  - **Sara Golemon**, SaraMG, for noting how this RFC had to explain how //is_trusted()// is different to the flawed Taint Checking approach, so we don't get "a false sense of security or require far too much escape hatching".
+  - **Sara Golemon**, SaraMG, for noting how this RFC had to explain how //is_noble()// is different to the flawed Taint Checking approach, so we don't get "a false sense of security or require far too much escape hatching".
