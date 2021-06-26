@@ -72,7 +72,7 @@ Add the function //is_literal()//, where a literal is defined as:
 
 > (Under The Hood: Interned strings do not include input values; instead interned strings are: Strings defined by the programmer, strings defined in the source code of php, and strings defined by the engine (either at compile or runtime), with known values.)
 
-Any function or instruction that is aware of "literal" strings shall produce a "literal" string if all input would pass //is_literal()//. This includes //sprintf()//, //str_repeat()//, //str_pad()//, //implode()//, //join()//, //array_pad()//, and //array_fill()//.
+Any function or instruction that is aware of "literal" strings shall produce a "literal" string if all input would pass //is_literal()//. This includes //str_repeat()//, //str_pad()//, //implode()//, //join()//, //array_pad()//, and //array_fill()//.
 
 <code php>
 is_literal('Example'); // true
@@ -383,11 +383,21 @@ Strings have multiple flags already that are off by default - this is the correc
 
 This allows you to "introspect classes, interfaces, functions, methods and extensions"; it's not currently set up for object methods to inspect the code calling it. Even if that was to be added (unlikely), it could only check if the literal value was defined there, it couldn't handle variables (tracking back to their source), nor could it provide any future scope for a dedicated type, nor could native functions work with this (see "Future Scope").
 
-==== Interned Strings: chr ====
+==== Oddities ====
 
-**Why does the output from //chr()// appear as a literal?**
+**Compile time concatenation with integers?**
 
-This was noticed by Claude Pache, and on a technical level is due to the [[https://news-web.php.net/php.internals/114877|use of Interned Strings]], an optimisation used by //RETURN_CHAR// that re-uses single character values. It's effectively the same as calling //sprintf('%c', $i)//, which is also not an issue, as the developer is choosing to do this.
+While compile-time and run-time concatenation with literals is consistent and works, when it comes to integers ([[#integer_values|which we cannot flag]]), the compiler can optimise the concatenation so it's seen as a single literal:
+
+<code php>
+$one = 1;
+var_dump(is_literal('A' . $one)); // false, flag removed with runtime concatenation.
+var_dump(is_literal('A' . 1)); // true, compiler optimises this to 'A1'.
+</code>
+
+**Output from //chr()// appearing as a literal?**
+
+This was noticed by Claude Pache, and on a technical level is due to the [[https://news-web.php.net/php.internals/114877|use of Interned Strings]], an optimisation used by //RETURN_CHAR// that re-uses single character values. While this could be used as a way to intentionally [[#faking_it|fake a literal string]], it's unlikely to be used to create sensitive strings.
 
 ===== Previous Examples =====
 
