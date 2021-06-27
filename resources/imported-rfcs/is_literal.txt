@@ -4,7 +4,7 @@
   * Date: 2020-03-21
   * Updated: 2021-06-06
   * Author: Craig Francis, craig#at#craigfrancis.co.uk
-  * Contributors: Joe Watkins, Máté Kocsis, Dan Ackroyd
+  * Contributors: Joe Watkins, Máté Kocsis
   * Status: Under Discussion
   * First Published at: https://wiki.php.net/rfc/is_literal
   * GitHub Repo: https://github.com/craigfrancis/php-is-literal-rfc
