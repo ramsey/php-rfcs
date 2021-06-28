@@ -383,22 +383,6 @@ Strings have multiple flags already that are off by default - this is the correc
 
 This allows you to "introspect classes, interfaces, functions, methods and extensions"; it's not currently set up for object methods to inspect the code calling it. Even if that was to be added (unlikely), it could only check if the literal value was defined there, it couldn't handle variables (tracking back to their source), nor could it provide any future scope for a dedicated type, nor could native functions work with this (see "Future Scope").
 
-==== Oddities ====
-
-**Compile time concatenation with integers?**
-
-While compile-time and run-time concatenation with literals is consistent and works, when it comes to integers ([[#integer_values|which we cannot flag]]), the compiler can optimise the concatenation so it's seen as a single literal:
-
-<code php>
-$one = 1;
-var_dump(is_literal('A' . $one)); // false, flag removed with runtime concatenation.
-var_dump(is_literal('A' . 1)); // true, compiler optimises this to 'A1'.
-</code>
-
-**Output from //chr()// appearing as a literal?**
-
-This was noticed by Claude Pache, and on a technical level is due to the [[https://news-web.php.net/php.internals/114877|use of Interned Strings]], an optimisation used by //RETURN_CHAR// that re-uses single character values. While this could be used as a way to intentionally [[#faking_it|fake a literal string]], it's unlikely to be used to create sensitive strings.
-
 ===== Previous Examples =====
 
 **Go** programs can use "ScriptFromConstant" to express the concept of a "compile time constant" ([[https://blogtitle.github.io/go-safe-html/|more details]]).
@@ -446,7 +430,28 @@ None known
 
 ===== Open Issues =====
 
-None
+==== Inconsistencies ====
+
+While compile-time and run-time concatenation with literal strings is consistent and works, when it comes to some developer-defined values (like integers, [[#integer_values|which we cannot flag]]), the compiling process can optimise a value so it's seen as a literal.
+
+As these optimisations happen during the compilation process, they cannot contain user data; but developers may wonder why a developer defined integer can sometimes be seen as a literal, e.g.
+
+<code php>
+$one = 1;
+is_literal('A' . $one); // false, flag removed with runtime concatenation of an integer.
+is_literal('A' . 1); // true, compiler optimises this to the literal 'A1'.
+
+$a = "Hello ";
+$b = $a . 2; // The 2 is coerced to the string '2' to optimise the concatenation.
+is_literal($b); // true
+
+$a = implode("-", [1, 2, 3]);
+is_literal($a); // Normally false, but OPcache can optimise to the literal '1-2-3'
+</code>
+
+==== Interned Strings ====
+
+Output from //chr()// appears to be a literal. This was noticed by Claude Pache, and on a technical level is due to the [[https://news-web.php.net/php.internals/114877|use of Interned Strings]], an optimisation used by //RETURN_CHAR// that re-uses single character values. While this could be used as a way to intentionally [[#faking_it|fake a literal string]], it's unlikely to be used to create sensitive strings.
 
 ===== Future Scope =====
 
