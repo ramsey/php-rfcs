@@ -71,67 +71,21 @@ $result = array_filter(
 
 The left-hand side of the pipe may be any value or expression.  The right-hand side may be any valid PHP callable that takes a single parameter, or any expression that evaluates to such a callable.  Functions with more than one required parameter are not allowed and will fail as if the function were called normally with insufficient arguments.  If the right-hand side does not evaluate to a valid callable it will throw an Error.
 
-While any callable style may be used, in practice the [[rfc:partial_function_application|Partial Function Application]] RFC will enable a very clear and readable syntax for use with pipes.  For instance, the previous example could instead be written:
+===== Language theory =====
 
-<code php>
-$result = "Hello World"
-    |> htmlentities(?)
-    |> str_split(?)
-    |> array_map(strtoupper(?), ?)
-    |> array_filter(?, fn($v) => $v != 'O');
-</code>
+The pipe operator is a form of function composition.  Function composition is a basic, fundamental feature of functional programming and functional languages.  However, it is also comfortable within object-oriented languages as a general tool to pass data from one function (or method) to another without intermediary variables or ugly nesting.
 
-And the example from the start of this RFC could be written as:
+It also cleanly enables "point-free style", an approach to programming that limits the use of unnecessary intermediary variables.  Point-free style has been gaining popularity in JavaScript circles, so will be familiar to JavaScript developers using that style.
 
-<code php>
-$holiday = "Lincoln's Birthday";
-$result = getCurrentUser()
-   |> getShoppingList(?, 'wishlist')
-   |> mostExpensiveItem(?, ['exclude' => 'onSale'])
-   |> getPromotions(?, $holiday);
-</code>
+===== Callable syntax =====
 
-Functions that accept their first parameter by reference are supported, and will behave exactly as if they were called in the normal "inside out" fashion.  However, unless they return a value as well they are not of much use.
+Pipes support any callable on the right hand side, using any callable syntax supported by PHP now or in the future.  As of 8.0, that is unfortunately not a particularly strong list.  However, over time that should improve, such as via the [[rfc:first_class_callable_syntax|First-class callable syntax]] RFC.
 
-The pipe operator evaluates immediately.  It does not produce a new function.  However, it is simple to produce a new function by writing an arrow function:
+Should a version of [[rfc:partial_function_application|Partial Function Application]] be adopted in the future, that would also integrate nicely with pipes with no further effort.
 
-<code php>
-$holiday = "Lincoln's Birthday";
-$new_function = fn($user) => $user
-   |> getShoppingList(?, 'wishlist')
-   |> mostExpensiveItem(?, ['exclude' => 'onSale'])
-   |> getPromotions(?, $holiday);
+The examples below largely assume that the first-class-callable RFC has passed, which as of this writing appears guaranteed.
 
-$new_function(getCurrentUser());
-</code>
-
-===== Real-world example =====
-
-The following code is taken from a Symfony app maintained by the TYPO3 project for an ancillary website:
-
-<code php>
-public function prepareRequirements(Collection $collection): array
-{
-    $result = $this->formatVersions($collection);
-    $result = $this->groupByCategory($result);
-    $result = $this->sortByTitle($result);
-    return $result;
-}
-</code>
-
-With pipes and partial application, that could be rewritten as:
-
-<code php>
-public function prepareRequirements(Collection $collection): array
-{
-    return $collection
-      |> $this->formatVersions(?)
-      |> $this->groupByCategory(?)
-      |> $this->sortByTitle(?);
-}
-</code>
-
-Even in this simple example, it requires less typing and involves less visual clutter.  It also makes the relationship between each function call explicitly clear: The results of each step are passed into the next, and then the final result is returned.  The benefits are even more pronounced if the intermediary steps include additional arguments.
+Additionally, functions that return callables may be used to conveniently produce pipe-compatible callables.  The following example includes some obvious examples.
 
 ===== Alternate comprehension syntax ====
 
@@ -168,37 +122,83 @@ function itcount(iterable $it) {
 }
 </code>
 
-And now comprehension-like behavior can be written using pipes
+And now comprehension-like behavior can be written using pipes, without the need for a dedicated syntax.
+
 <code php>
 $list = [1, 2, 3, 4, 5];
 
 $new_list = $list
   |> itmap(fn($x) => $x * 2)
   |> itfilter(fn($x) => $x % 3)
-  |> iterator_to_array(?);
+  |> iterator_to_array(...);
 </code>
 
 Any combination of map, filter, reduce, or other array-oriented operation can be wrapped up this way and added to a pipe chain, allowing a similar result to comprehensions without a one-off syntax, and can be mixed-and-matched with any other callable as appropriate.
 
+String-oriented functions would be equally easy to produce.  They would also serve to essentially eliminate the needle/haystack question (when used with an appropriate utility function), by splitting the call into two: One to capture the non-array/string arguments, and one to just take the array/string and apply it.
+
+===== Additional semantics =====
+
+Functions that accept their first parameter by reference are supported, and will behave exactly as if they were called in the normal "inside out" fashion.  However, unless they return a value as well they are not of much use.
+
+When evaluating a pipe, the left-hand side is fully evaluated first, then the right-hand side, then the right-hand side is invoked using the left-hand side.  That is, evaluation is strictly left-to-right.
+
+The pipe operator evaluates immediately.  It does not produce a new function.  However, it is simple to produce a new function by writing an arrow function:
+
+<code php>
+$array_op = fn(iterable $list) => $list
+  |> itmap(fn($x) => $x * 2)
+  |> itfilter(fn($x) => $x % 3)
+  |> iterator_to_array(...);
+  
+$result = $array_op([1, 2, 3, 4, 5]);
+</code>
+
+===== Further examples =====
+
+Given the utilities above, the following examples would all be valid.
+
+<code php>
+// Take a string, sanitize it, 
+// split it to an array, 
+// upper-case everything, 
+// and remove the letter O.
+$result = "Hello World"
+    |> htmlentities(...)
+    |> str_split(...)
+    |> itmap(strtoupper(...))
+    |> itfilter(fn($v) => $v != 'O');
+</code>
+
+The example from the start of this RFC could be written as:
+
+<code php>
+$holiday = "Lincoln's Birthday";
+$result = getCurrentUser()
+   |> getShoppingList('wishlist')
+   |> mostExpensiveItem(['exclude' => 'onSale'])
+   |> getPromotions($holiday);
+</code>
+
 For a more robust example, the following routine would, given a directory, give a line count of all files in the directory tree that have a specific extension.  (Thanks to Levi Morrison for this example.)
 
 <code php>
-function getLineCount(string $directory, string $ext): int {
-  $nonEmptyLines = function(\SplFileInfo $file): iterable {
-    try {
-      $object = $file->openFile("r");
-      $object->setFlags(\SplFileObject::SKIP_EMPTY);
-      yield from $object;
-    } catch (\Throwable $error) {
-      // File system error handling irrelevant for the moment.
-    }
-  };
+function nonEmptyLines(\SplFileInfo $file): iterable {
+  try {
+    $object = $file->openFile("r");
+    $object->setFlags(\SplFileObject::SKIP_EMPTY);
+    yield from $object;
+  } catch (\Throwable $error) {
+    // File system error handling irrelevant for the moment.
+  }
+};
 
+function getLineCount(string $directory, string $ext): int {
   return new RecursiveDirectoryIterator('.')
     |> new RecursiveIteratorIterator(?)
     |> itfilter(fn ($file) => $file->getExtension() == $ext)
-    |> itmap($nonEmptyLines(?))
-    |> itcount(?)
+    |> itmap(nonEmptyLines(...))
+    |> itcount(...)
   ;
 }
 
@@ -212,6 +212,16 @@ A previous RFC, [[https://wiki.php.net/rfc/pipe-operator|Pipe Operator v1]] from
 Additionally, the comprehension-esque usage noted above would be infeasible with a non-callable right hand side.
 
 Portions of this RFC are nonetheless based on the previous iteration, and the author wishes to thank the v1 authors for their inspiration.
+
+===== Existing implementations =====
+
+Multiple user-space libraries exist in PHP that attempt to replicate pipe-like behavior.  All are clunky and complex by necessity compared to a native solution, but demonstrate that there is desire for pipeline behavior.
+
+  * The PHP League has a [[https://pipeline.thephpleague.com/|Pipeline]] library that encourages wrapping all functions into classes with an __invoke() method to allow them to be referenced, and using a ''->pipe()'' call for each step.
+  * Laravel includes a [[https://github.com/illuminate/pipeline|Illuminate/Pipeline]] package that has an [[https://agoalofalife.medium.com/pipeline-and-php-d9bb0a6370ca|even more cumbersome syntax]].
+  * Various blogs speak of "the Pipeline Pattern" ([[https://medium.com/@aaronweatherall/the-pipeline-pattern-for-fun-and-profit-9b5f43a98130|for example]])
+
+Those libraries would be mostly obsoleted by this RFC, with a more compact, more universal, better-performing syntax.
 
 ===== Comparison with other languages =====
 
@@ -259,36 +269,21 @@ That is, this RFC proposes an equivalent of only the "pipe forward" operator.
 
 A pipeline operator `|>` has been [[https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Pipeline_operator|proposed for Javascript]].  As of this writing it is still in early stages and no implementations support it, but it may get accepted in the future.  The semantics are essentially the same as described here.
 
-===== Related RFCs =====
+==== OCaml ====
 
-This RFC is deliberately kept small and contained.  However, it naturally complements other RFCs under consideration, by design.
-
-* [[https://wiki.php.net/rfc/partial_function_application|Generic partial application]].  This RFC already exists, and will hopefully be approved in the near future.  It allows virtually any function to be partially applied to produce a single-parameter function, which is then compatible with ''|>'', as well as referencing an existing single-parameter function by name.  The examples further up show how the two RFCs complement each other nicely.
-
-* [[rfc:short-functions|Short functions]].  The short-functions RFC would combine with pipe to make writing named functions that simply invoke a pipeline of other functions trivial and nicely compact, like so:
-
-<code php>
-function handle_request(RequestInterface $request) => $request
-    |> authenticate(?)
-    |> $router->resolveAction(?)
-    |> fn($request) => $request->getAttribute('action')($request)
-    |> renderResult(?)
-    |> buildResponse(?)
-    |> emit(?);
-
-handle_request(ServerRequest::fromGlobals());
-</code>
+OCaml includes a [[https://riptutorial.com/ocaml/example/22018/composition-operators|Composition operator]], following its common implementation in user-space.  It also is denoted ''|>'', and its semantics are essentially the same as described here.
 
 ===== Future Scope =====
 
 This RFC suggests a number of additional improvements.  They have been left for future work so as to keep this RFC focused and non-controversial.  Should this RFC pass the authors intend to attempt these follow up improvements.  (Assistance in doing so is quite welcome.)
+
+* Generic partial function application.  While the prior RFC was declined due to its perceived use cases being insufficient to justify its complexity, increased use of pipes will likely provide sufficient justification.  (Alternatively, a less complex implementation might be found.)
 
 * Iterable right-hand side.  The pipe operator as presented here can only be used in a hard-coded fashion.  A possible extension is to support an iterable of callables on the right-hand side, allowing for a runtime-defined pipeline.
 
 * A `__bind` method or similar on objects.  If implemented by an object on the left-hand side, the right-hand side would be passed to that method to invoke as it sees fit.  Effectively this would be operator overloading, which could be part of a second attempt at full operator overloading or a one-off magic method.  It could also be implemented as a separate operator instead, for clarity.  Such a feature would be sufficient to support arbitrary monadic behavior in PHP in a type-friendly way.
 
 These options are mentioned here for completeness and to give an indication of what is possible, but are *not* in scope and are *not* part of this RFC at this time.
-
 
 ===== Proposed PHP Version(s) =====
 
