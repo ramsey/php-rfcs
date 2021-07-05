@@ -164,9 +164,7 @@ $db->prepare('SELECT * FROM users WHERE id = ' . $db->real_escape_string($id)); 
 
 **What about the performance impact?**
 
-Máté Kocsis has created a [[https://github.com/kocsismate/php-version-benchmarks/|php benchmark]] to replicate the old [[https://01.org/node/3774|Intel Tests]], and the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/kocsismate.pdf|preliminary testing on this implementation]] has found a 0.124% performance hit for the Laravel Demo app, and 0.161% for Symfony (rounds 4-6, which involved 5000 requests). These tests do not connect to a database, as the variability introduced makes it impossible to measure that low of a difference.
-
-The full stress-test is 3.719% when running this [[https://github.com/kocsismate/php-version-benchmarks/blob/main/app/zend/concat.php#L25|concat test]], but this is not representative of a typical PHP script (it's not normal to concatenate 4 strings, 5 million times, with no other actions).
+Máté Kocsis has created a [[https://github.com/kocsismate/php-version-benchmarks/|php benchmark]] to replicate the old [[https://01.org/node/3774|Intel Tests]], the preliminary results found a 0.47% impact with the Symfony demo app (it did not connect to a database, as the variability introduced would make it impossible to measure the difference) - [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/lexer/benchmark.pdf|Detailed Results]].
 
 ==== String Concatenation ====
 
