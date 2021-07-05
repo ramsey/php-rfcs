@@ -1,13 +1,16 @@
 ====== PHP RFC: Is_Literal ======
 
   * Version: 1.1
-  * Date: 2020-03-21
-  * Updated: 2021-07-04
+  * Voting Start: 2021-07-05 19:30 BST / 18:30 UTC
+  * Voting End: 2021-07-19 19:30 BST / 18:30 UTC
+  * RFC Started: 2020-03-21
+  * RFC Updated: 2021-07-04
   * Author: Craig Francis, craig#at#craigfrancis.co.uk
   * Contributors: Joe Watkins, Máté Kocsis
-  * Status: Under Discussion
+  * Status: Voting
   * First Published at: https://wiki.php.net/rfc/is_literal
   * GitHub Repo: https://github.com/craigfrancis/php-is-literal-rfc
+  * Implementation: https://github.com/php/php-src/compare/master...krakjoe:literals
 
 ===== Introduction =====
 
@@ -469,7 +472,12 @@ With a future RFC, we could potentially introduce checks for the native function
 
 ===== Proposed Voting Choices =====
 
-Accept the RFC. Yes/No
+Accept the RFC
+
+<doodle title="is_literal" auth="craigfrancis" voteType="single" closed="false">
+   * Yes
+   * No
+</doodle>
 
 ===== Implementation =====
 
