@@ -177,13 +177,7 @@ Yes. The //is_literal// flag is preserved when two literal values are concatenat
 
 Previously we tried a version that only supported concatenation at compile-time (not run-time), to see if it would reduce the performance impact even further. The idea was to require everyone to use special //literal_concat()// and //literal_implode()// functions, which would raise exceptions to highlight where mistakes were made. These two functions can still be implemented by developers themselves (see [[#support_functions|Support Functions]] below), as they can be useful; but requiring everyone to use them would have required big changes to existing projects, and exceptions are not a graceful way of handling mistakes.
 
-Performance wise, my [[https://github.com/craigfrancis/php-is-literal-rfc/tree/main/tests|simplistic testing]] found there was still [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/local.pdf|a small impact without run-time concat]]:
-
-    Laravel Demo App: +0.30% with, vs +0.18% without.
-    Symfony Demo App: +0.06% with, vs +0.06% without.
-    My Concat Test:   +4.36% with, vs +2.23% without.
-    -
-    Website with 22 SQL queries: Inconclusive, too variable.
+Performance wise, my [[https://github.com/craigfrancis/php-is-literal-rfc/tree/main/tests|simplistic testing]] found there was still [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/tests/results/with-concat/local.pdf|a small impact without run-time concat]].
 
 > (Under The Hood: This is because //concat_function()// in "zend_operators.c" uses //zend_string_extend()// which needs to remove the //is_literal// flag. Also "zend_vm_def.h" does the same; and supports a quick concat with an empty string (x2), which would need its flag removed as well).
 
@@ -470,11 +464,11 @@ However, first we need libraries to start using //is_literal()// to check their 
 
 With a future RFC, we could potentially introduce checks for the native functions. For example, if we use the [[https://web.dev/trusted-types/|Trusted Types]] concept from JavaScript (which protects [[https://www.youtube.com/watch?v=po6GumtHRmU&t=92s|60+ Injection Sinks]], like innerHTML), the libraries create a stringable object as their output. These objects can be added to a list of safe objects for the relevant native functions. The native functions could then **warn** developers when they do not receive a value with the //is_literal// flag, or one of the safe objects. These warnings would **not break anything**, they just make developers aware of the mistakes they have made, and we will always need a way of switching them off entirely (e.g. phpMyAdmin).
 
-===== Proposed Voting Choices =====
+===== Voting =====
 
 Accept the RFC
 
-<doodle title="is_literal" auth="craigfrancis" voteType="single" closed="false">
+<doodle title="is_literal" auth="craigfrancis" voteType="single" closed="true">
    * Yes
    * No
 </doodle>
@@ -482,10 +476,6 @@ Accept the RFC
 ===== Implementation =====
 
 [[https://github.com/php/php-src/compare/master...krakjoe:literals|Joe Watkin's implementation]]
-
-===== References =====
-
-N/A
 
 ===== Rejected Features =====
 
