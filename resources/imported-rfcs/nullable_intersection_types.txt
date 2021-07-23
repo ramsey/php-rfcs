@@ -10,7 +10,7 @@
 Intersection types as currently accepted for PHP 8.1 are not nullable. This RFC proposes to make them so.
 
 ===== Proposal =====
-Intersection types as currently accepted for PHP 8.1 are not nullable: when one uses ''X&Y'' as a type on a property, an argument or a return value, there is no syntax to declare them as also accepting the ''null'' value. This means that it is required to use the null-pattern where default values are needed for properties and for optional arguments. For return-types, a null-object must be returned and potentially detected using a custom check.
+Intersection types as currently accepted for PHP 8.1 are not nullable: when one uses "''X&Y''" as a type on a property, an argument or a return value, there is no syntax to declare them as also accepting the ''null'' value. This means that it is required to use the null-pattern where default values are needed for properties and for optional arguments. For return-types, a null-object must be returned and potentially detected using a custom check.
 
 While useful in some cases, the null-pattern is not common in PHP. One reason might be that it requires quite some boilerplate (the implementation of the null-object's class), but the most likely reason is that the ''null'' value works just great instead, with zero extra code to write.
 
@@ -29,23 +29,63 @@ class Foo
 </PHP>
 
 ===== Rationale =====
-When PHP 7.0 introduced scalar types, it was obvious that the special ''null'' type was missing as a way to declare the empty state of an argument, property, or return value. PHP 7.1 added the ''?foo'' syntax to declare nullability and scalar types gained much broader adoption. This lesson from history tells us that the nullable type is special and very much needed in PHP.
+When PHP 7.0 introduced scalar types, it was obvious that the special ''null'' type was missing as a way to declare the empty state of an argument, property, or return value. PHP 7.1 added the "''?foo''" syntax to declare nullability and scalar types gained much broader adoption. This lesson from history tells us that the nullable type is special and very much needed in PHP.
 
 As for scalars, nullable intersection types would make optional arguments/properties/return-values trivial to implement. It would also make them consistent with the other type declarations.
 
 For userland, if this nullable capability were added to a later version of PHP, making a parameter nullable later would cause a BC break (or force a major version bump when using semver.) This is of course because of LSP rules.
 
-From an implementation point of view, the linked patch is trivial: the source of PHP already implements all the required logic to deal with variance/covariance rules related to the null type. The patch is only a matter of adding a syntax to tell the engine about nullability and everything else works already.
+From an implementation point of view, the linked patch is trivial: the source of PHP already implements all the required logic to deal with variance/covariance rules related to the ''null'' type and ''ReflectionIntersectionType::allowsNull()'' already exists. The patch is only a matter of adding a syntax to tell the engine about nullability and everything else just works.
 
 For all these reasons, this RFC proposes to make intersection types nullable, and to make them so right away in PHP 8.1.
 
 ===== Future Scope =====
-TBD
+The original intersection types RFC discusses a bit how composite types (i.e. mixing union and intersection types) could happen:
+https://wiki.php.net/rfc/pure-intersection-types#future_scope
 
-See https://wiki.php.net/rfc/pure-intersection-types#future_scope
+It mentions two main challenges to make them happen (there will likely be others):
+  * variance rules and checks
+  * Reflection
+
+From a conceptual pov, nullability is a special form of composite type. Yet, nullability doesn't have these concerns, because the engine already deals will ''null'' in a special way: ''MAYBE_BE_NULL'' is a flag that any type can carry internally, independently from any other type constraints, and reflection provides the ''allowsNull()'' method everywhere needed.
+
+This means we don't need (and shouldn't) wait to solve the generic case to solve the nullability case, which is particular anyway.
+
+The very benefits to solve the generic case have even not been discussed yet. The possibility exists that we might decide later on that we don't need to solve it.
 
 ===== Syntax choices =====
-TBD
+
+PHP already has two syntax to express nullability:
+  * for simple types, the "''?''" prefix is required, as in "''?array''"
+  * for union types, "''null''" should be added to the union, as in "''string|array|null''"
+
+This means that we have two main options for the syntax of nullable intersection types:
+  - use the "''?''" prefix, as in "''?X&Y''"
+  - use the "''|null''" suffix (or similar prefix), as in "''X&Y|null''"
+
+Since both possibilities contain several operators ("''?''" and "''&''" / "''|''" and "''&''" respectively), operator precedence should be taken into account to resolve any possible ambiguity when interpreting the type expression. PHP already defines "''|''" as having a lower precedence than the "''&''" operators. This means that "''X&Y|null''" can only be interpreted as "''(X&Y) | null''", which is what we want to express here.
+
+The precedence of the "''?''" type-operator is not defined yet. Looking at the precedence of null-related operators (see [[https://php.net/language.operators.precedence|this table]]), they are all below the "''&''" and "''|''" operators, which is what we need to unambiguously interpret "''?X&Y''" as "''? (X&Y)''". Another consideration related to composite types backs this interpretation up: whatever the nesting level of an hypothetical composite type definition, nullability can always we expressed as a single flag that sits next to the non-null constraints of the type (as the engine does it already.) This is because any intersection that contains the ''null'' type is identical to the ''null'' type itself.
+
+Taking all these elements into account, the preference of the author of this RFC is to define "''?''" as having a lower precedence than any other type-operator, and thus to use the "''?X&Y''" syntax. This reads quickly from left to right as: 1. the type is nullable 2. here are the constraints that apply to any non-null values.
+
+Using the "''?X&Y''" syntax has also the benefit of not colliding with any of the envisioned language extensions (them being composite types or even generics). Not using brackets also eases with visual reading, to quickly spot eg the end of the signature of a function declaration.
+
+Here is how this would look like in practice:
+
+<PHP>
+class Foo
+{
+    public ?X&Y $bar;
+
+    function setBar(?X&Y $bar = null): ?X&Y
+    {
+        return $this->bar = $bar;
+    }
+}
+</PHP>
+
+That being said and because it's kinda hard to gather a broad consensus on syntax choices, this RFC proposes various possible options for the community to decide. Using ''null|X&Y'' is not offered as an option because it would be "over-delivering syntax that hasn't been entirely thought through" (using sgolemon's words) and that should be introduced by a potential future RFC that would extend to composite types.
 
 ===== Proposed PHP Version(s) =====
 PHP 8.1.
@@ -55,8 +95,8 @@ As per the voting RFC, the first question requires a 2/3 majority for this propo
 
   * Make intersection types nullable: yes / no
   * Preferred syntax: "?" prefix / "|null" suffix
-  * If "?" wins, brackets should be: mandatory "?(Y&Y)" / not needed "?X&Y" / both styles should work
-  * If "|null" wins, brackets should be: mandatory "(Y&Y)|null" / not needed "X&Y|null" / both styles should work
+  * If "?" wins, brackets should be: mandatory "?(Y&Y)" / not needed "?X&Y" / allow both styles
+  * If "|null" wins, brackets should be: mandatory "(Y&Y)|null" / not needed "X&Y|null" / allow both styles
 
 ===== Patches and Tests =====
 See https://github.com/php/php-src/pull/7259
