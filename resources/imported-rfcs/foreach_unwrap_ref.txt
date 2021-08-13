@@ -1,0 +1,123 @@
+====== PHP RFC: Unwrap reference after foreach ======
+  * Date: 2021-08-13
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Target Version: PHP 8.2
+  * Implementation: https://github.com/php/php-src/pull/7364
+
+===== Introduction =====
+
+After a foreach by reference loop, the value variable currently remains a reference to the last array element, which may result in unexpected behavior if the variable is later reused. This RFC proposes to unwrap the reference after the foreach loop.
+
+This RFC addresses a relatively well known footgun when using foreach by reference. Despite a [[https://www.php.net/manual/en/control-structures.foreach.php|prominent documentation warning]], we still regularly receive bug reports about this behavior. The issue is illustrated in the following:
+
+<PHP>
+$array = [1, 2, 3];
+foreach ($array as &$value) { /* ... */ }
+foreach ($array as $value) { /* ... */ }
+var_dump($array);
+
+// Before this RFC:
+// array(3) {
+//   [0]=>
+//   int(1)
+//   [1]=>
+//   int(2)
+//   [2]=>
+//   &int(2)
+// }
+
+// After this RFC:
+// array(3) {
+//   [0]=>
+//   int(1)
+//   [1]=>
+//   int(2)
+//   [2]=>
+//   int(3)
+// }
+</PHP>
+
+The current behavior looks like a bug at first glance, but is entirely consistent with reference semantics in PHP. The reason for this behavior becomes apparent if we write out the loops:
+
+<PHP>
+$array = [1, 2, 3];
+$value =& $array[0];
+$value =& $array[1];
+$value =& $array[2];
+// $value is still a reference to $array[2] here.
+$value = $array[0]; // $array will be [1, 2, 1] here.
+$value = $array[1]; // $array will be [1, 2, 2] here.
+$value = $array[2]; // $array will be [1, 2, 2] here.
+</PHP>
+
+While the behavior is justifiable, it remains unexpected.
+
+===== Proposal =====
+
+This RFC proposes to change the semantics of foreach by reference to unwrap the reference after the loop. This means that ''$value'' will still have the value of the last (visited) element, but will no longer be a reference to it.
+
+While PHP does not have a dedicated language construct for reference unwrapping, the operation is logically equivalent to:
+
+<PHP>
+$tmp =& $value;
+unset($value); // Unset has reference breaking semantics.
+$value = $tmp;
+</PHP>
+
+For the motivating case, this means that $value is no longer a reference after the first loop, which means that the second loop will not modify the array:
+
+<PHP>
+$array = [1, 2, 3];
+foreach ($array as &$value) { /* ... */ }
+// $value is no longer a reference here.
+foreach ($array as $value) { /* ... */ }
+var_dump($array);
+
+// array(3) {
+//   [0]=>
+//   int(1)
+//   [1]=>
+//   int(2)
+//   [2]=>
+//   int(3)
+// }
+</PHP>
+
+There is one edge case to consider: The foreach value variable may be any writable variable, not necessarily a simple variable. While very unusual, all of the following are legal:
+
+<PHP>
+foreach ($array as &$info['value']) {}
+foreach ($array as &$arrayCopy[]) {}
+foreach ($array as &getInfo()['value']) {}
+</PHP>
+
+Unwrapping the reference requires that we evaluate the variable again after the loop. For a simple variable like ''$value'' this will not have further side effects. For the complex variables in the above example, side effects are possible.
+
+There are broadly two ways we can handle this: Either we always perform the unwrap and accept the potential side effect, or we limit the unwrap operation to only some cases. For all practical purposes, only unwrapping for simple variables would be sufficient.
+
+===== Backward Incompatible Changes =====
+
+This change is backwards-incompatible, in that it's no longer possible to modify the last (visited) array element through the ''$value'' variable after the foreach loop.
+
+<PHP>
+foreach ($array as &$value) { /* ... */ }
+// This assignment no longer has an effect on $array:
+$value = 'Modify the last element';
+</PHP>
+
+This kind of usage is expected to be very rare, and breaking it is worthwhile to remove a common gotcha for less experienced PHP developers. It's possible to restore the previous behavior by explicitly assigning to a separate variable inside the loop:
+
+<PHP>
+$lastRef = null;
+foreach ($array as &$value) {
+    /* ... */
+    $lastRef =& $value;
+}
+// This will continue to work.
+$lastRef = 'Modify the last element';
+</PHP>
+
+===== Vote =====
+
+Yes/No
