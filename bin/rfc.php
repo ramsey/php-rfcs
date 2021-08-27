@@ -100,10 +100,8 @@ $app
             if ($dryRun) {
                 $io->warning('Executing in DRY RUN mode');
             } else {
-                $confirmation = 'You are not executing this in DRY RUN mode. Please '
-                    . 'confirm that you wish to commit changes to the repository.';
-
-                if (!$io->confirm($confirmation, false)) {
+                $io->warning('You are not executing in DRY RUN mode.');
+                if (!$io->confirm('Please confirm you wish to make changes.', false)) {
                     return 1;
                 }
             }
@@ -132,10 +130,8 @@ $app
             if ($dryRun) {
                 $io->warning('Executing in DRY RUN mode');
             } else {
-                $confirmation = 'You are not executing this in DRY RUN mode. Please '
-                    . 'confirm that you wish to commit changes to the repository.';
-
-                if (!$io->confirm($confirmation, false)) {
+                $io->warning('You are not executing in DRY RUN mode.');
+                if (!$io->confirm('Please confirm you wish to make changes.', false)) {
                     return 1;
                 }
             }
