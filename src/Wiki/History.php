@@ -34,6 +34,9 @@ class History
     ) {
     }
 
+    /**
+     * @return array<array{rev: int, date: string, author: string, email: string, message: string}>
+     */
     public function getHistory(string $rfcSlug, int $first = 0, array $history = []): array
     {
         $queryParams = [
@@ -93,7 +96,7 @@ class History
             }
 
             $history[] = [
-                'rev' => $time,
+                'rev' => (int) $time,
                 'date' => (new DateTimeImmutable("@{$time}"))->format(self::GIT_DATE),
                 'author' => $this->people[$user]['name'],
                 'email' => $this->people[$user]['email'],
