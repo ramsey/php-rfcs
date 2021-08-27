@@ -7,6 +7,7 @@ namespace PhpRfcs;
 use GuzzleHttp\Client;
 use Http\Factory\Guzzle\RequestFactory;
 use Http\Factory\Guzzle\UriFactory;
+use PhpRfcs\Wiki\Download;
 use PhpRfcs\Wiki\History;
 use PhpRfcs\Wiki\Index;
 use Silly\Application;
@@ -24,6 +25,7 @@ $uriFactory = new UriFactory();
 
 $wikiIndex = new Index($client, $requestFactory, $tidy);
 $wikiHistory = new History($client, $requestFactory, $uriFactory, $tidy);
+$wikiDownload = new Download($client, $requestFactory, $uriFactory);
 
 $app = new Application('PHP RFC Tools');
 
@@ -60,6 +62,22 @@ $app
     ->descriptions(
         'Display the wiki history of an RFC',
         ['rfc' => 'The RFC string slug'],
+    );
+
+$app
+    ->command(
+        'wiki:download rfc [rev]',
+        function (string $rfc, ?int $rev, SymfonyStyle $io) use ($wikiDownload) {
+            $rfc = $wikiDownload->downloadRfc($rfc, $rev);
+            $io->writeln($rfc);
+        },
+    )
+    ->descriptions(
+        'Download the raw RFC body from the wiki',
+        [
+            'rfc' => 'The RFC string slug',
+            'rev' => 'The timestamp of the revision; defaults to the current revision',
+        ],
     );
 
 $app->run();
