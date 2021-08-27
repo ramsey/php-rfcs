@@ -7,6 +7,7 @@ namespace PhpRfcs;
 use GuzzleHttp\Client;
 use Http\Factory\Guzzle\RequestFactory;
 use Http\Factory\Guzzle\UriFactory;
+use PhpRfcs\Wiki\Crawler;
 use PhpRfcs\Wiki\Download;
 use PhpRfcs\Wiki\History;
 use PhpRfcs\Wiki\Index;
@@ -36,6 +37,8 @@ $wikiSave = new Save(
     $config['paths']['repository'],
     $config['paths']['import'],
 );
+
+$wikiCrawler = new Crawler($wikiIndex, $wikiSave);
 
 $app = new Application('PHP RFC Tools');
 
@@ -119,6 +122,37 @@ $app
         [
             'rfc' => 'The RFC string slug',
             '--dry-run' => 'If set, this command will not commit any changes',
+        ],
+    );
+
+$app
+    ->command(
+        'wiki:crawl [--dry-run]',
+        function (bool $dryRun, SymfonyStyle $io) use ($wikiCrawler): int {
+            if ($dryRun) {
+                $io->warning('Executing in DRY RUN mode');
+            } else {
+                $confirmation = 'You are not executing this in DRY RUN mode. Please '
+                    . 'confirm that you wish to commit changes to the repository.';
+
+                if (!$io->confirm($confirmation, false)) {
+                    return 1;
+                }
+            }
+
+            $wikiCrawler->crawlWiki($io, $dryRun);
+
+            if ($dryRun) {
+                $io->warning('Finished DRY RUN. Nothing was committed.');
+            }
+
+            return 0;
+        },
+    )
+    ->descriptions(
+        'Crawl the wiki, finding new RFCs and/or history and saving it to the repo',
+        [
+            '--dry-run' => 'If set, the crawler does not commit any changes',
         ],
     );
 
