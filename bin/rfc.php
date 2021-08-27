@@ -92,14 +92,34 @@ $app
 
 $app
     ->command(
-        'wiki:save rfc',
-        function (string $rfc, SymfonyStyle $io) use ($wikiSave) {
-            $wikiSave->commitWithHistory($rfc, $io);
+        'wiki:save rfc [--dry-run]',
+        function (string $rfc, bool $dryRun, SymfonyStyle $io) use ($wikiSave): int {
+            if ($dryRun) {
+                $io->warning('Executing in DRY RUN mode');
+            } else {
+                $confirmation = 'You are not executing this in DRY RUN mode. Please '
+                    . 'confirm that you wish to commit changes to the repository.';
+
+                if (!$io->confirm($confirmation, false)) {
+                    return 1;
+                }
+            }
+
+            $wikiSave->commitWithHistory($rfc, $io, $dryRun);
+
+            if ($dryRun) {
+                $io->warning('Finished DRY RUN. Nothing was committed.');
+            }
+
+            return 0;
         },
     )
     ->descriptions(
         'Commit the RFC to the repository, including its history',
-        ['rfc' => 'The RFC string slug'],
+        [
+            'rfc' => 'The RFC string slug',
+            '--dry-run' => 'If set, this command will not commit any changes',
+        ],
     );
 
 $app->run();

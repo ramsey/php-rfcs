@@ -22,6 +22,9 @@ class Index
     ) {
     }
 
+    /**
+     * @return string[]
+     */
     public function getIndex(): array
     {
         $request = $this->requestFactory

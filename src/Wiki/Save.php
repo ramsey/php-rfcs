@@ -18,7 +18,7 @@ class Save
     ) {
     }
 
-    public function commitWithHistory(string $rfcSlug, SymfonyStyle $io): bool
+    public function commitWithHistory(string $rfcSlug, SymfonyStyle $io, bool $dryRun = true): bool
     {
         $io->info("Fetching history for '$rfcSlug'");
 
@@ -38,9 +38,12 @@ class Save
             $io->writeln("- Saving history for revision '{$historyRecord['rev']}'");
 
             $raw = $this->download->downloadRfc($rfcSlug, $historyRecord['rev']);
-            file_put_contents($file, $raw);
 
-            $this->commitFile($historyRecord, $file, $rfcSlug);
+            if (!$dryRun) {
+                file_put_contents($file, $raw);
+            }
+
+            $this->commitFile($historyRecord, $file, $rfcSlug, $dryRun);
         }
 
         $io->success("Saved RFC '$rfcSlug' and its history to $file");
@@ -79,7 +82,7 @@ class Save
     /**
      * @param array{rev: int, date: string, author: string, email: string, message: string} $historyRecord
      */
-    private function commitFile(array $historyRecord, string $file, string $rfcSlug): void
+    private function commitFile(array $historyRecord, string $file, string $rfcSlug, bool $dryRun): void
     {
         $message = $historyRecord['message'] ?: 'Wiki changes';
         $message .= "\n\nX-Dokuwiki-Revision: {$historyRecord['rev']}\nX-Dokuwiki-Slug: $rfcSlug";
@@ -91,7 +94,10 @@ class Save
         ];
 
         $stage = ($this->processFactory)(['git', 'add', $file], $this->repositoryPath, $environment);
-        $stage->mustRun();
+
+        if (!$dryRun) {
+            $stage->mustRun();
+        }
 
         $commitCommand = [
             'git',
@@ -109,6 +115,9 @@ class Save
         ];
 
         $commit = ($this->processFactory)($commitCommand, $this->repositoryPath, $environment);
-        $commit->mustRun();
+
+        if (!$dryRun) {
+            $commit->mustRun();
+        }
     }
 }
