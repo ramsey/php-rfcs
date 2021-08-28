@@ -70,6 +70,7 @@ class Save
         $logProcess->mustRun();
 
         $logs = explode("\n", trim($logProcess->getOutput()));
+        $logs = array_filter($logs);
         $logs = array_map(fn (string $row): array => explode(',', trim($row)), $logs);
         $logs = array_map(fn (array $row): array => ['rev' => $row[0], 'rfc' => $row[1]], $logs);
         $logs = array_filter($logs, fn (array $row): bool => $row['rfc'] === $rfcSlug);
