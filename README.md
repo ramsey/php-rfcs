@@ -20,6 +20,7 @@ Why do this?
 ------------
 
 Because a wiki is a terrible place to keep track of RFCs and changes to RFCs.
+This is for me; it's not intended to replace the wiki.
 
 I plan to expand on these tools to convert the RFCs into Markdown or
 reStructuredText. My goal is to automate these conversions to keep them
