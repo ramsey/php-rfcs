@@ -62,10 +62,6 @@ class Save
      */
     private function getKnownRevisionsForRfc(string $file, string $rfcSlug): array
     {
-        if (!file_exists($file)) {
-            return [];
-        }
-
         $knownRevisionsForRfc = array_filter(
             $this->wikiRevisionHistory,
             fn (array $row): bool => $row['rfc'] === $rfcSlug,
