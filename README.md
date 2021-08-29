@@ -35,6 +35,14 @@ Run `composer install` and then check out the commands available:
 php bin/rfc.php
 ```
 
+Requirements
+------------
+
+Requirements, other than those listed in `composer.json`, are:
+
+* [Git](https://www.git-scm.com) 2.30 or later
+* [Pandoc](https://pandoc.org) 2.14 or later
+
 Technical Notes
 ---------------
 
