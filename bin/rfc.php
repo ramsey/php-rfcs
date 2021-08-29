@@ -45,7 +45,7 @@ $app = new Application('PHP RFC Tools');
 $app
     ->command(
         'wiki:index',
-        function (SymfonyStyle $io) use ($wikiIndex) {
+        function (SymfonyStyle $io) use ($wikiIndex): int {
             /** @var array<string[]> $table */
             $table = [];
             foreach ($wikiIndex->getIndex() as $slug) {
@@ -56,6 +56,8 @@ $app
             }
 
             $io->table(['PHP RFC', 'URL'], $table);
+
+            return 0;
         },
     )
     ->descriptions(
@@ -65,11 +67,13 @@ $app
 $app
     ->command(
         'wiki:history rfc',
-        function (string $rfc, SymfonyStyle $io) use ($wikiHistory) {
+        function (string $rfc, SymfonyStyle $io) use ($wikiHistory): int {
             $io->table(
                 ['Rev', 'Date', 'Author', 'Email', 'Message'],
                 $wikiHistory->getHistory($rfc),
             );
+
+            return 0;
         },
     )
     ->descriptions(
@@ -80,9 +84,11 @@ $app
 $app
     ->command(
         'wiki:download rfc [rev]',
-        function (string $rfc, ?int $rev, SymfonyStyle $io) use ($wikiDownload) {
+        function (string $rfc, ?int $rev, SymfonyStyle $io) use ($wikiDownload): int {
             $rfc = $wikiDownload->downloadRfc($rfc, $rev);
             $io->writeln($rfc);
+
+            return 0;
         },
     )
     ->descriptions(
