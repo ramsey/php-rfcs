@@ -9,6 +9,11 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 
 class Save
 {
+    /**
+     * @var array{rev: int, rfc: string} $wikiRevisionHistory
+     */
+    private array $wikiRevisionHistory;
+
     public function __construct(
         private History $history,
         private Download $download,
@@ -16,6 +21,7 @@ class Save
         private string $repositoryPath,
         private string $savePath,
     ) {
+        $this->wikiRevisionHistory = $this->parseKnownRevisionsForWiki();
     }
 
     public function commitWithHistory(string $rfcSlug, SymfonyStyle $io, bool $dryRun = true): bool
@@ -25,11 +31,11 @@ class Save
         $history = $this->history->getHistory($rfcSlug);
         $history = array_reverse($history);
         $file = $this->savePath . '/' . $rfcSlug . '.txt';
-        $existingRevisions = $this->getExistingRevisions($file, $rfcSlug);
+        $knownRevisions = $this->getKnownRevisionsForRfc($file, $rfcSlug);
 
         /** @var array{rev: int, date: string, author: string, email: string, message: string} $historyRecord */
         foreach ($history as $historyRecord) {
-            if (in_array($historyRecord['rev'], $existingRevisions)) {
+            if (in_array($historyRecord['rev'], $knownRevisions)) {
                 $io->writeln("- Skipping revision '{$historyRecord['rev']}'; we already have it");
 
                 continue;
@@ -54,12 +60,30 @@ class Save
     /**
      * @return int[]
      */
-    private function getExistingRevisions(string $file, string $rfcSlug): array
+    private function getKnownRevisionsForRfc(string $file, string $rfcSlug): array
     {
         if (!file_exists($file)) {
             return [];
         }
 
+        $knownRevisionsForRfc = array_filter(
+            $this->wikiRevisionHistory,
+            fn (array $row): bool => $row['rfc'] === $rfcSlug,
+        );
+
+        $revisions = array_map(
+            fn (string $v): int => (int) $v,
+            array_column($knownRevisionsForRfc, 'rev'),
+        );
+
+        return array_filter($revisions);
+    }
+
+    /**
+     * @return array{rev: int, rfc: string}
+     */
+    private function parseKnownRevisionsForWiki(): array
+    {
         $logCommand = [
             'git',
             'log',
@@ -72,12 +96,11 @@ class Save
         $logs = explode("\n", trim($logProcess->getOutput()));
         $logs = array_filter($logs);
         $logs = array_map(fn (string $row): array => explode(',', trim($row)), $logs);
-        $logs = array_map(fn (array $row): array => ['rev' => $row[0], 'rfc' => $row[1]], $logs);
-        $logs = array_filter($logs, fn (array $row): bool => $row['rfc'] === $rfcSlug);
 
-        $revisions = array_map(fn (string $v): int => (int) $v, array_column($logs, 'rev'));
-
-        return array_filter($revisions);
+        return array_map(
+            fn (array $row): array => ['rev' => (int) $row[0], 'rfc' => (string) $row[1]],
+            $logs,
+        );
     }
 
     /**
