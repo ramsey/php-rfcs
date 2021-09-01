@@ -11,6 +11,7 @@ use PhpRfcs\Wiki\Crawler;
 use PhpRfcs\Wiki\Download;
 use PhpRfcs\Wiki\History;
 use PhpRfcs\Wiki\Index;
+use PhpRfcs\Wiki\Metadata;
 use PhpRfcs\Wiki\Save;
 use Silly\Application;
 use Symfony\Component\Console\Style\SymfonyStyle;
@@ -39,6 +40,7 @@ $wikiSave = new Save(
 );
 
 $wikiCrawler = new Crawler($wikiIndex, $wikiSave);
+$wikiMetadata = new Metadata($processFactory, $config['paths']['import']);
 
 $app = new Application('PHP RFC Tools');
 
@@ -156,6 +158,22 @@ $app
         [
             '--dry-run' => 'If set, the crawler does not commit any changes',
         ],
+    );
+
+$app
+    ->command(
+        'wiki:metadata [rfc]',
+        function (?string $rfc, SymfonyStyle $io) use ($wikiMetadata): int {
+            $io->writeln(json_encode(
+                $wikiMetadata->gatherMetadata($rfc),
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+            ));
+
+            return 0;
+        },
+    )
+    ->descriptions(
+        'Prints a JSON array of metadata for all RFCs on the wiki',
     );
 
 $app->run();
