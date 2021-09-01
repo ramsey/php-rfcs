@@ -11,10 +11,14 @@ use PhpRfcs\ProcessFactory;
 
 class Metadata
 {
+    private array $indexData;
+
     public function __construct(
         private ProcessFactory $processFactory,
+        private Index $wikiIndex,
         private string $rawPath,
     ) {
+        $this->indexData = $this->wikiIndex->getIndex();
     }
 
     public function gatherMetadata(?string $rfcSlug): array
@@ -71,9 +75,10 @@ class Metadata
         $listItems = $xpath->query('/html/body/ul[1]/li');
 
         $metadata = [
-            'wiki URL' => 'https://wiki.php.net/rfc/' . $rfcSlug,
+            'section' => $this->indexData[$rfcSlug]['section'] ?? 'Unknown',
             'slug' => $rfcSlug,
             'title' => $this->removeExcessWhitespace($title),
+            'wiki URL' => 'https://wiki.php.net/rfc/' . $rfcSlug,
         ];
 
         /** @var DOMElement $item */

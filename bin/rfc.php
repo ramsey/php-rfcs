@@ -41,7 +41,7 @@ $wikiSave = new Save(
 );
 
 $wikiCrawler = new Crawler($wikiIndex, $wikiSave);
-$wikiMetadata = new WikiMetadata($processFactory, $config['paths']['import']);
+$wikiMetadata = new WikiMetadata($processFactory, $wikiIndex, $config['paths']['import']);
 
 $rfcMetadata = new RfcMetadata(
     $processFactory,
