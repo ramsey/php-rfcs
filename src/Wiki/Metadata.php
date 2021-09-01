@@ -84,7 +84,7 @@ class Metadata
 
     private function parseMetadataFromFile(string $rfcSlug, string $rawFile): array
     {
-        $rawContents = file_get_contents($rawFile);
+        $rawContents = trim(file_get_contents($rawFile));
 
         // Find Dokuwiki links in the form of "[[http://foobar|http://foobar]]"
         // and replace them with just "http://foobar". Pandoc is having trouble
