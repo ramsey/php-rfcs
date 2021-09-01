@@ -130,7 +130,7 @@ class Metadata
             $itemText = preg_replace('#^<strong>(.*):</strong>#smU', '$1:', $itemText);
 
             $itemKeyValue = explode(': ', $itemText, 2);
-            $itemKeyValue = array_map(fn (string $v): string => trim($v), $itemKeyValue);
+            $itemKeyValue = array_map('trim', $itemKeyValue);
             $itemKeyValue = array_filter($itemKeyValue);
 
             if (count($itemKeyValue) === 0) {
@@ -353,7 +353,7 @@ class Metadata
         $logProcess->mustRun();
 
         $logs = explode("\n", trim($logProcess->getOutput()));
-        $logs = array_map(fn (string $v): string => trim($v), $logs);
+        $logs = array_map('trim', $logs);
         $logs = array_filter($logs);
 
         if (count($logs) > 0) {
