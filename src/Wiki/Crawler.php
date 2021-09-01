@@ -19,7 +19,7 @@ class Crawler
         $rfcIndex = $this->index->getIndex();
 
         foreach ($rfcIndex as $rfc) {
-            $this->save->commitWithHistory($rfc, $io, $dryRun);
+            $this->save->commitWithHistory($rfc['slug'], $io, $dryRun);
         }
     }
 }
