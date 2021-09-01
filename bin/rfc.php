@@ -165,7 +165,10 @@ $app
         'wiki:metadata [rfc]',
         function (?string $rfc, SymfonyStyle $io) use ($wikiMetadata): int {
             $io->writeln(json_encode(
-                $wikiMetadata->gatherMetadata($rfc),
+                [
+                    '_comment' => 'Do not manually edit this data. Generate it using `php bin/rfc.php wiki:metadata`.',
+                    'rfcs' => $wikiMetadata->gatherMetadata($rfc),
+                ],
                 JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
             ));
 

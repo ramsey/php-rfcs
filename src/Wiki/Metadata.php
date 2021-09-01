@@ -61,23 +61,25 @@ class Metadata
     public function gatherMetadata(?string $rfcSlug): array
     {
         if ($rfcSlug !== null) {
-            return $this->parseMetadataFromFile(
-                $rfcSlug,
-                $this->rawPath . '/' . $rfcSlug . '.txt',
-            );
+            return [
+                $this->parseMetadataFromFile(
+                    $rfcSlug,
+                    $this->rawPath . '/' . $rfcSlug . '.txt',
+                ),
+            ];
         }
 
         $metadata = [];
 
         foreach (glob($this->rawPath . '/*.txt') as $rawFile) {
             $slug = basename($rawFile, '.txt');
-            $metadata[$slug] = $this->parseMetadataFromFile($slug, $rawFile);
+            $metadata[] = $this->parseMetadataFromFile($slug, $rawFile);
         }
 
         // Sort the RFCs by date.
         array_multisort(array_column($metadata, 'Date'), SORT_ASC, $metadata);
 
-        return array_values($metadata);
+        return $metadata;
     }
 
     private function parseMetadataFromFile(string $rfcSlug, string $rawFile): array
