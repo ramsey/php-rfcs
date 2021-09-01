@@ -62,7 +62,7 @@ class Metadata
     {
         if ($rfcSlug !== null) {
             return [
-                $this->parseMetadataFromFile(
+                $rfcSlug => $this->parseMetadataFromFile(
                     $rfcSlug,
                     $this->rawPath . '/' . $rfcSlug . '.txt',
                 ),
@@ -73,7 +73,7 @@ class Metadata
 
         foreach (glob($this->rawPath . '/*.txt') as $rawFile) {
             $slug = basename($rawFile, '.txt');
-            $metadata[] = $this->parseMetadataFromFile($slug, $rawFile);
+            $metadata[$slug] = $this->parseMetadataFromFile($slug, $rawFile);
         }
 
         // Sort the RFCs by date.
