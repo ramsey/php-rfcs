@@ -193,9 +193,9 @@ $app
 
 $app
     ->command(
-        'rfc:metadata [rfc]',
-        function (?string $rfc, SymfonyStyle $io) use ($rfcMetadata, $config): int {
-            $metadata = $rfcMetadata->getMetadata($rfc);
+        'rfc:metadata [rfc] [--raw-metadata=]',
+        function (?string $rfc, ?string $rawMetadata, SymfonyStyle $io) use ($rfcMetadata, $config): int {
+            $metadata = $rfcMetadata->getMetadata($rfc, $rawMetadata);
             $io->writeln(json_encode($metadata, $config['json']));
 
             return 0;
@@ -205,6 +205,10 @@ $app
         'Prints a JSON array of cleaned and standardized metadata for the PHP RFCs',
         [
             'rfc' => 'The RFC string slug',
+            '--raw-metadata' => 'Typically, rfc:metadata generates the raw '
+                . 'metadata before cleaning it. If this option is provided, '
+                . 'rfc:metadata will use the data from the indicated file, rather '
+                . 'than generating the raw metadata itself.',
         ],
     );
 

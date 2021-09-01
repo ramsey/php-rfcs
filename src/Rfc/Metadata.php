@@ -60,9 +60,9 @@ class Metadata
     ) {
     }
 
-    public function getMetadata(?string $rfcSlug): array
+    public function getMetadata(?string $rfcSlug, ?string $rawMetadataFile): array
     {
-        $rawData = $this->wikiMetadata->gatherMetadata($rfcSlug);
+        $rawData = $this->getRawMetaData($rfcSlug, $rawMetadataFile);
         $cleanData = [];
 
         foreach ($rawData as $slug => $rfcData) {
@@ -75,6 +75,21 @@ class Metadata
         array_multisort(array_column($cleanData, 'Date'), SORT_ASC, $cleanData);
 
         return $cleanData;
+    }
+
+    private function getRawMetaData(?string $rfcSlug, ?string $rawMetadataFile): array
+    {
+        if ($rawMetadataFile !== null) {
+            $rawData = json_decode(file_get_contents($rawMetadataFile), true);
+
+            if ($rfcSlug !== null) {
+                return [$rfcSlug => $rawData[$rfcSlug]];
+            }
+
+            return $rawData;
+        }
+
+        return $this->wikiMetadata->gatherMetadata($rfcSlug);
     }
 
     private function applyDataOverrides(array $cleanData): array
