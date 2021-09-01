@@ -162,7 +162,7 @@ class Metadata
                 'maintainer' => 'maintainers',
                 'original author', 'based on previous rfc by', 'author of original patch' => 'original authors',
                 'rfc version' => 'version',
-                'target version', 'target php version', 'proposed version', 'target' => 'PHP version',
+                'target version', 'target php version', 'proposed version', 'proposed php version', 'target' => 'PHP version',
                 default => $rawKey,
             };
 
