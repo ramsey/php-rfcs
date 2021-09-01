@@ -102,7 +102,7 @@ class Metadata
             if (count($itemKeyValue) === 1) {
                 $rawKey = 'extra';
                 $rawValue = array_merge(
-                    $metadata['Extra'] ?? [],
+                    $metadata['extra'] ?? [],
                     [$this->convertToRst(trim($itemKeyValue[0] ?? '', '*'))],
                 );
             }
@@ -138,6 +138,14 @@ class Metadata
             '#<a(.+)href="/?(rfc/[\w\-/]+)"(.*)>#imsU',
             '<a$1href="https://wiki.php.net/$2"$3>',
             $value
+        );
+
+        // If a mailto link has a word character directly in front of it, add
+        // a space. The lack of a space causes some issues with pandoc.
+        $value = preg_replace(
+            '#((?<=\w)<a href="mailto:)#im',
+            ' $1',
+            $value,
         );
 
         $process = ($this->processFactory)(['pandoc', '--from', 'html', '--to', 'rst']);
