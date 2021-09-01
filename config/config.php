@@ -5,5 +5,6 @@ return [
     'paths' => [
         'repository' => realpath(__DIR__ . '/..'),
         'import' => realpath(__DIR__ . '/../resources/imported-rfcs'),
+        'overrides' => realpath(__DIR__ . '/../resources/metadata-overrides'),
     ],
 ];
