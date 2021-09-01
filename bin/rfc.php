@@ -166,7 +166,7 @@ $app
         function (?string $rfc, SymfonyStyle $io) use ($wikiMetadata): int {
             $io->writeln(json_encode(
                 [
-                    '_comment' => 'Do not manually edit this data. Generate it using `php bin/rfc.php wiki:metadata`.',
+                    '_comment' => 'Do not manually edit this data. This data is generated and compiled from the raw data obtained from the PHP wiki. Generate it using `php bin/rfc.php wiki:metadata`.',
                     'rfcs' => $wikiMetadata->gatherMetadata($rfc),
                 ],
                 JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
@@ -176,7 +176,7 @@ $app
         },
     )
     ->descriptions(
-        'Prints a JSON array of metadata for all RFCs on the wiki',
+        'Prints a JSON array of the raw metadata found for the RFCs on the PHP wiki',
     );
 
 $app->run();
