@@ -96,11 +96,6 @@ class Metadata
             $rawKey = trim(strtolower(strip_tags($itemKeyValue[0])), '*');
             $rawValue = trim($itemKeyValue[1] ?? '', '*');
 
-            if ($rawKey === 'first published at' && str_contains($rawValue, '://wiki.php.net/rfc/' . $rfcSlug)) {
-                // If the wiki URL is the same as "first published at," skip it.
-                continue;
-            }
-
             // If $itemKeyValue has only 1 element, then we assume that it does
             // not have the characters ": " to split the string. In this case,
             // set the single item as the $rawValue and the key as "extra."
