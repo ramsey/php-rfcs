@@ -42,6 +42,8 @@ Requirements, other than those listed in `composer.json`, are:
 
 * [Git](https://www.git-scm.com) 2.30 or later
 * [Pandoc](https://pandoc.org) 2.14 or later
+* [jq](https://stedolan.github.io/jq/) is *recommended* for querying
+  `resources/metadata.json` from the console
 
 Technical Notes
 ---------------
