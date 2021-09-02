@@ -34,6 +34,7 @@ class Metadata
         '#^Partially Accepted \(in PHP 7\.0\)#i' => self::STATUS_ACCEPTED,
         '#^Passed Proposal 1\. 2 and 3 declined\.$#i' => self::STATUS_ACCEPTED,
         '#^Ready for Review & Discussion$#i' => self::STATUS_DRAFT,
+        '#^Work in Progress$#i' => self::STATUS_DRAFT,
         '#^in the works$#i' => self::STATUS_DRAFT,
         '#^revising after v1\.0$#i' => self::STATUS_DRAFT,
         '#^updated stream_resolve_include_path\(\) was added in PHP 5\.3\.3$#i' => self::STATUS_IMPLEMENTED,
@@ -45,7 +46,7 @@ class Metadata
         '#^(Declined|Rejected)#i' => self::STATUS_DECLINED,
 
         // Draft statuses.
-        '#^(In |Under )?(Discussion|Draft|Brainstorming|Reopened|Started)#i' => self::STATUS_DRAFT,
+        '#^(In |Under )?(Development|Discussion|Draft|Brainstorming|Reopened|Started)#i' => self::STATUS_DRAFT,
 
         // Implemented statuses.
         '#^(<a.*>)?(Applied|Deprecation Implemented|`?Implemented|Merged)#i' => self::STATUS_IMPLEMENTED,
@@ -54,7 +55,7 @@ class Metadata
         '#^(In )?Voting#i' => self::STATUS_VOTING,
 
         // Withdrawn statuses.
-        '#^(Abandoned|Closed|Dead|Inactive|Obsolete|Superseded|Suspended|Wid?thdrawn?)#i' => self::STATUS_WITHDRAWN,
+        '#^(Abandonn?ed|Closed|Dead|Inactive|Obsolete|Superseded|Suspended|Wid?thdrawn?)#i' => self::STATUS_WITHDRAWN,
     ];
 
     private const SECTION_STATUS_MAP = [
