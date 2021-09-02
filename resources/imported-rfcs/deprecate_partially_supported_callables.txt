@@ -1,0 +1,84 @@
+====== PHP RFC: Deprecate partially supported callables ======
+  * Date: 2021-09-02
+  * Author: Nikita Popov <nikic@php.net>
+  * Status: Draft
+  * Target Version: PHP 8.2
+  * Implementation: https://github.com/php/php-src/pull/7446
+
+===== Introduction =====
+
+This RFC proposes to deprecate callables that are supported by ''call_user_func($callable)'', but not by ''$callable()''.
+
+===== Proposal =====
+
+The following callables are currently accepted by the ''callable'' type, the ''is_callable()'' function and ''call_user_func()'', but are not supported by ''$callable()'':
+
+<PHP>
+"self::method"
+"parent::method"
+"static::method"
+["self", "method"]
+["parent", "method"]
+["static", "method"]
+["Foo", "Bar::method"]
+[new Foo, "Bar::method"]
+</PHP>
+
+This RFC proposes to deprecate in PHP 8.2 and remove in PHP 9.0 support for these callables. A deprecation warning will be thrown by all attempts to invoke such a callable, such as via ''call_user_func()'', but also ''array_map()''.
+
+The ''is_callable()'' function and ''callable'' type remain side-effect free and do not throw a deprecation warning. They will continue to accept these callables until support is removed entirely.
+
+===== Discussion =====
+
+This RFC tries to address two issues. The first is the inconsistency in what PHP considers a "callable". Nowadays, the recommended way to invoke a calllable is the ''$callable()'' syntax. However, some arguments that pass a ''callable'' type are not actually "callable" with this syntax.
+
+There are principally two ways to resolve this inconsistency: Drop support for these callables entirely, or add support for them to ''$callable()''. Both outcomes are generally viable.
+
+This is where the second issue comes in: Apart from the last two cases, all of these callables are context-dependent. The method that ''%%"self::method"%%'' refers to depends on which class the call or callability check is performed from. In practice, this usually also holds for the last two cases, when used in the form of ''%%[new Foo, "parent::method"]%%''.
+
+Reducing the context-dependence of callables is the secondary goal of this RFC. After this RFC, the only scope-dependence still left is method visibility: ''%%"Foo::bar"%%'' may be visible in one scope, but not another. If callables were to be limited to public methods in the future (while private methods would have to use [[rfc:first_class_callable_syntax|first-class callables]] or ''Closure::fromCallable()'' to be made scope-independent), then the ''callable'' type would become well-defined and could be used as a property type. However, changes to visibility handling are not proposed as part of this RFC.
+
+===== Backward Incompatible Changes =====
+
+Most of the callables deprecated here have a straightforward replacement: ''%%"self"%%'' should be replaced with ''self::class'', and so on:
+
+<PHP>
+"self::method"       -> self::class . "::method"
+"parent::method"     -> parent::class . "::method"
+"static::method"     -> static::class . "::method"
+["self", "method"]   -> [self::class, "method"]
+["parent", "method"] -> [parent::class, "method"]
+["static", "method"] -> [static::class, "method"]
+</PHP>
+
+The new form of these callables is no longer context-dependent. It will refer to the self/parent/static scope of where the callable has been created, rather than where is will be called.
+
+If compatibility with PHP < 8.1 is not desired, use of the first-class callable syntax ''self::method(...)'' is also possible.
+
+The ''%%[$objOrClass, "Bar::method"]%%'' callable form deserves some additional explanation, as most people will not have encountered it. Given this kind of inheritance hierarchy...
+
+<PHP>
+class Bar {
+    public function method() {}
+}
+class Foo extends Bar {
+    public function method() {}
+}
+</PHP>
+
+...the basic idea behind this callable syntax is that ''%%[new Foo, "method"]%%'' will refer to the method ''Foo::method()'', which overrides ''Bar::method()''. The ''%%[new Foo, "Bar::method"]%%'' or ''%%[new Foo, "parent::method"]%%'' syntax provides a way to call the overridden method instead.
+
+Inside the scope of ''Foo'', the same can be achieved with a call to ''%%["Bar", "method"]%%'' or more intuitively written as ''%%[parent::class, "method"]%%''. This is not a static method call, but a scoped instance call, the same as the familiar ''parent::method()''.
+
+PHP does not provide any straightforward facilities to call an overriden method outside its inheritance hierarchy, as this is generally not a meaningful operation. If need be, this can still be achieved by using either reflection or closure rebinding:
+
+<PHP>
+// Using reflection:
+(new ReflectionMethod("Bar", "method"))->invoke(new Foo);
+// Using closure rebinding:
+Closure::fromCallable([new Bar, "method"])->bindTo(new Foo)();
+</PHP>
+
+===== Vote =====
+
+Yes/No
