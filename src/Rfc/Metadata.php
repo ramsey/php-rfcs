@@ -105,7 +105,7 @@ class Metadata
 
     public function getMetadata(?string $rfcSlug, ?string $rawMetadataFile): array
     {
-        $rawData = $this->getRawMetaData($rfcSlug, $rawMetadataFile);
+        $rawData = $this->getRawMetadata($rfcSlug, $rawMetadataFile);
         $cleanData = [];
 
         foreach ($rawData as $slug => $rfcData) {
@@ -120,7 +120,7 @@ class Metadata
         return $cleanData;
     }
 
-    private function getRawMetaData(?string $rfcSlug, ?string $rawMetadataFile): array
+    private function getRawMetadata(?string $rfcSlug, ?string $rawMetadataFile): array
     {
         if ($rawMetadataFile !== null) {
             $rawData = json_decode(file_get_contents($rawMetadataFile), true);

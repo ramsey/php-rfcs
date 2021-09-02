@@ -8,6 +8,7 @@ use GuzzleHttp\Client;
 use Http\Factory\Guzzle\RequestFactory;
 use Http\Factory\Guzzle\UriFactory;
 use PhpRfcs\Rfc\Metadata as RfcMetadata;
+use PhpRfcs\Rfc\Rst;
 use PhpRfcs\Wiki\Crawler;
 use PhpRfcs\Wiki\Download;
 use PhpRfcs\Wiki\History;
@@ -49,6 +50,8 @@ $rfcMetadata = new RfcMetadata(
     $config['paths']['import'],
     $config['paths']['overrides'],
 );
+
+$rfcRst = new Rst($processFactory, $rfcMetadata, $config['paths']['import']);
 
 $app = new Application('PHP RFC Tools');
 
@@ -209,6 +212,23 @@ $app
                 . 'metadata before cleaning it. If this option is provided, '
                 . 'rfc:metadata will use the data from the indicated file, rather '
                 . 'than generating the raw metadata itself.',
+        ],
+    );
+
+$app
+    ->command(
+        'rfc:rst rfc [--clean-metadata=]',
+        function (string $rfc, ?string $cleanMetadata, SymfonyStyle $io) use ($rfcRst): int {
+            $io->writeln($rfcRst->generateRst($rfc, $cleanMetadata));
+
+            return 0;
+        },
+    )
+    ->descriptions(
+        'Print an RFC as reStructured Text',
+        [
+            'rfc' => 'The RFC string slug',
+            '--clean-metadata' => 'A pre-generated file of clean metadata to use'
         ],
     );
 
