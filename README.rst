@@ -45,8 +45,96 @@ Requirements, other than those listed in ``composer.json``, are:
 * `jq <https://stedolan.github.io/jq/>`_ is *recommended* for querying
   ``resources/metadata.json`` from the console
 
-Technical Notes
----------------
+Notes
+-----
+
+Types
+~~~~~
+
+This project consolidates and standardizes the types of all PHP RFCs to the
+following:
+
+*Informational*
+  An Informational RFC provides general guidelines or information to the
+  PHP community but does not propose a new feature or process for PHP.
+  Examples include definitions of terms, release schedules, etc.
+
+*Process*
+  A Process RFC describes a process surrounding PHP or proposes a change to a
+  process. Process RFCs are like Standards Track RFCs but apply to areas other
+  than the PHP language itself. They may propose an implementation, but not to
+  PHP's codebase. Examples include procedures, guidelines, changes to the
+  decision-making process, and changes to the tools or environment used in PHP.
+  Meta-RFCs are always Process RFCs.
+
+*Standards Track*
+  A Standards Track RFC describes a new feature or implementation for PHP.
+  It may also describe an interoperability standard that will be supported
+  outside the standard library for current PHP versions before a subsequent
+  RFC adds standard library support in a future version (e.g., reservation
+  of type names).
+
+Statuses
+~~~~~~~~
+
+This project consolidates and standardizes the statuses of all PHP RFCs to the
+following:
+
+*Accepted*
+  Accepted RFCs have gone through the discussion and voting phases and have
+  been approved for implementation. This status indicates the RFC has not been
+  implemented. RFCs may be partially accepted, though their status is simply
+  "Accepted." Partially accepted RFCs must clearly describe which parts of the
+  RFC will be in force when the RFC is active or implemented.
+
+*Active*
+  An active RFC was accepted, and the information, policies, or procedures it
+  describes are in full force and considered the best current practices for the
+  PHP project. Informational and process RFCs may receive the active status.
+
+*Declined*
+  A declined RFC went through the discussion and voting phases and failed to
+  receive a 2/3 majority of votes.
+
+*Draft*
+  All RFCs begin as drafts and remain as drafts throughout the discussion
+  period.
+
+*Implemented*
+  An implemented RFC was accepted, and the code or work necessary to fulfill the
+  requirements of the RFC is complete. For changes to php-src, this means any
+  patches created to fulfill the work have been merged to the main branch.
+  Standards track RFCs may receive the implemented status.
+
+*Superseded*
+  Accepted, active, and implemented RFCs may be superseded by another RFC. In
+  this case, the new RFC takes precedence and the original one is set to the
+  superseded status.
+
+  An RFC that updates an accepted, active, or implemented RFC **but does not
+  replace it** does not supersede the existing RFC. Rather, the existing RFC
+  is still accepted, active, or implemented, but it must explain that it is
+  updated by the new RFC. "Updated" is not a status.
+
+*Unknown*
+  For historical reasons, this status exists to identify historic RFCs for which
+  the status could not be automatically determined. This status must not be
+  applied to new RFCs.
+
+*Voting*
+  Following the draft state, which includes the discussion phase, RFCs are
+  *frozen* during their voting phases. This is the time during which voters may
+  vote on the RFC as it exists in its current state.
+
+*Withdrawn*
+  If an RFC never proceeds to the voting phase, it may be withdrawn from
+  consideration. Withdrawn RFCs are no longer drafts and should not receive
+  continued updates from discussion unless they are reopened as drafts.
+
+  Withdrawn RFCs include historically inactive and abandoned draft RFCs.
+
+Importing History
+~~~~~~~~~~~~~~~~~
 
 Importing all the differences from Dokuwiki and creating separate commits for
 each resulted in a repository with commits that were wildly out of order. To
