@@ -1,0 +1,456 @@
+Mixed Type V2
+=============
+
+:PHP-RFC: 0701
+:Title: Mixed Type V2
+:Author: Máté Kocsis <kocsismate@php.net>, Danack <danack@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2020-03-23
+:PHP-Version: 8.0
+:Version: 0.9
+
+Introduction
+------------
+
+With the addition of scalar types in PHP 7, nullables in 7.1, object in
+7.2, and lastly, union types in 8.0, people writing PHP code can
+explicitly declare type information for most function parameters,
+function returns, as well as class properties.
+
+However, PHP has not always supported types, and most probably it will
+always allow to omit type information. But this leads to the problem
+that its meaning is ambiguous when type information is missing:
+
+-  the type is a specific type, but the programmer forgot to declare it.
+-  the type is a specific type, but the programmer omitted it to keep
+   compatibility with an older PHP version
+-  the type is not currently expressible in PHP's type system, and so no
+   type could be specified.
+-  for return types, it is not clear if the function will or will not
+   return a value, other than null.
+
+An explicit ``mixed`` type would allow people to add types to
+parameters, class properties and function returns to indicate that the
+type information wasn't forgotten about, it just can't be specified more
+precisely, or the programmer explicitly decided not to do so.
+
+Currently, ``mixed`` can only be used in PHPDoc-based type hints to give
+more context about a type, but this is a suboptimal solution, since it
+also has the same problems that comments generally have.
+
+One prominent example where the ``mixed`` type is extensively used in
+PHPDoc is the `stubs of PHP's own standard
+library <https://github.com/php/php-src/blob/dfd0acf0d722fbbebeab349b0d4366dd8f30bbee/ext/standard/basic_functions.stub.php#L94>`__
+with which type information is defined for internal functions. If we had
+the native ``mixed`` type, we could provide more precise reflection
+information for users about functions that accept or return any type.
+
+Additionally, the ``mixed`` pseudo-type is used widely in the PHP
+manual:
+
+.. code:: php
+
+   var_dump ( mixed $expression [, mixed $... ] ) : void
+
+Proposal
+--------
+
+This RFC proposes to add the mixed type to be used in PHP's type system.
+A type of ``mixed`` would be equivalent to
+``array|bool|callable|int|float|null|object|resource|string`` as this is
+the correct behaviour to conform to LSP using PHP's implementation of
+type checking for inheritance.
+
+LSP, Covariance and Contravariance
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The proposal conforms to the `Liskov Substituion
+Priniciple <https://en.wikipedia.org/wiki/Liskov_substitution_principle>`__,
+when performing signature checks for inheritance.
+
+Since 7.4 PHP allows `covariant returns and contravariant
+parameters <https://wiki.php.net/rfc/covariant-returns-and-contravariant-parameters>`__.
+
+PHP allows contravariance (aka type widening) for parameter types to
+obey the LSP principle. A subclass may use a 'wider' aka less specific
+type in place of the inherited type for a parameter.
+
+PHP allows covariance (aka type narrowing) for return types to obey the
+LSP principle. A subclass may use a 'narrower' aka more specific type in
+place of the inherited type for a function return.
+
+Parameter types are contravariant
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A parameter type may be widened in a subclass from a specific value type
+to the ``mixed`` type as this is contravariant and so is allowed in LSP.
+
+.. code:: php
+
+   // Valid example
+
+   class A
+   {
+       public function foo(int $value) {}
+   }
+
+   class B extends A
+   {
+       // Parameter type was widened from int to mixed, this is allowed
+       public function foo(mixed $value) {}
+   }
+
+A parameter type may not be narrowed in a subclass to a more specific
+type as this is not contravariant and so violates LSP.
+
+.. code:: php
+
+   // Invalid example
+
+   class A
+   {
+       public function foo(mixed $value) {}
+   }
+
+   class B extends A
+   {
+       // Parameter type cannot be narrowed from mixed to int
+       // Fatal error thrown
+       public function foo(int $value) {}
+   }
+
+Return types are covariant
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``mixed`` return type could be narrowed in a subclass as this is
+covariant and is allowed in LSP.
+
+.. code:: php
+
+   // Valid example
+
+   class A
+   {
+       public function bar(): mixed {}
+   }
+
+   class B extends A
+   {
+       // return type was narrowed from mixed to int, this is allowed
+       public function bar(): int {}
+   }
+
+Specific return type may not be widened by using ``mixed`` as this is
+not covariant and so breaks LSP.
+
+.. code:: php
+
+   // Invalid example
+
+   class C
+   {
+       public function bar(): int {}
+   }
+
+   class D extends C
+   {
+       // return type cannot be widened from int to mixed
+       // Fatal error thrown
+       public function bar(): mixed {}
+   }
+
+Property types are invariant
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Following the
+`https://wiki.php.net/rfc/typed_properties_v2#inheritance_and_variance <typed properties RFC>`__,
+all property types are invariant.
+
+.. code:: php
+
+   // Invalid example
+
+   class A
+   {
+       public mixed $foo;
+       public int $bar;
+       public $baz;
+   }
+
+   class B extends A
+   {
+       // property type cannot be narrowed from mixed to int
+       // Fatal error thrown
+       public int $foo;
+   }
+
+   class C extends A
+   {
+       // property type cannot be widened from int to mixed
+       // Fatal error thrown
+       public mixed $bar;
+   }
+
+   class D extends A
+   {
+       // property type cannot be added
+       // Fatal error thrown
+       public mixed $baz;
+   }
+
+   class E extends A
+   {
+       // property type cannot be removed
+       // Fatal error thrown
+       public $foo;
+   }
+
+Void return type
+~~~~~~~~~~~~~~~~
+
+The signature checking done in PHP for functions that return void does
+not currently allow covariance, even though that could be conformant to
+LSP.
+
+.. code:: php
+
+   class A
+   {
+       public function bar(): void {}
+   }
+
+   class B extends A
+   {
+       public function bar(): int {}
+   }
+
+   // Fatal error: Declaration of B::bar(): int must be compatible with A::bar(): void
+
+The position of this RFC is to follow the existing behaviour: i.e. you
+can't widen the type from ``void`` to ``mixed``, when inheriting.
+
+Signature checking of function when no parameter type present
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When no type is present for a function parameter, the signature checks
+for inheritance are done as if the parameter had a ``mixed`` type.
+
+.. code:: php
+
+   class A
+   {
+       // no type is specified, mixed type is assumed
+       public function foo($value) {}
+   }
+
+   class B extends A
+   {
+       // mixed type is explicitly specified, and is invariant to
+       // type in parent class
+       public function foo(mixed $value) {}
+   }
+
+   class C extends B
+   {
+       // no type is specified, mixed type is assumed which is
+       // invariant to type in parent class
+       public function foo($value) {}
+   }
+
+   class D extends B
+   {
+       public function foo(mixed $value = null) {}
+   }
+
+Currently this only affects inheritance in classes.
+
+If/when PHP gains the abilties to declare `function signatures as
+types <https://github.com/Danack/RfcCodex/blob/master/typedef_callables.md>`__,
+rather than just the generic ``callable`` type this signature checking
+should work for those signature checks also.
+
+Signature checking of function when no return type present
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When no type is present for a function return, the signature checks for
+inheritance are done as if the parameter had a ``mixed|void`` type.
+
+When no type is specified, the same method in a subclass must either
+also declare no return type, declare ``void`` or declare ``mixed`` (or
+any other value type which is subtype of ``mixed``). Additionally
+neither ``mixed`` nor ``void`` return types could be changed back to no
+type since this would widen the resulting type.
+
+.. code:: php
+
+   class A
+   {
+       // no return type is specified, mixed|void is assumed
+       public function foo() {}
+   }
+
+   class B extends A
+   {
+       // mixed type is explicitly specified. The type 'mixed' is
+       // covariant to 'mixed|void' and so is allowed to be declared
+       // for this function.
+       public function foo(): mixed {}
+   }
+
+   class C extends B
+   {
+       // INVALID - no type is specified, mixed|void is assumed.
+       // 'mixed|void' is not covariant to 'mixed' and so this breaks LSP.
+       // Fatal error is thrown
+       public function foo() {}
+   }
+
+   class D extends B
+   {
+       // INVALID - as void is not subtype of mixed, Fatal error is thrown
+       public function foo(): void {}
+   }
+
+The mixed|void union type
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The position of this RFC is that supporting a union of ``mixed|void`` is
+not needed and so proposes not allowing that type declaration to be
+used. This limitation could be lifted at a later date if a use-case was
+found.
+
+Nullability
+~~~~~~~~~~~
+
+The ``mixed`` is a union type that accepts any value type, including
+``null``. Allowing the ``mixed`` type declaration to be nullable would
+be duplication of information i.e. ``?mixed`` would be always be
+equivalent to be ``mixed``.
+
+The position of this RFC is to not support nullability of ``mixed``
+type. This could always be added at a later date if a requirement for
+adding it was discovered. This would be part of a separate RFC that
+would address directly which 'redundant types' should or shouldn't be
+allowed.
+
+.. code:: php
+
+   //INVALID - Fatal error: Mixed types cannot be nullable, null is already part of the mixed type.
+   function foo(?mixed $arg) {}
+
+   //INVALID - Fatal error: Mixed types cannot be nullable, null is already part of the mixed type.
+   function bar(): ?mixed {}
+
+Explicit returns
+~~~~~~~~~~~~~~~~
+
+When using mixed as a return type, a value must be explicitly returned
+from the function, otherwise a TypeError will be thrown.
+
+.. code:: php
+
+   function foo(): mixed {}
+
+   foo();
+
+   // Uncaught TypeError: Return value of foo() must be of 
+   // the type mixed, none returned
+
+This is consistent with the existing behaviour for other return types.
+
+.. code:: php
+
+   function bar(): ?int {}
+   bar();
+   // Uncaught TypeError: Return value of bar() must be of 
+   // the type int or null, none returned
+
+Resource 'type'
+~~~~~~~~~~~~~~~
+
+Although variables can be a ``resource`` in PHP, it is not possible to
+use ``resource`` as a parameter, return or property type in userland PHP
+code.
+
+The position of this RFC is that ``resource`` variables of type
+``resource`` should pass the ``mixed`` type check as that is the most
+useful thing to do.
+
+Mixed vs any
+~~~~~~~~~~~~
+
+This RFC proposes ``mixed`` rather than ``any`` since ``mixed`` has been
+used widely in the PHP ecosystem already (e.g. the PHP manual, static
+analysis tools like PHPStan and Psalm, IDEs).
+
+Also, choosing to use ``any`` would likely have a slightly bigger BC
+break, as ``mixed`` is a `soft
+reserved <https://wiki.php.net/rfc/reserve_even_more_types_in_php_7>`__
+keyword since PHP 7, but ``any`` hasn't had any warnings against using
+it as a class name.
+
+RFC Impact
+==========
+
+Proposed PHP Version(s)
+-----------------------
+
+8.0
+
+Backward Incompatible Changes
+-----------------------------
+
+Since PHP 7.0, ``mixed`` is a 'soft' reserved word. This RFC would
+prevent the use of ``mixed`` as a class name if it is passed.
+
+To SAPIs
+--------
+
+None known.
+
+To Existing Extensions
+----------------------
+
+None known.
+
+To Opcache
+----------
+
+Not analyzed.
+
+Vote
+----
+
+The vote starts on 2020-05-07 and ends on 2020-05-21 12:00 UTC. The vote
+requires 2/3 majority to be accepted.
+
+Question: Add mixed as a type to be used as parameter, return and class property types?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+`GitHub Pull request #5313 <https://github.com/php/php-src/pull/5313>`__
+
+References
+----------
+
+-  `PHP RFC: Reserve Even More Types in PHP
+   7 <https://wiki.php.net/rfc/reserve_even_more_types_in_php_7>`__
+-  `phpDocumentor type
+   reference <https://www.phpdoc.org/docs/latest/guides/types.html>`__
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5313
+:Original Authors: , Michael Moravec
+:Slug: mixed_type_v2
+:Wiki URL: https://wiki.php.net/rfc/mixed_type_v2

@@ -1,0 +1,167 @@
+DTrace Probes For PHP
+=====================
+
+:PHP-RFC: 0066
+:Title: DTrace Probes For PHP
+:Author: David Soria Parra <david.soriaparra@sun.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2009-07-14
+:PHP-Version: 5.4
+:Version: 1.0
+
+Introduction
+------------
+
+From Wikipedia [1]:
+
+"DTrace is a comprehensive dynamic tracing framework created by Sun
+Microsystems for troubleshooting kernel and application problems on
+production systems in real time. [...] It is designed to give
+operational insights that allow users to tune and troubleshoot
+applications and the OS itself.
+
+Tracing programs (also referred to as scripts) are written using the D
+programming language (not to be confused with other programming
+languages named "D"). The language is a subset of C with added functions
+and variables specific to tracing. D programs resemble awk programs in
+structure; they consist of a list of one or more probes (instrumentation
+points), and each probe is associated with an action. Whenever the
+condition for the probe is met, the associated action is executed (the
+probe "fires"). A typical probe might fire when a certain file is
+opened, or a process is started, or a certain line of code is executed.
+A probe that fires may analyze the run-time situation by accessing the
+call stack and context variables and evaluating expressions; it can then
+print out or log some information, record it in a database, or modify
+context variables. The reading and writing of context variables allows
+probes to pass information to each other, allowing them to cooperatively
+analyze the correlation of different events."
+
+Why DTrace probes for PHP
+-------------------------
+
+Applications can be compiled with statically probes to better reflect
+its underlying structure. This is particularly useful for scripting
+language to give the user the perspective of the script and not of the
+underlying executor. This includes that probes are fired at important
+stages of the execution including the ability to pass useful data to the
+DTrace consumer.
+
+The proposed patch adds a provider for PHP specific probes to PHP. This
+will better reflect the execution flow of a PHP script. Former
+inaccessible information, such as the error message in zend_error are
+passed to probes. The patch introduces probes to track the compilation
+of a script, the execution and function call stacks and error/exception
+handling. Calling a probe doesn't affect the performance until the probe
+is enabled by DTrace. Disabled probes are replaced by NOPs. If
+additional information is needed, the information is retrieved and
+passed to the probes once it is enabled.
+
++-----------------------------+---------------------------------------+
+| Probes                      | Description                           |
++=============================+=======================================+
+| request-(startup/shutodnw)  | These probes are fire when a request  |
+|                             | starts or shuts down.                 |
++-----------------------------+---------------------------------------+
+| compile-file-(entry/return) | These probes are fire when the        |
+|                             | compilation of a script starts and    |
+|                             | when it finishes.                     |
++-----------------------------+---------------------------------------+
+| execute-(entry/return)      | These probes are fire when a new      |
+|                             | opcode is executed.                   |
++-----------------------------+---------------------------------------+
+| function-(entry/return)     | These probes are fire when the engine |
+|                             | enters or returns from a PHP function |
+|                             | or method call.                       |
++-----------------------------+---------------------------------------+
+| exception-thrown            | This probe is fired whenever an       |
+|                             | exception is thrown                   |
++-----------------------------+---------------------------------------+
+| exception-caught            | This probe is fired whenever an       |
+|                             | exception is caught                   |
++-----------------------------+---------------------------------------+
+| error                       | This probe is fired whenever an error |
+|                             | occurs. It doesn't depend on the      |
+|                             | error_reproting level.                |
++-----------------------------+---------------------------------------+
+
+Examples
+--------
+
+Display errors
+''''''''''''''
+
+Display all errors, warning and notices independent from the current
+error_reporting setting or @-operator on all running PHP instances:
+
+::
+
+   #!/usr/sbin/dtrace -s
+
+   #pragma D option quiet
+
+   php*:::error
+   {
+       printf("Error: %s in line %d (%s)\n", copyinstr(arg0), arg2, copyinstr(arg1));
+   } 
+
+Count FSTAT calls
+'''''''''''''''''
+
+The following example counts the fstat calls in a PHP file and add up
+the time needed for the fstats.
+
+::
+
+   #!/usr/sbin/dtrace -s
+
+   #pragma D option quiet
+
+   php*:::execute-entry
+   /!self->start/
+   {
+       self->start = vtimestamp;
+   }
+
+   php*:::execute-entry
+   /self->start/
+   {
+       self->isInsidePHP++;
+       self->filename = copyinstr(arg0);
+       self->result[self->filename] = 0;
+   }
+
+   php*:::execute-return
+   {
+       self->isInsidePHP--;
+   }
+
+   syscall::fstat:entry
+   /self->isInsidePHP > 0/
+   {
+       self->calltime = timestamp;
+   }
+
+   syscall::fstat:return
+   /self->isInsidePHP > 0/
+   {
+       self->result[self->filename] = timestamp - self->calltime;
+   }
+
+More about DTrace
+~~~~~~~~~~~~~~~~~
+
+[1] http://wikis.sun.com/display/DTrace/Documentation [2]
+http://en.wikipedia.org/wiki/DTrace
+
+Changelog
+---------
+
+Additional Metadata
+-------------------
+
+:Branch: trunk
+:Original Authors: David Soria Parra david.soriaparra@sun.com
+:Patch: http://patches.experimentalworks.net/dtrace.patch
+:Slug: dtrace
+:Wiki URL: https://wiki.php.net/rfc/dtrace

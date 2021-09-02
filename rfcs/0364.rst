@@ -1,0 +1,392 @@
+Union Types
+===========
+
+:PHP-RFC: 0364
+:Title: Union Types
+:Author: Levi Morrison <levim@php.net>, Bob Weinand <bobwei9@hotmail.com>
+:Status: Declined
+:Type: Unknown
+:Created: 2015-02-14
+:Version: 1.1
+
+Introduction
+------------
+
+PHP has `type
+declarations <http://php.net/manual/en/functions.arguments.php#functions.arguments.type-declaration>`__
+which can be associated with function parameters or return values. These
+declarations perform two useful roles:
+
+-  They allow the PHP engine to enforce the correct type of variable
+   passed to or returned from a function.
+-  They make it easier to reason about what types need to be passed to
+   or can be returned from a function. Both humans and static code
+   analysis tools can use this information to help determine the
+   correctness of the code.
+
+For a lot of functions in PHP each parameter will only be one type.
+Similarly, for the majority of functions the return value will only ever
+be of one type.
+
+However, for a significant number of functions, the acceptable
+parameters or the possible return values can be of more than one type.
+For example consider the ``stripos`` function where the return value
+varies based on:
+
+-  if the needle exists it returns an integer.
+-  if the needle is not found, false is returned.
+
+In the documentation on php.net, the two possible return types are
+documented as ``mixed`` - however this does not actually document what
+the possible return types are, only that there is more than one possible
+type returned.
+
+Currently in userland code when a parameter for a function can be one of
+multiple types, or the return value from a function can be one of
+multiple types, there can be no type information supplied. It is not
+possible for the PHP engine to enforce any types passed to/from these
+functions and similarly it is not easy for people using these functions
+to reason about the types passed to/returned from these functions.
+
+This RFC seeks to address these limitations.
+
+Proposal
+--------
+
+This RFC proposes the ability to define multiple possible types for
+parameter and return types. To define a 'union type' a single vertical
+bar (OR) is placed between types e.g. ``int|bool`` represents the union
+type of either integer or boolean. For these 'union types' a value
+passes the type check if the value would pass any one of the types in
+the union.
+
+Additionally this RFC proposes that the values ``true``, ``false`` (see
+`the "True/False" section <#truefalse>`__) and ``null`` (equal to type
+``null``; see `the "Nullable types" section <#nullable_types>`__) will
+be usable as types in both parameter types and return type definitions.
+
+There can be more than two types in the union.
+
+Parameter type examples
+~~~~~~~~~~~~~~~~~~~~~~~
+
+A function that requires either a string or an array is passed to it as
+the parameter:
+
+.. code:: php
+
+   function print_each(array | string $in) {
+       foreach ((array) $in as $value) {
+           echo $value, PHP_EOL;
+       }
+   }
+    
+   print_each(['Bob', 'Joe', 'Levi']); // ok
+   print_each('Levi'); // ok
+   print_each(new stdclass()); // TypeError
+
+For this example, it is clear to both static analysis tools and humans
+that passing anything other than an array or a string to this function,
+would be an error. (or will be weakly cast to a string if strict_types
+are disabled, see also `the "Weak Scalar Types"
+section <#weak_scalar_types>`__)
+
+A class instance method that requires that either a string or a
+ParameterGenerator object is passed as the parameter.
+
+.. code:: php
+
+   // From zend-code
+   class MethodGenerator extends AbstractMemberGenerator {
+        ...
+       public function setParameter(ParameterGenerator|string $parameter) {
+           ...
+       }
+   }
+
+For this example, it is clear to both static analysis tools and humans
+that passing anything other than a ParameterGenerator object or a string
+to this function, would be an error.
+
+Return type example
+~~~~~~~~~~~~~~~~~~~
+
+A userland definition of ``stripos`` function:
+
+.. code:: php
+
+   function stripos(string $haystack, string $needle, int $offset = 0): int|false {
+       $lowerHaystack = strtolower($haystack);
+       $lowerNeedle = strtolower($needle);
+       return strpos($lowerHaystack, $lowerNeedle, $offset);
+   }
+
+For this example, it is clear to both static analysis tools and humans
+this function can return either an integer or the value 'false', and so
+both cases need to be handled in the calling code.
+
+Nullable types
+~~~~~~~~~~~~~~
+
+To cover the common use-case of returning some type or ``null``, the
+``null`` type needs to be permitted in a type declaration. The name is
+already reserved and the documentation already documents that ``null``
+is both a type and a value. Previously it was not a helpful type
+declaration - if something is always passed ``null`` then there doesn't
+need to be a parameter at all, and if a function always returns ``null``
+then there is no need to assign it. With the introduction of union types
+it becomes helpful and so this RFC proposes allowing ``null`` in unions:
+
+.. code:: php
+
+   function lookup_user(string $id): User | null;
+
+This is currently possible via the short-hand nullable type support
+``?Type``. However some concerns have been raised:
+
+#. ``?Foo | Bar`` is pretty weird, it reads like "(nullable Foo) or
+   (Bar)" when the nullability is not tied to a particular type.
+#. Allowing ``Foo | null`` and ``?Foo`` is redundant.
+#. ``Foo | null`` is more explicit than ``?Foo``. Users who are not
+   familiar with ``?`` in other languages may understand the ``|``
+   better.
+
+To address some of these issues this RFC disallows ``?`` being used in
+combination with union types. Thus ``Foo | Bar | null`` is allowed, but
+not ``?Foo | Bar``.
+
+This RFC proposes a vote on whether ``?Foo`` shall be replaced by
+``Foo | null`` in general.
+
+True/False
+~~~~~~~~~~
+
+It may be helpful to be able to explicitly use ``| false`` for return
+types as this is a common idiom in PHP's standard functions. As an
+example, the function signature for ``strpos`` could change:
+
+.. code:: php
+
+   // from
+   strpos ( string $haystack , mixed $needle [, int $offset = 0 ] ): mixed
+   // to
+   strpos ( string $haystack , mixed $needle [, int $offset = 0 ] ): int | false
+
+This now allows to perfectly forward any internal signature and allows
+users to be more explicit.
+
+Also ``false`` and ``true`` are not types in user-land, but they are
+internally.
+
+This RFC proposes a vote to decide if ``true`` and ``false`` should be
+supported for unions.
+
+Weak Scalar Types
+~~~~~~~~~~~~~~~~~
+
+Problem
+^^^^^^^
+
+PHP 7 allows weak scalar types. There is a question of how things will
+get converted in some situations when used in unions. As an example, if
+we have a union type of ``int`` and ``float`` and are passed the string
+"10" how is it converted?
+
+.. code:: php
+
+   function f(int | float $number) {
+       return $number * 2;
+   }
+   f("10");
+
+Would it be converted to ``int(10)`` or ``float(10)``, since either is
+acceptable? Does it matter given they are both acceptable?
+
+Solution
+^^^^^^^^
+
+Primarily, this issue is avoided if a parameter type exactly matches the
+input type or if PHP is in strict type mode.
+
+With the only exception that an ``int(10)`` passed to a parameter
+requiring float as one of its types, but not ``int`` (e.g.
+``string | float``), will be, in accordance with normal handling of
+integers passed to floats, coerced to ``float(10)``.
+
+Otherwise PHP's casting rules are applied in an order to be as lossless
+as possible. PHP's weak-type casting rules are complex, which leads to a
+seemingly complex set of rules for casting types, however these rules
+are not an invention of this proposal. This RFC applies PHP casting
+rules in a sane way to convert a value to a type accepted by the union
+whenever possible.
+
+=========== ========================= ======= =======
+Passed type Union type #1             #2      #3
+=========== ========================= ======= =======
+object      string (``__toString()``) -       -
+boolean     int                       float   string
+int         float\*                   string  boolean
+float       string                    int     boolean
+string      int/float\ :sup:`†`       boolean -
+=========== ========================= ======= =======
+
+| \* While string is more lossless than float for big values, we have to
+  match behavior with strict types enabled here
+| :sup:`†` only if ``is_numeric()`` would return true
+| Respecting the order, for each type check if it is available in the
+  union, else throw a ``TypeError`` if none is available.
+
+Problems with left-to-right
+'''''''''''''''''''''''''''
+
+Left-to-right conversion has been proposed multiple times. But this is
+not a viable solution for the following reasons:
+
+-  (string|float) would convert to a string if passed an integer, which
+   would be inconsistent with strict types converting it to a float.
+   This type of inconsistency must be avoided.
+-  Also, in strict left-to-right, exact matches would still be cast to
+   the first type (from the left) which they can be cast to. This would
+   again, be inconsistent with strict types enabled.
+-  Ultimately, (float|int) would, even in strict types mode, lead to a
+   conversion to float in any case upon passing integer; this is very
+   counterintuitive.
+
+It might be possible to exempt exact matches, but then we have yet
+another rule and still the first problem in the list above. At which
+point it just is much simpler to have well-defined conversion order
+depending on the passed type.
+
+Variance
+~~~~~~~~
+
+Return types are covariant: it is possible to remove types from the
+union in child functions.
+
+Parameter types are contravariant: it is possible to add types to the
+union in child functions.
+
+.. code:: php
+
+   interface Foo {
+       function pos(string $baz): int | false;
+   }
+   interface Bar extends Foo {
+       function pos(string | Stringable $baz): int;
+   }
+
+Reflection
+~~~~~~~~~~
+
+This RFC proposes the addition of a class ``ReflectionUnionType``
+inheriting from ``ReflectionType`` with a single method
+``ReflectionUnionType::getTypes(): array<ReflectionType>;`` to get the
+reflection classes of the individual types in the union.
+
+``ReflectionUnionType::__toString()`` will now provide a full union type
+as string; e.g. ``"int | float | NumberObject"``.
+
+Proposed PHP Version(s)
+-----------------------
+
+This RFC targets PHP version 7.1.
+
+Vote
+----
+
+This RFC requires that two-thirds of voters vote in favor of the RFC to
+pass.
+
+Question: Merge union types
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additionally, there are two 50%+1 votes:
+
+Question: Replace ?QuestionMarkNullables by union \| null
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+​
+
+Question: Include true/false types
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-2:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+The vote started 14th June 2016 and will end 23th June 2016.
+
+Patches and Tests
+-----------------
+
+Bob Weinand and Joe Watkins have created a patch:
+https://github.com/php/php-src/pull/1887 which is needs some small
+polishing but implements the proposed features.
+
+Future Scope
+------------
+
+This sections details areas where the feature might be improved in
+future, but that are not currently proposed in this RFC.
+
+Long Type Expressions
+~~~~~~~~~~~~~~~~~~~~~
+
+Since you can create a chain of types the names can get quite lengthy.
+Even the fairly short union type of ``Array | Traversable`` can be
+repetitive to type out. Should a mechanism to provide type aliases
+exist?
+
+.. code:: php
+
+   type Iterable = Array | Traversable;
+
+   function map(Callable $f, Iterable $input): Iterable {
+       foreach ($input as $key => $value) {
+           yield $key => $f($value);
+       }
+   }
+
+   function filter(Callable $f, Iterable $input): Iterable {
+       foreach ($input as $key => $value) {
+           if ($value) {
+               yield $key => $value;
+           }
+       }
+   }
+
+It may also be advantageous for implementation reasons to define a type
+name for an expression.
+
+References
+----------
+
+-  Original announcement on Mailing List of rationale for this feature:
+   http://news.php.net/php.internals/92252
+-  Official Under Discussion Announcment:
+   http://news.php.net/php.internals/92274
+
+Additional Metadata
+-------------------
+
+:Original Authors: Levi Morrison levim@php.net, Bob Weinand bobwei9@hotmail.com
+:Slug: union_types
+:Wiki URL: https://wiki.php.net/rfc/union_types

@@ -1,0 +1,421 @@
+Saner Numeric Strings
+=====================
+
+:PHP-RFC: 0746
+:Title: Saner Numeric Strings
+:Author: George Peter Banyard <girgias@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2020-06-28
+:PHP-Version: 8.0
+:Version: 1.4
+
+Technical Background
+--------------------
+
+The PHP language has a concept of *numeric strings*, strings which can
+be interpreted as numbers.
+
+A string can be categorised in three ways according to its numeric-ness,
+as `described by the language
+specification <https://github.com/php/php-langspec/blob/be010b4435e7b0801737bb66b5bbdd8f9fb51dde/spec/05-types.md#the-string-type>`__:
+
+-  A *numeric string* is a string containing only a
+   `number <https://github.com/php/php-langspec/blob/be010b4435e7b0801737bb66b5bbdd8f9fb51dde/spec/05-types.md#grammar-str-number>`__,
+   optionally preceded by whitespace characters. For example, ``"123"``
+   or ``"  1.23e2"``.
+-  A *leading-numeric string* is a string that begins with a numeric
+   string but is followed by non-number characters (including whitespace
+   characters). For example, ``"123abc"`` or ``"123 "``.
+-  A *non-numeric string* is a string which is neither a numeric string
+   nor a leading-numeric string.
+
+A fourth way PHP might deal with numeric strings is when using an
+*integer* string for an array index. An integer string is stricter than
+a numeric string as it has the following additional constraints:
+
+-  It doesn't accept leading whitespace
+-  It doesn't accept leading zeros (``0``)
+
+How PHP deals with array indexes is shown in the following code snippet:
+
+.. code:: php
+
+   $a = [
+       "4" => "Integer index",
+       "03" => "Integer index with leading 0/octal",
+       "2str" => "leading numeric string",
+       " 1" => "leading whitespace",
+       "5.5" => "Float",
+   ];
+   var_dump($a);
+
+Which results in the following output:
+
+::
+
+   array(5) {
+     [4]=>
+     string(13) "Integer index"
+     ["03"]=>
+     string(34) "Integer index with leading 0/octal"
+     ["2str"]=>
+     string(22) "leading numeric string"
+     [" 1"]=>
+     string(19) "leading whitespace"
+     ["5.5"]=>
+     string(5) "Float"
+   }
+
+This RFC does not affect how array indexes behave, and thus won't
+mention them again.
+
+Another aspect which should be noted is that arithmetic/bitwise
+operators will convert all operands to their numeric/integer equivalent
+and emit a notice/warning on malformed/invalid numeric string, except
+for the ``&``, ``|``, and ``^`` bitwise operators when both operands are
+strings and the ``~`` operator, in which case it will perform the
+operation on the ASCII values of the characters that make up the strings
+and the result will be a string, as per the `documentation on bitwise
+operators <https://www.php.net/manual/en/language.operators.bitwise.php>`__.
+
+One final behaviour of PHP which needs to be presented is how PHP
+performs weak comparisons, i.e. a comparison with one of the following
+binary operators: ``==``, ``!=``, ``<>``, ``<``, ``>``, ``<=``, and
+``>=``, in the string-to-string case and in the string-to-int/float
+case.
+
+String-to-string comparisons are performed numerically if and only if
+both strings are numeric strings.
+
+String-to-int/float are **always** performed numerically, therefore the
+string will be type-juggled silently regardless of its numeric-ness.
+
+This RFC does not propose to modify this behaviour, see `PHP RFC: Saner
+string to number comparisons </rfc/string_to_number_comparison>`__
+instead.
+
+The concept of numeric strings is used in a few places, and the
+distinction between a numeric string and a leading-numeric string is
+significant as certain operations distinguish between these:
+
+-  Explicit conversions of strings to number types, such as ``(int)``
+   and ``(float)`` type casts or ``settype()``, convert numeric and
+   leading-numeric strings and produce ``0`` for non-numeric strings
+   silently, e.g.:<PHP>
+
+var_dump((float) "123"); // float(123) var_dump [1]_; // bool(false)
+</PHP>
+
+-  String offsets, e.g. <PHP>
+
+$str = 'The world'; var_dump($str['4']); // string(1) "w"
+var_dump($str['04']); // string(1) "w" var_dump($str['4str']); //
+string(1) "w" with E_NOTICE "A non well formed numeric value
+encountered" var_dump($str[' 4']); // string(1) "w"
+var_dump($str['4.5']); // string(1) "w" with E_WARNING "Illegal string
+offset '4.5'" var_dump($str['string']); // string(1) "T" with E_WARNING
+"Illegal string offset 'string'" </PHP>
+
+-  Arithmetic operations, i.e. ``-``, ``+``, ``*``, ``/``, ``%``, or
+   ``**``, strings will be converted to int/float but will emit the
+   ``E_NOTICE``/``E_WARNING`` as needed, e.g.<PHP>
+
+var_dump(123 + "123"); // int(246) var_dump(123 + " 123"); // int(246)
+var_dump(123 + "123 "); // int(246) with E_NOTICE "A non well formed
+numeric value encountered" var_dump(123 + "123abc"); // int(246) with
+E_NOTICE "A non well formed numeric value encountered" var_dump(123 +
+"string"); // int(123) with E_WARNING "A non-numeric value encountered"
+</PHP>
+
+-  Increment/decrement operators, i.e. ``++`` and ``--``, e.g.<PHP>
+
+$a = "5"; var_dump(++$a); // int(6) $b = " 5"; var_dump(++$b); // int(6)
+$c = "5z"; var_dump(++$c); // string(2) "6a" $d = "5 "; var_dump(++$d);
+// string(2) "5 " </PHP>
+
+-  String-to-string comparisons, e.g.<PHP>
+
+var_dump("123" == "123.0"); // bool(true) var_dump("123" == " 123"); //
+bool(true) var_dump("123" == "123 "); // bool(false) var_dump("123" ==
+"123abc"); // bool(false) </PHP>
+
+-  Bitwise operations, e.g.<PHP>
+
+var_dump(123 & "123"); // int(123) var_dump(123 & " 123"); // int(123)
+var_dump(123 & "123 "); // int(123) with E_NOTICE "A non well formed
+numeric value encountered" var_dump(123 & "123abc"); // int(123) with
+E_NOTICE "A non well formed numeric value encountered" var_dump(123 &
+"abc"); // int(0) with E_WARNING "A non-numeric value encountered"
+</PHP>
+
+The Problem
+-----------
+
+The current behaviour of numerical strings has various issues:
+
+-  Numeric strings with leading whitespace are considered more numeric
+   than numeric strings with trailing whitespace.
+-  Strings which happen to start with a digit, e.g. hashes, may at times
+   be interpreted as numbers, which can lead to bugs.
+-  ``\is_numeric()`` is misleading, as it will reject values that a
+   weak-mode parameter check will accept.
+-  Leading-numeric strings is a rather strange concept with
+   unintuitive/surprising behaviour.
+
+Proposal
+--------
+
+Unify the various numeric string modes into a single concept: Numeric
+characters only with both leading and trailing whitespace allowed. Any
+other type of string is non-numeric and will throw ``TypeError``\ s when
+used in a numeric context.
+
+This means, all strings which currently emit the ``E_NOTICE`` “A non
+well formed numeric value encountered” will be reclassified into the
+``E_WARNING`` “A non-numeric value encountered” *except* if the
+leading-numeric string contained only trailing whitespace. And the
+various cases which currently emit an ``E_WARNING`` will be promoted to
+``TypeError``\ s.
+
+One exception to this are type declarations as they only accept proper
+numeric strings, thus some ``E_NOTICE`` will result in a ``TypeError``.
+See below for an example.
+
+For string offsets accessed using numeric strings the following changes
+will be made:
+
+-  Leading numeric strings will emit the “Illegal string offset” warning
+   instead of the “A non well formed numeric value encountered” notice,
+   and continue to evaluate to their respective values.
+-  Non-numeric strings which emitted the “Illegal string offset” warning
+   will throw an “Illegal offset type” TypeError.
+-  There is a secondary implementation vote to decide the following:
+   should numeric strings which correspond to well-formed floats remain
+   a warning (by emitting the same “String offset cast occurred” warning
+   that occurs when a float is used for a string offset), or should the
+   current “Illegal string offset” warning simply be promoted to a
+   ``TypeError``? Our position is that this case should be a TypeError,
+   as it simplifies the implementation and is consistent with the
+   handling of other strings (see this
+   `commit <https://github.com/php/php-src/pull/5762/commits/897c37727b1ee393f04f57a88fc48d69c3cf0d1d>`__).
+
+The following cases will produce this behaviour under the proposal:
+
+-  Type declarations<PHP>
+
+function foo(int $i) { var_dump($i); } foo("123 "); // int(123)
+foo("123abc"); // TypeError </PHP>
+
+-  ``\is_numeric`` will return ``true`` for numeric strings with
+   trailing whitespace<PHP>
+
+var_dump(is_numeric("123 ")); // bool(true) </PHP>
+
+-  String offsets<PHP>
+
+$str = 'The world'; var_dump($str['4str']); // string(1) "w" with
+E_WARNING "Illegal string offset '4str'" var_dump($str['4.5']); //
+string(1) "w" with E_WARNING "String offset cast occurred" if the
+secondary vote is accepted otherwise TypeError var_dump($str['string']);
+// TypeError </PHP>
+
+-  Arithmetic operations<PHP>
+
+var_dump(123 + "123 "); // int(246) var_dump(123 + "123abc"); //
+int(246) with E_WARNING "A non-numeric value encountered" var_dump(123 +
+"string"); // TypeError </PHP>
+
+-  The ``++`` and ``--`` operators would convert numeric strings with
+   trailing whitespace to integers or floats, as appropriate, rather
+   than applying the alphanumeric increment rules<PHP>
+
+$d = "5 "; var_dump(++$d); // int(6) </PHP>
+
+-  String-to-string comparisons<PHP>
+
+var_dump("123" == "123 "); // bool(true) </PHP>
+
+-  Bitwise operations, e.g.<PHP>
+
+var_dump(123 & "123 "); // int(123) var_dump(123 & "123abc"); //
+int(123) with E_WARNING "A non-numeric value encountered" var_dump(123 &
+"abc"); // TypeError </PHP>
+
+These changes will be accomplished by modifying the
+``is_numeric_string`` C function (and its variants) in the Zend Engine.
+
+For the string offset behaviour changes the following C Zend engine
+function and their JIT equivalent will be modified
+``zend_check_string_offset()`` and
+``zend_fetch_dimension_address_read()``.
+
+The PHP language specification's `definition of
+str-numeric <https://github.com/php/php-langspec/blob/master/spec/05-types.md#the-string-type>`__
+would be modified by the addition of ``str-whitespace``\ :sub:```opt```
+after ``str-number`` and the removal of the following sentence: "A
+leading-numeric string is a string whose initial characters follow the
+requirements of a numeric string, and whose trailing characters are
+non-numeric".
+
+Backward Incompatible Changes
+-----------------------------
+
+There are three backward incompatible changes:
+
+-  Code relying on numerical strings with trailing whitespace to be
+   considered non-well-formed.
+-  Code with liberal use of leading-numeric strings might need to use
+   explicit type casts.
+-  Code relying on the fact that ``''`` (an empty string) evaluates to
+   ``0`` for arithmetic/bitwise operations.
+
+The first reason is a precise requirement and therefore should be
+checked explicitly. A small poly-fill to check for the previous
+``is_numeric()`` behaviour:
+
+.. code:: php
+
+   if (is_numeric($str) && strlen($str) === strlen(rtrim($str)) ){...}
+
+Breaking the second reason will allow to catch various bugs ahead of
+time, and the previous behaviour can be obtained by adding explicit
+casts, e.g.:
+
+.. code:: php
+
+   var_dump((int) "2px");     // int(2)
+   var_dump((float) "2px");   // float(2)
+   var_dump((int) "2.5px");   // int(2)
+   var_dump((float) "2.5px"); // float(2.5)
+
+The third reason already emitted an ``E_WARNING``. We considered
+special-casing this to evaluate to ``0``, but this would be inconsistent
+with how type declarations deal with an empty string, namely throwing a
+TypeError. Therefore a TypeError will also be emitted in this case. The
+error can be avoided by explicitly checking for an empty string and
+changing it to ``0``.
+
+Proposed PHP Version
+--------------------
+
+PHP 8.0.
+
+RFC Impact
+----------
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Any extension using the C ``is_numeric_string``, its variants, or other
+functions which themselves use it, will be affected.
+
+To Opcache
+~~~~~~~~~~
+
+None that I am aware of.
+
+Unaffected PHP Functionality
+----------------------------
+
+This does not affect the filter extension, which handles numeric strings
+itself in a different fashion.
+
+Future Scope
+------------
+
+-  Nikita Popov's `PHP RFC: Saner string to number
+   comparisons </rfc/string_to_number_comparison>`__
+-  Adding an E_NOTICE for numerical strings with leading/trailing
+   whitespace
+-  Adding a flag to ``\is_numeric`` to accept or reject numeric strings
+   with leading/trailing whitespace
+-  Align string offset behaviour with array offsets
+-  Promote remaining warnings to Type Errors in PHP 9
+-  Warn on illegal offsets when used within ``isset()`` or ``empty()``
+
+Vote
+----
+
+Per the Voting RFC, there is a single Yes/No vote requiring a 2/3
+majority for the main proposal. A secondary Yes/No vote requiring a
+50%+1 majority will decide whether float strings used as string offsets
+should continue to produce a warning (with different wording) instead of
+consistently becoming a TypeError.
+
+Primary vote:
+
+Question: Accept Saner numeric string RFC proposal
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Secondary vote:
+
+Question: Should valid float strings for string offsets remain a warning
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+A pull request for a complete PHP interpreter patch, including test
+files, can be found here: https://github.com/php/php-src/pull/5762
+
+A language specification patch still needs to be done.
+
+A possible documentation patch still needs to be done.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+Acknowledgement
+---------------
+
+To Andrea Faulds for the `PHP RFC: Permit trailing whitespace in numeric
+strings <http://wiki.php.net/rfc/trailing_whitespace_numerics>`__ on
+which this RFC and patch is based of.
+
+To Theodore Brown and Larry Garfield for reviewing the RFC.
+
+Changelog
+---------
+
+-  2020-07-13: Tweak inconsistency in regards to Arithmetic/Bitwise ops
+-  2020-07-10: Major rewrite
+-  2020-07-02: Explain difference between array and string offsets, and
+   how the RFC will impact string offsets
+-  2020-07-01: Add explicit cast behaviour for leading numeric strings
+-  2020-06-28: Initial version
+
+.. [1]
+   float) " 123"); // float(123) var_dump [2]_; // bool(false)
+   var_dump(is_numeric("123abc"
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5762
+:Original Authors: , Andrea Faulds, ajf@ajf.me
+:Original Rfc: `PHP RFC: Permit trailing whitespace in numeric strings <http://wiki.php.net/rfc/trailing_whitespace_numerics>`__
+:Original Status: Implemented in PHP 8.0
+:Slug: saner-numeric-strings
+:Wiki URL: https://wiki.php.net/rfc/saner-numeric-strings

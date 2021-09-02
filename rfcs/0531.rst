@@ -1,0 +1,435 @@
+Chaining Comparison
+===================
+
+:PHP-RFC: 0531
+:Title: Chaining Comparison
+:Author: Richard Fussenegger <php@fleshgrinder.com>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2016-12-13
+:Version: 0.2
+
+Introduction
+------------
+
+This RFC proposes a syntax change to allow arbitrary chaining together
+of comparison and equality operations
+``[==, !=, !==, ===, <, <=, >, >=]``. The initial request that spawned
+this RFC[1] was initially only for interval checking. Discussion on the
+thread expanded the scope of the request to go from strictly interval
+checking to allowing more arbitrary number of comparisons. It evolved
+from there to expand to a majority of the comparison operations. The
+primary benefit to this proposal would be to make for more readable code
+when doing numerous comparisons between a single variable.
+
+.. code:: php
+
+   <?php
+   $a = 10;
+
+   /*
+    * The initial request of this proposal was to change the following syntax
+    */
+   if (0 < $a && $a < 100) {
+       echo "Value is between 0 and 100\n";
+   }
+
+   /*
+    * To be functionally equivalent to this syntax
+    */
+   if (0 < $a < 100) {
+       echo "Value is between 0 and 100\n";
+   }
+
+Proposal
+--------
+
+Proposals herein will contain a dump of relevant AST (php-ast) nodes and
+OPCodes (vld) to better visualize the compilation, and execution.
+
+Comparison Chaining
+~~~~~~~~~~~~~~~~~~~
+
+The proposal creates a new AST operation type ``ZEND_AST_COMPARE_OP``
+which will be compiled in a left-recursive manor.
+
+.. code:: php
+
+   <?php
+   $a = 1;
+   $b = 10;
+
+   var_dump($a < 5 < $b++); // bool(true)
+
+   /*
+    * AST Dump
+    *
+    * 2:  AST_CALL
+    *      expr: AST_NAME
+    *          flags: NAME_NOT_FQ (1)
+    *        name: "var_dump"
+    *      args: AST_ARG_LIST
+    *         0: AST_COMPARE_OP
+    *             flags: COMPARE_IS_SMALLER (19)
+    *             left: AST_COMPARE_OP
+    *                 flags: COMPARE_IS_SMALLER (19)
+    *                 left: AST_VAR
+    *                     name: "a"
+    *                 right: 5
+    *             right: AST_POST_INC
+    *                 var: AST_VAR
+    *                     name: "b"
+    */
+
+   /*
+    * OPCodes
+    *
+    *    2        INIT_FCALL                                               'var_dump'
+    *    3        IS_SMALLER                                       ~4      !0, 5
+    *    4      > JMPZ_EX                                          ~4      ~4, ->7
+    *    5    >   POST_INC                                         ~5      !1
+    *    6    >   IS_SMALLER                                       ~4      ~4, ~5
+    *    7    >   SEND_VAL                                                 ~4
+    *    8        DO_ICALL                                                 
+    */
+
+So we can see what this feature will do internally. Speaking directly at
+the OPCodes we see how our ``JMPZ_EX`` code injection works. Since the
+first evaluated ``IS_SMALLER`` op is the left side-recursive of the
+expression, we determine this expressions result. If the result
+evaluates to true (and if you look at the code it checks to see if
+there's an extended_value flag) we continue to the ``POST_INC``
+otherwise we skip to the sending of the value which would be false.
+
+Equality Chaining
+~~~~~~~~~~~~~~~~~
+
+The proposal is also extended to allow chaining of equality operators.
+However, equality operators are at a higher (or not as significant)
+precedence as the comparison operations. This enforces equality
+operators operate on either booleans, or values that will be compared to
+a boolean value. Example:
+
+.. code:: php
+
+   <?php
+   $a = 1;
+   $b = 10;
+
+   var_dump($a == 1 === true); // bool(true)
+
+   /*
+    * AST Dump
+    *
+    *   2: AST_CALL
+    *       expr: AST_NAME
+    *           flags: NAME_NOT_FQ (1)
+    *           name: "var_dump"
+    *       args: AST_ARG_LIST
+    *           0: AST_COMPARE_OP
+    *               flags: COMPARE_IS_IDENTICAL (15)
+    *               left: AST_COMPARE_OP
+    *                   flags: COMPARE_IS_EQUAL (17)
+    *                   left: AST_VAR
+    *                       name: "a"
+    *                   right: 1
+    *               right: AST_CONST
+    *                   name: AST_NAME
+    *                       flags: NAME_NOT_FQ (1)
+    *                       name: "true"
+    */
+
+   /*
+    * OPCodes
+    *
+    *   2        INIT_FCALL                                               'var_dump'
+    *   3        IS_EQUAL                                         ~2      !0, 1
+    *   4      > JMPZ_EX                                          ~2      ~2, ->6
+    *   5    >   IS_IDENTICAL                                     ~2      ~2, <true>
+    *   6    >   SEND_VAL                                                 ~2
+    */
+
+False Short Circuiting
+~~~~~~~~~~~~~~~~~~~~~~
+
+In doing this compilation we can ensure short cutting of righter
+operations if the left sides have evaluated to false. To accomplish this
+we introduce a new means of emitting an operation, by noting where a
+``JMPZ_EX`` may need to exist (see implementations for
+``zend_emit_op_at``). This will shift operations that may have been
+emitted by compiling the right side of this AST compare to allow jumping
+over them if the left side of the operation is evaluated to false. I
+believe this means is necessary because we can't just shortcut if the
+left operation is false, ``false < $a++`` should still evaluate the
+right part of the expression. We should only inject the JMPZ_EX ops, IF,
+the left child is a chained ``ZEND_AST_COMPARE_OP``. The proposal also
+changes the associativity of the equality, and comparison, operations to
+being left associative.
+
+Backward Incompatible Changes
+-----------------------------
+
+BC Breaking changes expected depending on open-issue answers
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP (currently 7.2)
+
+RFC Impact
+----------
+
+To Opcache
+~~~~~~~~~~
+
+I'm unsure; we're adding new op-codes and/or order of opcodes, but are
+not introducing any new codes
+
+Open Issues
+-----------
+
+Should equality and comparison expressions be treated as same precedence?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This is harder of a question that it seems. What we are asking is how
+should we parse a seemingly simple expression: ``1 < 2 == 3 < 4``
+
+Why is this even a question, much less a challenging one? Well, a
+seemingly majority of languages
+``[C[2], C++[3], Java[4], Ruby[5], Perl[6]]`` all would tell you that
+the expression would evaluate to true. However some, like ``Python[7]``,
+would evaluate that expression to false. Some, like
+``[Numbers, LibreOffice]`` will raise a syntax error, or give awkward
+answers. The question we have is which way should PHP go with the
+evaluation of this expression? Clearly we can ascertain that the
+true-evaluating languages have the precedence of the less-than operator
+more imporatant than that of the equality, so they check if true ==
+true. Whereas the false-evaluating languages treat comparisons and
+equality with the same precedence. As such they compare 1 less than 2, 2
+is-equal 3. The latter group are apparently more strictly typed and
+won't compare bools to numbers, but even there we can see the precedence
+is equal, as it's comparing the result of the first expression into the
+next ``(1 < 2) == 3``
+
+It is important to point out that the example syntax is currently valid
+in PHP 7.1. PHP 7.1 currently has a C-like precedence where
+``[<, <=, >, >=]`` are a higher precedence than
+``[==, !=, ===, !==]``\ [8]. Below are expressions and their return
+values in PHP 7.1, and with the two potential methods of evaluating that
+expression.
+
+.. code:: php
+
+   <?php
+
+   /*
+    * PHP <= 7.1
+    */
+   var_dump(1 < 2 == 3 < 4); // bool(true)
+   var_dump(1 < 2 == 3 < 4 == 5 < 6) // Syntax Error
+
+   /*
+    * Proposed Chaining, comparators evaluated first; equality second [See: Implementation #1]
+    */
+   var_dump(1 < 2 == 3 < 4); // bool(true)
+   var_dump(1 < 2 == 3 < 4 == 5 < 6) // bool(true)
+
+   /*
+    * Proposed Strict Chaining [See: Implementation #2]
+    */
+   var_dump(1 < 2 == 3 < 4); // bool(false)
+   var_dump(1 < 2 == 3 < 4 == 5 < 6) // bool(false)
+   var_dump((1 < 2) == (3 < 4) == (5 < 6)) // bool(true)
+
+Right Recursion
+~~~~~~~~~~~~~~~
+
+Another syntax difference that could be BC problematic is with
+right-recursion of the chained expression. Currently PHP will evaluate
+right recursive single expression comparisons. The proposed feature
+would raise a compile time error doing this. The question is should it,
+or should we permit right-recursive chaining? The test case we can look
+at:
+
+.. code:: php
+
+   <?php
+   var_dump(1 < (2 < 3));
+   var_dump(1 < 2 == 3);
+   var_dump(1 < 2 == 3 == 4);
+   var_dump(1 < 2 == (3 == 4));
+
+We will go over how PHP 7.1 currently would evaluate each, and then how
+a right-recursive chain would pan out.
+
+.. code:: php
+
+   <?php
+   var_dump(1 < (2 < 3));
+   /*
+    * 1 < (2 < 3) := 1 < true := false
+    */
+
+   var_dump(1 < 2 == 3);
+   /*
+    * (1 < 2) == 3 := true == 3 := true
+    */
+
+   var_dump(1 < 2 == 3 == 4);
+   /*
+    * Parse Error, unexpected ==
+    */
+
+   var_dump(1 < 2 == (3 == 4));
+   /*
+    * (1 < 2) == (3 == 4) := true == false := false
+    */
+
+The current proposal (implemented) evaluation method. You'll notice that
+we do permit right-recursion for equality operations. This is due to the
+fact that equality operations will evaluate against boolean, or
+boolean-converted values. Since you don't really care what the left-node
+of the right-recursive side is, you only care if the right side
+evaluates to true or not.
+
+.. code:: php
+
+   <?php
+   var_dump(1 < (2 < 3));
+   /*
+    * Parse Error: No right recursion
+    */
+
+   var_dump(1 < 2 == 3);
+   /*
+    * (1 < 2) == 3 := true == 3 := true
+    */
+
+   var_dump(1 < 2 == 3 == 4);
+   /*
+    * ((1 < 2) == 3) == 4 := (true == 3) == 4 := true == 4 := true
+    */
+
+   var_dump(1 < 2 == (3 == 4));
+   /*
+    * (1 < 2) == (3 == 4) := true == false := false
+    */
+
+If however we permitted right recursive comparison operations we would
+evaluate as such:
+
+.. code:: php
+
+   <?php
+   var_dump(1 < (2 < 3));
+   /*
+    * 1 < (2 < 3) := 1 && (2 < 3) && (1 < 2) := true && true && true := true
+    */
+
+   var_dump(1 < 2 == 3);
+   /*
+    * (1 < 2) == 3 := true == 3 := true
+    */
+
+   var_dump(1 < 2 == 3 == 4);
+   /*
+    * ((1 < 2) == 3) == 4 := (true == 3) == 4 := true == 4 := true
+    */
+
+   var_dump(1 < 2 == (3 == 4));
+   /*
+    * (1 < 2) == (3 == 4) := true == false := false
+    */
+
+If the first example in this last one looks a little odd, it's because
+it is. We do design for short-cutting of a long expression when a fault
+is found to prevent further execution much like you have in ``if()``
+statements. However, we do process in a left-to-right manor. So the
+first thing would require us to ensure the left most side evaluates to
+true, and if it wasn't ``1`` but rather ``$a++``, we'd want to ensure to
+get that left nodes potential opcodes to execute before comparing the
+right hand side. Since we are chaining, we'd want to evaluate the right,
+then return the left node of it to be evaluated against the top's left
+node. This, odd syntax is why I didn't implement a right-recursive
+chaining of comparison operations.
+
+Although allow right-recursion of equality operations does itself
+introduce some slightly odd syntax like:
+
+.. code:: php
+
+   <?php
+   /*
+    * Right chained comparison syntax
+    */
+   var_dump(1 < (2 == 2)); // bool(false)
+
+   /*
+    * Is Functionally identical to PHP 7.1's allowed syntax
+    */
+   var_dump(1 < (2 <= 2)); // bool(false)
+
+Since we don't chain together the right/left node of an equality
+operator, this is functionally identical to PHP 7.1's allowed syntax. We
+could, for equality operations denote if they were in-fact a right
+node-continuation of a chain, thus would allow them to evaluate to
+either the left node, or false.
+
+As we can see right-recursive comparison operations do have numerous
+caveats and oddities. For these reasons we didn't implement it, and
+generally are on the side of forbidding right-recursive comparison
+operations.
+
+Unaffected PHP Functionality
+----------------------------
+
+Does not alter the operation of the comparison Spaceship [<=>] operator.
+
+Proposed Voting Choices
+-----------------------
+
+Requires 2/3 vote
+
+Patches and Tests
+-----------------
+
+Working Implementation: comparisons evaluated before equality:
+https://github.com/php/php-src/compare/master...bp1222:multi-compare
+
+Will need eyes of those more familiar with AST/VM to review.
+
+Implementation
+--------------
+
+References
+----------
+
+-  [1] - `Initial idea on
+   Internals <http://marc.info/?l=php-internals&m=147846422102802&w=2>`__
+-  [2] - `Precedence in
+   C <https://www.gnu.org/software/gnu-c-manual/gnu-c-manual.html#Operator-Precedence>`__
+-  [3] - `Precedence in
+   C++ <https://msdn.microsoft.com/en-us/library/126fe14k.aspx>`__
+-  [4] - `Precedence in
+   Java <http://introcs.cs.princeton.edu/java/11precedence/>`__
+-  [5] - `Precedence in
+   Ruby <https://ruby-doc.org/core-2.2.0/doc/syntax/precedence_rdoc.html>`__
+-  [6] - `Precedence in
+   Perl <http://perldoc.perl.org/perlop.html#Operator-Precedence-and-Associativity>`__
+-  [7] - `Precedence in
+   Python <https://docs.python.org/2/reference/expressions.html#operator-precedence>`__
+-  [8] - `Precedence in
+   PHP <http://php.net/manual/fa/language.operators.precedence.php>`__
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Richard Fussenegger (php@fleshgrinder.com)
+:Original Status: Inactive
+:Slug: chaining_comparison
+:Wiki URL: https://wiki.php.net/rfc/chaining_comparison

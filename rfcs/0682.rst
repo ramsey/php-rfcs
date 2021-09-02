@@ -1,0 +1,540 @@
+Declare(function_and_const_lookup='global')
+===========================================
+
+:PHP-RFC: 0682
+:Title: Declare(function_and_const_lookup='global')
+:Author: Tyson Andre <tandre@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2020-01-28
+:Version: 0.9.1
+
+Introduction
+------------
+
+When calling a function or using a constant that isn't fully qualified
+from a namespace (other than the global namespace), PHP will check these
+two locations in order:
+
+#. The current namespace.
+#. The global namespace. (if not found in the current namespace)
+
+This leads to the following problems:
+
+#. A minor decrease in performance, due to not being able to use
+   specialized opcodes (and other optimizations) for functions such as
+   ``strlen`` due to the ambiguity, not being able to evaluate the
+   values of constants,
+   and due to usually needing to check the current namespace before
+   finding a function/constant in the global namespace at runtime.
+   For example, ``version_compare(PHP_VERSION, '7.0.0', '>=')`` can't be
+   converted to a constant by opcache in a namespace,
+   but ``\version_compare(\PHP_VERSION, '7.0.0', '>=')`` can.
+#. Developers having to deal with ambiguity of which function is being
+   called, if a project has or uses namespaced functions.
+
+In order to eliminate the ambiguity, there are currently several
+options, which have different drawbacks:
+
+#. Add multiple ``use function function_name`` and
+   ``use const MY_CONST`` at the top of the namespace.
+   This is prone to merge conflicts when functions start/stop being
+   used, inconvenient to keep up to date, and the vast majority of these
+   will be global functions and constants.
+#. Write functions as ``\function_name()`` and constants as
+   ``\MY_CONST``.
+
+::
+
+       * This is more verbose, and inconvenient if the only types of constants/functions used are global.
+       * Some builtins such as ''%%__DIR__%%'' and ''empty()'' aren't actually constants/functions, and they can't be prefixed by backslashes.
+       * Version control history for lines would change if ''MY_CONST'' was replaced with ''\MY_CONST''
+       * New contributors to a project would often be unfamiliar with any applicable coding style guidelines of fully qualifying function/const uses.
+   - Avoid using namespaces (this is forbidden by [[https://www.php-fig.org/psr/psr-1/#3-namespace-and-class-names|PSR-1]])
+   - Mixes of the above approaches.
+
+This RFC proposes a new language feature which avoids those drawbacks.
+
+Proposal
+--------
+
+Support ``declare(function_and_const_lookup = 'global')`` as the first
+statement of a PHP file (the same place as ``strict_types``). This
+directive can be used in combination with function/global uses.
+
+.. code:: php
+
+   <?php
+
+   declare(
+       strict_types=1,
+       function_and_const_lookup='global'
+   );
+
+   namespace MyNS;
+
+   use function OtherNS\my_function;
+   use const OtherNS\OTHER_CONST;
+
+   // The below function and constant references now unambiguously refer to the global namespace.
+   //
+   // Without "declare(function_and_const_lookup='global') ...",
+   // php would have checked for MyNS\version_compare
+   // and MyNS\PHP_VERSION at runtime before checking the global namespace.
+   if (version_compare(PHP_VERSION, '8.0.5') >= 0) {
+       // ...
+   }
+
+Implementation Details
+~~~~~~~~~~~~~~~~~~~~~~
+
+``declare(function_and_const_lookup='global')`` can be thought of
+behaving the same way as if every possible function name and constant
+name was used from the global namespace (for names without ``use``
+elsewhere).
+
+Note that declaring a function or constant within a file does not add a
+use.
+
+Instead, unless the namespace is the global namespace, it is a
+compilation error to declare a function or constant without adding
+``use function MyNS\my_function;`` or ``use const MyNS\MY_CONST;`` in an
+above statement of the namespace block.
+
+This keeps the name lookup rules easy to understand, and avoids adding
+unpredictable edge cases (the other possibility of automatically adding
+uses would cause surprises if functions were reordered, or moved to a
+different file, or declared within if/else statements.)
+
+.. code:: php
+
+   declare(function_and_const_lookup='global');
+
+   namespace MyNS;
+
+   // Outside the global namespace, without 'use function MyNS\sprintf',
+   // declaring a function is a compile error when function_and_const_lookup='global'.
+   // PHP already only warns about the name already
+   // being in use if the namespace being referred to is different.
+   // It does not emit notices, warnings, or errors if the namespace is the same.
+   use function MyNS\factorial;
+   use function MyNS\sprintf;
+   // Outside the global namespace, without 'use const MyNS\MY_CONST',
+   // declaring a constant is a compile error when function_and_const_lookup='global'.
+   // PHP already only warns about the name already
+   // being in use if the namespace being referred to is different.
+   // It does not emit notices, warnings, or errors if the namespace is the same.
+   use const MyNS\MY_PREFIX;
+
+   const MY_PREFIX = 'Prefix';
+    
+   function sprintf($msg, ...$args) {
+       // this forces the implementer to explicitly refer to sprintf from the global namespace.
+       return \sprintf(MY_PREFIX . " $msg", ...$args);
+   }
+
+   function factorial(int $n) {
+       return $n > 1 ? factorial($n - 1) * $n : 1;
+   }
+
+There is a working implementation at
+https://github.com/php/php-src/pull/4951
+
+``function_and_const_lookup`` has two possible values: ``'global``' and
+``'default``' (these are case sensitive). ``'default``' is the same as
+omitting the setting. The setting ``'default``' is added to provide a
+way to explicitly indicate the default behavior is deliberately chosen
+for a file, as well as to support any future language changes such as
+https://wiki.php.net/rfc/namespace_scoped_declares
+
+Error handling
+~~~~~~~~~~~~~~
+
+The error handling (for the first voting options) can be thought of
+being the same as if every possible function name and constant name was
+used from the global namespace (for names not used elsewhere).
+
+-  Declaring a function or constant in a file with
+   function_and_const_lookup='global' is allowed without notices or
+   errors.
+   ``define()`` is not affected.
+   This RFC does not propose triggering notices or errors, because
+   forbidding declaring functions or constants may cause problems with
+   future work such as
+   https://wiki.php.net/rfc/namespace_scoped_declares , and would
+   prevent using this directive in all files.
+-  A warning is emitted if
+   ``declare(function_and_const_lookup='global')`` and
+   ``use <element_type> global_element_name`` are both used, due to the
+   latter being redundant when referring to the global namespace.
+-  ``declare(function_and_const_lookup='global')`` does not cause
+   notices if the any of the below namespaces are the global namespace.
+
+Backward Incompatible Changes
+-----------------------------
+
+This version of the RFC has no backwards incompatible changes. The
+behavior of existing code is unchanged.
+
+Proposed PHP Version(s)
+-----------------------
+
+8.0
+
+Vote
+----
+
+Voting started 2020-01-28 and ends 2020-02-11.
+
+The overall change requires a 2/3 majority.
+
+Question: Support declare(function_and_const_lookup=...)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Secondary vote: When ``declare(function_and_const_lookup='global')`` and
+``use <element_type> global_element_name;`` are both used in a namespace
+block, due to the latter being redundant when referring to the global
+namespace, php will do the following when the file is required:
+
+#. Emit a warning (as described in the RFC)
+#. Trigger a fatal Error
+#. Allow it and don't warn
+
+If "Allow it and don't warn" has over 50% of the votes, that option
+wins.
+
+Otherwise, the option of "Warning" or "Fatal Error" with the most votes
+wins.
+
+Question: Severity of redundant uses of global functions/constants
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Warning
+-  Fatal Error
+-  Allow and don't warn
+
+Patches and Tests
+-----------------
+
+https://github.com/php/php-src/pull/4951 implements this RFC
+
+Discussion
+----------
+
+Arguments for declare() syntax
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+From https://externals.io/message/107877#107883
+
+    That [use global functions] still doesn't really explain what's
+    happening, because in code that doesn't use any namespaced
+    functions, the line has no user-visible effect at all - functions
+    are always used from the global namespace. What it actually does is
+    switch off a language feature, so perhaps it should be something
+    more like:
+
+    ``declare(lookup_functions_in_current_namespace=false);``
+
+    That would also mean that it can be covered by any future way of
+    setting language directives, such as settings per "module", bundling
+    into "editions", etc.
+
+From https://externals.io/message/107877#107894
+
+    #. strict_types is not the first or only declare directive.
+    Declaring an    encoding fundamentally changes the meaning of a
+    source file; probably    it would be invalid in a different
+    encoding, but errors are not the    primary purpose of the
+    directive. Declaring a value of "ticks"    actually changes the
+    runtime behavior of the code. The manual defines    declare vaguely
+    as "used to set execution directives", so it's not    particularly
+    clear to me that changing namespace resolution would be    outside
+    of its purpose.
+
+    ::
+
+    -The existing fallback to global scope means that looking at the use
+    statements of a file is not sufficient to resolve the ambiguity of
+    an unprefixed function name. Indeed, the same line of code can
+    execute two different functions within a running program if the
+    namespaced function is defined at the right time.
+
+From https://externals.io/message/107877#107894
+
+    I'm generally not convinced that beginning the special directive
+    with the word "use" automatically makes it easier to find or
+    understand. Given some code mentioning "strpos", you wouldn't be
+    able to scan the list of use statements for the word "strpos", you'd
+    have to understand that there are two modes of execution, and look
+    for a line that switches between those modes.
+
+From https://externals.io/message/107953#108132
+
+    First and foremost, if we ever implement
+    https://wiki.php.net/rfc/namespace_scoped_declares or some similar
+    way of specifying declares on the package level, and I think it's
+    pretty likely that we're going to do this in one form or another,
+    then we're very much going to regret not making this a declare.
+    Disabling the namespace fallback, just like the use of strict types,
+    is something you will usually want to do for an entire
+    library/project, not just for individual files. Going for something
+    like "use global functions" preemptively precludes this for no good
+    reason.
+
+Arguments for use global functions/consts syntax
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+-  This is similar to the ``use function ...;`` syntax. Both
+   ``use global functions`` and ``declare(...)`` make it clear that this
+   syntax can be used only for the global namespace.
+-  ``use global functions;`` can be placed immediately adjacent to other
+   ``use function ...;`` statements, so only one block of code needs to
+   be checked for function/constant resolution behavior (if coding style
+   guidelines are enforced).
+-  This can be set per each namespace block, in the uncommon case of
+   files that combine blocks from multiple namespaces. This makes it
+   possible for a file to use this in some namespace blocks, but also
+   declare functions/constants in different namespace blocks. (The
+   latest RFC version allows declaring functions/constants with
+   ``declare(function_and_const_lookup='global')``, so this argument no
+   longer applies)
+
+(The first versions of this RFC used the syntax
+``use global functions;`` and ``use global consts``)
+
+An argument against the separate statements for functions and constants
+is that these two directives would almost always be combined, so it
+would make to use a combination of these.
+
+Deprecate the fallback to the root namespace instead?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An earlier RFC
+https://wiki.php.net/rfc/fallback-to-root-scope-deprecation had the
+following notable objections, and I'm not sure of the current status of
+that RFC:
+
+-  Deprecating the behavior of existing code would break (possibly
+   unmaintained) third-party libraries and require a lot of code
+   changes, discouraging updates to the latest version of PHP.
+   ``use global functions;`` wouldn't.
+-  Some mocking libraries will declare functions in namespaces being
+   tested, with the same name as the global function.
+   My proposal has similar drawbacks - third party code that started
+   using "use function \*" would break those libraries (but so would
+   manually adding the same namespace uses).
+   But there are alternatives to those libraries, such as uopz, runkit7,
+   and SoftMocks (SoftMocks changes the class autoloader to replace code
+   with instrumented code).
+
+Any work on that RFC can be done independently of this RFC.
+
+Add setting to make all name lookups global instead (e.g. declare(global_lookup=1))
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+i.e. for functions, constants, **and class names**.
+
+e.g. ``declare(global_lookup=1)`` or ``declare(name_lookup='global')``
+
+https://externals.io/message/107953#108250
+
+    One option that I haven't seen much discussion on is the opposite:
+    Always only look in the global namespace. Any unimported unqualified
+    usages will be treated as fully qualified names. This would match
+    the proposed semantics for functions/consts and change the
+    resolution rules for classes. I think this would have relatively
+    little impact on how code is written, as classes already tend to
+    make extensive use of cross-namespace references and the import is
+    usually IDE managed.
+
+    ...
+
+    It's fairly common for NS\SubNS\ClassName to mention other classes  
+     from NS\SubNS\OtherClassName right now,    (more commonly than use
+    Exception, use Throwable, etc in some cases),
+
+    Out of interest, I checked how the symbol reference distribution in
+    open-source projects look like. These numbers are for unique class
+    name references inside namespaces:
+
+    Global: int(88398) Same namespace: int(83790) Other namespace:
+    int(315455)
+
+    So, most references are to classes outside the current namespace.
+    The number of references to global classes and classes in the same
+    namespace is actually pretty similar, there are 5% more global
+    references.
+
+    From that perspective, changing the name resolution rules to always
+    look for the global symbol if unimported would actually slightly
+    reduce the number of necessary "use" statements.
+
+    It's fairly common for NS\SubNS\ClassName to mention other classes  
+     from NS\SubNS\OtherClassName right now,    (more commonly than use
+    Exception, use Throwable, etc in some cases),    and [opting into
+    that a single setting such as    ``declare(global_lookup=1)``]   
+    would require changing a lot of third party code [to get unambiguous
+       function and constant resolution easily].    A separate option
+    such as \`declare(lookup_classes=global)\` would    allow migrating
+    to that,    but would confuse developers switching between codebases
+    using    different settings of lookup_classes,    and introduce
+    similar confusion about the rare case of multiple    classes in one
+    file.
+
+    If we were to make such a change (hypothetically), the way I would
+    view it is "use new name resolution rules" or not, rather than a
+    collection of fine-grained options. Notably Rust made a major change
+    to how symbols are resolved in the 2018 edition, so such things
+    aren't inconceivable, especially with the right tooling.
+
+https://externals.io/message/107953#108251
+
+    If "use new name resolution rules" was the only option, the larger
+    amount of refactoring for class references (and doc comments) might
+    discourage using the new name resolution for functions/constants,
+    and make backporting patches to previous major versions of
+    applications/libraries more error prone (e.g. \\MyNS\Exception vs
+    \\Exception). The refactoring might also be perceived as risky.
+
+Encourage static methods and class constants instead
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Arguments for:
+
+-  Classes don't have the ambiguity functions and constants do, and
+   already have autoloaders, so we should encourage the use of classes
+   instead.
+-  Can potentially support ``use function Ns\SomeClass::some_method;``,
+   ``use const Ns\SomeClass::SOME_CLASS_CONST`` instead
+
+Arguments against:
+
+-  PHP will still need to support existing php modules and userland
+   libraries/polyfills that use global functions/constants.
+
+Look up elements in the current namespace instead of the global namespace?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+(i.e. for unqualified my_function(), do the opposite of this: work on
+approaches to only check \\NS\my_function() without checking
+\\my_function() to avoid ambiguity.)
+
+This was suggested in combination with other strategies. See the section
+"Use module/library systems instead".
+
+Right now, the majority of PHP's functions are in the global namespace.
+(count(), strlen(), is_string(), etc.)
+
+Use module/library systems instead
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    We might eventually benefit from versioned "libraries" of functions
+    that can be imported in one command which would solve
+    many-a-future-problem by itself.
+
+I'd be in favor of a module system, I just can't think of a good way to
+migrate to that with existing use cases and limitations. I'd imagine
+there would be various obstacles/objections to getting an RFC for that
+approach accepted. (continuing to support polyfills and autoloading;
+increasing ambiguity instead of decreasing ambiguity; any
+implementations I can think of would have worse performance with
+opcache)
+
+If it is implemented in a way causing large backwards compatibility
+breaks, it may discourage upgrading.
+
+See https://externals.io/message/107953#107962 for more details.
+
+The performance hit is minor
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It is in most cases. Counterarguments:
+
+-  Making it easier to avoid ambiguity has benefits elsewhere - for
+   analyzing code, future work on autoloading, helping developers avoid
+   unexpected behavior in edge cases in applications, etc.
+-  It's much larger in some cases than others due to other opcache
+   optimizations, frequency of calling a line of code, etc. Benchmarking
+   and interpreting performance of applications after new features get
+   added may take more developer time than ensuring files contain
+   ``declare(function_and_const_lookup='global');``
+
+::
+
+   *-Developers may still aim to avoid ambiguity without this RFC, resulting in more verbose code.
+
+'global' string or global keyword
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Background: 3 declare options exist at the time of writing:
+``encoding="UTF-8"``, ``ticks=500``, and ``strict_types=1``. See
+https://www.php.net/manual/en/control-structures.declare.php
+
+Arguments for a string literal: Another setting, ``encoding="UTF-8"`` is
+quoted, and every declare directive currently only allows scalar values.
+Making the value for ``function_and_const_lookup`` a string literal
+would keep the syntax simple, consistent and unchanged.
+
+Arguments for a keyword: Keys aren't quoted, there are only two possible
+values for ``function_and_const_lookup``, and ``encoding`` needs to be
+quoted because of the hyphen. A keyword is also shorter.
+
+Support = 'fallback' in addition to/instead of = 'default'
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+https://externals.io/message/107953#108268
+
+    As a minor note, rather than using 'default' as one of the values, I
+       think    it would be better to use 'fallback' to make it robust
+    against a    potential    future change of defaults.
+
+    I'd rather have that done when the future change of defaults is
+    being proposed. Supporting 'fallback' might cause confusion and
+    extra work if the name resolution defaults ever change in a
+    different way. At the point where they do change, we either do or
+    don't want a way to support the old 'fallback', but we will want to
+    support the new 'default'.
+
+    I'd imagine that if there were significant changes, they would go in
+    the next major version, and PHP 8.X.0 would add the new 'fallback'
+    option and possibly emit deprecation notices about the 'default'
+    option or the absence of an option. So done that way, you could run
+    the same code both on PHP 8 and PHP 9. I'd be annoyed if 8.X.0
+    didn't make it that easy.
+
+    I don't plan to change the default name resolution behavior in PHP
+    9, though, and if it does change, it might even be according to a
+    different proposal, so adding 'fallback' as a third option before we
+    know what type of change is planned seems premature.
+
+Implementation
+--------------
+
+References
+----------
+
+`Initial proposal <https://externals.io/message/107877>`__
+
+`[RFC] "use global functions/consts"
+statement <https://externals.io/message/107953>`__
+
+`[VOTE]
+declare(function_and_const_lookup='global') <https://externals.io/message/108306>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: Tyson Andre tandre@php.net
+:Slug: use_global_elements
+:Wiki URL: https://wiki.php.net/rfc/use_global_elements

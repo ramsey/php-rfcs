@@ -1,0 +1,281 @@
+PHP Native Interface
+====================
+
+:PHP-RFC: 0060
+:Title: PHP Native Interface
+:Author: Paul Biggar <paul.biggar@gmail.com>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2009-03-27
+:Version: 1.0
+
+Design of the design of *phpni*, a native interface for PHP, designed to
+replace the Zend API.
+
+The need for such a native interface is described separately in
+`remove_zend_api <remove_zend_api>`__.
+
+phpni: The PHP Native Interface
+-------------------------------
+
+This describes the design of *phpni*, the PHP Native Interface. This
+design is in early stages.
+
+Design Criteria
+^^^^^^^^^^^^^^^
+
+-  Remove any couping between the Zend Engine, extensions and SAPIs.
+-  Support all major use cases of the Zend API
+
+   -  embedding within SAPIs
+   -  proving access to C libraries
+   -  providing the ability to rewrite performance sensitive code in C
+
+-  Significantly simplify creation of extensions
+-  Allow other PHP implementations to use the same interface.
+-  This is intended to be a **static** process. That is, we are
+   replacing the static compilation of extensions with another static
+   process. We do not intend to simplify or support run-time binding,
+   like *JNI*, *JNA* or *libffi*. Instead it is imagined the result will
+   be a single libphplibs.a, which statically links into libphp5.so.
+
+Solution
+^^^^^^^^
+
+Take the use case of wrapping a C library to expose its functionality in
+user space. The major idea is to "automatically" import C functions into
+a special namespace. The PHP library functions would then be comprised
+of PHP user space code which calls those C functions directly. That way
+it is possible to craft an API that is separate from the C
+implementation.
+
+Lets take a simple example. Assume we have a C library XXX, with 3
+functions, x, y and z. We'd like to expose this in user space as a class
+called MyXXX, with methods a and b. We create a file with the signatures
+of x, y and z:
+
+extensions/xxx/sigs.h
+
+::
+
+   int x (int, int);
+   void y (char*, int);
+   void z (char*, int);
+
+We then write our user space code:
+
+extensions/xxx/MyXXX.php
+
+::
+
+   class MyXXX
+   {
+      function __construct ($username)
+      {
+          $this->username = $username;
+      }
+
+      function a ($w1, $w2)
+      {
+         $foo = \internals\XXX\x ($w1, $w2);
+         \internals\XXX\y ($this->username, $foo);
+      }
+
+      function b ($m1, $m2)
+      {
+         $foo = \internals\XXX\x ($m1, $m2);
+         \internals\XXX\z ($this->username, $foo);
+         return $foo;
+      }
+   }
+
+Interface
+^^^^^^^^^
+
+In order to interface between the PHP code and the C functions, a tool
+will be required to generate code. This tool will obviously be
+implementation specific. SWIG could be used to create this.
+
+Zend engine
+^^^^^^^^^^^
+
+Since the libraries would no longer use the Zend API, the tight coupling
+would be broken. It would now be possible to change major parts of the
+Zend engine without affecting the operation of any other part of PHP.
+
+Extensions/PECL
+^^^^^^^^^^^^^^^
+
+It would no longer be necessary to know the Zend API to write
+extensions. Instead, only the API of the C library is necessary, and the
+interface can be created in PHP user code.
+
+Embed SAPI
+^^^^^^^^^^
+
+The same interface used for libraries can be used to handle many of the
+use cases of the C API. However, we do need to specify a means to call
+PHP user code from C/C++ code.
+
+Other PHP implementations
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Since PHP extensions are no longer written in the Zend API, other PHP
+implementations, such as Roadsend, Project Zero, Phalanger and Quercus
+should be reuse the libraries without difficulty. In addition, if the
+coupling is between the interpreter and its components is simple enough,
+it may be possible for other implementations to be slotted in directly.
+However, though this would be a nice side-effect, it should probably not
+be considered a priority.
+
+Note that the design described requires the Zend engine to generate
+interfacing code from the phpni specification. Other implementations
+would be required to generate their own code for this interface.
+
+Input from other PHP implementations:
+
+-  Project Zero
+
+   -  Supportive (see
+      `remove_zend_api/scratchpad <http://wiki.php.net/rfc/remove_zend_api/scratchpad>`__
+      for their discussion.
+
+-  phc
+
+   -  Involved
+
+-  Roadsend
+
+   -  TODO
+
+-  Phalanger
+
+   -  TODO
+
+-  Quercus
+
+   -  TODO
+
+Problems with current design
+----------------------------
+
+As the design progresses, problems will be identified, which must be
+solved. This section will keep track of them:
+
+Problems to be dealt with
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+-  Strings:
+
+   -  Who will be responsible for freeing passed memory?
+
+-  Arrays
+
+   -  It is likely that each implementation will have to implement their
+      own array extension (the term "extension" is probably misleading
+      for something so fundamental to the language).
+
+Problems solved
+^^^^^^^^^^^^^^^
+
+-  Performance of say, pointer arithmetic, will suffer
+
+   -  With the basic design (v1.0), it should be simple to put a C layer
+      above the C library, and wrap that instead.
+
+-  strings:
+
+   -  representing length
+
+      -  The php_string structure created on the C side should have a
+         length
+
+   -  mutability
+
+      -  The php_string structure created on the C side should either be
+         of type mutable_string/immutable_string, or have a mutable
+         flag.
+      -  Does the implementation have to respect this too? Probably.
+
+   -  Unicode
+
+      -  This should come for free?
+
+Similar projects
+----------------
+
+Non-PHP
+^^^^^^^
+
+*phpni* differs from many of these in that it is designed not to add new
+features, but instead to replace an existing facility - the ability to
+call C libraries. As such, dynamic linking is not part of the spec.
+
+-  ctypes (Python) http://docs.python.org/library/ctypes.html
+-  JNI (Java) http://en.wikipedia.org/wiki/Java_Native_Interface
+-  CNI (Java) http://gcc.gnu.org/onlinedocs/gcj/About-CNI.html#About-CNI
+-  JNA (Java) https://jna.dev.java.net/
+-  Pyrex (Python)
+   http://www.cosc.canterbury.ac.nz/greg.ewing/python/Pyrex/
+-  Cython (Python) http://www.cython.org/
+-  FFI (ruby) http://kenai.com/projects/ruby-ffi/pages/Home
+   http://lifegoo.pluskid.org/?p=370
+-  Haskell 98 Foreign Function Interface
+   http://www.cse.unsw.edu.au/~chak/haskell/ffi/
+-  CFFI (Common Lisp): Common-Lisp FFI:
+   http://common-lisp.net/project/cffi/
+-  SICStus Prolog FLI:
+   http://www.sics.se/sicstus/docs/latest/html/sicstus.html/Mixing-C-and-Prolog.html
+
+For PHP
+^^^^^^^
+
+There is no reason we shouldn't reuse these, if they fit the bill.
+
+-  FFI http://pecl.php.net/package/ffi
+
+   -  This is an interface to libffi, and is therefore not suitable
+      directly.
+   -  Some ideas may still be suitable
+
+-  CodeGen_PECL http://pear.php.net/package/CodeGen_PECL/
+-  Inline_C http://pear.php.net/package/Inline_C
+
+Project Plan
+------------
+
+This is a simple design. In reality, it would need to be prototyped to
+determine whether this makes sense for every use case, and that there
+would be little sacrificed to make it work. The work on it should
+probably progress in roughly the following order:
+
+-  Discuss requirements with other PHP implementations
+
+-  Prototype a single library
+
+   -  perhaps readline?
+   -  Manually write interface code between phpni code and the PHP code.
+   -  Look at other implementations, in particular JNI
+
+-  Write a utility to generate the interface code automatically for the
+   Zend engine
+
+   -  Using SWIG?
+   -  Test 5 or 6 libraries
+   -  Test more complicated functionality
+
+-  Work with other implementations to prototype the same
+
+-  Convert entire set of PHP extensions
+
+-  At some point we'll need to get consensus from PHP-internals
+   developers that this is a good idea, and a commitment to use it.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Paul Biggar paul.biggar@gmail.com
+:Original Status: revising after v1.0
+:Original Version: 1.0.x
+:Slug: php_native_interface
+:Wiki URL: https://wiki.php.net/rfc/php_native_interface

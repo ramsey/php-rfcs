@@ -1,0 +1,511 @@
+Scalar Type Hinting With Casts
+==============================
+
+:PHP-RFC: 0166
+:Title: Scalar Type Hinting With Casts
+:Author: Anthony Ferrara <ircmaxell@php.net>, Andrea Faulds <ajf@ajf.me>
+:Status: Withdrawn
+:Type: Standards Track
+:Created: 2012-07-03
+:Version: 0.1.9
+
+Introduction
+------------
+
+Currently, PHP has no way to provide type hinting for function
+parameters which are not classes or arrays. This is on often requested
+feature that has been discussed on the internals list many many times.
+This RFC discusses a new implementation of this feature that attempts to
+stay close to php's type shifting roots, and attempts to mirror
+*zend_parse_parameters* as much as possible.
+
+Philosophy
+~~~~~~~~~~
+
+This RFC discusses a method of adding scalar type hints to PHP while
+attempting to embrace the dynamic nature of PHP variables. This means
+that passing a type that does not exactly match the hinted type will
+cause a cast to happen. This cast will only succeed if the argument can
+be cleanly converted to the requested type. If it cannot be converted
+without significant data-loss, an *E_RECOVERABLE_ERROR* will be raised.
+
+For consistency, this patch attempts to largely follow
+*zend_parse_parameters()* for the validation rules, but disallows lossy
+conversion from float to int (1.5 -> int generates an error) and
+non-well-formed numeric values for float or int ('123abc' is an error).
+Since v0.1.6, booleans are handled strictly, and since v0.1.9, booleans
+are not accepted for int, float, numeric and string, also departures
+from zpp
+
+Rationale for this proposal compared to others
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Other options for scalar type hints have been proposed. The most obvious
+other two are strict type hinting, where no casting is done and if the
+value is the wrong type, it errors (much like the non-scalar type
+hints), and type casting, where values are simply casted using the
+implicit casting rules with no failure cases (but sometimes emitting
+notices).
+
+The problems with strict type hinting are twofold. Firstly, PHP's types
+can change somewhat unpredictably. For example, dividing one integer by
+another may result in a float when the the divisor is not a factor, and
+existing code may be poorly written and not guaranteed to return the
+types you'd expect. Secondly, while PHP's non-scalar types have always
+been quite strict and not been juggled, PHP's scalar types are routinely
+casted implictly, juggled, and are expected to do so, because of PHP's
+designed-for-the-web nature where numeric values are likely to start
+life in string form (from *$_GET* etc.). To break from this convention
+would be rather "un-PHP-like"; PHP has always juggled its scalar types,
+and PHP's internal (zend_parse_parameters-using, at least) functions
+have always had implict casting.
+
+The other main option, simply type casting, also has problems. This way,
+there is no real error prevention (E_NOTICE is not a safeguard, it is a
+message in a log file, and in production it is not even that) and unsafe
+casts can happen with data being lost. Being able to pass "foobar" as an
+argument which is expected to be an integer doesn't really make sense
+and would probably be a source of problems. It's also not actually
+consistent, despite what it first appears, with the behaviour of
+zend_parse_parameters for internal functions; zend_parse_parameters
+actually fails in many cases, and a lot of internal functions will bail
+out and return NULL when it does.
+
+On the other hand, this RFC tries to strike a balance between strict
+typing and mere type casting. It casts, making sure PHP's type shifting
+won't break things and keeping with PHP's traditional type casting and
+juggling nature, which is useful when dealing with the web, but prevents
+conversions causing data loss, reducing the likelihood of causing bugs
+and making it more likely bugs will be caught. In this way we feel the
+RFC combines the best parts of both proposals, providing both validation
+and type conversion.
+
+Proposal
+--------
+
+Engine Changes
+~~~~~~~~~~~~~~
+
+The current implementation introduces five new reserved words: *int*,
+*float*, *bool*, *string* and *numeric*. These were not previously
+reserved, because casting is a special case in the lexer.
+
+If this causes a problem, it would be possible to revert to the previous
+implementation, where the parser still detects the type hints as object
+type hints and the compiler (zend_compile.c) then detects the exact
+value for the type hint, changing the stored hint from IS_OBJECT to the
+proper type (freeing the string).
+
+Syntax
+~~~~~~
+
+Five new type hints are introduced with this patch:
+
+-  *int* - Matching integers only
+-  *float* - Matching floating point numbers
+-  *numeric* - Matching integers and floating point numbers (to allow
+   polymorphic functions dealing with numbers)
+-  *bool* - Matching boolean parameters only
+-  *string* - Matching strings only
+
+Conversion Rules
+~~~~~~~~~~~~~~~~
+
+Conversion is allowed only if data-loss does not happen. There are a few
+exceptions (objects using \__toString, etc.). Here's a table of
+examples.
+
+-  *fail* indicates an E_RECOVERABLE_ERROR
+-  *pass* indicates no error and a conversion
+-  *notice* indicates an E_NOTICE and a conversion
+
+======================== ====== ====== ====== ======= ======== =====
+value                    string float  int    numeric boolean‡ array
+======================== ====== ====== ====== ======= ======== =====
+true (boolean)           fail   fail   fail   fail    pass     fail
+false (boolean)          fail   fail   fail   fail    pass     fail
+NULL (NULL)              fail   fail   fail   fail    fail     fail
+0 (integer)              pass   pass   pass   pass    fail     fail
+1 (integer)              pass   pass   pass   pass    fail     fail
+12 (integer)             pass   pass   pass   pass    fail     fail
+12 (double)              pass   pass   pass   pass    fail     fail
+12.34 (double)           pass   pass   fail   pass    fail     fail
+'true' (string)          pass   fail   fail   fail    fail     fail
+'false' (string)         pass   fail   fail   fail    fail     fail
+'0' (string)             pass   pass   pass   pass    fail     fail
+'1' (string)             pass   pass   pass   pass    fail     fail
+'12' (string)            pass   pass   pass   pass    fail     fail
+'12abc' (string)         pass   fail   fail   fail    fail     fail
+'12.0' (string)          pass   pass   pass   pass    fail     fail
+'12.34' (string)         pass   pass   fail   pass    fail     fail
+'foo' (string)           pass   fail   fail   fail    fail     fail
+array () (array)         fail   fail   fail   fail    fail     pass
+array (0 => 12) (array)  fail   fail   fail   fail    fail     pass
+'' (string)              pass   fail   fail   fail    fail     fail
+1 (resource)             fail   fail   fail   fail    fail     fail
+StdClass                 fail   fail\* fail\* fail\*  fail†    fail
+implementing \__toString pass   fail\* fail\* fail\*  fail†    fail
+======================== ====== ====== ====== ======= ======== =====
+
+\*actually *notice* in patch as it stands due to behaviour of default
+object casting handler
+
+†actually *pass* in patch as it stands due to behaviour of default
+object casting handler
+
+‡likely subject to change, see Booleans section below
+
+It's important to note that passing \`12.5\` as a float or string to a
+*int* type hint will presently fail, since data-loss would occur (this
+diverges from *zend_parse_parameters* which would truncate the value).
+
+Errors
+~~~~~~
+
+If a provided hint does not match at all ("foo" passed to an *int*
+hint), an *E_RECOVERABLE_ERROR* is raised. This includes non-well-formed
+numerics passed to an *int*, *float* or *numeric* hinted parameter,
+unlike zend_parse_parameters which would simply raise an *E_NOTICE*.
+
+Defaults
+~~~~~~~~
+
+Any value can be entered as a default. Presently even array() is
+allowable for an int type hint. The default is converted at run-time
+when it is accessed.
+
+This can lead to odd bugs, so in the future it would be good to validate
+the default in zend_compile.c (casting it where appropriate, checking
+for a valid cast).
+
+NULL defaults (nullable hints)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The scalar types can be nullable just like any other type. If a
+parameter does not have a default value of NULL, then NULL is not a
+permitted value. If it does have a default value of NULL, and is
+therefore nullable, then the value NULL is accepted and will not be
+casted.
+
+References
+~~~~~~~~~~
+
+The current implementation treats references like any other value. If it
+casts, the referenced value is casted.
+
+New APIs
+~~~~~~~~
+
+This current proposal adds a series of conversion functions to the core:
+
+-  *int convert_to_{type}_safe(zval \**ptr)* - Convert the zval to
+   {type}. Return value indicates if conversion was "clean". (FAILURE
+   indicates unclean conversion)
+-  *int convert_to_{type}_safe_ex(zval \**ptr)* - Separate zval if not a
+   reference, and convert to {type}. Return indicates clean conversion
+   (FAILURE indicates unclean conversion).
+
+These functions pairs exist for *long*, *double*, *string*, *boolean*
+and *numeric*.
+
+New Methods
+~~~~~~~~~~~
+
+For consistency, the following new methods have been added to
+*ReflectionParameter*
+
+-  *isInt()* - boolean to determine if parameter is type-hinted as an
+   integer.
+-  *isFloat()* - boolean to determine if parameter is type-hinted as a
+   float.
+-  *isBool()* - boolean to determine if parameter is type-hinted as a
+   boolean.
+-  *isString()* - boolean to determine if parameter is type-hinted as a
+   string.
+-  *isNumeric()* - boolean to determine if parameter is type-hinted as
+   numeric.
+
+Patch
+~~~~~
+
+The modifications necessary to implement this feature exist on the
+`scalar_type_hints branch of Andrea's GitHub
+fork <https://github.com/TazeTSchnitzel/php-src/tree/scalar_type_hints>`__
+(forked from the `branch on ircmaxell's GitHub
+fork <https://github.com/ircmaxell/php-src/tree/scalar_type_hints>`__).
+It is stable to the best of Andrea's knowledge, with its tests passing
+and it breaking no known tests on her machine nor Travis.
+
+Possible Changes
+----------------
+
+For points I'm unsure on, this section lists possible future changes to
+the RFC.
+
+Float to Int Casting Rules
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+At present, the cast from float to int results in an error if the int
+doesn't exactly represent the float (satisfying a double cast: *val =
+(double) (long) val*). And a cast from an int to a float follows the
+same semantics (as on 64 bit platforms PHP_INT_MAX is not exactly
+representable by a float).
+
+This could be relaxed for semi-representable values. So 1.5 could be
+allowed for an int parameter (casted to 1). But
+*float(99999999999999999999)* would not, because it would lose a lot of
+information in the transfer (would be casted to PHP_INT_MAX).
+
+I believe the current behavior (error on non-exactly-representable) is
+the correct one. However, this could be changed to an E_NOTICE instead
+indicating that partial data was lost.
+
+Warning On Data Loss
+~~~~~~~~~~~~~~~~~~~~
+
+We could also change the E_RECOVERABLE_ERROR on data-loss to an
+E_WARNING. That would allow data-loss to continue. The value passed in
+would still be cast according to the normal casting rules. So passing
+*"foo"* to an int parameter would result in *int(1)* and an E_WARNING.
+
+Handling of StdClass and other objects
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+While an E_RECOVERABLE_ERROR result when passing a StdClass (and other
+objects with the default object handlers) to parameters hinted as int,
+float or bool would be desirable, the patch as it stands does not do
+this. Instead, for the int and float cases, an E_NOTICE is emitted and
+the result back is 1, and in the bool case, no error at all happens and
+the result back is true. To make this yield E_RECOVERABLE_ERROR would
+require detecting the default object handler (an ugly hack which also
+wouldn't make the behaviour sensible for non-defaults), or changing the
+behaviour and/or semantics of the object handler for casting, neither of
+which are particularly desirable. By keeping the current behaviour in
+the patch, we are consistent with casting and zend_parse_parameters.
+Furthermore, it could be argued that since objects are truthy, casting
+to bool without complaint here might not be a bad thing.
+
+Booleans
+~~~~~~~~
+
+Given that StdClass casts without error to bool in the patch as it
+stands, and there's no nice way of changing that (see previous section),
+should we just make all truthy values (including array(non-empty) and
+resource) cast to true without error, and all falsey values (including
+array() and empty string) cast to false without error?
+
+While int, float and string only allow lossless casting (with the
+exception of objects), bool’s behaviour at the moment is quite
+different. The current behaviour leaves much to be desired, and there
+are some other options available.
+
+One option is simply to forget about being lossless and make the bool
+type hint accept any value, meaning any truthy value or any falsey value
+would yield what is expected without error. This would ensure that if
+someone has passed in a non-boolean truthy/falsey value to your
+function, it’ll be handled correctly. It would mean all your bit hacks
+($foo & FLAG etc.) would work and anything you got from $_GET (e.g.
+?foobar=1). However, this is unlikely to catch bugs in code, because
+literally any PHP value would work. For that reason, this may not be the
+way forward.
+
+Another option is go completely strict and allow only boolean values,
+failing everything else, which is what the RFC current proposes since
+v0.1.6. This would be unlike the int, float and string hints, which are
+flexible and cast, but would be more helpful for catching bugs. It's
+worth noting that unlike for numbers, which can be losslessly
+transformed between string, int and float without any information lost
+at all, a string value casted to a boolean then back to a string will
+not be the same as the original string value. There aren't any sensible
+completely lossless bidirectional casts for booleans where the result of
+casting from boolean would obviously be boolean. However, not casting at
+all isn’t very “PHP-like”, and forcing people to manually cast with
+(bool) might not be ideal. If we were to go for this one, we could also
+accept objects casting to bool (which the default handler does), because
+otherwise we'd be stopping extension developers from making bool-like
+objects if they so pleased.
+
+The final option this section considers is a limited set of values.
+TRUE, FALSE and NULL would be accepted, along with the integer and float
+values 1 and 0 (which are the int/float values TRUE and FALSE cast to,
+respectively), ‘1’ and the empty string (which are the string values
+TRUE and FALSE cast to), and ‘0’ (which (string)(int)FALSE would give
+you), along with objects casting to boolean. This is something of a
+compromise between the first two proposals.
+
+Both the author of this RFC (Anthony) and the current maintainer
+(Andrea) are yet to settle on one specific option.
+
+Handling of "123abc" for int, float and numeric
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This has been changed to E_RECOVERABLE_ERROR, but should it perhaps be
+something softer, like E_NOTICE or E_WARNING?
+
+With it as E_RECOVERABLE_ERROR, it can be considered to "fail" the
+typehint and hence the int and float typehints are lossless.
+
+Examples
+--------
+
+Note that these reflect the intended output and not what the patch at
+present actually does. For that, see `the patch's own test
+cases <https://github.com/TazeTSchnitzel/php-src/tree/scalar_type_hints/Zend/tests/typehints>`__
+or the table above.
+
+Integer Hints
+~~~~~~~~~~~~~
+
+.. code:: php
+
+   <?php
+   function foo(int $a) {
+       var_dump($a); 
+   }
+   foo(1); // int(1)
+   foo("1"); // int(1)
+   foo(1.0); // int(1)
+   foo("1a"); // E_RECOVERABLE_ERROR
+   foo("a"); // E_RECOVERABLE_ERROR
+   foo(""); // E_RECOVERABLE_ERROR
+   foo(999999999999999999999999999999999999); // E_RECOVERABLE_ERROR (since it's not exactly representable by an int)
+   foo('999999999999999999999999999999999999'); // E_RECOVERABLE_ERROR (since it's not exactly representable by an int)
+   foo(1.5); // E_RECOVERABLE_ERROR
+   foo(array()); // E_RECOVERABLE_ERROR
+   foo(new StdClass); // E_RECOVERABLE_ERROR
+   ?>
+
+Float Hints
+~~~~~~~~~~~
+
+.. code:: php
+
+   <?php
+   function foo(float $a) {
+       var_dump($a); 
+   }
+   foo(1); // float(1)
+   foo("1"); // float(1)
+   foo(1.0); // float(1)
+   foo("1a"); // E_RECOVERABLE_ERROR
+   foo("a"); // E_RECOVERABLE_ERROR
+   foo(""); // E_RECOVERABLE_ERROR
+   foo(1.5); // float(1.5)
+   foo(array()); // E_RECOVERABLE_ERROR
+   foo(new StdClass); // E_RECOVERABLE_ERROR
+   ?>
+
+Numeric Hints
+~~~~~~~~~~~~~
+
+.. code:: php
+
+   <?php
+   function foo(numeric $a) {
+       var_dump($a); 
+   }
+   foo(1); // int(1)
+   foo("1"); // int(1)
+   foo(1.0); // float(1)
+   foo("1a"); // E_RECOVERABLE_ERROR
+   foo("a"); // E_RECOVERABLE_ERROR
+   foo(""); // E_RECOVERABLE_ERROR
+   foo(1.5); // float(1.5)
+   foo(array()); // E_RECOVERABLE_ERROR
+   foo(new StdClass); // E_RECOVERABLE_ERROR
+   ?>
+
+String Hints
+~~~~~~~~~~~~
+
+.. code:: php
+
+   <?php
+   function foo(string $a) {
+       var_dump($a); 
+   }
+   foo(1); // string "1"
+   foo("1"); // string "1"
+   foo(1.0); // string "1"
+   foo("1a"); // string "1a"
+   foo("a"); // string "a"
+   foo(""); // string ""
+   foo(1.5); // string "1.5"
+   foo(array()); // E_RECOVERABLE_ERROR
+   foo(new StdClass); // E_RECOVERABLE_ERROR
+   ?>
+
+Boolean Hints
+~~~~~~~~~~~~~
+
+.. code:: php
+
+   <?php
+   function foo(bool $a) {
+       var_dump($a); 
+   }
+   foo(1); // E_RECOVERABLE_ERROR
+   foo("1"); // E_RECOVERABLE_ERROR
+   foo(1.0); // E_RECOVERABLE_ERROR
+   foo(0); // E_RECOVERABLE_ERROR
+   foo("0"); // E_RECOVERABLE_ERROR
+   foo("1a"); // E_RECOVERABLE_ERROR
+   foo("a"); // E_RECOVERABLE_ERROR
+   foo(""); // E_RECOVERABLE_ERROR
+   foo(1.5); // E_RECOVERABLE_ERROR
+   foo(array()); // E_RECOVERABLE_ERROR
+   foo(new StdClass); // E_RECOVERABLE_ERROR
+   foo(true); // bool(true)
+   foo(false); // bool(false)
+   foo(null); // E_RECOVERABLE_ERROR
+   ?>
+
+Proposed Voting Choices
+-----------------------
+
+As this is a language change, a 2/3 majority is required. Voting started
+2014-09-14 and ends 2014-09-21.
+
+It will be a straight Yes/No vote.
+
+More Information
+----------------
+
+Prior RFCs
+~~~~~~~~~~
+
+-  `Return value and parameter type hint </rfc/typehint>`__ by Felipe
+-  `Strict and weak parameter type
+   checking </rfc/typecheckingstrictandweak>`__ by Lukas and Zeev
+-  `Optional Strict Type Checking for
+   Scalars </rfc/typecheckingstrictonly>`__ by Paul (Ilia's proposal)
+-  `Parser and Reflection-API only Type
+   Hints </rfc/typecheckingparseronly>`__ by Derick (Implemented)
+-  `Parameter Type Casting Hints </rfc/parameter_type_casting_hints>`__
+   by Anthony
+
+Changelog
+---------
+
+-  0.1 - Initial Draft
+-  0.1.1 - Takeover by Andrea; notes on StdClass behaviour
+-  0.1.2 - Renamed boolean to bool, noted reserved words
+-  0.1.3 - E_RECOVERABLE_ERROR for "1a" as int/float
+-  0.1.4 - Removed *resource* typehint
+-  0.1.5 - Note on NULL default values
+-  0.1.6 - Booleans are now strict
+-  0.1.7 - Types are now not nullable by default
+-  0.1.8 - Added numeric typehint
+-  0.1.8.1 - Overflow prevention for int hints
+-  0.1.9 - Booleans not accepted for int, float, numeric or string
+-  0.1.9.1 - Added "" to tests, patch is stable
+
+Additional Metadata
+-------------------
+
+:Original Authors: Anthony Ferrara ircmaxell@php.net (original)
+:Original Date: 2012-07-03 (reopened 2014-07-13, latest update 2014-09-14, withdrawn 2014-09-15)
+:Original Status: Withdrawn (previously Withdrawn then reopened)
+:Original Version: 0.1.9.1
+:Slug: scalar_type_hinting_with_cast
+:Wiki URL: https://wiki.php.net/rfc/scalar_type_hinting_with_cast

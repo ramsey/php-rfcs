@@ -1,0 +1,190 @@
+Skipping Optional Parameters For Functions
+==========================================
+
+:PHP-RFC: 0343
+:Title: Skipping Optional Parameters For Functions
+:Author: Stas Malyshev <stas@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2015-01-01
+:Version: 3.0
+
+Introduction
+------------
+
+In PHP, it is very common for function is to have many optional
+arguments, like this:
+
+::
+
+      function create_query($where, $order_by, $join_type='', $execute = false, $report_errors = true)
+      {...}
+
+If we always use defaults, it's fine. But what if we need ot change
+$report_errors but don't care about the others? We'd have to find
+function definition and copy-paste all other defaults into the call,
+which is annoying, error-prone and may not do what you wanted if some of
+the defaults change.
+
+Proposal
+--------
+
+The proposal is to allow skipping optional arguments in a call, thus
+making them assume default values as they do when they are not provided,
+like this:
+
+::
+
+       create_query("deleted=0", "name", default, default, /*report_errors*/ true);
+
+This means that $join_type and $execute are going to use defaults. Of
+course, if we ever get implementation of named parameters, it may also
+solve this problem, but until we do, this can be a partial solution.
+
+Only declared optional parameters can be skipped this way, skipping
+non-optional one will produce the same error it does now when function
+is not given enough parameters. Also, for variadic functions, variadic
+parameters can not be skipped - only parameters that are explicitly
+declared and marked optional can be skipped.
+
+Implementation
+--------------
+
+On the engine level, it will be implemented by putting IS_UNDEF value in
+the place where the parameter is passed. Functions dealing with argument
+handling will be updated.
+
+See example implementation at: https://github.com/php/php-src/pull/981
+
+See tests there for examples of most common uses cases.
+
+User functions
+--------------
+
+User functions would have defaults for optional args take place of
+skipped arguments, just as before.
+
+Internal functions
+------------------
+
+For internal functions, parameter parser will ignore the skipped
+parameters, thus leaving the defaults supplied by the caller intact.
+Again, skipping non-optional parameter is an error. For variadic
+parameters, as per above, skipping is not allowed, unless specifically
+requested by function declaration.
+
+Thus, this code is an error:
+
+::
+
+        var_dump(2,default,1);
+
+but this is not:
+
+::
+
+        call_user_func('foo', 2, default, 1);
+
+since call_user_func is specifically described as accepting defaults.
+
+func_get_args()
+---------------
+
+func_get_args() will use default values for parameters that are not
+supplied. Because of how PHP 7 engine works, it is not possible to
+distinguish skipped parameter from parameter where default value is
+actually passed.
+
+call_user_func_array()
+----------------------
+
+Currently, call_user_func_array does not support skipping parameters due
+to the fact that previously it accepted any array as parameters list,
+but supporting skipping parameters would mean only sequential indexed
+numeric array will be accepted.
+
+Internal API changes
+--------------------
+
+Parameters stored as array of zvals n the engine. For skipped parameter,
+the zval type is stored as IS_UNDEF.
+
+zend_parse_parameter() would ignore parameters marked as skipped/default
+- meaning, it will not assign any value to the underlying variable. This
+is unless the parameter is marked as !, in which case the parameter
+would be nullified just as if null were passed. This means you can not
+have variables marked as ! with different behavior between null and
+'default', but I did not find any such cases to be required.
+
+If certain function wants to disallow skipping parameters, it should use
+option ZEND_PARSE_PARAMS_NODEFAULT with zend_parse_parameters_ex(). This
+may be when internal function has optional arguments but does not have
+any defaults for them. In this case, skipped parameters will cause a
+catchable fatal error.
+
+ZEND_NUM_ARGS() is always the number of parameters in function call, so
+skipped parameters are counted there.
+
+User request examples
+---------------------
+
+-  http://stackoverflow.com/q/579331/214196
+-  http://stackoverflow.com/q/1115125/214196
+-  http://stackoverflow.com/q/9541776/214196
+-  http://stackoverflow.com/q/1066625/214196
+-  http://stackoverflow.com/q/4453817/214196
+-  http://stackoverflow.com/q/8356227/214196 (for Javascript)
+-  http://stackoverflow.com/q/9888725/214196
+-  http://stackoverflow.com/q/4681987/214196 (for Delphi)
+-  http://stackoverflow.com/q/4435918/214196 (for AS)
+-  http://stackoverflow.com/q/812058/214196 (for Ruby)
+
+Issues raised
+-------------
+
+\* Internal functions that declare parameters as optional but fail to
+provide proper defaults and rely on ZEND_NUM_ARGS to figure out if to
+use default or not may be broken. The patch fixes all instances of this
+in the core extensions, but third-party extensions may need to be fixed
+too. This applies only to ones that check ZEND_NUM_ARGS() manually in
+the code instead of using zend_parse_parameters().
+
+\* This RFC does not prevent named parameters implementation - in fact,
+a lot of cleanup to the code mentioned above is also necessary for named
+parameters implementation, since it would require the same level of care
+with providing the defaults. Both features can be used in parallel, and
+thus this RFC is a complimentary functionality for potential named
+parameters implementation.
+
+Vote
+----
+
+Since this RFC changes the language semantics, the 2/3+1 vote majority
+is required for it to pass. The vote is a straight Yes/No vote.
+
+Question: Should PHP 7 support parameter skipping as described in this RFC?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+The vote concludes on the end of the day, PST, February 21th.
+
+Changelog
+---------
+
+-  2012-04-13 First draft.
+-  2012-07-07 Changed empty parameter to use 'default'
+-  2013-09-01 Added Zend API description
+-  2015-01-01 Updated for PHPNG
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/smalyshev/php-src/tree/skip_params7
+:Original Authors: Stas Malyshev stas@php.net
+:Slug: skipparams
+:Wiki URL: https://wiki.php.net/rfc/skipparams

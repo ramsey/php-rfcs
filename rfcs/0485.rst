@@ -1,0 +1,274 @@
+Fix Inconsistent Behavior Of $this Variable
+===========================================
+
+:PHP-RFC: 0485
+:Title: Fix Inconsistent Behavior Of $this Variable
+:Author: Dmitry Stogov <dmitry@zend.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2016-05-23
+:PHP-Version: 7.1
+:Version: 0.9
+
+Introduction
+------------
+
+Historically PHP implementation accessed special $this variable using
+two different methods. In some cases this might lead to significant
+inconsistency, when $this accessed through different methods might have
+different values.
+
+.. code:: php
+
+   class C {
+     function foo() {
+       var_dump($this);
+     }
+     function bar() {
+       $a="this";
+       $$a=42;
+       var_dump($this); // prints int(42)
+       $this->foo();    // prints object(C)#1 (0) {}
+     }
+   }
+   $x = new C;
+   $x->bar();
+
+This RFC proposes disabling modification of $this variable using "magic
+code" and make $this always behave in the same way.
+
+Proposal
+--------
+
+Disable using $this as parameter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The following code worked in PHP 7, but will emit compilation error in
+PHP 7.1
+
+.. code:: php
+
+   function foo($this) { // Fatal error: Cannot use $this as parameter
+   }
+
+Disable using $this as static variable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The following code leaded to "Cannot re-assign $this" compilation error.
+In PHP 7.1 it will produce more suitable error message - "Cannot use
+$this as static variable".
+
+.. code:: php
+
+   static $this; // Fatal error: Cannot use $this as static variable
+
+Disable using $this as global variable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The following code worked in PHP 7, but will emit compilation error in
+PHP 7.1
+
+.. code:: php
+
+   global $this; // Fatal error: Cannot use $this as global variable
+
+Disable using $this as catch variable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The following code worked in PHP 7, but will emit compilation error in
+PHP 7.1
+
+.. code:: php
+
+   try {
+     ...
+   } catch (Exception $this) { // Fatal error: Cannot re-assign $this
+   }
+
+Disable using $this as foreach value variable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The following code worked in PHP 7, but will emit compilation error in
+PHP 7.1
+
+.. code:: php
+
+   foreach ($a as $this) { // Fatal error: Cannot re-assign $this
+   }
+
+Disable ability to unset() $this
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It's not allowed to re-assign $this, so why it should be allowed to
+unset() it. The following code worked in PHP 7, but will emit
+compilation error in PHP 7.1
+
+.. code:: php
+
+   unset($this); // Fatal error: Cannot unset $this
+
+Disable ability to re-assign $this indirectly through $$
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An attempt to re-assign $this through $$ assignment will lead to
+throwing of Error exception.
+
+.. code:: php
+
+   $a = "this";
+   $$a = 42; // throw new Error("Cannot re-assign $this")
+
+It's still possible to read $this value through $$.
+
+Disable ability to re-assign $this indirectly through reference
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Indirect re-assign $this through reference won't make effect in PHP 7.1
+
+.. code:: php
+
+   class C {
+     function foo(){
+       $a =& $this;
+       $a = 42;
+       var_dump($this); // prints object(C)#1 (0) {}, php-7.0 printed int(42)
+     }
+   }
+   $x = new C;
+   $x->foo();
+
+Disable ability to re-assign $this indirectly through extract() and parse_str()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Few internal PHP functions may re-assign local variable. In PHP 7.1 they
+cannot change value of $this variable and throw Error exception.
+
+.. code:: php
+
+   class C {
+     function foo(){
+       extract(["this"=>42]);  // throw new Error("Cannot re-assign $this")
+       var_dump($this);
+     }
+   }
+   $x = new C;
+   $x->foo();
+
+get_defined_vars() always doesn't show value of variable $this
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In PHP 7.0 and below get_defined_vars() might show or not show value of
+$this depending on some condition. (e.g. it was shown if we used $this
+variable itself, but not if it was used in a $this property reference or
+method call). In PHP 7.1 we won't show the value of $this in all cases.
+
+Always show true $this value in magic method \__call()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In PHP 7.0 and below $this in **static** magic method \__call() had
+value NULL. However it was possible to access properties and call object
+methods.
+
+.. code:: php
+
+   class C {
+     static function __call($name, $args) {
+       var_dump($this); // prints object(C)#1 (0) {}, php-7.0 printed NULL
+       $this->test();   // prints "ops"
+     }
+     function test() {
+       echo "ops\n"; 
+     }
+   }
+   $x = new C;
+   $x->foo();
+
+Using $this when not in object context
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Attempt to use $this in plain function or method now will lead to
+exception "Using $this when not in object context". This unifies
+behavior with method call and property access. Previously PHP emitted
+"undefined variable" notice and continued execution assuming $this is
+NULL. It's still possible to use isset($this) and empty($this) to check
+object context.
+
+.. code:: php
+
+   function foo() {
+       var_dump($this); // throws "Using $this when not in object context"
+                        // php-7.0 emitted "Undefined variable: this" and printed NULL
+   }
+   foo();
+
+Backward Incompatible Changes
+-----------------------------
+
+All the BC breaks are intentional and they are described in the proposal
+section.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.1
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+none
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+none
+
+To Opcache
+~~~~~~~~~~
+
+The proposed implementation is compatible with opcache
+
+Open Issues
+-----------
+
+none
+
+Proposed Voting Choices
+-----------------------
+
+The vote is a straight Yes/No vote, that requires a 2/3 majority. The
+voting began on Jun 6 and will close on Jun 16.
+
+Question: Fix inconsistent behavior of $this variable?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+`PR 1918 <https://github.com/php/php-src/pull/1918>`__
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit
+   `a9512af8109e889eb2c6042c57797184930667cd <http://git.php.net/?p=php-src.git;a=commitdiff;h=a9512af8109e889eb2c6042c57797184930667cd>`__
+#. a link to the PHP manual entry for the feature
+
+Additional Metadata
+-------------------
+
+:Original Authors: Dmitry Stogov, dmitry@zend.com
+:Original Status: Accepted
+:Slug: this_var
+:Wiki URL: https://wiki.php.net/rfc/this_var

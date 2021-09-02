@@ -1,0 +1,519 @@
+Readonly Properties 2.0
+=======================
+
+:PHP-RFC: 0819
+:Title: Readonly Properties 2.0
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2021-06-02
+:PHP-Version: 8.1
+:Version: 1.0
+
+Introduction
+------------
+
+This RFC introduces a ``readonly`` property modifier, which prevents
+modification of the property after initialization.
+
+Value objects are often immutable: Properties are initialized once in
+the constructor, and should not be modified afterwards. PHP currently
+has no way to enforce this constraint. The closest alternative is to
+declare the property private, and only expose a public getter:
+
+.. code:: php
+
+   class User {
+       public function __construct(
+           private string $name
+       ) {}
+
+       public function getName(): string {
+           return $this->name;
+       }
+   }
+
+This doesn't actually make the property readonly, but it does tighten
+the scope where modification could occur to a single class declaration.
+Unfortunately, this requires the use of getter boilerplate, which
+results in worse ergonomics for the consumer.
+
+Support for first-class readonly properties allows you to directly
+expose public readonly properties, without fear that class invariants
+could be broken through external modification:
+
+.. code:: php
+
+   class User {
+       public function __construct(
+           public readonly string $name
+       ) {}
+   }
+
+Proposal
+--------
+
+A ``readonly`` property can only be initialized once, and only from the
+scope where it has been declared. Any other assignment or modification
+of the property will result in an ``Error`` exception.
+
+.. code:: php
+
+   class Test {
+       public readonly string $prop;
+
+       public function __construct(string $prop) {
+           // Legal initialization.
+           $this->prop = $prop;
+       }
+   }
+
+   $test = new Test("foobar");
+   // Legal read.
+   var_dump($test->prop); // string(6) "foobar"
+
+   // Illegal reassignment. It does not matter that the assigned value is the same.
+   $test->prop = "foobar";
+   // Error: Cannot modify readonly property Test::$prop
+
+This variant is not allowed, as the initializing assignment occurs from
+outside the class:
+
+.. code:: php
+
+   class Test {
+       public readonly string $prop;
+   }
+
+   $test = new Test;
+   // Illegal initialization outside of private scope.
+   $test->prop = "foobar";
+   // Error: Cannot initialize readonly property Test::$prop from global scope
+
+Modifications are not necessarily plain assignments, all of the
+following will also result in an ``Error`` exception:
+
+.. code:: php
+
+   class Test {
+       public function __construct(
+           public readonly int $i = 0,
+           public readonly array $ary = [],
+       ) {}
+   }
+
+   $test = new Test;
+   $test->i += 1;
+   $test->i++;
+   ++$test->i;
+   $test->ary[] = 1;
+   $test->ary[0][] = 1;
+   $ref =& $test->i;
+   $test->i =& $ref;
+   byRef($test->i);
+   foreach ($test as &$prop);
+
+However, readonly properties do not preclude interior mutability.
+Objects (or resources) stored in readonly properties may still be
+modified internally:
+
+.. code:: php
+
+   class Test {
+       public function __construct(public readonly object $obj) {}
+   }
+
+   $test = new Test(new stdClass);
+   // Legal interior mutation.
+   $test->obj->foo = 1;
+   // Illegal reassignment.
+   $test->obj = new stdClass;
+
+Restrictions
+~~~~~~~~~~~~
+
+The ``readonly`` modifier can only be applied to typed properties. The
+reason is that untyped properties have an implicit ``null`` default
+value, which counts as an initializing assignment, and would likely
+cause confusion.
+
+Thanks to the introduction of the ``mixed`` type in PHP 8.0, a readonly
+property without type constraints can be created using the ``mixed``
+type:
+
+.. code:: php
+
+   class Test {
+       public readonly mixed $prop;
+   }
+
+The alternative would be to not use an implicit null default value for
+untyped readonly properties. However, this would make the rules for
+implicit property default values more complex and confusing. Simply
+making it an error condition let's the programmer explicitly opt-in by
+specifying the ``mixed`` type.
+
+Specifying an explicit default value on readonly properties is also not
+allowed:
+
+.. code:: php
+
+   class Test {
+       // Fatal error: Readonly property Test::$prop cannot have default value
+       public readonly int $prop = 42;
+   }
+
+As the default value counts as an initializing assignment, a readonly
+property with a default value is essentially the same as a constant, and
+thus not particularly useful. The notion could become more useful in the
+future, if ``new`` expressions are allowed as property default values.
+At the same time, depending on how exactly property initialization would
+work in that case, having a default value on a readonly property could
+preclude userland serialization libraries from working, as they would
+not be able to replace the default-constructed object. Whether or not
+this is a concern depends on whether the property is initialized at time
+of object creation, or as an implicit part of the constructor (or
+similar). As these are open questions, the conservative choice is to
+forbid default values until these questions are resolved.
+
+It is worth reiterating here that default values on promoted parameters
+only apply to the parameter, not the property:
+
+.. code:: php
+
+   class Test {
+       public function __construct(
+           public readonly int $prop = 0,
+       ) {}
+   }
+
+   // Desugars to:
+
+   class Test {
+       public readonly int $prop;
+
+       public function __construct(int $prop = 0) {
+           $this->prop = $prop;
+       }
+   }
+
+As the property has no default value, the assignment in the constructor
+is initializing, and thus legal. The constructor property promotion
+feature was specifically designed for forward-compatibility with
+readonly properties.
+
+Readonly static properties are not supported. This is a technical
+limitation, in that it is not possible to implement readonly static
+properties non-intrusively. In conjunction with the questionable
+usefulness of readonly static properties, this is not considered
+worthwhile at this time.
+
+Inheritance
+~~~~~~~~~~~
+
+It is not allowed to override a read-write property with a read-only
+property or vice versa. Both of the following are not legal:
+
+.. code:: php
+
+   class A {
+       public int $prop;
+   }
+   class B extends A {
+       // Illegal: readwrite -> readonly
+       public readonly int $prop;
+   }
+
+.. code:: php
+
+   class A {
+       public readonly int $prop;
+   }
+   class B extends A {
+       // Illegal: readonly -> readwrite
+       public int $prop;
+   }
+
+It is obvious that overriding a readwrite property with a readonly
+property needs to be forbidden, because that may render operations
+performed in the parent class invalid. However, this proposal views
+readonly not just as a lack of capabilities (which would be safe to
+increase in a child class), but as an intentional restriction. Lifting
+the restriction in the child class could break invariants in the parent
+class. As such, a readonly modifier may be neither added nor removed
+during inheritance.
+
+It is interesting to consider how property redeclaration interacts with
+the restriction that initialization can only occur in the declaring
+class:
+
+.. code:: php
+
+   class A {
+       public readonly int $prop;
+   }
+   class B extends A {
+       public readonly int $prop;
+   }
+
+Here, initialization of ``B::$prop`` would be permitted both from inside
+``A`` and ``B``, as both classes declare the property. A possible
+alternative would be to allow initialization only from ``B``, though
+that would mean that a redeclaration in a child class could break usage
+in a parent class.
+
+When the same property is imported from two traits, the ``readonly``
+modifiers must also match:
+
+.. code:: php
+
+   trait T1 {
+       public readonly int $prop;
+   }
+   trait T2 {
+       public int $prop;
+   }
+   class C {
+       // Illegal: Conflicting properties.
+       use T1, T2;
+   }
+
+Types on readonly properties remain invariant. One could argue that
+types of readonly properties could be covariant instead:
+
+.. code:: php
+
+   class A {
+       public readonly int|float $prop;
+   }
+   class B extends A {
+       public readonly int $prop;
+   }
+
+Covariance would hold for reads from the property, but not for the
+initializing assignment, which is permitted from both ``A`` and ``B``
+here. I believe that covariance would only be truly correct if the
+parent property were abstract, which is currently not supported. A
+relaxation to covariant semantics (either wholesale, or for abstract
+parents) would be possible in the future.
+
+Unset
+~~~~~
+
+Readonly properties cannot be unset once they are initialized:
+
+.. code:: php
+
+   class Test {
+       public readonly int $prop;
+
+       public function __construct() {
+           $this->prop = 1;
+           unset($this->prop);
+           // Error: Cannot unset readonly property Test::$prop
+       }
+   }
+
+However, it is possible to unset a readonly property prior to
+initialization, from the scope where the property has been declared.
+Just like with normal typed properties, explicitly unsetting the
+property makes it visible to magic methods. In particular, this enables
+the usual lazy initialization pattern to work:
+
+.. code:: php
+
+   class Test {
+       public readonly int $prop;
+
+       public function __construct() {
+           unset($this->prop);
+       }
+
+       public function __get($name) {
+           if ($name === 'prop') {
+               $this->prop = $this->lazilyComputeProp();
+           }
+           return $this->$name;
+       }
+   }
+
+Reflection
+~~~~~~~~~~
+
+A ``ReflectionProperty::isReadOnly()`` method is added, which reports
+whether a property is declared as read-only.
+``ReflectionProperty::getModifiers()`` will also report a
+``ReflectionProperty::IS_READONLY`` flag.
+
+``ReflectionProperty::setValue()`` can bypass the requirement that
+initialization occurs from the scope where the property has been
+declared. However, reflection cannot modify a readonly property that has
+already been initialized.
+
+Similarly, closure rebinding can be used to bypass the initialization
+scope requirement.
+
+Serialization
+~~~~~~~~~~~~~
+
+Readonly properties have no impact on serialization. As
+``__unserialize()`` (and the legacy ``Serializable::unserialize()``)
+method are invoked without a prior constructor call, readonly properties
+will be in an uninitialized state and can be set by the
+``__unserialize()`` implementation.
+
+This also applies to userland serializers and hydrators. As long as the
+object is created using
+``ReflectionClass::newInstanceWithoutConstructor()`` or some other
+constructor-bypass, it is always safe to initialize readonly properties.
+
+Rationale
+---------
+
+The readonly property concept introduced in this proposal provides
+strong immutability guarantees, which apply both inside and outside the
+class. Once a property has been initialized, it cannot be changed under
+any circumstances. Reading a readonly property will always return the
+same value, no matter what code runs in between:
+
+.. code:: php
+
+   class Test {
+       public readonly string $prop;
+       
+       public function method(Closure $fn) {
+           $prop = $this->prop;
+           $fn(); // Any code may run here.
+           $prop2 = $this->prop;
+           assert($prop === $prop2); // Always holds.
+       }
+   }
+
+These guarantees are *too* strong for certain use-cases. For example,
+some classes may wish to have properties that are publicly readable, but
+can only be written from within the class. This is a much weaker
+guarantee, as the value of a property can change during the lifetime of
+an object. *Both* variants can be useful depending on the situation, and
+the addition of readonly properties neither precludes nor discourages
+the addition of asymmetric property visibility.
+
+A special case worth mentioning are classes using clone-based withers:
+
+.. code:: php
+
+   class Point {
+       public function __construct(
+           public readonly float $x,
+           public readonly float $y,
+           public readonly float $z,
+       ) {}
+
+       public function withX(float $x): static {
+           // This implementation works:
+           return new static($x, $this->y, $this->z);
+
+           // This implementation does not:
+           $clone = clone $this;
+           $clone->x = $x;
+           return $clone;
+       }
+   }
+
+The clone-based implementation will result in an error, because the
+``x`` property on the cloned object is already initialized, and
+modification is thus rejected. This is by design: The property does
+indeed get modified post-initialization, and the fact that this is only
+"temporary" is ultimately irrelevant.
+
+In the future, a `clone with <https://externals.io/message/112624>`__
+construct, which allows setting properties during the cloning process,
+would make such implementations compatible with readonly properties. The
+important difference is that the new value for the property is assigned
+directly, without assigning the old cloned value first.
+
+Alternatively, such properties could use a future asymmetric visibility
+concept, though it does not express the actual invariant as precisely.
+
+This proposal is very similar to the previously declined `Write-Once
+Properties </rfc/write_once_properties>`__ RFC. I think that a key
+mistake of that RFC was specifically the "write-once" framing. While
+maybe technically accurate, it makes for confusing messaging, as the
+intended API contract is that of "read-only", not "write-once". It
+stands to reason that a readonly property still needs to be initialized
+at some point, and there is no need to put a particular focus on that
+initialization.
+
+This proposal does deviate from the write-once properties RFC in one
+significant respect: Initialization is only allowed from within the
+declaring class (modulo the usual rebinding and reflection workarounds).
+This ensures that these properties are always read-only from a public
+API perspective, even if they don't get initialized in the class
+constructor. The "write-once" limitation is intended specifically for
+initialization, not as a one-shot communication channel.
+
+This also ensures that a potential future "clone with" implementation
+will only be able to modify readonly properties from private scope and
+thus cannot bypass additional invariants imposed by the implementation
+when used from a different scope.
+
+This RFC overlaps with the `Property Accessors
+RFC </rfc/property_accessors>`__. In particular, it implements the "only
+implicit get" aspect, though not with the exact same semantics. As
+mentioned in the RFC, I'm not convinced that the full complexity of
+accessors is truly warranted. Supporting readonly properties and
+asymmetric visibility would cover a significant portion of the
+use-cases, at a lower language complexity cost.
+
+It is worth noting that having a readonly property feature does not
+preclude introduction of accessors. C# supports both readonly properties
+and accessors. C# also provides properties with implicit backing storage
+through accessor syntax, but this is not the only way to do it. For
+example, Swift has special syntax for asymmetric visibility, rather than
+specifying visibility on implicitly implemented accessors.
+
+Even if we have property accessors, I believe it may be worthwhile to
+limit them to computed properties only, and solve use-cases that involve
+engine-managed storage through other mechanisms, such as readonly
+properties and property-level asymmetric visibility. This avoids
+confusion relating to the two kinds of accessors (implicit and
+explicit), and also allows us to make their behavior independent of
+accessor constraints. For example, a first-class asymmetric visibility
+feature would shield the user from considering distinctions such as
+``get;`` vs ``&get;`` accessors. These are externalities of the general
+accessor feature and not needed for asymmetric visibility.
+
+A separate implementation can also be more efficient. After
+initialization, a readonly property will have the same performance
+characteristics as a normal property. Accessor-based properties, even
+with implicit storage, still carry a performance penalty.
+
+Backward Incompatible Changes
+-----------------------------
+
+A new ``readonly`` keyword is reserved.
+
+Assumptions of existing code that all accessible properties are also
+writable may be broken.
+
+Vote
+----
+
+Voting started on 2021-07-01 and closes on 2021-07-15.
+
+Question: Add readonly properties as proposed?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/7089
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.1
+:Slug: readonly_properties_v2
+:Wiki URL: https://wiki.php.net/rfc/readonly_properties_v2

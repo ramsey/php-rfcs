@@ -1,0 +1,256 @@
+Class Name Resolution As Scalar Via "class" Keyword
+===================================================
+
+:PHP-RFC: 0160
+:Title: Class Name Resolution As Scalar Via "class" Keyword
+:Author: Ralph Schindler <ralph.at.ralphschindler.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2012-04-17
+:PHP-Version: 5.5
+:Version: 1.0
+
+Introduction
+------------
+
+This RFC proposes to add a new ``ClassName::class`` syntax, which
+provides the fully qualified class name as a string.
+
+Use case
+--------
+
+Class names in strings have to be fully qualified in PHP. It is not
+possible to utilize aliases registered through ``use`` statements:
+
+.. code:: php
+
+   use A\Namespaced\ClassName;
+
+   // this will try to create a mock of the global class ClassName, not
+   // of the aliased class A\Namespaced\ClassName
+   $mock = $this->getMock('ClassName');
+
+``ClassName::class`` allows the programmer to easily obtain the fully
+qualified class name from an aliased name:
+
+.. code:: php
+
+   use A\Namespaced\ClassName;
+
+   // ClassName::class resolves to 'A\Namespaced\ClassName'
+   $mock = $this->getMock(ClassName::class);
+
+Real World Usage Scenarios
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. PHPUnit's Mocking
+
+.. code:: php
+
+
+   use MyVendor\SomeComponent\TargetSubNs;
+
+   // inside a test case
+   $this->getMock(TargetSubNs\Foo::class);
+   // as opposed to
+   $this->getMock('MyVendor\SomeComponent\TargetSubNs\Foo');
+
+2. Doctrine
+
+.. code:: php
+
+
+   use MyVendor\SomeComponent\TargetEntityNs as Entity;
+
+   // inside a test case
+   $entityManager->find(Entity\User::class, 5);
+   // as opposed to
+   $entityManager->find('MyVendor\SomeComponent\TargetEntityNs\User', 5);
+
+3. Any Real (auto-wiring \|\| auto-instantiating) Dependency Injection
+Container
+
+.. code:: php
+
+
+   use MyVendor\SomeComponent\TargetNs as T;
+
+   // inside a test case
+   $dic->newInstance(T\Foo::class);
+   // as opposed to
+   $dic->newInstance('MyVendor\SomeComponent\TargetEntityNs\Foo');
+
+4. General PHP Usage:
+
+.. code:: php
+
+
+   use MyVendor\SomeComponent\TargetNs as T;
+
+   // reflection
+   $r = new ReflectionClass(T\Foo::class); // instead of new ReflectionClass('MyVendor\SomeComponent\TargetNs\Foo');
+
+   // class_exists, also applies to any php function that takes a class name (is_subclass_of, get_class_methods, etc)
+   if (class_exists(T\Foo::class, true)) {} // instead of class_exists('MyVendor\SomeComponent\TargetNs\Foo')
+
+Choice of syntax
+----------------
+
+The ``ClassName::class`` syntax was chosen because it can not clash with
+existing constants (as ``class`` is a keyword). The feature addition
+thus is fully backwards compatible.
+
+Furthermore the syntax resembles the semantically equivalent Java syntax
+``ClassName.class``.
+
+Note: since this feature reuses T_CLASS/class keyword, it is
+case-insensitive. Therefore, Foo::class is semantically equivalent to
+Foo::Class, Foo::CLASS and the like.
+
+More examples
+-------------
+
+From the test for the feature:
+
+.. code:: php
+
+
+   --TEST--
+   class name as scalar from ::class keyword
+   --FILE--
+   <?php
+
+   namespace Foo\Bar {
+       class One {
+           // compile time constants
+           const A = self::class;
+           const B = Two::class;
+       }
+       class Two extends One {
+           public static function run() {
+               var_dump(self::class); // self compile time lookup
+               var_dump(static::class); // runtime lookup
+               var_dump(parent::class); // runtime lookup
+               var_dump(Baz::class); // default compile time lookup
+           }
+       }
+       class Three extends Two {
+           // compile time static lookups
+           public static function checkCompileTime(
+               $one = self::class,
+               $two = Baz::class,
+               $three = One::A,
+               $four = self::B
+           ) {
+               var_dump($one, $two, $three, $four);
+           }
+       }
+       echo "In NS\n";
+       var_dump(Moo::CLASS); // resolve in namespace
+   }
+
+   namespace {
+       use Bee\Bop as Moo,
+           Foo\Bar\One;
+       echo "Top\n";
+       var_dump(One::class); // resolve from use
+       var_dump(Boo::class); // resolve in global namespace
+       var_dump(Moo::CLASS); // resolve from use as
+       var_dump(\Moo::Class); // resolve fully qualified
+       $class = One::class; // assign class as scalar to var
+       $x = new $class; // create new class from original scalar assignment
+       var_dump($x);
+       Foo\Bar\Two::run(); // resolve runtime lookups
+       echo "Parent\n";
+       Foo\Bar\Three::run(); // resolve runtime lookups with inheritance
+       echo "Compile Check\n";
+       Foo\Bar\Three::checkCompileTime();
+   }
+
+   ?>
+   --EXPECTF--
+   In NS
+   string(11) "Foo\Bar\Moo"
+   Top
+   string(11) "Foo\Bar\One"
+   string(3) "Boo"
+   string(7) "Bee\Bop"
+   string(3) "Moo"
+   object(Foo\Bar\One)#1 (0) {
+   }
+   string(11) "Foo\Bar\Two"
+   string(11) "Foo\Bar\Two"
+   string(11) "Foo\Bar\One"
+   string(11) "Foo\Bar\Baz"
+   Parent
+   string(11) "Foo\Bar\Two"
+   string(13) "Foo\Bar\Three"
+   string(11) "Foo\Bar\One"
+   string(11) "Foo\Bar\Baz"
+   Compile Check
+   string(13) "Foo\Bar\Three"
+   string(11) "Foo\Bar\Baz"
+   string(11) "Foo\Bar\One"
+   string(11) "Foo\Bar\Two"
+
+Considerations
+--------------
+
+One situation in need of a solution is what to do with ``self::class``,
+``static::class``, and ``parent::class``
+
+Do we:
+
+-  [STRIKEOUT:Throw a compile error?]
+-  [STRIKEOUT:Resolve as best as possible, meaning error in non-class
+   context, do a runtime lookup in a class context]
+
+**Note:** (as of 1/18/13)
+
+In the current patch, the following resolutions take place:
+
+-  self::class resolves the same as \__CLASS_\_ would
+-  static::class resolves the same as get_called_class() would
+-  parent::class resolves the same as get_parent_class() would, (in
+   fact, would return false if not inherited.)
+-  static::class & parent::class when used in compile-time only places
+   (like method signatures), will throw an exception
+
+Patch
+-----
+
+\* Pull Request located here:
+https://github.com/php/php-src/pull/187/files
+
+Vote
+----
+
+Question: Should the ::class feature be merged to master?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Note: This Vote has been closed as the RFC will be moved back to
+discussion at the time being while the RFC and associated patch become
+more mature.
+
+Changelog
+---------
+
+-  2012-04-17 Initially created by Ralph Schindler
+-  2012-09-08 Updated RFC and added link to Pull Request (which
+   addresses considerations and on-list questions)
+-  2013-01-18 Updated RFC to reflect design decisions, updated the
+   test/example
+
+Additional Metadata
+-------------------
+
+:Original Authors: Ralph Schindler <ralph.at.ralphschindler.com>
+:Original Status: Implemented in PHP 5.5
+:Slug: class_name_scalars
+:Wiki URL: https://wiki.php.net/rfc/class_name_scalars

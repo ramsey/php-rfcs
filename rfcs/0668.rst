@@ -1,0 +1,475 @@
+Object Initializer
+==================
+
+:PHP-RFC: 0668
+:Title: Object Initializer
+:Author: Michał Brzuchalski <brzuchal@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2019-09-03
+:Version: 1.0
+
+Introduction
+------------
+
+PHP doesn't have a convenient literal syntax for creating an object and
+initializing properties. This makes creating objects and initializing
+their state quite laborious. Every time you have to:
+
+#. Instantiate an object.
+#. Assign each needed accessible properties with the value.
+#. Pass created a fully initialized object.
+
+In current PHP implementation with Typed Properties, it is possible to
+instantiate class which doesn't require nullability for all properties
+and when they're not initialized we finish with properties in an
+uninitialized state.
+
+That's where object initializer optimization can benefit with single
+expression statement and it can be used to initialize any kind of object
+*(including anonymous classes)* ensuring all required properties are
+properly initialized, otherwise a ``RuntimeExpection`` is thrown.
+
+The initializer block can use any properties and variables available in
+the containing scope, but one has to be wary of the fact that
+initializers are run after constructors.
+
+Proposal
+--------
+
+Object initializers allow assigning values to any accessible properties
+of an object at creation time without having to invoke a constructor
+followed by lines of assignment statements. The object initializer
+syntax enables to specify arguments for a constructor or omit the
+arguments (and parentheses syntax).
+
+.. code:: php
+
+   <?php
+
+   class Customer
+   {
+     public $id;
+     public $name;
+     private DateTimeImmutable $createdAt;
+     
+     public function __construct()
+     {
+       $this->createdAt = new DateTimeImmutable("now");
+     }
+   }
+
+   class Car
+   {
+     public int $yearOfProduction;
+     public string $vin;
+   }
+
+The following example shows how to use an object initializer with a
+``Customer``, ``Car`` and how to invoke the parameterless constructor.
+
+.. code:: php
+
+   <?php
+
+   $customer = new Customer {
+     id = 123,
+     name = "John Doe",
+   };
+
+   $car = new Car {
+     yearOfProduction = 2019,
+     vin = "1FTFW1CVXAFD54385",
+   };
+
+..
+
+   **Note!** If in current scope there are constants with exactly the
+   same name as property names used in the above example, they do not
+   impact object initialization in any way. Property names used in
+   Object Initializer block stay with no relation to constants names.
+
+The following example is equivalent to the previous one.
+
+.. code:: php
+
+   <?php
+
+   $customer = new Customer();
+   $customer->id = 123;
+   $customer->name = "John Doe";
+
+   $car = new Car();
+   $car->yearOfProduction = 2019;
+   $car->vin = "1FTFW1CVXAFD54385";
+
+The main difference is that object initializers allow creating a new
+object, with its assigned properties in a single expression. For eg.
+factory methods where normally a significant amount of argument has
+default values or simple Data Transfer Objects could benefit.
+
+   **Note!** Currently, language allows instantiating object and
+   initializing only a subset of typed non-nullable properties without a
+   default value. These rules apply to object initializer the same way,
+   meaning the creation of properly initialized object state is in
+   authors responsibility, cause object initializer is a simplification
+   as mentioned before.
+
+Restrictions
+~~~~~~~~~~~~
+
+Using Object Initializer enforce that if a class is instantiated with
+the Object Initializer, at the end of the instantiation and properties
+initialization, all visible properties *(depends on initialization
+scope)* are initialized, otherwise, a ``RuntimeException`` is thrown.
+This helps to avoid bugs where a property is added to the class but
+forgot to be assigned it a value in all cases where the class is
+instantiated and initialized.
+
+The object initializers syntax allows to create an instance, and after
+that, it assigns the newly created object, with its assigned properties,
+to the variable in the assignment.
+
+.. code:: php
+
+   <?php
+
+   $customer = new Customer {
+     name = "John Doe",
+   }; // throws RuntimeException: Initialization of Customer class object failed due to missing required properties
+
+   $car = new Car {
+     yearOfProduction = 2019,
+   }; // throws RuntimeException: Initialization of Car class object failed due to missing required properties
+
+Constructors
+~~~~~~~~~~~~
+
+Due to the fact that initializer block purpose is a simplification of
+instantiating and initializing object properties, constructors are
+called before initialization takes apart. Constructors allow
+initializing default values *(especially not scalar one properties like
+``DateTime`` etc.)* for read-only properties which are visible only in
+the class scope.
+
+Due to the fact that objects in PHP simply have constructor directly
+declared in class definition or indirectly through the defaulting
+constructor, creating a class instance and initializing properties
+through initializer block will effect in invoking constructor and assign
+property values after instantiation.
+
+   **Note!** Object instantiation allows only constructors without
+   required arguments to be used. Any class which requires passing
+   arguments to constructor cannot be used in combination with object
+   initializer.
+
+.. code:: php
+
+   <?php
+
+   class Customer
+   {
+     public int $id;
+     public string $name;
+     private DateTimeImmutable $createdAt;
+     
+     public function __construct()
+     {
+       $this->createdAt = new DateTimeImmutable("now");
+     }
+   }
+
+   $customer = new Customer {
+     id = 123,
+     name = "John Doe",
+   };
+
+..
+
+   **Note!** Classes without constructor desired to mimick "structs" or
+   "data classes" are almost completely viable through the class with
+   typed properties which means they rather don't need a constructor
+   declared directly in the definition of class.
+
+   **Note!** If a class needs validation upon to validate its invariants
+   a proper validation logic needs to be called after initialization. To
+   combine it with object initializer and keep the validation process
+   encapsulated, instantiation and initialization of class state are
+   possible in named constructor with validation invoke before the
+   instance is being used.
+
+Lexical scope
+~~~~~~~~~~~~~
+
+Initializer block uses current lexical scope, which means all local
+variables, accessible properties and methods, global variables and
+functions are possible to use for initializing object properties inside
+the object initializer block.
+
+Visibility
+~~~~~~~~~~
+
+Initializer block allows assigning values to properties accessible from
+the current class context. This means if used to initialize object
+properties from inside the same class like for eg. using named static
+constructor all standard visibility rules apply as it is just a
+simplification of object creation and assigning values statements.
+
+The following example shows the correct behaviour of visibility rules.
+
+.. code:: php
+
+   <?php
+
+   class Customer
+   {
+     private string $name = '';
+     protected ?string $email = null;
+     
+     public static function create(string $name, ?string $email = null): self
+     {
+       return new self {
+         name = $name, // assign private property within the same class
+         email = $email, // assign protected property within the same class
+       };
+     }
+   }
+   $customer = Customer::create("John Doe", "john.doe@example.com");
+
+Magic methods
+~~~~~~~~~~~~~
+
+Due to lacks of property accessors magic methods like set() are often
+used to keep invariants and restrict property values to valid ones. This
+leads potentially to more issues than benefit but at current
+implementation, language allows using them.
+
+An object initializer is just a simplification of instantiating the
+object and initializing property values that's why all rules regarding
+assigning property values to apply.
+
+Using an object initializer combined with magic set method call might be
+used if an additional validation is required.
+
+.. code:: php
+
+   <?php
+
+   class EmailAddress
+   {
+     protected string $email;
+     public ?string $name = null;
+       
+     public function __set(string $name, $value): void
+     {
+       if ($name !== "email") {
+         return;
+       }
+       if (!filter_var($value, FILTER_VALIDATE_EMAIL)) {
+         throw new InvalidArgumentException("Invalid email address");
+       }
+       $this->email = $value;
+     }
+   }
+
+   $email = new EmailAddress {
+     email = "john.doe@example.org",
+     name = "John Doe",
+   };
+
+Anonymous classes
+~~~~~~~~~~~~~~~~~
+
+Initializer block stands instead of constructor arguments which means in
+case of anonymous classes that place is right before the class
+definition.
+
+The following example shows how to use object initializer with anonymous
+classes.
+
+.. code:: php
+
+   <?php
+
+   $email = new class {
+     email = "john.doe@example.org",
+     name = "John Doe",
+     birthDate = new DateTime('1970-01-01'),
+   } {
+     public DateTime $birthDate;
+   };
+
+Undeclared properties
+~~~~~~~~~~~~~~~~~~~~~
+
+As stated before all property rules apply inside initializer block,
+which means properties can be set even if they're not declared then
+initializer block creates dynamic properties and assign their value.
+
+Dynamic properties can be set by their name or by a variable which holds
+the name of property.
+
+The following example shows how to use object initializer with dynamic
+properties.
+
+.. code:: php
+
+   <?php
+
+   $baz = "baz";
+   $obj = new stdClass {
+     foo = "bar",
+     $baz = true,
+   };
+
+Backward Incompatible Changes
+-----------------------------
+
+This proposal changes the meaning of the above example which uses a
+curly brace to fetch array offset *(which is already deprecated since
+PHP 7.4)* which is very rare usage.
+
+.. code:: php
+
+   <?php
+
+   class Foo {} 
+   $foo = [123 => Foo::class];
+   new $foo {
+     $var = 123
+   };
+
+Reflection
+----------
+
+Both ``ReflectionClass`` and ``ReflectionObject`` get a new method
+``newInstanceFields(array $fields): object``.
+
+.. code:: php
+
+   <?php
+
+   $reflectionClass = new ReflectionClass(Customer::class);
+   $customer = $reflectionClass->newInstanceFields(['name' => 'Bert']);
+   // equivalent to
+   $customer = new Customer {name = 'Bert'};
+
+Proposed PHP Version(s)
+-----------------------
+
+Targets next PHP 8.x. Which is PHP 8.0
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+None.
+
+To Opcache
+~~~~~~~~~~
+
+Would require opcache changes.
+
+New Constants
+~~~~~~~~~~~~~
+
+None.
+
+Future Scope
+------------
+
+The features discussed in the following are **not** part of this
+proposal.
+
+Presume default stdClass
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+In a future removal of a class name before initializer block could be
+considered as a simplification for creating new instances of stdClass
+with initializer block to keep it in a single expression.
+
+.. code:: php
+
+   <?php
+
+   echo json_encode(new stdClass { foo = "bar" }); // will output {"foo":"bar"}
+   echo json_encode(new { foo = "bar" }); // could be equivalent
+
+Splat operator
+~~~~~~~~~~~~~~
+
+In a future splat operator could be used to expand array with string
+keys as arguments with the key parameter names.
+
+.. code:: php
+
+   <?php
+
+   $data = [
+     "email" => "john.doe@example.org",
+     "name" => "John Doe",
+   ];
+   $customer = new Customer { ...$data };
+
+Proposed Voting Choices
+-----------------------
+
+As this is a language change, a 2/3 majority is required.
+
+The vote is a straight Yes/No vote for accepting the RFC.
+
+Question: Accept object initializer?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+.
+
+Question: Choose between two tokens as an assign operator in object initializer block?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  =
+-  =>
+
+Patches and Tests
+-----------------
+
+Not implemented.
+
+A volunteer to help with implementation would be desirable.
+
+Implementation
+--------------
+
+Not implemented.
+
+References
+----------
+
+-  `C# Object
+   initializer <https://docs.microsoft.com/pl-pl/dotnet/csharp/programming-guide/classes-and-structs/object-and-collection-initializers#object-initializers>`__
+-  `Java Double Brace
+   Initialization <http://wiki.c2.com/?DoubleBraceInitialization>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: Michał Brzuchalski brzuchal@php.net
+:Slug: object-initializer
+:Wiki URL: https://wiki.php.net/rfc/object-initializer

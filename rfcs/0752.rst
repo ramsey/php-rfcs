@@ -1,0 +1,140 @@
+Don't Automatically Unserialize Phar Metadata Outside GetMetadata()
+===================================================================
+
+:PHP-RFC: 0752
+:Title: Don't Automatically Unserialize Phar Metadata Outside GetMetadata()
+:Author: Tyson Andre <tandre@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2020-07-07
+:PHP-Version: 8.0
+:Version: 0.4
+
+Introduction
+------------
+
+In 2018, various vulnerabilities were found in php web frameworks due to
+the phar stream wrappers. A call such as
+``file_exists("phar://...somepath.extension/file/within/phar.ext")``
+will lead to unserializing the metadata found in the phar. As
+https://php.net/unserialize notes, "unserialization can result in code
+being loaded and executed due to object instantiation and autoloading,
+and a malicious user may be able to exploit this."
+
+Various blog posts have been written explaining the resulting
+vulnerabilities, such as
+https://www.ixiacom.com/company/blog/exploiting-php-phar-deserialization-vulnerabilities-part-1
+
+Proposal
+--------
+
+Don't unserialize the metadata automatically when a phar file is opened
+by php. Make PHP unserialize the metadata **only** if
+``Phar->getMetadata()`` or ``PharFile->getMetadata()`` is called
+directly.
+
+Additionally, add an ``array $unserialize_options = []`` parameter to
+both getMetadata() implementations, defaulting to the current default
+``unserialize()`` behavior such as allowing any classes. (As an
+implementation detail, if ``$unserialize_options`` is set to anything
+other than the default, the resulting metadata won't be cached and this
+won't return the value from the cache. E.g.
+``getMetaData(['allowed_classes' => []])`` after
+``setMetadata(new stdClass())`` will likely trigger a
+``unserialize(['allowed_classes' => []])`` call internally.)
+
+This implements one possible solution for
+https://bugs.php.net/bug.php?id=76774
+
+Backward Incompatible Changes
+-----------------------------
+
+Any side effects from ``__wakeup()``, ``__destruct()``, etc. that were
+triggered during/after unserialization of metadata when the phar is
+loaded will stop happening, and will only happen when ``getMetadata()``
+is directly called.
+
+Eliminating the side effects is the goal of this RFC, for security
+reasons. Typical phars use scalars and associative arrays for any
+metadata, and many phars don't need metadata at all.
+
+Proposed PHP Version(s)
+-----------------------
+
+8.0
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+This affects stream wrapper calls such as ``file_exists()`` (they will
+no longer call ``unserialize()`` if there is metadata), as well as
+direct calls to ``Phar->getMetadata()`` (they will call
+``unserialize()`` if there is metadata, instead of using the data from
+the time the phar file was loaded)
+
+Vote
+----
+
+Yes/No, requiring 2/3 majority to stop automatically unserializing
+metadata. Voting started on 2020-07-21 and ended 2020-08-04.
+
+Question: Stop automatically unserializing Phar metadata outside direct getMetadata() calls
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+References
+----------
+
+https://externals.io/message/110871 '[RFC] Don't automatically
+unserialize Phar metadata outside getMetadata()'
+
+https://externals.io/message/110856 'Including "Disable the ability to
+use concrete types in PHAR metadata" in PHP 8.0?'
+
+https://externals.io/message/105271 'PHP deserialization techniques
+offer rich pickings for security researchers'
+
+https://bugs.php.net/bug.php?id=76774 'Request #76774 Disable the
+ability to use concrete types in PHAR metadata'
+
+Rejected Features
+-----------------
+
+I'd considered continuing to call ``unserialize()`` all of the time to
+validate phars earlier, but with ``allowed_classes=[]`` instead
+(controlled by an ini setting). This seemed like an unnecessary ini
+setting that could be avoided by just not automatically loading the
+metadata.
+
+Changelog
+---------
+
+0.4: Change from ``getMetadata($allowed_classes = ...)`` to
+``getMetadata(array $unserialize_options = [])`` in this document. I
+forgot about max_depth being added in php 8.0 and the usefulness of
+being able to support future options added to unserialize() without
+changing the signature of getMetadata. Elaborate on implementation
+details ``$unserialize_options`` would lead to when setMetaData is
+called before
+``$pharFileOrEntry->getMetadata(['allowed_classes' => $classes])``
+
+0.3: Clarify wording, add link to RFC announcement thread. Remove
+inapplicable ini defaults section.
+
+0.2: Link to implementation.
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5855
+:Original Authors: Tyson Andre tandre@php.net
+:Slug: phar_stop_autoloading_metadata
+:Wiki URL: https://wiki.php.net/rfc/phar_stop_autoloading_metadata

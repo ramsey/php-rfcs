@@ -1,0 +1,211 @@
+Suppressed Exceptions
+=====================
+
+:PHP-RFC: 0645
+:Title: Suppressed Exceptions
+:Author: Danack
+:Status: Draft
+:Type: Unknown
+:Created: 2019-04-04
+:Version: 0.1
+
+Introduction
+------------
+
+Currently in PHP there are some scenarios where information about
+exceptions can be lost, particularly when multiple exceptions occur in
+block of code. For example when retrying network requests.
+
+.. code:: php
+
+   function fetchDataOverNetwork() {
+
+     for ($i = 0; $i < MAX_ATTEMPTS; $i++) {
+       try {
+         // Some operation that may throw 
+         return foo(); 
+       }
+       catch (NetworkException $networkException) {
+         // can't do anything with $networkException here
+       }
+     }
+     
+     // Information about $networkExceptions is lost.
+     throw new FetchDataException("Failed to get data");
+   }
+
+Another example where an exception is thrown trying to release an
+acquired resource:
+
+.. code:: php
+
+   $resource = acquireSomeResource();
+
+   try {
+     foo($resource);
+   }
+   catch (FooException $fooException) {
+     try {
+       // try to release resource cleanly
+       $resource->close();
+       throw $fooException;
+     }
+     catch (ResourceException $resourceException) {
+       // The information about $resourceException is lost.
+       throw $fooException;
+     }
+   }
+
+Although PHP has the capability of adding a 'previous' exception when
+creating a new exception, it is inappropriate to do that in these
+examples as that is meant to be used for transforming one exception to
+another type.
+
+Additionally the 'previous' exception can only store information about
+one exception, not an arbitrary number of exceptions.
+
+Proposal
+--------
+
+This RFC proposes to add two methods to allow storing and retrieving of
+suppressed exceptions to each of the base exception classes \\Exception
+and \\Error with the signatures
+
+.. code:: php
+
+   public void addSuppressed(Throwable exception);
+
+   public getSuppressed(): Throwable[];
+
+These signatures would be similar to those in
+[Java](https://docs.oracle.com/javase/8/docs/api/java/lang/Throwable.html#addSuppressed-java.lang.Throwable-)
+
+These suppressed exceptions can be handled or logged appropriately where
+the exception is caught.
+
+Example when retrying network requests.
+
+.. code:: php
+
+   function fetchDataOverNetwork() {
+
+     $networkExceptions = [];
+
+     for ($i = 0; $i < MAX_ATTEMPTS; $i++) {
+       try {
+         // Some operation that may throw 
+         return foo(); 
+       }
+       catch (NetworkException $ne) {
+         $networkExceptions[] = $ne;
+       }
+     }
+
+     $fdException = new FetchDataException("Failed to get data");
+     
+     foreach ($networkExceptions as $networkException) {
+       $fdException->addSuppressed($networkException);
+     }
+     
+     throw $fdException;
+   }
+
+Example when cleaning up resource
+
+.. code:: php
+
+   $resource = acquireSomeResource();
+
+   try {
+     foo($resource);
+   }
+   catch (FooException $fooException) {
+     try {
+       // try to release resource cleanly
+       $resource->close();
+       throw $fe;
+     }
+     catch (ResourceException $resourceException) {
+       $fe->addSuppressed($resourceException);        
+       throw $fooException;
+     }
+   }
+
+Why not add suppressed in constructor?
+--------------------------------------
+
+As per the resource exception sometimes it is necessary to add
+suppressed exception to an exception that has been caught and is going
+to be re-thrown.
+
+Why not just use the 'previous' exception
+-----------------------------------------
+
+The constructor for Exceptions allows a 'previous' exception to be set
+in the constructor. This is typically used for catching generic
+exceptions and throw a more specific exception:
+
+.. code:: php
+
+   function foo() 
+   {
+       try {
+           bar();
+       }
+       // LogicException is part of core
+       catch (LogicException $le) {
+           throw new FooException(
+             "Failed calling bar:",
+             0,
+             $le
+           )
+       }
+   }
+
+In this example, only one thing has gone wrong unexpectedly and so the
+FooException and LogicException are representing a single unexpected
+error. As it is a single error, this exception only needs to be logged
+once.
+
+In the resource exception example, the fact that there was an exception
+calling 'foo' and the fact that there was an exception releasing the
+resource are two separate errors, that should be logged separately.
+
+Additionally, the 'previous' exception can only be set in the
+constructor, but users may want to re-throw the initial exception,
+rather than create a new exception.
+
+Backward Incompatible Changes
+-----------------------------
+
+This has the potential to break user's custom exception serializing and
+deserializing. Although individually these would not be major breaks,
+they would still be more appropriate to have at a major release than a
+minor release, hence this RFC targets PHP 8.
+
+Proposed PHP Version(s)
+-----------------------
+
+8
+
+Proposed Voting Choices
+-----------------------
+
+Single for requiring 2/3 majority.
+
+Patches and Tests
+-----------------
+
+TODO .
+
+Implementation
+--------------
+
+TODO
+
+Additional Metadata
+-------------------
+
+:Original Authors: Danack
+:Slug: suppressed_exceptions
+:Wiki URL: https://wiki.php.net/rfc/suppressed_exceptions

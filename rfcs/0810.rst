@@ -1,0 +1,420 @@
+Deprecate And Remove Utf8_encode And Utf8_decode
+================================================
+
+:PHP-RFC: 0810
+:Title: Deprecate And Remove Utf8_encode And Utf8_decode
+:Author: Rowan Tommins <rowan.collins@gmail.com>
+:Status: Draft
+:Type: Unknown
+:Created: 2021-04-03
+:Version: 0.3
+
+Introduction
+------------
+
+The built-in functions utf8_encode and utf8_decode convert strings
+encoded in ISO-8859-1 ("Latin 1") to and from UTF-8, respectively. While
+this is sometimes a useful feature, they are commonly misunderstood, for
+three reasons:
+
+-  Their names suggest a more general use than their implementation
+   actually allows.
+-  The Latin 1 encoding is commonly confused with other encodings,
+   particularly Windows Code Page 1252.
+-  The lack of error messages means that incorrect use is not easy to
+   spot.
+
+This RFC takes the view that their inclusion under the current name does
+more harm than good, and that removing them will encourage users to find
+more appropriate functions for their use cases.
+
+Proposal
+--------
+
+-  In PHP 8.1, all uses of utf8_encode and utf8_decode will raise an
+   E_DEPRECATED diagnostic. [TODO: Specify custom message?]
+-  In PHP 9.0, the utf8_encode and utf8_decode functions will be removed
+   from the language.
+
+Historical note
+---------------
+
+The functions were originally added as internal functions in the XML
+extension, and were `exposed to userland in
+2006 <https://github.com/php/php-src/commit/e79e9fade6694ab8485c8722dfdc84b0c866ccc1>`__.
+
+They remained part of that extension (and thus technically optional)
+until `Andrea Faulds moved them to ext/standard in PHP
+7.2 <https://github.com/php/php-src/pull/2160>`__. At the same time,
+`she reworded the documentation
+page <https://github.com/php/doc-en/commit/838941f6cce51f3beda16012eb497b26295a8238>`__
+which previously consisted mostly of a long explanation of UTF-8, and
+little explanation of the functions themselves.
+
+Problems with the current functions
+-----------------------------------
+
+Poor naming
+~~~~~~~~~~~
+
+Character encoding issues are often poorly understood, and users will
+often look for a "quick fix" that just makes their UTF-8 "work
+properly". The names "utf8_encode" and "utf8_decode" suggest functions
+that will do exactly that, and these functions are frequently used in
+functions called things like "fix_utf8" or "ensure_utf8".
+
+While the language can never protect users from all misunderstanding, it
+is at best unfortunate to include functions whose functionality could
+not be guessed without looking at the manual.
+
+Confusion around Latin-1 encoding
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+`ISO-8859-1 <https://en.wikipedia.org/wiki/ISO/IEC_8859-1>`__, or Latin
+1, is an 8-bit ASCII-compatible encoding standardised in 1985. It is
+notably the basis for the first 256 code points of Unicode.
+
+There are two closely related encodings:
+
+-  `ISO-8859-15 <https://en.wikipedia.org/wiki/ISO/IEC_8859-15>`__
+   ("Latin 9") is an official replacement standard, replacing some
+   printable characters with others that were deemed more useful. For
+   instance, the "universal currency symbol" (¤, U+00A4) is replaced
+   with the Euro symbol (€, U+20AC) at position 0xA4.
+-  `Windows Code Page
+   1252 <https://en.wikipedia.org/wiki/Windows-1252>`__ is a proprietary
+   encoding developed by Microsoft which adds *additional* printable
+   characters in place of the rarely used "C1 control characters". For
+   instance, the Euro sign is placed at position 0x80.
+
+All three encodings specify all 256 possible 8-bit values, so any
+sequence of bytes is a valid string in all three. However, the "C1
+control characters" are effectively unused, so a string labelled "Latin
+1" but containing values in the range 0x80 to 0x9F is often assumed to
+actually be in Windows Code Page 1252. The WHATWG HTML specification
+`specifies that browsers should treat Latin 1 as a synonym for Windows
+1252 <https://encoding.spec.whatwg.org/#ref-for-windows-1252%E2%91%A0>`__.
+
+The PHP utf8_encode and utf8_decode functions do **not** handle the
+additional characters of Windows 1252, which may be surprising to users
+whose "Latin 1" text displays these characters in browsers.
+
+Error handling
+~~~~~~~~~~~~~~
+
+By nature and design, neither function raises any errors:
+
+-  Both Latin 1 and UTF-8 are designed to be "ASCII compatible", so
+   bytes up to 0x7F are always left unchanged.
+-  Any byte is valid in Latin 1 and has an unambiguous mapping to a
+   Unicode code point, so utf8_encode has no error conditions.
+-  The vast majority of Unicode code points do not have a mapping to
+   Latin 1; utf8_decode handles these by substituting a '?' (0x3F)
+-  Many byte sequences do not form a valid UTF-8 string; utf8_decode
+   handles these by silently inserting a '?' (0x3F)
+
+This lack of feedback to the user compounds the above problems, because
+incorrect uses of both functions can easily go unnoticed.
+
+Usage
+-----
+
+In popular Composer packages
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Of the top 1000 packages by popularity on Packagist, 37 mention one or
+both of these functions. These uses can be roughly categorised as
+follows (some packages have uses in more than one category):
+
+::
+
+    * 4 libraries clearly using them correctly
+    * 20 using them without clear understanding
+    * 1 using on the output of strftime, which may be correct
+    * 7 using utf8_decode to count codepoints in a UTF-8 string
+    * 1 using them as "armour" (explained below)
+    * 3 using them in context where they will do nothing
+    * 2 providing polyfill implementations of the functions ([[https://packagist.org/packages/patchwork/utf8|patchwork/utf8]] and [[https://packagist.org/packages/symfony/polyfill-php72|symfony/polyfill-php72]])
+    * 4 providing stubs for static analysis
+
+For character conversion
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The correct use of these functions is to convert *specifically* between
+Latin 1 and UTF-8. This can be used as a fallback if other extensions
+are unavailable *only if* the source/target encoding is in fact Latin 1.
+Of the libraries analysed, **only 4 clearly incorporate or document this
+condition**.
+
+The far more common case is to use utf8_encode for *all* non-UTF-8
+inputs, implicitly assuming that anything other than UTF-8 is Latin 1.
+While this assumption may be valid in some cases, context often suggests
+it was simply not considered. Some clear misuses:
+
+-  Use as a fallback from calling mb_convert_encoding with no source
+   parameter, which is not equivalent because it uses the global
+   "internal encoding" setting (e.g.
+   `phing/phing <https://packagist.org/packages/phing/phing>`__,
+   `sebastian/phpcpd <https://packagist.org/packages/sebastian/phpcpd>`__)
+-  Treating UTF-8 as the default encoding, but falling back to
+   utf8_encode anyway, e.g.
+   `pdepend/pdepend <https://packagist.org/packages/pdepend/pdepend>`__
+
+On output of strftime
+~~~~~~~~~~~~~~~~~~~~~
+
+The `strftime <https://www.php.net/strftime>`__ function formats dates
+and times according to the currently selected locale. Where non-ASCII
+characters are needed, common locales will use Latin 1 encoding. If
+UTF-8 output is required, using ``utf8_encode(strftime(...))`` will give
+the correct result for these locales.
+
+This is used in
+`nesbot/carbon <https://packagist.org/packages/nesbot/carbon>`__ and
+suggested in `this Stack Overflow
+answer <https://stackoverflow.com/a/8995320/157957>`__.
+
+For counting code points
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+If ``$string`` is a valid UTF-8 string, ``strlen(utf8_decode($string))``
+can be used to count the number of code points it contains. This works
+because any unmappable code point is replaced with the single byte '?'
+in the output.
+
+Although convenient, this is mostly used as a fallback from more
+specific functions, and a pure PHP implementation is also possible, as
+discussed below.
+
+As "armour" for a binary value
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Passing any string of bytes to utf8_encode produces a valid UTF-8
+string; and the original bytes can be recovered using utf8_decode. This
+makes it possible to "armour" arbitrary binary data for transmission or
+storage as UTF-8 strings, similar to how
+`Base64 <https://en.wikipedia.org/wiki/Base64>`__ or `quoted
+printable <https://en.wikipedia.org/wiki/Quoted-printable>`__ encoding
+are used where ASCII is required.
+
+It's likely that users discover this through trial-and-error, rather
+than understanding why it works. Examples include
+`cache/adapter-common <https://packagist.org/packages/cache/adapter-common>`__
+and `two contributors to the php-internals
+list <https://externals.io/message/113645#113673>`__.
+
+Doing nothing
+~~~~~~~~~~~~~
+
+Some of the clearest misuses occur when running either function on text
+which is guaranteed to be ASCII, so will be returned unchanged. For
+instance:
+
+-  `aws/aws-sdk-php <https://packagist.org/packages/aws/aws-sdk-php>`__
+   calls utf8_encode on the output of ``sha1()``, which formats its
+   output in hexadecimal
+-  `ccampbell/chromephp <https://packagist.org/packages/ccampbell/chromephp>`__
+   and
+   `monolog/monolog <https://packagist.org/packages/monolog/monolog>`__
+   call utf8_encode on the output of json_encode, whose default mode
+   encodes all non-ASCII characters as ``\u....`` escape strings.
+
+Detecting UTF-8
+~~~~~~~~~~~~~~~
+
+An `answer on Stack Overflow with 17
+upvotes <https://stackoverflow.com/a/3479658/157957>`__ suggests this
+incredibly broken function:
+
+.. code:: php
+
+   function isUTF8($string) {
+       return (utf8_encode(utf8_decode($string)) == $string);
+   }
+
+This will return true for any ASCII string, and any UTF-8 string which
+contains only code points below U+00FF. For any other UTF-8 string, it
+will return false.
+
+Throwing the kitchen sink at it
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It is easy to find examples online of using utf8_encode and utf8_decode
+as part of a brute force attempt to fix problems that aren't understood.
+Here are a few found on Stack Overflow:
+
+-  This user wrote a function to strip "invalid" UTF-8, then passed it
+   the output of utf8_encode, which is guaranteed to be valid UTF-8:
+   https://stackoverflow.com/a/57871683/157957
+-  This user tried a number of seemingly unrelated commands until one
+   "fixed" an undefined problem they were having:
+   https://stackoverflow.com/a/15183803/157957
+-  This user sums up a similar trial-and-error approach: "I've tried a
+   lot of functions, html_entities_decode, utf8_encode and decode,
+   decoding the hex codes, but I always get the error "JSON_ERROR_UTF8":
+   https://stackoverflow.com/q/10199017/157957
+-  `One of the answers to that
+   question <https://stackoverflow.com/a/17182431/157957>`__, with an
+   astonishing 58 upvotes, suggests this voodoo:
+   ``$input = iconv('UTF-8', 'UTF-8//IGNORE', utf8_encode($input));``
+   This is of course equivalent to
+   ``$input = iconv('UTF-8', 'UTF-8//IGNORE', iconv('ISO-8859-1', 'UTF-8', $input));``
+   Since the inner conversion always returns valid UTF-8, the outer call
+   to iconv is completely pointless, and was probably added by
+   trial-and-error.
+-  This user called utf8_encode on the same CSV file every time they
+   processed it, eventually ending up with cells of
+   `mojibake <https://en.wikipedia.org/wiki/Mojibake>`__ 32kB long:
+   https://stackoverflow.com/q/63814648/157957
+
+Alternatives to Removed Functionality
+-------------------------------------
+
+Removing these functions will break some code that is operating
+correctly. However, replacement is straight-forward in most cases.
+
+.. _for-character-conversion-1:
+
+For character conversion
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+If the exact error-handling behaviour is not important, and the relevant
+extension is installed, any of the following can be used:
+
+-  ``$utf8 = mb_convert_encoding($latin1, 'UTF-8', 'ISO-8859-1');`` and
+   ``$latin1 = mb_convert_encoding($utf8, 'ISO-8859-1', 'UTF-8');``
+   (from ext/mbstring)
+-  ``$utf8 = iconv('ISO-8859-1', 'UTF-8', $latin1);`` and
+   ``$latin1 = iconv('UTF-8', 'ISO-8859-1', $utf8);`` (from ext/iconv)
+-  ``$utf8 = UConverter::transcode($latin1, 'UTF8', 'ISO-8859-1');`` and
+   ``$latin1 = UConverter::transcode($utf8, 'ISO-8859-1', 'UTF8');``
+   (from ext/intl)
+
+An exact replacement is also straight-forward to implement in pure PHP;
+examples are available in
+`patchwork/utf8 <https://packagist.org/packages/patchwork/utf8>`__ and
+`symfony/polyfill-php72 <https://packagist.org/packages/symfony/polyfill-php72>`__
+
+For code point counting
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Alternatives in bundled extensions:
+
+-  ``$count = mb_strlen($string, 'UTF-8');`` (from ext/mbstring)
+-  ``$count = iconv_strlen($string, 'UTF-8');`` (from ext/iconv)
+
+Because of UTF-8's "self-synchronizing" design, code points can be
+counted without fully decoding the string, by counting bytes in the
+range 0x00 to 0x7F (ASCII) or 0xC2 to 0xF4 (leading bytes of a
+multi-byte sequence).
+
+Examples of pure PHP implementations can be found in
+`dompdf/dompdf <https://packagist.org/packages/dompdf/dompdf>`__,
+`masterminds/html5 <https://packagist.org/packages/masterminds/html5>`__,
+`patchwork/utf8 <https://packagist.org/packages/patchwork/utf8>`__, and
+`symfony/polyfill-iconv <https://packagist.org/packages/symfony/polyfill-iconv>`__.
+
+.. _as-armour-for-a-binary-value-1:
+
+As "armour" for a binary value
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If the exact functionality needs to be retained, any of the character
+conversion functions above will work fine.
+
+If the requirement is just for safe transport of binary data, a more
+standard mechanism such as base64_encode / base64_decode should be
+preferred.
+
+.. _on-output-of-strftime-1:
+
+On output of strftime
+~~~~~~~~~~~~~~~~~~~~~
+
+Most systems now include variant locales which use UTF-8, so
+``setlocale(LC_ALL, 'fr_FR.UTF8'); echo strftime("%A, %d %B %Y");`` will
+have the same result as
+``setlocale(LC_ALL, 'fr_FR'); echo utf8_encode(strftime("%A, %d %B %Y"));``
+
+Proposed PHP Version(s)
+-----------------------
+
+Deprecation in 8.1, removal in 9.0
+
+RFC Impact
+----------
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+The internal functions will be moved back to ext/xml, but no longer
+exposed as userland functions.
+
+Unaffected PHP Functionality
+----------------------------
+
+The use of these functions internally within the ext/xml extension has
+not been examined, and will not be changed.
+
+Open Issues
+-----------
+
+-  Exact wording of deprecation notice.
+-  What alternatives should the manual actively promote?
+
+Proposed Voting Choices
+-----------------------
+
+Should utf8_encode and utf8_decode be deprecated in 8.1 and removed in
+9.0? (Yes / No)
+
+Patches and Tests
+-----------------
+
+TODO
+
+References
+----------
+
+-  `Abandoned RFC on the same topic from
+   2016 <https://wiki.php.net/rfc/remove_utf_8_decode_encode>`__
+-  `Feature Request on bugs.php.net suggesting their
+   removal <https://bugs.php.net/bug.php?id=60429>`__
+-  `Pre-RFC mailing list
+   discussion <https://externals.io/message/113645>`__
+
+Rejected Features
+-----------------
+
+Adding improved replacements
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It would be possible to add new functions, under clearer names, with
+improved functionality; for instance:
+
+-  Raise an error on invalid UTF-8
+-  Handle Windows 1252 encoding rather than Latin 1
+
+However, the functions would remain awkwardly narrow in their
+applicability; given there are several more general-purpose functions
+already officially bundled, it would seem arbitrary to include this
+specific feature today.
+
+Changing name only
+~~~~~~~~~~~~~~~~~~
+
+An alternative approach would be to introduce aliases, such as
+"latin1_to_utf8" and "utf8_to_latin1" without changing the existing
+functionality, then deprecate the old names.
+
+This has the advantage of giving a single clear replacement for correct
+use of the existing functions. In the long term, though, users are best
+served by using general-purpose encoding functions than by this narrow
+feature.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Rowan Tommins rowan.collins@gmail.com
+:Slug: remove_utf8_decode_and_utf8_encode
+:Wiki URL: https://wiki.php.net/rfc/remove_utf8_decode_and_utf8_encode

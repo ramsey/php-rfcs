@@ -1,0 +1,633 @@
+Callable Prototypes
+===================
+
+:PHP-RFC: 0413
+:Title: Callable Prototypes
+:Author: Nikita Nefedov <inefedor@gmail.com>, Márcio Almada <marcio3w@gmail.com>
+:Status: Declined
+:Type: Unknown
+:Created: 2015-08-27
+:Version: 1.0
+
+Introduction
+------------
+
+This RFC proposes an evolution of the **callable** type, scoped to
+argument lists. This should allow more detailed declarations of
+**callable** type declarations - including their **arity**, **argument
+types** and **return type**.
+
+Here is one basic comparison between a simple **callable** and a
+detailed **callable prototype** declaration:
+
+.. code:: php
+
+   // Before
+   /**
+    * @param callable(int, int):int $reducer
+    */
+   function reduce(int $a, int $b, callable $reducer): int {
+     return $reducer($a, $b);
+   }
+
+   // call with bad callback
+   reduce(1, 2, function($a, $b, $c) {
+     return $a + $b + $c;
+   });
+   // >>>
+   // Warning: Missing argument 3 for {closure}(), called in ...
+   // Notice: Undefined variable: c in ...
+   // TypeError: Return value of reduce() must be of the type integer, string returned in ...
+
+.. code:: php
+
+   // After
+   function reduce(int $a, int $b, callable(int, int):int $reducer): int {
+     return $reducer($a, $b);
+   }
+
+   // call with bad callback
+   reduce(1, 2, function($a, $b, $c) {
+     return $a + $b + $c;
+   });
+   // >>>
+   // TypeError: Argument 3 passed to reduce() must be compliant with callable(int, int):int, incompatible callable($a, $b, $c) given...
+
+This concept is also present in other languages, commonly referred as
+**function prototypes**, **function types**.
+
+   NOTE: This RFC is **not** related to "generics".
+
+Proposal
+--------
+
+Why?
+~~~~
+
+Callable types might be particularly useful to write more robust
+callback based code (functional or not). This includes:
+
+Better Error Messages
+^^^^^^^^^^^^^^^^^^^^^
+
+The very first example of this RFC already illustrates well why a
+detailed "Type Error" offers better debuggability when compared to a
+trail of warnings and notices. In case warnings and notices get
+converted to exceptions, the scenario gets even less friendly as
+problems would be revealed one by one.
+
+Safety Before Side Effects
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+While callable types can offer more debug friendlier messages, there are
+other factor that could favor earlier failures approach. The objective
+of a callable type is to know when a callable is safe to execute before
+executing it. Specifying a more constrained callable type allows a given
+routine to fail before the next step of some important operation.
+
+This certainly can be achieved without callable types: perhaps using
+reflection or manual type checking of return values (with "is_<type>()"
+functions or "instanceof"). But certainly callable types can make this
+kind of situation less tedious.
+
+Self Documented Code
+^^^^^^^^^^^^^^^^^^^^
+
+It's common to see callback based libraries doing their best to declare
+the callable signatures on doc comments, hoping that the consumers will
+be able to figure out what to pass around:
+
+.. code:: php
+
+   /**
+    * @param  array                  $array
+    * @param  callable($key, $value) $callback
+    */
+   function array_walk(array $array, callable $callback) {
+       // ...
+   }
+
+With callable types, the codebase simply becomes much closer to "self
+documented":
+
+.. code:: php
+
+   function array_walk(array $array, callable($key, $value) $callback) {
+       // ...
+   }
+
+Empower Anonymous Functions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Currently the only possible way to formally specify the type information
+of a callable is by using classes:
+
+.. code:: php
+
+   // before
+
+   interface FooCallback {
+       function __invoke(int $left, int $right): int;
+   }
+
+   function crunch_data(array $data, FooCallback $callback): array {
+       $result = [];
+       foreach($data as $left => $right) $result[] = $callback($left, $right);
+
+       return $result;
+   }
+
+   $crunched = crunch_data(
+       [1 => 2, 3 => 4],
+       new class implements FooCallback {
+           function __invoke(int $left, int $right): int { return $left * $right; }
+       }
+   );
+
+Unfortunately, this solution completely excludes anonymous functions as
+they can't implement any interface. But with a more specific signature,
+callable types could work as requirements over the \`__invoke\` method
+of callables:
+
+.. code:: php
+
+   // after
+
+   function crunch_data(array $data, callable(int $left, int $right):int $callback): array {
+       $result = [];
+       foreach($data as $left => $right) $result[] = $callback($left, $right);
+
+       return $result;
+   }
+
+   $crunched = crunch_data([1 => 2, 3 => 4], function(int $left, int $right): int {
+       return $left * $right;
+   });
+
+Nested callables
+~~~~~~~~~~~~~~~~
+
+Nested callables can be used with no imposed limit on the nesting level.
+
+.. code:: php
+
+   function foo(callable(callable(int)) $cb) {
+       $cb(function (int $i) {
+           var_dump($i);
+       });
+   }
+
+   foo(function (callable(int) $intPrinter) {
+       $intPrinter(123);
+   });
+
+There's currently no way to reference ``callable`` signature from within
+itself, meaning there's no way to make recursive signatures like below:
+
+.. code:: php
+
+   function bar(callable(int $number): callable(int $number): callable(int $number): parent_callable $recursiveCb) { // this wouldn't work currently
+   }
+
+To add to that, nested callables can get pretty unreadable quickly, both
+of these problems would be best solved by a typedef feature of some
+kind, added to PHP later.
+
+Variance and Signature Validation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Variance is supported and adheres to LSP. This means that whenever
+function of type ``F`` is expected, any function that takes equal or
+more general input than ``F`` and gives equal or narrower output than
+``F``, can be considered of type ``F``. Classes in argument/return type
+of a callable type declarations are a subject to variance, primitives
+are not.
+
+Examples:
+
+.. code:: php
+
+   class A {}
+   class B extends A {}
+
+   function foo(callable(A) $cb) { }
+   function bar(callable(B) $cb) { }
+
+   foo(function (A $a) {}); // there's no variance in this case, A can be substituted by A
+   foo(function (B $b) {}); // Uncaught TypeError: Argument 1 passed to foo() must be compliant with callable(A), incompatible callable(B $b) given
+   bar(function (A $a) {}); // callable(A) > callable(B) - we can substitute callable(B) with callable(A) because the latter has a wider input than the latter
+
+The same rules apply to return type of a callable:
+
+.. code:: php
+
+   function bar(callable() $cb) { }
+   bar(function (): A { return new A; }); // it is valid to pass a function with declared return type as a parameter of `callable(..)`
+
+   function foo(callable(): A $cb) { }
+
+   foo(function (): A { return new A; }); // A == A
+   foo(function (): B { return new B; }); // B < A this closure will return narrower type than what is expected by "foo", which means it can be a substitute for callable(): A
+
+A function that takes less arguments than what is expected is also
+considered contravariant:
+
+.. code:: php
+
+   function foo(callable($a, $b) $cb) { }
+   foo(function($a) { }); // callable($a) > callable($a, $b)
+
+Optional parameters count just like any other parameters if they are
+typed:
+
+.. code:: php
+
+   function foo(callable() $cb) { }
+   foo(function (A $a = null) { }); // TypeError
+   // even though technically callable($a = null) could be called without arguments (as foo() expects) it would lead to type error later on if used as callable().
+   // Because PHP doesn't prohibit you from passing extra arguments which function doesn't really expect nor take.
+   // That means that foo() could call $cb and pass anything as a first argument and if it would be something that is not an instance of A the call would fail.
+   // Hence "function (A $a = null) {}" has a prototype of callable(A $a) (it doesn't matter if the argument is optional or not)
+   // And callable(A $a) < callable(), so the call to foo() will fail here
+
+Otherwise they can pass type check boundaries even if they are not
+defined in the callable type:
+
+.. code:: php
+
+   function foo(callable() $cb) { }
+   foo(function ($a = 123) { }); // valid as it won't have a problem explained above
+
+The same goes for variadics as they are a special kind of optional
+parameters.
+
+When callable type is nested (when you have ``callable(callable(A))``)
+variance has to be inversed with each nesting level. So if we have
+``callable(A) > callable(B)`` then
+``callable(callable(A)) < callable(callable(B))``.
+
+References in callables
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Reference parameters are supported: no variance is applied to the fact
+whether parameter is referential or not.
+
+Example:
+
+.. code:: php
+
+   function foo(callable(&$byref) $cb) { }
+
+   foo(function (&$bar) { }); // valid
+   foo(function ($bar) { }); // TypeError: Argument 1 passed to foo() must be compliant with callable(&$byref), incompatible callable($bar) given
+
+   function bar(callable($byval) $cb) { }
+
+   bar(function (&$bar) { }); // TypeError: Argument 1 passed to bar() must be compliant with callable($byval), incompatible callable(&$bar) given
+
+Functions returning a reference are compatible with functions returning
+a value for caller, hence both are interchangeable:
+
+.. code:: php
+
+   function foo(callable(): A $cb) { }
+
+   foo(function (): A { return new A; });
+   foo(function &(): A { static $a; $a = $a ?: new A; return $a; }); // both would pass the boundaries of a type check
+
+There's no way to declare that you expect a callable that returns
+reference due to syntax limitations.
+
+Parameters with default values
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It's not possible to declare default value of a parameter in a callable
+prototype. Because currently PHP doesn't consider parameter's default
+values in signature validation (their invariance is not enforced in
+overridden methods in classes).
+
+Syntax Choices
+~~~~~~~~~~~~~~
+
+The proposed syntax is similar to what we have on interfaces and
+abstract methods, and will look meaningful to anyone who already knows
+how to declare a PHP interface. There are only two minor distinctions:
+
+While declaring a callable type, it's possible to omit the argument
+names from argument lists when a given argument has type information.
+The argument names can be valuable, but there are cases they represent
+unnecessary verbosity. Hence why they can be omitted:
+
+.. code:: php
+
+   // the declarations below are synonyms:
+
+   function foo(callable(string $string_a, string $string_b):string $callback) {}
+
+   function foo(callable(string, string):string $callback) {}
+
+It's already common to see analogous syntax inside doc comments even
+though there are no regnant conventions:
+
+.. code:: php
+
+   /**
+    * Foo function 
+    *
+    * @arg string                   $action
+    * @arg callable(Logger $logger) $callback
+    */
+   function foo($action, callable $callback) {
+     // ...
+   }
+
+Why Not?
+~~~~~~~~
+
+One might say that function prototypes "does not fit the PHP loosely
+typed model". This might be true to part of the community, at some
+extent. Anyway, it's possible to affirm that PHP already supports
+function prototypes - but their potential is currently "confined" inside
+interfaces and abstract class definitions:
+
+.. code:: php
+
+   interface FooInterface {
+       function foo(A $a, B $b): C; // this is a function prototype, part of an interface
+   }
+
+   abstract class Foo {
+       function bar(A $a, B $b): C; // this is a function prototype too
+   }
+
+Why Not Add Callable Types Through Interfaces
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+During off list discussions, it was proposed to add callable types to
+PHP by hacking the interface system:
+
+.. code:: php
+
+   interface FooCallback extends Callable {
+       function __invoke(int $i, string $str, FooClass $foo) : ReturnType;
+   }
+
+The RFC authors rejected the idea because of the many design problems
+this would cause. For example, the following situation would completely
+**break anonymous functions support**:
+
+.. code:: php
+
+   interface FooCallback extends Callable {
+       function someExtraMethod();
+       function __invoke(int $i, string $str, FooClass $foo) : ReturnType;
+   }
+
+In order to amend this design issue, we would have to add many weird
+checks to PHP interfaces just to accommodate something that conceptually
+(at least for PHP) doesn't pertain to interfaces:
+
+::
+
+     - interfaces extending Closure (or abstract classes implementing any interface extending closure) would have to be forbidden to declare constants or any extra method other than invoke.
+     - interfaces extending any interface that extends Closure (or abstract classes that...) would need the same checks as above.
+     - in case an interface has only invoke all rules to determine compatibility would change.
+
+The obvious conclusion is that extending the behavior of \`callable\`
+should **not** require deep changes (or any change at all) on the
+current interface system. The fact that objects can become callables by
+having an \`__invoke\` method is just a detail.
+
+As a side note, any comparison with callable types and interfaces on
+this RFC is for didactic purpose.
+
+When To Use Return Types On Callable Types
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It should be noted that, while perfectly valid, adding return types to
+callable types may not be as useful as it seems at a first sight.
+Perhaps this bit is only valuable if the returned value of the callback
+is really going to be used by the receiver, otherwise the recommendation
+is to simply skip it.
+
+It's also notable that some types like 'void' should never be used as a
+callable return type. They simply impose unnecessary restrictions to
+callables in any imaginable use case. E.g:
+
+.. code:: php
+
+   function foo(callable($a, $b):void $callback) {
+     //...
+   }
+
+Reflection
+----------
+
+There are no BC-breaking changes in Reflection.
+
+Here are the changes needed for reflection:
+
+\`ReflectionParameter::getType()\` can now return instance of
+\`ReflectionCallableType\` which extends \`ReflectionType`:
+
+.. code:: php
+
+   class ReflectionCallableType extends ReflectionType
+   {
+       /**
+        * Tells whether it's just a `callable` hint or if it has a prototype `callable(something): something`
+        */
+       public function hasPrototype(): bool;
+
+       /**
+        * Returns a number of parameters required by a callable prototype
+        */
+       public function getArity(): bool;
+
+       /**
+        * Returns an array of ReflectionCallableParameter instances
+        */
+       public function getParameters(): array;
+
+       /**
+        * Tells whether the prototype has return type defined
+        */
+       public function hasReturnType(): bool;
+
+       /**
+        * Returns return type of the callable prototype
+        */
+       public function getReturnType(): ReflectionType;
+
+       /**
+        * Tells whether $value has compatible callable prototype. This is the easiest way
+        * to implement runtime-error-free compatibility checks at this point...
+        * Later we could implement it in the form of `instanceof`
+        */
+       public function isA($value);
+   }
+
+   class ReflectionCallableParameter
+   {
+       /**
+        * Tells whether this callable parameter has a type
+        */
+       public function hasType(): bool;
+
+       /**
+        * Returns a type of this callable parameter
+        */
+       public function getType(): ReflectionType;
+
+       /**
+        * Tells whether callable parameter is named or not (e.g. callable(Foo $foo) vs callable(Foo))
+        */
+       public function hasName(): bool;
+
+       /**
+        * Returns name of the callable parameter
+        */
+       public function getName(): string;
+
+       /**
+        * Whether this is by-val or by-ref parameter
+        */
+       public function isPassedByReference(): bool;
+       
+       /**
+        * Whether this is a variadic parameter
+        */
+       public function isVariadic(): bool;
+   }
+
+Backward Incompatible Changes
+-----------------------------
+
+The proposal has no BC breaks.
+
+Proposed PHP Version(s)
+-----------------------
+
+The proposal targets PHP 7.1.
+
+RFC Impact
+----------
+
+Performance
+~~~~~~~~~~~
+
+The performance difference between argument lists with "complex
+callables" vs "simple callables" is negligible.
+
+To Opcache
+~~~~~~~~~~
+
+Currently, the patch works with opcache. Any possible further break
+should be easily fixable anyway.
+
+Unaffected PHP Functionality
+----------------------------
+
+The current callable implementation should not have any of it's
+behaviors altered and will still be available. The RFC merely augments
+how callable can be declared.
+
+Future Scope
+------------
+
+Named Callable Types
+~~~~~~~~~~~~~~~~~~~~
+
+Named callable types were deliberately left out the current proposal.
+The rationale behind this decision is that most callable types are very
+transient, so the proposed inlined syntax will solve 90% of the use
+cases.
+
+Another reason is that depending on how the `Union
+Types <https://wiki.php.net/rfc/union_types>`__ RFC is designed it might
+include named types and, naturally, named callable types would be
+supported. This bit could be added through another RFC, and probably
+should, because if typedefs are to appear in PHP they should work not
+only for callable types but for all other types as well.
+
+The following could also be an option for a dedicated named callable
+type syntax if union types (or any other RFC introducing type aliasing)
+gets rejected:
+
+.. code:: php
+
+   callable NodeComparator(Node $left, Node $right): bool;
+
+   function filter_nodes(array $nodes, NodeComparator $predictor) {
+     // ...
+   }
+
+   function sort_nodes(array $nodes, NodeComparator $predictor) {
+     // ...
+   }
+
+Besides that, even with named callable types support, inlined callable
+types could be a way to keep the type unexposed from public API while
+PHP lacks first class packages.
+
+Votes
+-----
+
+This RFC requires a 2/3 majority to pass. Vote started on May 23, 2016,
+ends June 6, 2016.
+
+Question: Accept callable prototypes?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+The work in progress of the implementation can be found at
+https://github.com/php/php-src/pull/1633
+
+The patch can be tested through https://3v4l.org
+
+Known Issues
+------------
+
+Syntax
+~~~~~~
+
+There is a known syntax conflict with callable types that omit argument
+names, as in:
+
+.. code:: php
+
+   function func(callable(int) $callback) {
+    //...
+   }
+   // syntax error, unexpected T_INT_CAST in {file} on line 1
+
+The following pull request would fix these argument list edge cases
+https://github.com/php/php-src/pull/1667
+
+References
+----------
+
+Languages that have this same concept (with inlined definitions or not):
+
+::
+
+     - Python has annotation based callable types https://www.python.org/dev/peps/pep-0484/#callable
+     - Golang https://tour.golang.org/moretypes/21
+     - Rust ("where" is a bit verbose) https://doc.rust-lang.org/book/closures.html#taking-closures-as-arguments
+     - Scala
+     - Swift https://developer.apple.com/library/ios/documentation/Swift/Conceptual/Swift_Programming_Language/Types.html
+
+Additional Metadata
+-------------------
+
+:Original Authors: Nikita Nefedov inefedor@gmail.com, Márcio Almada marcio3w@gmail.com
+:Slug: callable-types
+:Wiki URL: https://wiki.php.net/rfc/callable-types

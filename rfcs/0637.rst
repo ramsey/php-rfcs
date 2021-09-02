@@ -1,0 +1,241 @@
+Locked Classes
+==============
+
+:PHP-RFC: 0637
+:Title: Locked Classes
+:Author: Rowan Collins [IMSoP] <rowan.collins@gmail.com>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2019-03-10
+:Version: 1.0
+
+Introduction
+------------
+
+Object properties in PHP are primarily defined in class definitions;
+however, they can also be added to or removed from individual instances
+at any time. This RFC proposes an opt-in method for a class definition
+to disable this behaviour for all instances of that class.
+
+While setting properties which were not declared in a class definition,
+or unsetting properties which were declared, can be a useful tool, like
+many of PHP's dynamic features, it also makes certain mistakes easier.
+For instance, if a class defines a property ``public $normalise=true;``,
+and a user writes ``$instance->normalize=false;``, a new property will
+be silently added. Static analysis can highlight this mistake, but the
+language itself issues no warning.
+
+Changing this behaviour for all objects would be a significant change to
+the language, with the potential to break a large amount of existing
+code. However, code written with no intention of using this dynamic
+behaviour would benefit from a way to switch it off.
+
+While this can be achieved through strategic use of the ``__set``,
+``__get``, and ``__unset`` magic methods, this is long-winded, hard to
+optimise, and interferes with other uses of those methods.
+
+Proposal
+--------
+
+A "locked" class is any class whose definition includes the modifier
+keyword "locked", regardless of any other modifiers. An instance of a
+locked class behaves like any other object, except that:
+
+-  Attempting to set a property on the instance which was not declared
+   in the class (or inherited from one of its parent classes) will throw
+   an error, and the instance will not be modified.
+-  Attempting to read a property on the instance which was not declared
+   (or inherited) will throw an error, rather than raising a Notice and
+   evaluating to ``null``.
+-  Attempting to call ``unset()`` on any property of the instance will
+   throw an error, and the instance will not be modified.
+
+Interaction with Magic Methods
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The existing "property overloading" magic methods (``__set``, ``__get``,
+and ``__unset``) may still be defined on locked classes, and will
+continue to be called in the same circumstances. Specifically:
+
+-  If the class declares a magic ``__set`` method, this will still be
+   called when attempting to set an undefined property instead of the
+   error being thrown.
+-  If the class declares a magic ``__get`` method, this will still be
+   called when attempting to read an undefined property instead of the
+   error being thrown.
+-  If the class declares a magic ``__unset`` method, this will be called
+   when attempting to unset *any property which is not declared in the
+   class, or is declared private*. For properties which are declared and
+   public, this magic method is not called; if the class is declared
+   "locked", this case will therefore throw an error.
+
+Interaction with Inheritance
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The "locked" flag is **not** applied automatically to sub-classes. Any
+class may be marked "locked", regardless of whether it inherits from a
+locked class or not.
+
+The rationale is that a sub-class can add any number of public
+properties not listed in the parent definition, or add magic methods; it
+would therefore be inconsistent to ban it from allowing dynamic
+properties.
+
+If the author of the class wants to prevent this, the combination "final
+locked class" can be used to prohibit any child classes, whether locked
+or not.
+
+Example
+-------
+
+For more examples, see the tests included in the draft implementation.
+
+.. code:: php
+
+   locked class TestClass {
+       public $definedProp;
+   }
+
+   $t = new testClass();
+
+   // Defined properties work as normal
+   $t->definedProp = "OK";
+   echo $t->definedProp;
+   unset($t->definedProp);
+
+   // Undefined properties may not be read or written
+   echo $t->nonExistentProp; # ERROR: Cannot access undefined property $nonExistentProp on locked class TestClass
+   $t->nonExistentProp = "Not OK"; # ERROR: Cannot write undefined property $nonExistentProp on locked class TestClass
+
+   // Existing properties may not be unset
+   unset($t->definedProp); # ERROR: Cannot unset property $definedProp of locked class TestClass
+
+Naming
+------
+
+Newer versions of ECMAScript / JavaScript have `similar functionality,
+under the name "sealed
+objects" <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/seal>`__.
+However, the term "sealed class" has an unrelated meaning in languages
+such as C# and Kotlin, to do with limiting the class's participation in
+inheritance.
+
+Since the proposed modifier applies to a class, not an instance, it
+would be confusing to use the keyword "sealed" in this sense, so the
+synonym "locked" has been chosen instead.
+
+The name "strict" was also considered, but this could mean a variety of
+things, and might mislead users into thinking other types of
+"strictness" will apply to the class.
+
+Backward Incompatible Changes
+-----------------------------
+
+The keyword "locked" will become "semi-reserved", on the same list as
+"final" and "abstract".
+
+No existing code will change behaviour, since the modifier must be
+explicitly added.
+
+Since it is a new keyword, it will not be possible to "polyfill" this
+functionality, or declare a "locked class" in code which needs to be
+compatible with earlier PHP versions.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 7.x
+
+RFC Impact
+----------
+
+To Opcache
+~~~~~~~~~~
+
+To be determined: are there any optimisations which interact with the
+behaviours being changed?
+
+To Reflection
+~~~~~~~~~~~~~
+
+The following additions will be made to expose the new flag via
+reflection:
+
+-  New constant ReflectionClass::IS_LOCKED to expose the bit flag used
+   for locked classes
+-  The return value of ReflectionClass::getModifiers() will have this
+   bit set if the class being reflected is locked
+-  Reflection::getModifierNames() will include the string "locked" if
+   this bit is set
+-  A new ReflectionClass::isLocked() method will allow directly checking
+   if a class is locked
+
+Unaffected PHP Functionality
+----------------------------
+
+Calling ``unset`` on a typed property will still succeed, and result in
+an "undefined property" on next access, unless the class is also marked
+``locked``.
+
+Future Scope
+------------
+
+Classes defined by extensions could be marked "locked" if it was
+considered beneficial. This RFC does not propose any such changes.
+
+Proposed Voting Choices
+-----------------------
+
+Should "locked classes" as described above be added to PHP 7.x? A 2/3
+majority is required.
+
+Patches and Tests
+-----------------
+
+A pull request containing an initial implementation with basic tests is
+available on github: https://github.com/php/php-src/pull/3931
+
+Reasons for Withdrawal
+----------------------
+
+This RFC was discussed on the Internals list in March 2019. See archive
+here: https://externals.io/message/104620
+
+While the reasoning behind the feature was welcomed, the general
+consensus was that it was not quite right in its current form.
+
+Specific concerns raised included:
+
+-  The handling of ``__set``, ``__get``, and ``__unset`` on locked
+   classes is unnecessarily complicated. Perhaps these should just be
+   prohibited instead.
+-  The restriction on ``unset()`` prevents clearing of reference
+   bindings set with ``$foo->bar =& $baz``. One possibility is to reset
+   the property to ``null``, but not remove it from the list of
+   properties on the object.
+-  Contrary to both of the above suggestions, there was interest in
+   using locked classes with "lazy-loading", where properties are
+   deliberately removed to trigger ``__unset``.
+-  The extra keyword was considered "ugly" by some. While subjective,
+   this does point to a lack of long-term vision: if nearly all PHP
+   classes should behave this way, requiring the boilerplate on each
+   declaration is cumbersome.
+-  If the primary purpose is to prevent *accidental* use of dynamic
+   properties, the flag would be better set where the object is *used*
+   (e.g. with a ``declare()`` flag) rather than where it is *defined*.
+   That way, use of third-party objects can be subject to strict
+   checking without modifying shared code; and deliberate "trap doors"
+   can be used to implement tricks that rely on dynamic properties.
+
+The feature proposed in this RFC was deliberately conservative to keep
+the implementation simple, and bring it to users as soon as possible.
+However, it may be sensible to revisit the idea in combination with
+other concepts, such as packages/namespace-scoped declares, and a
+roadmap for making strictness the default.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Rowan Collins [IMSoP], rowan.collins@gmail.com
+:Slug: locked-classes
+:Wiki URL: https://wiki.php.net/rfc/locked-classes

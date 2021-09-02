@@ -1,0 +1,177 @@
+Reflection For References
+=========================
+
+:PHP-RFC: 0622
+:Title: Reflection For References
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2019-01-15
+:PHP-Version: 7.4
+:Version: 1.0
+
+Introduction
+------------
+
+Specialized libraries that perform operations like dumping, cloning or
+comparison over arbitrary value graphs require the ability to reason
+about PHP references. Currently PHP provides no APIs for this purpose,
+forcing libraries to use roundabout ways of detecting references and
+reference equalities.
+
+As an example, the
+`VarCloner <https://github.com/symfony/symfony/blob/master/src/Symfony/Component/VarDumper/Cloner/VarCloner.php>`__,
+which is part of Symfony's debug dump component uses essentially the
+following approach to detect references:
+
+.. code:: php
+
+   $array2 = $array1;
+   $array2[$key] = $unique_cookie;
+   if ($array1[$key] === $unique_cookie) {
+       // $array1[$key] is a reference
+   }
+
+This works, because references are preserved when copying arrays, such
+that a modification of ``$array2[$key]`` will modify ``$array1[$key]``
+if and only if ``$array1[$key]`` was a reference (or ``$array1`` is
+``$GLOBALS``).
+
+While this approach currently works, it is slow and convoluted. To make
+matters worse, this approach will no longer work reliably in PHP 7.4,
+due to the introduction of `typed
+properties </rfc/typed_properties_v2>`__. If ``$array1[$key]`` is a
+reference to a property with a certain type, then the assignment of the
+cookie may trigger a ``TypeError``.
+
+This RFC proposes to introduce a first-class API for reflection of
+references, to solve this type of rare, but also fundamental problem.
+
+Proposal
+--------
+
+This RFC proposes the addition of a ``ReflectionReference`` class, with
+the following prototypes:
+
+.. code:: php
+
+   final class ReflectionReference {
+       /* Returns ReflectionReference if array element is a reference, null otherwise. */
+       public static function fromArrayElement(array $array, int|string $key): ?ReflectionReference;
+       
+       /* Returns unique identifier for the reference. The return value format is unspecified. */
+       public function getId(): int|string;
+
+       private function __construct(); // Always throws
+       private function __clone(); // Always throws
+   }
+
+Essentially this provides the functionality of ``spl_object_hash()``,
+but for references instead of objects, through an API that is amenable
+to extension in the future. The functionality and design is discussed in
+more detail in the following.
+
+Construction of ReflectionReference
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Construction of ``ReflectionReference`` instances faces the following
+problem: A PHP function can either accept an argument by value or by
+reference. This needs to be declared in the function signature, making
+it impossible to distinguish whether the passed value was a reference
+originally or not. To determine whether or not something is a reference,
+access to the parent structure is necessary (which might be an array,
+object property table or symbol table).
+
+To start with, only the ``fromArrayElement($array, $key)`` API is
+provided, which covers all known use-cases. Object properties can be
+handled by casting the object to array. The
+``fromArrayElement($array, $key)`` method will either return a
+``ReflectionReference`` instance if ``$array[$key]`` is a reference, or
+null.
+
+If ``$array`` is not an array or ``$key`` is not an integer or string, a
+``TypeError`` is thrown. If ``$array[$key]`` does not exist, a
+``ReflectionException`` is thrown.
+
+Unique IDs for references
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Detecting whether something is a reference is only part of the problem.
+Additionally, we need to determine whether two storage locations hold
+the same reference. More generally, we want to determine whether a
+reference is equal to some other already known reference (out of a
+larger set of references).
+
+To solve both of these problems, the ``ReflectionProperty::getId()``
+function is provided. The return value is an integer or string of
+unspecified format. The only guarantee is that the return value will be
+unique for a given reference **for the lifetime of that reference**. IDs
+may be reused when references are destroyed and recreated. (The same
+limitation applies to ``spl_object_hash()``.)
+
+Two references may be compared for equality using
+``$ref1->getId() === $ref2->getId()``. The reference ID can also be used
+to maintain a map of known references:
+
+.. code:: php
+
+   $refs = [];
+   $refs[$ref1->getId()] = $ref1;
+
+   if (isset($refs[$ref2->getId()])) {
+       // $ref2 is same as $refs[$ref2->getId()]
+   }
+
+The value returned by ``getId()`` is based on the address of the
+``zend_reference`` structure, which is used internally to represent
+references. To avoid directly leaking memory addresses, which would
+facilitate attacks requiring knowledge of memory layout, the address is
+SHA1 hashed together with a per-process 128-bit key. The raw 20 byte
+digest is returned (not hex encoded). In other words, the return value
+of ``getId()`` is ``sha1(address_of($ref) . $key, true)``.
+
+As mentioned above, the specific scheme used here is an implementation
+detail and may change in the future. The length of the string may
+change, and the return value may be converted into an integer in the
+future, if it becomes technically feasible.
+
+Backward Incompatible Changes
+-----------------------------
+
+None.
+
+Future Scope
+------------
+
+The proposed API is intentionally minimal, but may be extended in the
+future on an as-needed basis. Two possible additions would be:
+
+-  Ability to fetch the reference count, or at least determine whether
+   this is a singleton reference.
+-  Ability to fetch all typed properties that are part of this
+   reference.
+
+Vote
+----
+
+Add ``ReflectionReference`` class as described? A 2/3 majority is
+required. The vote started 2019-01-30 and will end 2019-02-13.
+
+Question: Add ReflectionReference?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Original Authors: Nikita Popov nikic@php.net
+:Original Status: Implemented (in PHP 7.4)
+:Pr: https://github.com/php/php-src/pull/3550
+:Slug: reference_reflection
+:Targets: PHP 7.4
+:Wiki URL: https://wiki.php.net/rfc/reference_reflection

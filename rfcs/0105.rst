@@ -1,0 +1,309 @@
+Stream Metadata
+===============
+
+:PHP-RFC: 0105
+:Title: Stream Metadata
+:Author: Stas Malyshev <stas@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2011-03-13
+:PHP-Version: 5.4
+:Version: 1.0
+
+Purpose
+=======
+
+PHP file streams provide very powerful and useful abstraction layer over
+the I/O-related functions. However, there's a group of functions which
+are excluded from this support - namely, touch(), chmod(), chown() and
+chgrp() - i.e., functions dealing with file metadata. This lead to
+libraries implementing FS virtualization developing various hacks, such
+as here: https://code.google.com/p/bovigo/wiki/vfsStreamDocsFilemode
+
+The purpose of this RFC is to plug this hole by creating stream metadata
+API allowing to override these functions.
+
+Engine part
+===========
+
+The stream wrapper gets an additional optional handler, like this:
+
+::
+
+     int (*stream_metadata)(php_stream_wrapper *wrapper, char *url, int options, void *value, php_stream_context *context TSRMLS_DC);
+
+The options supported currently are:
+
+::
+
+     #define PHP_STREAM_META_TOUCH       1
+     #define PHP_STREAM_META_OWNER_NAME  2
+     #define PHP_STREAM_META_OWNER       3
+     #define PHP_STREAM_META_OWNER_NAME  4
+     #define PHP_STREAM_META_GROUP       5
+     #define PHP_STREAM_META_ACCESS      6
+
+implementing various aspects of touch(), chmod(), etc. Values are
+defined by option and currently are:
+
+-  For PHP_STREAM_META_TOUCH - struct utime \*
+-  For PHP_STREAM_META_OWNER_NAME, PHP_STREAM_META_OWNER_NAME - char \*
+-  For all the rest - long \*
+
+The return value is 0 on failure, non-0 on success.
+
+Userspace part
+==============
+
+Userspace stream handler implements this wrapper by using userspace
+method:
+
+::
+
+     public function stream_metadata($path, $option, $value)
+
+See example below as for suggested implementation for virtualized
+filesystem. The option values match options above, and have constants
+defined without the PHP prefix (i.e., STREAM_META_TOUCH, etc.). The
+value is:
+
+-  For STREAM_META_TOUCH - array specifying modification and access time
+   (both optional, can be empty array)
+-  For STREAM_META_OWNER_NAME, STREAM_META_OWNER_NAME - string
+   specifying the name
+-  For all the rest - integer
+
+The return value is true on success, false on failure. The stream
+implementor has to decide what to do with unknown/unsupported options.
+
+Examples
+========
+
+Virtual stream usage (mostly as before):
+
+.. code:: php
+
+   <?php
+   require_once 'vstream.php';
+   VirtualStream::register("vfstest");
+   mkdir("vfstest://startdir");
+   unlink("vfstest://startdir/test123");
+   var_dump(stat("vfstest://startdir/test123"));
+   touch("vfstest://startdir/test123");
+   var_dump(stat("vfstest://startdir/test123"));
+   file_put_contents("vfstest://startdir/test123", "test test\ntest 2\n");
+   chmod("vfstest://startdir/test123", 0755);
+   var_dump(stat("vfstest://startdir/test123"));
+   $f = fopen("vfstest://startdir/test123", "r");
+   while($l = fgets($f)) {
+       echo "== $l";
+   }
+   fclose($f);
+   $d = opendir("vfstest://startdir/");
+   while($de = readdir($d)) {
+       var_dump($de);
+   }
+   closedir($d);
+
+Virtual stream definition:
+
+.. code:: php
+
+   <?php
+   class VirtualStream
+   {
+       protected static $stream_name = "vfs";
+       protected static $realdir;
+
+       public static function getRealDir()
+       {
+           if(empty(self::$realdir)) {
+               if(empty(self::$realdir)) {
+                   self::$realdir = "/tmp/vfs";
+               }
+               if(!file_exists(self::$realdir)) {
+                   mkdir(self::$realdir, 0755, true);
+               }
+           }
+           return self::$realdir;
+       }
+       
+       public static function setRealDir($dir) {
+           self::$realdir = $dir;
+           if(!file_exists(self::$realdir)) {
+               mkdir(self::$realdir, 0755, true);
+           }
+       }
+
+       protected function path($path)
+       {
+           return self::getRealDir()."/".substr($path, strlen(self::$stream_name)+3);
+       }
+
+       public function register($name = "vfs")
+       {
+           self::$stream_name = $name;
+           stream_register_wrapper(self::$stream_name, __CLASS__, 0);
+       }
+
+       public static function realPath($path)
+       {
+           return self::getRealDir()."/".substr($path, strlen(self::$stream_name)+3);
+       }
+
+       public function dir_closedir()
+       {
+           closedir($this->dirp);
+       }
+
+       public function dir_opendir ($path, $options )
+       {
+           $this->dirp = opendir($this->path($path));
+           return !empty($this->dirp);
+       }
+
+       public function dir_readdir()
+       {
+           return readdir($this->dirp);
+       }
+
+       public function dir_rewinddir()
+       {
+           return rewinddir($this->dirp);
+       }
+
+       public function mkdir($path, $mode, $options)
+       {
+           return mkdir($this->path($path), $mode, ($options&STREAM_MKDIR_RECURSIVE) != 0);
+       }
+
+       public function rename($path_from, $path_to)
+       {
+           return rename($this->path($path_from), $this->path($path_to));
+       }
+
+       public function rmdir($path, $options)
+       {
+           return rmdir($this->path($path));
+       }
+
+       public function stream_cast ($cast_as)
+       {
+           return $this->fp;
+       }
+
+       public function stream_close ()
+       {
+           fclose($this->fp);
+           return true;
+       }
+
+       public function stream_eof ()
+       {
+           return feof($this->fp);
+       }
+
+       public function stream_flush ()
+       {
+           return fflush($this->fp);
+       }
+
+       public function stream_lock($operation)
+       {
+           return flock($this->fp, $operation);
+       }
+
+       public function stream_open($path, $mode)
+       {
+           $fullpath = $this->path($path);
+           if($mode == 'r') {
+               $this->fp = fopen($fullpath, $mode);
+           } else {
+               // if we will be writing, try to transparently create the directory
+               $this->fp = @fopen($fullpath, $mode);
+               if(!$this->fp && !file_exists(dirname($fullpath))) {
+                   mkdir(dirname($fullpath), 0755, true);
+                   $this->fp = fopen($fullpath, $mode);
+               }
+           }
+           return !empty($this->fp);
+       }
+
+       public function stream_read($count)
+       {
+           return fread($this->fp, $count);
+       }
+
+       public function stream_seek($offset, $whence = SEEK_SET)
+       {
+           return fseek($this->fp, $offset, $whence);
+       }
+
+       public function stream_set_option($option, $arg1, $arg2)
+       {
+           return true;
+       }
+
+       public function stream_stat()
+       {
+           return fstat($this->fp);
+       }
+
+       public function stream_tell()
+       {
+           return ftell($this->fp);
+       }
+
+       public function stream_write($data)
+       {
+           return fwrite($this->fp, $data);
+       }
+
+       public function unlink($path)
+       {
+           unlink($this->path($path));
+           return true;
+       }
+
+       public function url_stat($path, $flags)
+       {
+           return @stat($this->path($path));
+       }
+       
+       public function stream_metadata($path, $option, $var)
+       {
+           $path = $this->path($path);
+           switch($option) {
+               case STREAM_META_TOUCH:
+                   array_unshift($var, $path);
+                   return call_user_func_array("touch", $var);
+               case STREAM_META_OWNER:
+               case STREAM_META_OWNER_NAME:
+                   return chown($path, $var);
+               case STREAM_META_GROUP:
+               case STREAM_META_GROUP_NAME:
+                   return chgrp($path, $var);
+               case STREAM_META_ACCESS:
+                   return chmod($path, $var);
+           }
+       }
+   }
+
+TODO
+====
+
+ch{own|mod}() functions are not defined on Netware and defined, but not
+implemented on Windows. While this API does not limit its implementation
+to any particular set of features, currently it follows the existing API
+implementation, not improving on it. We could add additional
+capabilities allowing to support these operations on these systems in
+one way or another.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Stas Malyshev stas@php.net
+:Original Status: Implemented in 5.4
+:Patch: http://random-bits-of.info/stream_meta.diff
+:Slug: streammetadata
+:Wiki URL: https://wiki.php.net/rfc/streammetadata

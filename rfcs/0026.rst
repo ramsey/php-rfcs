@@ -1,0 +1,453 @@
+Improve Consistency Of Protected Member Lookups
+===============================================
+
+:PHP-RFC: 0026
+:Title: Improve Consistency Of Protected Member Lookups
+:Author: Robin Fernandes <robinf@php.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2008-06-01
+:Version: 0.1
+
+Introduction
+------------
+
+This RFC proposes to eliminate an inconsistency in the way protected
+class members are resolved.
+
+The fix to `bug 37632 <http://bugs.php.net/bug.php?id=37632>`__
+introduced a new visibility rule for protected methods. Prior to this
+fix, protected methods were visible only from their declaring class,
+ancestor classes and descendant classes. Subsequent to this fix,
+protected methods may be visible from sibling classes. Specifically, a
+protected method ``f`` declared in class ``C1`` can be invoked from a
+context ``C2`` if there is a class ``P`` which is an ancestor to both
+``C1`` and ``C2``, and ``P`` declares a prototype of ``f``. See the
+first code sample below for an illustration.
+
+However, this rule is not applied consistently for all types of method
+invocation. For example, a method that is visible when invoked directly
+may become invisible when invoked as a callback. Furthermore, it does
+not apply at all to protected property lookups.
+
+This RFC investigates 3 alternatives to improve consistency:
+
+-  Option 1: Remove the new lookup rule.
+-  Option 2: Ensure the new lookup rule is followed consistently.
+-  Option 3: Modify the new lookup rule to better match the
+   intuitive/documented meaning of 'protected', and ensure it is
+   followed consistently.
+
+Code Examples of the Inconsistencies
+------------------------------------
+
+Illustration of the new lookup rule for direct invocation of instance and static methods
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   // Class P declares some protected members.
+   class P {
+     protected function f() { echo 'P::f()'; }
+     protected static function sf() { echo 'P::sf()'; } 
+   }
+
+   // Class C1 re-declares the inherited protected members.
+   class C1 extends P {
+     protected function f() { echo 'C1::f()'; }
+     protected static function sf() { echo 'C1::sf()'; } 
+   }
+
+   // Class C2 attempts to access protected members on its sibling C1.
+   class C2 extends P {
+     public static function test() {
+       $c1 = new C1;
+       $c1->f();  // used to trigger fatal error, now prints C1::f()
+       C1::sf();  // used to trigger fatal error, now prints C1::sf()
+     }
+   }
+
+   C2::test();
+   ?>
+
+The new rule does not apply to properties (niether instance nor static)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   // Class P declares some protected members.
+   class P {
+     protected $p = 'P::$p';
+     protected static $sp = 'P::$sp';
+   }
+
+   // Class C1 re-declares the inherited protected members.
+   class C1 extends P {
+     protected $p = 'C1::$p';
+     protected static $sp = 'C1::$sp';
+   }
+
+   // Class C2 attempts to access protected members on its sibling C1.
+   class C2 extends P {
+     public static function test() {
+       $c1 = new C1;
+       echo $c1->p;  // Fatal error: Cannot access protected property C1::$p
+       echo C1::$sp; // Fatal error: Cannot access protected property C1::$sp
+     }
+   }
+
+   C2::test();
+   ?>
+
+The new rule does not apply to callbacks
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   // Class P declares some protected members.
+   class P {
+     protected function f() { echo 'P::f()'; }
+     protected static function sf() { echo 'P::sf()'; }  
+   }
+
+   // Class C1 re-declares the inherited protected members.
+   class C1 extends P {
+     protected function f() { echo 'C1::f()'; }
+     protected static function sf() { echo 'C1::sf()'; }    
+   }
+
+   // Class C2 attempts to access protected members on its sibling C1.
+   class C2 extends P {
+     public static function test() {
+       $c1 = new C1;
+       var_dump(is_callable(array($c1, 'f'))); // false
+       var_dump(is_callable(array('C1', 'sf'))); // false
+       call_user_func(array($c1, 'f')); // Warning: [...] cannot access protected method C1::f()
+       call_user_func(array('C1', 'sf')); // Warning: [...] cannot access protected method C1::sf()
+     }
+   }
+
+   C2::test();
+   ?> 
+
+The new rule does not apply to implicit invocations of \__clone()
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   // Class P declares some protected members.
+   class P {
+     protected function __clone() { echo 'P::__clone()'; }
+   }
+
+   // Class C1 re-declares the inherited protected members.
+   class C1 extends P {
+   protected function __clone() { echo 'C1::__clone()'; }
+   }
+
+   // Class C2 attempts to access protected members on its sibling C1.
+   class C2 extends P {
+     public static function test() {
+       $c1 = new C1;
+         clone $c1; // Fatal error: Call to protected C1::__clone() from context 'C2'
+     }
+   }
+
+   C2::test();
+   ?> 
+
+The new rule does not apply to implicit invocations of \__destruct()
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   // Class P declares some protected members.
+   class P {
+     protected function __destruct() { echo 'P::__destruct()'; }
+   }
+
+   // Class C1 re-declares the inherited protected members.
+   class C1 extends P {
+   protected function __destruct() { echo 'C1::__destruct()'; }
+   }
+
+   // Class C2 attempts to access protected members on its sibling C1.
+   class C2 extends P {
+     public static function test() {
+       $c1 = new C1;
+     } // Fatal error: Call to protected C1::__destruct() from context 'C2'
+   }
+
+   C2::test();
+   ?> 
+
+Some Details
+------------
+
+The new lookup rule is implemented by using
+``zend_get_function_root_class(function)`` when invoking
+``zend_check_protected(class, context)``, e.g.:
+
+.. code:: c
+
+      zend_check_protected(zend_get_function_root_class(fbc), EG(scope))
+
+``zend_get_function_root_class(f)`` returns the declaring class of the
+prototype that ``f`` overrides, or ``f`` 's declaring class if there is
+no such prototype. The inconsistency amongst method lookups were found
+by searching for calls to ``zend_check_protected()`` which do not make
+use of ``zend_get_function_root_class()``.
+
+Properties do not keep pointers to the inherited properties that they
+shadow, so their "root class" cannot be determined in the same way.
+
+Proposal
+--------
+
+Option 1
+~~~~~~~~
+
+Remove new rule: remove calls to zend_get_function_root_class().
+
+Patch
+^^^^^
+
+-  `Patch from Felipe
+   Pena <http://thread.gmane.org/gmane.comp.php.devel/48176/focus=48179>`__
+-  `Tests <http://www.soal.org/php/protectedrfc/protected_opt1_tests.zip>`__
+
+Pros
+^^^^
+
+-  Simple code change
+-  Intuitive/documented meaning of protected is preserved: protected
+   members are visible only from ancestor and descendant classes (not
+   siblings).
+
+Cons
+^^^^
+
+-  Can be viewed as a breach of the `Liskov Substitution
+   Principle <http://en.wikipedia.org/wiki/Liskov_substitution_principle>`__.
+   Consider this case:
+
+.. code:: php
+
+   <?php
+   // Class P declares some protected members.
+   class P {
+     protected function f() { echo 'P::f()'; }
+   }
+
+   // Class C1 re-declares the inherited protected members.
+   class C1 extends P {
+     protected function f() { echo 'C1::f()'; }
+   }
+
+   class C2 extends P {
+     public static function test(P $liskov) {
+       $liskov->f();
+     }
+   }
+
+   C2::test(new P); // prints P::f()
+   C2::test(new C1); // Valid Liskov substitution. Should this fail?
+   ?>
+
+Removing the new rule causes a fatal error on the second invocation of
+C2::test(). If this is considered unacceptable, then this option should
+be rejected.
+
+Option 2
+~~~~~~~~
+
+If option 1 is dismissed due to the violation of LSP, it follows that
+the current rules for property access, callbacks, ``clone()`` and
+``destruct()`` are also violations of LSP and should be fixed. This
+option ensures that ``zend_get_function_root_class()`` is used
+consistently for all protected method checks, and implements equivalent
+functionality for protected property checks.
+
+.. _patch-1:
+
+Patch
+^^^^^
+
+-  `Patch <http://www.soal.org/php/protectedrfc/protected_opt2.txt>`__
+-  `Tests <http://www.soal.org/php/protectedrfc/protected_opt2_tests.zip>`__
+
+.. _pros-1:
+
+Pros
+^^^^
+
+-  Respects the Liskov Substitution Principle.
+
+.. _cons-1:
+
+Cons
+^^^^
+
+-  Non-trivial code change: requires that properties keep track of their
+   root declaring class.
+-  The protected modifier loses its intuitive/documented meaning, since
+   protected members may be accessible from siblings.
+
+Option 3
+~~~~~~~~
+
+This approach is similar to option 2, but modifies the new rule slightly
+so as to preserve the intuitive meaning of the protected modifier.
+Lookups of protected members on sibling classes fall back to the
+declaration from the common ancestor class, if available. To illustrate:
+
+.. code:: php
+
+   <?php
+   // Class P declares some protected members.
+   class P {
+     protected function f() { echo 'P::f()'; }
+   }
+
+   // Class C1 re-declares the inherited protected members.
+   class C1 extends P {
+     protected function f() { echo 'C1::f()'; }
+   }
+
+   // Class C2 attempts to access protected members on its sibling C1.
+   class C2 extends P {
+     public static function test() {
+       $c1 = new C1;
+       // C1::f() is not visible, so the call implicitly falls back to P::f().
+       $c1->f(); // Prints 'P::f()'.
+     }
+   }
+   ?>
+
+.. _patch-2:
+
+Patch
+^^^^^
+
+-  Patch to do.
+-  `Tests <http://www.soal.org/php/protectedrfc/protected_opt3_tests.zip>`__
+
+.. _pros-2:
+
+Pros
+^^^^
+
+-  Respects the Liskov Substitution Principle.
+-  Intuitive/documented meaning of protected is preserved: protected
+   members are visible only from ancestor and descendent classes (not
+   siblings).
+
+.. _cons-2:
+
+Cons
+^^^^
+
+-  Non-trivial code change
+-  Possibly confusing at first, as code that reads C1::f() may in fact
+   result in an invocation of P::f(). However, this behaviour would be
+   comparable to existing behaviour when accessing re-declared private
+   members of child classes. For example:
+
+.. code:: php
+
+   <?php
+   // Class P declares some private members.
+   class P {
+     private function f() { echo 'P::f()'; }
+     public static function test() {
+       $c = new C;
+       $c->f();  // falls back to P::f() prints P::f()
+     }
+   }
+    
+   // Class C1 re-declares the "inherited" private members.
+   class C extends P {
+     private function f() { echo 'C::f()'; }
+   }
+
+   P::test();
+   ?>
+
+Appendix
+--------
+
+Other potential LSP violations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If Option 1 is rejected on the grounds of a breach of LSP, then other
+arguable violations of LSP should be reviewed too. Below is a list of
+examples to be considered.
+
+Private static methods
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   class P {
+      private function f() { echo "In " . __METHOD__ . "\n"; }
+      private static function sf() { echo "In " . __METHOD__ . "\n"; }
+      
+      static function test(P $liskov) {
+         $class = get_class($liskov);
+         echo "Instance method call on instance of $class: ";
+         $liskov->f(); // if $liskov instanceof C, falls back to P::f()
+         echo "Static method call on $class: ";
+         $class::sf(); // if $liskov instanceof C, does not fall back to P::f() - fatal error.
+      }
+   }
+
+   class C extends P {
+      private function f() { echo "In " . __METHOD__ . "\n"; }
+      private static function sf() { echo "In " . __METHOD__ . "\n"; }
+   }
+
+   P::test(new P);
+   P::test(new C); // Valid Liskov substitution - should this fail?
+   ?>
+
+Private static properties
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   class P {
+      private $a = 'P::$a';
+      private static $sa = 'P::$sa';
+      
+      static function test(P $liskov) {
+         $class = get_class($liskov);
+         echo "Instance property access on instance of $class: ";
+         echo $liskov->a . "\n"; // if $liskov instanceof C, falls back to P::$a
+         echo "Static property access call on $class: ";
+         echo $class::$sa . "\n"; // if $liskov instanceof C, does not fall back to P::$sa - fatal error.
+      }
+   }
+
+   class C extends P {
+      private $a = 'C::$a';
+      private static $sa = 'C::$sa';
+   }
+
+   P::test(new P);
+   P::test(new C); // Valid Liskov substitution - should this fail?
+   ?>
+
+Additional Metadata
+-------------------
+
+:Original Authors: Robin Fernandes robinf@php.net
+:Original Status: Draft (Inactive)
+:Slug: protectedlookup
+:Wiki URL: https://wiki.php.net/rfc/protectedlookup

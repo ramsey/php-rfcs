@@ -1,0 +1,1138 @@
+Improve Hash_hkdf() Parameter Order And Handling
+================================================
+
+:PHP-RFC: 0540
+:Title: Improve Hash_hkdf() Parameter Order And Handling
+:Author: Yasuo Ohgaki <yohgaki@ohgaki.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2017-02-05
+:Version: 1.0
+
+Introduction
+------------
+
+Even cryptographic hashes have secret information disclosure/analysis
+risks with string concatenations. For example, following code is weak
+(could be more vulnerable).
+
+Example 1:
+
+.. code:: php
+
+     $new_key = hash('sha256', $secret_key . $derivation_key);
+
+To reduce this risk, HMAC was invented. HMAC is known to be more secure
+compare to previous example.
+
+Example 2:
+
+.. code:: php
+
+     $new_key = hash_hmac('sha256', $secret_key, $derivation_key);
+
+Note that HMAC divides keys as distinct parameters for better security.
+
+When deriving new keys, there are many cases that developers need
+additional application- and context-specific information such as a
+protocol number, algorithm identifiers, user identities, etc, to limit
+derived key context. For the same reason that Example 1 being weak,
+following code is weak.
+
+Example 3:
+
+.. code:: php
+
+     $new_key = hash_hmac('sha256', $secret_key, $derivation_key . $proto_version . $algo . $user_id);
+
+To reduce risk, keys and additional information should be divided into
+separated parameters.
+
+Example 4:
+
+.. code:: php
+
+     // $proto_version, $algo, $user_id are non-secret.
+     $info = $proto_version . $algo . $user_id;
+
+     // $prk must be cryptographically strong to derive strong $new_key.
+     $prk = hash_hmac('sha256', $secret_key, $derivation_key);
+
+     // $prk is strong and $info is non-secret, therefore $new_key is secured.
+     $new_key = hash_hmac('sha256', $prk, $info);
+
+This is the basic HKDF (HMAC based Key Derivation Function) operation.
+HKDF additionally supports shorting/extending key length for certain
+crypto tasks. Therefore, natural HKDF function signature would be
+
+.. code:: php
+
+     string HKDF(string $hash_algo, string $secret_key, string $derivation_key, string $info [, int $length]);
+
+Newly introduced HKDF function (hash_hkdf) has different signature that
+is inconsistent with hash() and hash_hmac() functions even if
+hash_hkdf() is simple hash_hmac() extension.
+
+Proposal
+--------
+
+Change hash_hkdf() signature from
+
+.. code:: php
+
+   string hash_hkdf(string $algo, string $ikm [, int $length = 0 [, string $info = '' [, string $salt = '' ]]])
+   Return value: Binary hash value ONLY.
+
+-  $algo: Hash algorithm. e.g. "sha1", "sha256"
+-  $ikm: Secret or non secret Input Key Material. Some kind of key. e.g.
+   Super secret master key, password, API key, etc.
+-  $length: Optional Output length. If omitted, default output size of
+   specified hash function.
+-  $info: Optional Generated key context. e.g Protocol number, user ID,
+   group ID, applicable URI, etc.
+-  $salt: Optional secret or non secret salt value. e.g Random value
+   such as nonce, timestamp, etc.
+
+to
+
+.. code:: php
+
+   string hash_hkdf(string $algo, string $ikm, string $salt , string $info [, int $length = 0 [, bool $raw_output = FALSE]])
+   Return value: HEX string hash value by default.
+
+-  $salt: Required. Set empty string to use without salt. More
+   precedence over $info because HKDF security depends on $salt or $ikm
+   strength.
+-  $info: Required. Set empty string to use without info. Optional
+   context but user should use hash_hmac() without $info.
+-  $length: Optional. Mostly needless unless users need key derivations
+   for low level crypto operations.
+-  $raw_output: Optional. Added for hash API consistency. Specify return
+   value format, raw(binary) or HEX. Majority of PHP use cases would
+   require non binary output and HEX is good enough.
+
+Note: Only changed/added parts are described.
+
+Short Rationale - security, parameter importance, hash_hmac() signature
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Insecure usage is easily possible with current signature.
+
+.. code:: php
+
+   $key = hash_hkdf('sha256', $weak_key); // Generate insecure $key!! <= This isn't secure at all w/o strong salt.
+   $key = hash_hkdf('sha256', $weak_key, 80); // Generate even more insecure $key!! <= Length does not add strength to OKM.
+   $key = hash_hkdf('sha256', $weak_key, 80, 'Admin'); // Generate even more insecure $key only usable in 'Admin' context!! <= info does not add strength to OKM because it supposed to be non secret.
+
+$salt is described as more important parameter than "info" in RFC 5869,
+and it recommends there should be appropriate $salt whenever it is
+possible. $info makes HKDF more valuable because simpler and faster
+hash_hmac(string $algo , string $data , string $key [, bool $raw_output
+= false ] ) could be used instead when $info could be omitted.
+hash_hkdf() could be viewed as hash_hmac() extension. (It is HMAC
+extension indeed) It should be better to have compatible signatures for
+API consistency.
+
+i.e. hash_hmac(), as well as hash(), already has optional $raw_output
+parameter
+
+.. code:: php
+
+   string hash_hmac(string $algo, string $data, string $key [, bool $raw_output = FALSE ])
+   Return value: HEX string hash value by default.
+
+Compatible hash_hkdf() signature would be
+
+.. code:: php
+
+   string hash_hkdf(string $algo, string $ikm, string $salt , string $info [, int $length = 0 [, bool $raw_output = FALSE ]])
+   Return value: HEX string hash value by default.
+
+For these reasons, $salt and $info are made to required parameters and
+made return to HEX hash value by default.
+
+Rationale behind salt as required parameter
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+-  Salt is responsible for IKM and output key security. Other parameters
+   are not.
+-  Salt is required as pre-shared key in most cases. Key parameter
+   should have more precedence.
+-  Users should use salt always when it is possible as per the RFC.
+
+   -  Must use strong salt if it is possible.
+   -  Must use secret salt if it is possible.
+   -  Must use strong secret salt when input key is weak.
+
+-  Omitting salt is usually a bad(weak) design. See 'hash_hkdf()
+   applications with PHP' and 'Other Use Cases' section.
+
+Rationale behind info as required parameter
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+-  hash_hmac() could be used when info has no use.
+-  info has well defined purpose, derive key(s) for specific context by
+   non secret information.
+
+Rationale behind changed return value
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+-  HEX string return value and "raw" flag parameter is required to be
+   consistent with existing hash functions.
+-  Most use cases with PHP will require string return values.
+
+hash('sha256', something) and hash_hmac('sha256', something) returns
+HEX. hash_hkdf() which is HMAC returns "binary" breaks API consistency
+and disturbs common usage with PHP.
+
+Detailed Rationale
+------------------
+
+HKDF (HMAC based KDF) is
+`KDF <https://en.wikipedia.org/wiki/Key_derivation_function>`__ (Key
+Devivation Function) defined by `RFC
+5869 <https://tools.ietf.org/html/rfc5869>`__. Although the RFC
+describes HKDF in low level crypto context, HKDF is designed as general
+purpose key derivation function. It derives secure keys for
+encryption/validation/authentication/etc from other weak/strong key
+information such as encryption key, API key, master key, password, etc.
+However, current hash_hkdf() signature is overly optimized for
+specialized cryptographic operation. (i.e. To derive "binary" output key
+with "specified length" for "strong input key". This is hardly be
+common/most used use case with PHP. In addition, it violates what the
+RFC recommends.) This PHP RFC proposes more generic HKDF behavior to use
+with PHP and consistent signature with other PHP hash functions.
+
+In short, HKDF is a general purpose hash function that is designed to
+create new key(s) from certain key using cryptographic hash function and
+HMAC. However, newly introduced hash_hkdf() is optimized for very
+limited usage.
+
+Terms
+'''''
+
+-  IKM - Input Key Material which is secret.
+-  OKM - Output Key Material which is derived by HKDF function.
+-  salt - Some entropy value which could be both secret and non secret.
+   Poor entropy like timestamp is acceptable when IKM is strong. Ideally
+   random value of used hash size. Poor IKM example is user defined
+   plain password.
+-  info - Context and application specific information such as a
+   protocol number, algorithm identifiers, user identities, etc. These
+   are non secret values by definition.
+-  length - Controls HKDF result length.
+-  strong key - Cryptographically secure(true) random bytes. Example 256
+   bit strong key is random_bytes(64).
+-  weak key - Anything not cryptographically secure(true) random bytes.
+   Example 256 bit weak key is hash('sha256', 'myrandompassword',
+   FALSE). This key is extremely weak key.
+-  output key - Hash value generated by hashes.
+
+Absolute requirement for safe HKDF usage
+''''''''''''''''''''''''''''''''''''''''
+
+-  Either IKM or salt must be strong.
+
+Typical HKDF usage with PHP
+'''''''''''''''''''''''''''
+
+-  Generate security tokens for CSRF protection, Object Access, etc,
+   from "IKM", ""salt" and "info".
+-  Generate new encryption keys for user, session, domain, groups, etc,
+   from "IKM", "salt" and "info".
+-  Generate secure URL that could be access with password without stored
+   key nor user information in server.
+
+Current Status
+''''''''''''''
+
+hash_hkdf() is added to master without a PHP RFC already. HKDF is HMAC
+based KDF hash function (HMAC extension) for general purpose key
+derivation. However, the signature (and return value) is overly
+optimized to derive key from strong IKM (input key material) with
+specified length. hash_hkdf() has following signature currently.
+
+.. code:: php
+
+     string hash_hkdf(string $algo, string $ikm [, int $length = 0 [, string $info = '' [, string $salt = '']]])
+     Returns "Binary" hash value ONLY.
+
+To understand what HKDF does, HMAC should be understood. PHP already has
+HAMC hash function as hash_hmac().
+
+.. code:: php
+
+     string hash_hmac ( string $algo , string $data , string $key [, bool $raw_output = false ] )
+     Returns "HEX" or "Binary" string hash value by $raw_output
+
+Please note that $key(required parameter) in hash_hmac() and $salt(the
+last optional parameter) in hash_hkdf() has the same task. [1]_ Also
+note that "return value" and return value option parameter
+inconsistencies.
+
+When $ikm (or $data) is strong and $length is equal to hash size,
+hash_hkdf() is not needed at all and hash_hmac() is enough for KDF task.
+Followings are cryptographically equivalent.  [2]_  [3]_
+
+.. code:: php
+
+     $key = hash_hmac('sha256', $ikm, $pre_shared_key, TRUE); // This is basically the same as following hash_hkdf()
+     $key = hash_hkdf('sha256', $ikm, 0, '', $pre_shared_key); // Key as the least important. It returns "Binary" hash value always unlike other hash functions.
+
+Not only hash_hkdf() has inconsistencies with existing function, but it
+also encourages insecure/poor usages.
+
+Example: Poor 256 bits (32 bytes) AES key derivation from 128 bits AES
+key. [4]_
+
+.. code:: php
+
+     // Weak key expansion from 128 bit key to 256 bit key 
+     $key256 = hash_hkdf('sha256', $key128); 
+     // Or even worse
+     $key256 = hash_hkdf('sha1', $key128, 32);
+
+Users must not do this unless derivation key(salt) cannot be used [5]_.
+Although aboves are misuse, it is clear that current hash_hkdf()
+encourages poor usage/misuse by ignoring strong RFC 5869 recommendation.
+ [6]_
+
+Correct ways are followings.
+
+Example: Derive new strong 256 bits AES key from 128 bits AES key.
+
+.. code:: php
+
+     $derivation_key = random_bytes(32); // Create and save a random 256 bit derivation key used to derive new key
+     // By hash_hmac()
+     $key256 = hash_hmac('sha256', $key128, $derivation_key, TRUE);
+     // By hash_hkdf()
+     $key256 = hash_hkdf('sha256', $key128, 0, '', $derivation_key);
+
+Even though hash_hmac() and HMAC based hash_hkdf() has similar use, they
+have different signature and return value. These are unnecessary
+inconsistencies. Moreover, current signature `encourages insecure usage
+in many ways <#other_use_cases>`__.
+
+In general, "salt" (or "**key**" with hash_hmac(), or "**pre-shared
+key**" with RFC 5869 ) is mandatory or should be use for almost all use
+cases. "salt" importance is clear because "salt" is often used as
+pre-shared "key". The RFC states "**designers of applications are
+therefore encouraged to provide salt values to HKDF if such values can
+be obtained by the application**". PHP internals are the **designers**.
+Nonetheless, current PHP implementation discourages "salt" parameter use
+by "salt as the last optional parameter".
+
+"length" is optional mostly. Modified output key length results in
+weaker key always. It shouldn't be used unless it is necessary for very
+limited crypto operations. [7]_
+
+"info" is what HKDF makes useful otherwise hash_hmac() is enough, but it
+still is optional with regard to derive secure keys.  [8]_
+
+Although hash_hmac() and hash_hkdf() has equivalent usage, new
+hash_hkdf() has inconsistent signature and "Binary" only return value.
+
+It makes little sense to have the most important parameter as the last
+optional parameter and encourages insecure usages/misuse. String return
+value is suitable for most hash_hkdf() usage with PHP also.
+
+In short, hash_hkdf() has unnecessary inconsistencies with
+hash()/hash_hmac() and RFC 5869 currently.
+
+Relation to other hash functions
+''''''''''''''''''''''''''''''''
+
+If cryptographic hash function is truly cryptographic hash, following
+hash usage that "concatenate $IKM and $key" should be safe.
+
+.. code:: php
+
+   $secure_hex_hash = hash('sha256', $IKM . $key);
+
+However, in real world, MD5/SHA-1 which was known as cryptographic hash
+function is obsolete and above usage is not safe enough. HMAC is made to
+address this issue by separating $IKM and $key as follows.
+
+.. code:: php
+
+   $secure_hex_hash = hash_hmac('sha256', $IKM, $key); 
+   // Note: $key is  individual parameter
+
+While hash_hmac() is good enough for many purposes, there are many cases
+that require additional non secret information (e.g. Key version,
+expiration time, applicable user/group) to generate secure hash. HKDF
+separates $key and additional non secret key information ($info) to keep
+generate hash value safe. Natural/consistent function signature/usage
+would be
+
+.. code:: php
+
+   $secure_binary_hash = hash_hkdf('sha256', $IKM, $key, $info); 
+   // Note: $key and $info are individual parameters
+
+RFC 5869 Notes for HKDF users
+'''''''''''''''''''''''''''''
+
+In many use cases, IKM could be strong key. However, in real world, IKM
+could be user defined poor plain text password.
+
+RFC 5869 "Notes for HKDF Users" states,
+
+    3.1. To Salt or not to Salt
+
+    **HKDF is defined to operate with and without random salt. This is
+    done to accommodate applications where a salt value is not
+    available. We stress, however, that the use of salt adds
+    significantly to the strength of HKDF**, ensuring independence
+    between different uses of the hash function, supporting
+    "source-independent" extraction, and strengthening the analytical
+    results that back the HKDF design.
+
+Primary purpose of "salt" is to generate stronger key from IKM by "salt"
+entropy. "Salt" is also often used as pre shared key. i.e. Salt is
+combined final key.
+
+    3.2. The 'info' Input to HKDF
+
+    **While the 'info' value is optional in the definition of HKDF, it
+    is often of great importance in applications**. Its main objective
+    is to bind the derived key material to application- and
+    context-specific information.
+
+Primary purpose of "info" is to distinguish key context so that
+generated key is only usable to specific context. i.e. Users should not
+use secret value for "info".
+
+Summary of IKM, salt and info parameter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+-  **Either IKM or salt must be strong key.**
+-  IKM could be weak or strong key, strong key is preferred but it's not
+   mandatory requirement. IKM could be user controllable.
+-  salt could be weak or strong key, secret or non secret, often used as
+   pre-shared key such as nonce. salt must not be user controllable.
+-  info is non secret optional value, shouldn't use secret value while
+   it could be used as combined key like salt.
+-  length is mostly optional unless you need to change existing key(IKM)
+   length. Modified length results in weaker output key almost always.
+-  When you provide both output key and salt (pre-shared key), you
+   should have timeout for IKM. Even if keys (output key and salt) are
+   supposed to be cryptographically strong  [9]_, brute force attack is
+   always possible. e.g. HMAC based AWS S3 presigned URL secret key
+   expires within a week. length shorter than hash size makes brute
+   force attack difficult in this case. e.g. sha512 with 48 bytes output
+   key leaves 16 bytes (128 bits) unguessable part to figure out exact
+   IKM.
+-  When key(s) must be unique, either IKM or salt must be unique.
+
+Although it may seem IKM and salt is interchangeable, there is important
+difference that salt must be not be user controllable. salt and info may
+seem they are interchangeable. However unlike salt, info is supposed to
+be non secret.
+
+hash_hkdf() behavior and other hash functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+md5() is used to obtains shorter result from hash_hkdf(). In practice,
+developers should consider SHA2 or better.
+
+    [yohgaki@dev PHP-master]$ ./php-bin -r
+    'var_dump(bin2hex(hash_hkdf("md5","123456")));'
+
+    string(32) "**1a4f9cd30ab214082d93ba850f1fa2b0**"
+
+    [yohgaki@dev PHP-master]$ ./php-bin -r
+    'var_dump(bin2hex(hash_hkdf("md5","123456", 20)));'
+
+    string(40) "**1a4f9cd30ab214082d93ba850f1fa2b0**\ 54cfcd49"
+
+    [yohgaki@dev PHP-master]$ ./php-bin -r
+    'var_dump(bin2hex(hash_hkdf("md5","123456", 20, "1")));'
+
+    string(40) "d0d1bbee08810d08a1e54f3a401308353cedd30b"
+
+    [yohgaki@dev PHP-master]$ ./php-bin -r
+    'var_dump(bin2hex(hash_hkdf("md5","123456", 20, "1", "1")));'
+
+    string(40) "ca16de591ad40f02e599428bf9f50772ebead3ff"
+
+Both "salt" and "info" parameters affect hash_hkdf() result. Although
+hash_hkdf() does some hash calculations (HMAC with specified hash) to
+derive secure key from IKM, salt and info, it could be understood as
+simple hash calculation by using separate parameters with
+hash_hmac(string $algo, string $data, string $key), i.e. $key is devided
+into $salt (secret or non secret) and $info (non secret) from user point
+of view. "length" parameter works in a way that weaken derived key.
+
+Therefore, following code is equivalent.  [10]_
+
+.. code:: php
+
+   // Although the value returned differs due to algorithm difference, they are equivalent
+   $key = hash_hmac('sha256', $ikm, $salt);
+   $key = bin2hex(hash_hkdf('sha256', $ikm, 0, '', $salt)); // Need bin2hex() because hash_hkdf() return binary result always
+
+Although followings are supposed to be equivalent if hash is truly
+cryptographic, but they aren't because hash functions have some
+characteristics that allow analysis.
+
+.. code:: php
+
+   // Trying to add 'Admin' only context information to derived $key
+   $key = hash('sha256', $ikm . $salt . 'Admin'); // This should work in theory, but has greater risks than blow
+   $key = hash_hmac('sha256', $ikm, $salt . 'Admin'); // Better, but involves risk by string concatenation 
+   $key = bin2hex(hash_hkdf('sha256', $ikm, 0, 'Admin', $salt)); // More secure than aboves because $info parameter('Admin') is designed for non secret
+
+hash_hkdf() applications with PHP
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Typical PHP HKDF application can be used with "salt". Application can
+provide better security with "salt", strong salt is mandatory in many
+cases. There are many PHP HKDF usages that can/should/must use with
+salt. This PHP RFC only describes 4 examples here. Developers must
+consider salt use for better security rather than omitting salt without
+proper consideration. Salt is often a part of final key which is
+combined key for users to access resources. Developers should use strong
+salt if it is possible. When IKM is weak, developer must use strong salt
+to keep IKM and OKM security.
+
+There are more usages for low level crypto, but these would not be
+common for average PHP developers/applications, so these are not
+covered. Crypto specialists should be able to use HKDF hash properly
+regardless of examples here.
+
+Example #1: Generating strong encryption key from weak key (password)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Although this usage would not be the most used with PHP, but following 3
+examples. This would be one of most common example usage for HKDF
+application. There will be this usage with PHP also.  [11]_
+
+#. Get user enter password for encryption. $ikm
+#. Get random strong salt for the user. [12]_ $salt e.g.
+   random_bytes(32) Keep salt secret.
+#. Specify key context if it is possible. $info e.g. "Confidential",
+   "Secret", "Restricted" and "Non secret"
+#. Specify key size if it is needed. $length
+#. Derive strong key from weak $ikm by hash_hkdf('sha256', $ikm,
+   $length, $info, $salt);
+#. Use the output key from 5 for encryption.
+
+User entered password is extremely weak key. Therefore, strong salt is
+mandatory for security unless such salt cannot be used. Omitting strong
+salt or non secret salt results in extremely weak encryption key that
+attackers can crack easily. $info and $length is optional.
+
+Example #2: Web page with access expiration that requires specific password
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This is second example that HKDF could be used with weak IKM (password).
+Note that this method fundamentally differs from user ID based access
+control. i.e No user registration required nor stored keys on server
+side.
+
+With this method, system does not have to store each combinations of
+$_GET['salt'], $_GET['timestamp'] (info) and $_POST['password'] (ikm).
+Except IKM is weak so that user can type it, other keys are
+cryptographically secured.
+
+Step1: Setting up keys
+
+#. Generate random password for the URL. $ikm e.g.
+   base64_encode(random_byte(8))
+#. Generate random strong unique salt(pre-shared key) will be stored in
+   the URL. $salt
+#. Get expiration $timestamp
+#. Get the URL and set expiration time. $info e.g.
+   **http://example.com/the_page?expire=$timestamp**
+#. Generate HKDF hash value ( $hk ) with 1, 2 and 3. hash_hkdf('sha256',
+   $ikm, 0, $info, $salt) as a part of combined key.
+#. Send final URL includes $salt (e.g.
+   **http://example.com/the_page?expire=$timestamp&salt=$salt&hk=$hk**)
+   via mail/etc.
+#. Notify password ($ikm) via SMS/etc.
+
+You may display URL(6) and send password(7) via email.
+
+Step2: Validating keys (Check expiration time before this procedure)
+
+#. Ask and get user to enter password ($ikm) that is supposed to be
+   generated by Step1.
+#. Get salt and hk parameters in the URL. $salt, $hk
+#. Get the URL ($info) without $salt and $hk. i.e.
+   **http://example.com/the_page?expire=$timestamp**
+#. Generate HKDF hash value with 1, 2 and 3. hash_hkdf('sha256', $ikm,
+   0, $info, $salt)
+#. Compare computed HKDF hash value by 4 and $hk from 2, allow access to
+   the page only when they match.
+
+Note: You would be better to deploy password brute force attack
+countermeasure. hash_password()/crypt() is designed for password, but
+developers shouldn't use it unless performance and DoS is not your
+concern, because hash_password()/crypt() is designed to be inefficient
+to calculate password hash.
+
+Example #3: Per user data encryption
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This is an example that "salt" over "info" results in better design.
+
+Less secure design
+
+#. Get application secret and strong secret master key stored in secure
+   place. e.g. $_ENV $ikm
+#. Get user ID for key to be user specific. $info
+#. Compute HKDF hash value with 1 and 2. hash_hkdf('sha256', $ikm, 0,
+   $info)
+#. Encrypt the user data with the key from 3
+
+Suppose your application had SQL injection vulnerability and your data
+is stolen including password hash and encrypted user data. Secret
+encrypted data can be decrypted by attackers.
+
+Better design
+
+#. Get application secret and strong secret master key stored in secure
+   place. e.g. $_ENV $ikm
+#. Get strong random salt as combined key, store it as secret key for
+   the user. $salt
+#. Compute HKDF hash value with 1 and 2. hash_hkdf('sha256', $ikm, 0,
+   '', $salt)
+#. Encrypt the user data with the key from 3
+
+Both method uses application wie "secret" $ikm. However, there is
+notable difference between these 2. This method uses only 1 secret $ikm
+key (master encryption key) and $info (user ID) is known to public, one
+stolen key allows attackers to decrypt all encrypted data. Latter method
+requires 2 secret information(master encryption $ikm key and secret
+$salt as combined key) to attack.
+
+Example #4: Advanced CSRF token - Only valid token for certain URL with fully configurable timeout
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This example shows how HKDF could be used for CSRF token that has both
+expiration time and context limitation, i.e. URL specific CSRF token
+with expiration without server resource.
+
+When session ID is used for CSRF token, there is risk that session ID
+can leak to others by saving & sending HTML page, by malware web browser
+plugins that read page content, etc. Therefore, session ID should not be
+used as CSRF token and CSRF token should have much shorter lifetime than
+session. [13]_
+
+Setting up CSRF token
+
+Generate strong unique CSRF token seed, store it in $_SESSION. (
+$_SESSION['CSRF_TOKEN_SEED'] = random_bytes(32) ) This ensures CSRF
+belongs to certain session.
+
+#. Use CSRF_TOKEN_SEED as secret key. ( $ikm ) (Simple CSRF token use
+   this value as token)
+#. Get expiration timestamp. ( $salt ) Weak salt is OK, since $ikm is
+   strong.
+#. Get the URL for this CSRF token. ( $info )
+#. Compute HKDF hash value with 1 and 2. hash_hkdf('sha256', $ikm, 0,
+   $info, $salt)
+#. Send HKDF hash value from 4 and timestamp from 2 to browser as CSRF
+   token. i.e. Set these as $_POST or $_GET parameters.
+
+Verifying CSRF token
+
+#. Get HKDF hash value and timestamp ( $salt ) value from request.
+#. Check if timestamp is not expired.
+#. Get requested URL. ( $info )
+#. Compute HKDF hash value from CSRF_TOKEN_SEED ( $ikm ), timestamp (
+   $salt ) and URL ( $info ). hash_hkdf('sha256', $ikm, 0, $info, $salt)
+#. Compare HKDF hash value sent by browser and server computed HKDF hash
+   value if they match.
+
+Secure CSRF token expiration and context (URL) can be defined with this
+method regardless of session ID lifetime. Developers do not need
+hash_hkdf() when context (URL) is not required because this could be
+done with hash_hmac().
+
+Since this CSRF token in valid only for specific URL, the token cannot
+be used for other URLs. Timeout is configurable for each URL. Developers
+can have more precise access controls according to URL importance. i.e.
+Shorter timeout for important, longer for less important.
+
+You can create expiration enabled URL for limited use with similar
+steps. This could be used to allow anonymous storage object access with
+relatively secure manner. Example is AWS S3 presigned URL.
+
+Discussions
+-----------
+
+Salt is optional. - Salt could be optional, but it should be provided always whenever it is possible.
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    On Mon, Jan 16, 2017 at 8:16 PM, Andrey Andreev narf@devilix.net
+    wrote:
+
+    There's no comment from you on the PR, inline or not, but I can
+    assure you this was not overlooked.
+
+    Salt is optional because RFC 5869 allows it to be optional. There's
+    a reason for each of the current defaults work as they do, as well
+    as the parameter positions:
+
+    - Length is in no way actually described as optional, and that makes
+    sense as the function's purpose is to create cryptographic keys,
+    which by nature have fixed lengths. The only reason we could make
+    Length optional is because hash functions' output sizes are known
+    values, and matching the desired OKM length with the hash function
+    size makes for better performance.
+
+    - Info can be empty, but the algorithm is pretty much meaningless
+    without it. The purpose of HKDF is to derive 2+ outputs from a
+    single input, with the Info parameter serving as the differentiating
+    factor.
+
+    - Salt is ... while recommended, the only thing actually optional.
+
+Salt cannot be optional to derive strong key(s) when IKM is weak. In
+order to obtain strong output key, either input key or salt must be
+cryptographically strong. i.e. When input key is weak, strong salt is
+mandatory by HKDF definition.
+
+While salt could be optional for strong IKM, but as the RFC describes
+"salt" as "**salt adds significantly to the strength of HKDF**" and
+"**designers of applications are therefore encouraged to provide salt
+values to HKDF if such values can be obtained by the application.**",
+"info" is actually optional. "Salt" should be used always whenever it is
+possible as the RFC recommends.
+
+In any cases, "info"(context) has less importance than "salt"(entropy or
+pre-shared key/combined key) at least. With PHP, length is not needed
+for most HKDF applications.
+
+    On Mon, Jan 16, 2017 at 8:08 PM, Nikita Popov nikita.ppv@gmail.com
+    wrote:
+
+    Making the salt required makes no sense to me.
+
+    HKDF has a number of different applications:
+
+    a) Derive multiple strong keys from strong keying material. Typical
+    case for this is deriving independent encryption and authentication
+    keys from a master key. This requires only specification of $length.
+    A salt is neither necessary nor useful in this case, because you
+    start with strong cryptographic keying material.
+
+    b) Generating per-session (or similar) keys from a (strong
+    cryptographic) master key. For this purpose you can specify the
+    $info parameter. again, a salt is neither necessary nor useful in
+    this case. (You could probably also use $salt instead of $info in
+    this case, but the design of the function implies that $info should
+    be used for this purpose.)
+
+    c) Extracting strong cryptographic keying material from weak
+    cryptographic keying material. Standard example here is extracting
+    strong keys from DH g^xy values (which are non-uniform) and similar.
+    This is the usage that benefits from a $salt.
+
+    d) Combinations thereof.
+
+    Remember that HKDF is an extract-and-expand algorithm, and the
+    extract step (which uses the salt) is only necessary if the input
+    keying material is weak. We always include the extract step for
+    compatibility with the overall HKDF construction (per the RFCs
+    recommendation), but it's essentially just an unnecessary operation
+    if you work on strong keying material.
+
+    The only thing that we may want to discuss is whether we should swap
+    the $info and the $salt parameters. This depends on which usage (b
+    or c) we consider more likely.
+
+a) When deriving keys, "salt" should be supplied whenever it's possible
+in general. Simply deriving other key w/o salt would not be typical, not
+recommended at least, usage with PHP because PHP is not used to
+implement basic cryptographic algorithms. i.e. a) statement only
+applicable to specific application. Unless weaker encryption/etc is
+required, e.g. generate 128 bit AES key from 256 bit AES key, modified
+length results in weaker output key than it could be as described in
+this PHP RFC.
+
+b) If I assume 'user identity' is used for "info", then derived key
+wouldn't be "per session" key, but "per user" key. So assuming session
+ID is used as "info". While it works, the RFC states "info" as are non
+secret information, i.e. "a protocol number, algorithm identifiers, user
+identities, etc.". Session ID is secret key. We don't have to follow the
+RFC recommendations always, but storing secret key in "info"(context)
+violates the RFC.
+
+For per-session encryption/etc, simple choice for secret input key(IKM)
+would be per-session master key stored in $_SESSION, random string as
+"salt" which is a part of final key, optional "info"(context) could be
+used for additional information such as "confidential","public", etc.
+
+We are implementing RFC 5869. Not following the RFC recommendation does
+not make sense.
+
+c) True, but "salt" is not only good for generating strong key from weak
+key according to the RFC. "salt" can be used as part of final key just
+like crypt() calculates password hash by "salt and password".
+
+d) True, but you seems to be missed "non secret salt" usage. 'Other Use
+Cases' section includes many "non secret salt" that are used as final
+key. Like examples in this PHP RFC, there are valid use cases with very
+weak IKM.
+
+"**the extract step (which uses the salt) is only necessary if the input
+keying material is weak**", this cannot be true by the RFC.
+
+What the RFC states is
+
+    Yet, even a salt value of less quality (shorter in size or with
+    limited entropy) may still make a significant contribution to the
+    security of the output keying material
+
+It does not say salt is only good for weak input keys, but generated
+output key will have significantly better security.
+
+Should not be used with weak key. - It is ok by HKDF definition.
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    On Sun, Feb 5, 2017 at 1:20 AM, Tom Worster fsb@thefsb.org wrote:
+    The salt defends against certain attacks on predictable input key
+    material, i.e. weak passwords. But HKDF should not normally be used
+    for passwords because it is unsuitable.
+
+Strong input key is prefered, but input key shouldn't not have to be
+strong. For weak input keys, strong salt should be used though.
+
+There are valid usages with weak input keys as this PHP RFC examples
+illustrated. Weak input key is perfectly OK when it is used properly.
+
+Other Use Cases
+---------------
+
+Following use case examples are using new hash_hkdf() signiture. $ikm
+could be any valid keys. Secret master key is assumed for convenience.
+Generally speaking, secret master key for all derived keys is difficult
+to maintain, developers are better to avoid it if it is possible.
+
+As you can understand from bad examples, omitting salt as an optional
+parameter results in nonoptimal implementations.
+
+Following examples use proposed hash_hkdf() function signature.
+
+Note: When you provide both output key and salt (pre-shared key), you
+should have timeout for IKM. Even if keys (output key and salt) are
+supposed to be cryptographically strong, brute force attack is always
+possible. e.g. HMAC based AWS S3 presigned URL secret key expires within
+a week.
+
+Create Strong Key From Weak Key For a User
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Bad example first
+
+#. Get plain text password. ($ikm)
+#. Get random string to make strong password. ($info)
+#. Generate encryption key. hash('sha256', $ikm, NULL, $info);
+
+Although it works, developers shouldn't do this because $info is
+intended for context which is public information as per the RFC.
+
+Correct way is
+
+#. Get plain text password for user. ($ikm)
+#. Get secret random string to make strong password. ($salt)
+#. Generate encryption key. hash('sha256', $ikm, $salt);
+
+Note: "salt" is intended to be secret or non secret as per the RFC, but
+salt should be secret for this application. Since $ikm is very weak,
+salt must be strong.
+
+Per User Encryption Key
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Bad example first
+
+#. Get secure secret master key. ($ikm)
+#. Get user ID. ($info)
+#. Generate encryption key. hash('sha256', $ikm, NULL, $info);
+
+Developers shouldn't do this unless they have no choice because once
+encryption key is stolen, they cannot issue new encryption key.
+
+Correct way is
+
+#. Get secure secret master key. ($ikm)
+#. Generate secret or non secret random slat. ($salt) Save salt and
+   provide salt as part of key to user if it is needed.
+#. Get user ID. ($info)
+#. Generate encryption key. hash('sha256', $ikm, $salt, $info);
+
+Developers can issue new encryption keys as many as they need with this
+way for user.
+
+Combined key, output key and salt, may be disclosed to user as
+encryption key. Key disclosure is not necessary for many web
+applications because encryption and decryption will be done by servers.
+
+Per Session Encryption Key
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Bad example first
+
+#. Get secure secret master key. ($ikm)
+#. Get session ID. ($info)
+#. Generate encryption key. hash('sha256', $ikm, NULL, $info);
+
+Although it works, developers shouldn't do this because $info is
+intended for context(public information) as per the RFC.
+
+Correct way is
+
+#. Get secure secret master key. ($ikm)
+#. Set secret random salt to session, use it as salt. ($salt)
+#. Generate encryption key. hash('sha256', $ikm, $salt);
+
+URL access key
+~~~~~~~~~~~~~~
+
+Bad example first
+
+#. Get secure secret master key. ($ikm)
+#. Get URL should be protected. ($info)
+#. Generate access key. hash('sha256', $ikm, NULL, $info);
+
+Developers shouldn't do this unless they are absolutely sure that URL is
+accessible with the generated key regardless of stolen key.
+
+Better way is
+
+#. Get secure secret master key. ($ikm)
+#. Get random salt. ($salt) Save salt and provide salt as a part of key.
+   i.e. pre-shared key.
+#. Get URL should be protected. ($info)
+#. Generate access key. hash('sha256', $ikm, $salt, $info);
+
+By keeping track valid $salt values, developers can control key
+validity.
+
+Limited URL access key
+~~~~~~~~~~~~~~~~~~~~~~
+
+Good example only
+
+#. Get secure secret master key. ($ikm)
+#. Get unique timestamp for access control as non secret salt. ($salt)
+   Provide salt as a part of key.
+#. Get URL should be protected. ($info) Accessed URL is known to server
+   when user accesses it.
+#. Generate access key. hash('sha256', $ikm, $salt, $info);
+
+Any keys that have timeout can build similarly.
+
+Note: To generate unique ID, either $ikm or $salt must be unique.
+Current uniqid() result is not unique enough.
+
+Generate Key with Timeout
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Good example only
+
+#. Get secure secret master key. ($ikm)
+#. Get unique random string for access control as non secret salt.
+   ($salt) Provide salt as a part of key.
+#. Get timestamp for timeout. ($info)
+#. Generate access key. hash('sha256', $ikm, $salt, $info);
+
+Generate Key Whatever Purpose For a User
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Bad example first
+
+#. Get user's password information. ($ikm)
+#. Get user ID. ($info)
+#. Generate access key. hash('sha256', $ikm, NULL, $info);
+
+Developers shouldn't do this because developers cannot issue new key for
+the user, cannot revoke keys. Since input is weak, there must be strong
+salt also.
+
+Better way is
+
+Note: this example's salt is secret partially, non secret partially.
+
+#. Get user's password information. ($ikm)
+#. Get random secret master salt (Per system or per user. Per user
+   prefered.) + get random salt(user key) as combined key. ($salt) Save
+   user key salt and provide it as a part of key.
+#. Generate access key. hash('sha256', $ikm, $salt);
+
+By keeping track salt values, developers can control key validity.
+
+Note: generated keys could be non unique.
+
+Generate Key from Whatever ID
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Bad example first
+
+#. Get secret master key. ($ikm)
+#. Get ID. ($info) Could be non secret ID like group ID displayed in
+   URL.
+#. Generate access key. hash('sha256', $ikm, NULL, $info);
+
+Developers shouldn't do this because developers cannot issue new key for
+the user, cannot revoke keys. Since input is weak, there must be strong
+salt also.
+
+#. Get secret master key. ($ikm)
+#. Get and save random secret salt for ID ($salt)
+#. Get ID ($info) Could be non secret ID like group ID display in URL.
+#. Get key version ($info)
+#. Generate key. hash('sha256', $ikm, $salt, $info);
+
+Use output key, ID and key version as combined key. Developers may
+revoke keys by key version.
+
+Note: To generate unique key, either $ikm or $salt must be unique.
+
+Backward Incompatible Changes
+-----------------------------
+
+It is merged into PHP 7.1.2.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 7.x and 7.1.x
+
+RFC Impact
+----------
+
+PHP 7.1.2/7.1.3 has hash_hkdf().
+
+Open Issues
+-----------
+
+Please comment if any.
+
+Unaffected PHP Functionality
+----------------------------
+
+Other than hash_hkdf() signature and return value, nothing is affected.
+
+Future Scope
+------------
+
+Please comment if any
+
+Proposed Voting Choices
+-----------------------
+
+State whether this project requires a 2/3
+
+Question: Fix hash_hkdf() signature and behavior
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Vote start: 2017-03-26 Vote end: 2017-04-07 UTC 23:59:59
+
+Patches and Tests
+-----------------
+
+TBD
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+References
+----------
+
+Links to external references, discussions or RFCs
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+.. [1]
+   i.e. Generate strong output key
+
+.. [2]
+   Derived $key value differs due to HKDF algorithm, but result is
+   equivalently secure.
+
+.. [3]
+   HKDF apply Extend step always, i.e. apply additional HMAC with serial
+   value, so it could be said Extend step adds additionally security.
+   However, it has little significance in the sense of cryptographic
+   strength of output key.
+
+.. [4]
+   Developers should provide more entropy(salt/key) to derive strong 256
+   bit key from 128 bit key. Without entropy(salt/key), derived key
+   simply will not have enough entropy.
+
+.. [5]
+   Entropy in derived keys do not change at all with these methods, i.e.
+   Not strong as it should be. Therefore, they are much weaker than
+   methods use appropriate derivation key, i.e. salt
+
+.. [6]
+   RFC 5869 states "designers of applications are therefore encouraged
+   to provide salt values to HKDF if such values can be obtained by the
+   application"
+
+.. [7]
+   e.g. Some encryption keys has larger size and has to make shorter key
+   from it, or vice versa.
+
+.. [8]
+   "info" is designed to distinguish key context, not for key security
+   by RFC 5869.
+
+.. [9]
+   Cryptographic hashes are supposed to have characteristic that makes
+   guessing output(hash) and input(IKM, salt, info for HKDF) relation
+   extremely hard.
+
+.. [10]
+   hash_hkdf() adds more security by extra hash_hmac($hash, $PRK,
+   "\x01"), but single hash_hmac() should be sufficient by HAMC
+   definition
+
+.. [11]
+   If you are storing login password, you should use hash_password()
+   instead.
+
+.. [12]
+   Salt generated by 2 is better to belong only to the user. i.e.
+   Generate random strong salt for each user and keep it for the user.
+   It could be application wide shared salt, but this is more
+   vulnerable.
+
+.. [13]
+   For similar reasons, session ID must be regenerated in short period,
+   hijacked session must be detected regardless of SSL and session must
+   be managed precisely. Refer to
+   https://wiki.php.net/rfc/precise_session_management for details.
+
+Additional Metadata
+-------------------
+
+:Create Date: 2017-02-05
+:Discussion Start: 2017-03-26
+:Original Authors: Yasuo Ohgaki yohgaki@ohgaki.net
+:Original Status: Rejected
+:Slug: improve_hash_hkdf_parameter
+:Wiki URL: https://wiki.php.net/rfc/improve_hash_hkdf_parameter

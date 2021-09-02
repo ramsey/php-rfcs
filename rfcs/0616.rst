@@ -1,0 +1,265 @@
+Preloading
+==========
+
+:PHP-RFC: 0616
+:Title: Preloading
+:Author: Dmitry Stogov <dmitry@zend.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2018-10-18
+:PHP-Version: 7.4
+:Version: 0.9
+
+Introduction
+------------
+
+PHP has been using opcode caches for ages (APC, Turck MMCache, Zend
+OpCache). They achieve significant performance boost by **ALMOST**
+completely eliminating the overhead of PHP code recompilation. With an
+opcode cache, files are compiled once (on the first request that uses
+them), and are then stored in shared memory. All the following HTTP
+requests use the representation cached in shared memory.
+
+This proposal is about the "**ALMOST**", mentioned above. While storing
+files in an opcode cache eliminates the compilation overhead -- there is
+still cost associated with fetching a file from the cache and into a
+specific request's context. We still have to check if the source file
+was modified, copy certain parts of classes and functions from the
+shared memory cache to the process memory, etc. Notably, since each PHP
+file is compiled and cached completely independently from any other
+file, we can't resolve dependencies between classes stored in different
+files when we store the files in the opcode cache, and have to re-link
+the class dependencies at run-time on each request.
+
+This proposal is inspired by the "Class Data Sharing" technology
+designed for Java HotSpot VM. It aims to provide users with the ability
+to trade in some of the flexibility that the conventional PHP model
+provides them, for increased performance. On server startup -- before
+any application code is run -- we may load a certain set of PHP files
+into memory - and make their contents "permanently available" to all
+subsequent requests that will be served by that server. All the
+functions and classes defined in these files will be available to
+requests out of the box, exactly like internal entities (e.g. strlen()
+or Exception). In this way, we may **preload** entire or partial
+frameworks, and even the entire application class library. It will also
+allow for introducing "built-in" functions that will be written in PHP
+(similar to HHVM's sytemlib). The traded-in flexibility would include
+the inability to update these files once the server has been started
+(updating these files on the filesystem will not do anything; A server
+restart will be required to apply the changes); And also, this approach
+will not be compatible with servers that host multiple applications, or
+multiple versions of applications - that would have different
+implementations for certain classes with the same name - if such classes
+are preloaded from the codebase of one app, it will conflict with
+loading the different class implementation from the other app(s).
+
+Proposal
+--------
+
+Preloading is going to be controlled by just a single new php.ini
+directive - **opcache.preload**. Using this directive we will specify a
+single PHP file - which will perform the preloading task. Once loaded,
+this file is then fully executed - and may preload other files, either
+by including them or by using the opcache_compile_file() function.
+Previously, I tried to implement a rich DSL to specify which files to
+load, which to ignore, using pattern matching etc, but then realized
+that writing the preloading scenarios in PHP itself was much more simple
+and much more flexible.
+
+For example the following script introduces a helper function, and uses
+it to preload the whole Zend Framework.
+
+.. code:: php
+
+   <?php
+   function _preload($preload, string $pattern = "/\.php$/", array $ignore = []) {
+     if (is_array($preload)) {
+       foreach ($preload as $path) {
+         _preload($path, $pattern, $ignore);
+       }
+     } else if (is_string($preload)) {
+       $path = $preload;
+       if (!in_array($path, $ignore)) {
+         if (is_dir($path)) {
+           if ($dh = opendir($path)) {
+             while (($file = readdir($dh)) !== false) {
+               if ($file !== "." && $file !== "..") {
+                 _preload($path . "/" . $file, $pattern, $ignore);
+               }
+             }
+             closedir($dh);
+           }
+         } else if (is_file($path) && preg_match($pattern, $path)) {
+           if (!opcache_compile_file($path)) {
+             trigger_error("Preloading Failed", E_USER_ERROR);
+           }
+         }
+       }
+     }
+   }
+
+   set_include_path(get_include_path() . PATH_SEPARATOR . realpath("/var/www/ZendFramework/library"));
+   _preload(["/var/www/ZendFramework/library"]);
+
+As mentioned above, preloaded files remain cached in opcache memory
+forever. Modification of their corresponding source files won't have any
+effect without another server restart. All functions and most classes
+defined in these files will be permanently loaded into PHP's function
+and class tables and become permanently available in the context of any
+future request. During preloading, PHP also resolves class dependencies
+and links with parent, interfaces and traits. It also removes
+unnecessary includes and performs some other optimizations.
+
+``opcache_reset()`` is not going to reload preloaded files. It's just
+not possible using current opcache design, because during restart, they
+may be used by some process, and any modifications may lead to crash.
+
+``opcache_get_status`` is extended to provide information about
+preloaded functions, classes and scripts under the "preload_statistics"
+index.
+
+Static members and static variables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To avoid misunderstanding, it is clear stated that preloading doesn't
+change the behavior of static class members and static variables. Their
+values are not going to relive request boundary.
+
+Preloading Limitation
+~~~~~~~~~~~~~~~~~~~~~
+
+Only classes without unresolved parent, interfaces, traits and constant
+values may be preloaded. If a class doesn't satisfy to this condition,
+it's stored in opcache SHM as a part of corresponding PHP script in the
+same way as without preloading. Also, only top-level entities that are
+not nested within control structures (e.g. if()...) may be preloaded.
+
+On Windows, it's also not possible to preload classes inherited from
+internal ones. Windows ASLR and absence of fork() don't allow to
+guarantee the same addresses of internal classes in different processes.
+
+Implementation Details
+~~~~~~~~~~~~~~~~~~~~~~
+
+Preloading is implemented as a part of the opcache on top of another
+(already committed) patch that introduces "immutable" classes and
+functions. They assume that the immutable part is stored in shared
+memory once (for all processes) and never copied to process memory, but
+the variable part is specific for each process. The patch introduced the
+MAP_PTR pointer data structure, that allows pointers from SHM to process
+memory.
+
+Backward Incompatible Changes
+-----------------------------
+
+Preloading does not affect any functionality unless it is explicitly
+used. However, if used, it may break some application behavior, because
+preloaded classes and functions are always available, and
+function_exists() or class_exists() checks would return TRUE, preventing
+execution of expected code paths. As mentioned above, incorrect usage on
+a server with more than one app could also result in failures. As
+different apps (or different versions of the same app) may have the same
+class/function names in different files, if one version of the class is
+preloaded - it will prevent loading of any other version of that class
+defined in a different file.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.4
+
+RFC Impact
+----------
+
+To Opcache
+~~~~~~~~~~
+
+Preloading is implemented as a part of opcache.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+-  opcache.preload - specifies a PHP script that is going to be compiled
+   and executed at server start-up.
+
+Performance
+-----------
+
+Using preloading without any code modification I got ~30% speed-up on
+ZF1_HelloWorld (3620 req/sec vs 2650 req/sec) and ~50% on ZF2Test (1300
+req/sec vs 670 req/sec) reference applications. However, real world
+gains will depend on the ratio between the bootstrap overhead of the
+code and the runtime of the code, and will likely be lower. This will
+likely provide the most noticeable gains with requests with short very
+runtimes, such as microservices.
+
+Future Scope
+------------
+
+-  Preloading may be used as systemlib in HHVM to define "standard"
+   functions/classes in PHP
+-  It might be possible to pre-compile the preload script and use a
+   binary-form (may be even native .so or .dll) to speed-up server
+   start-up.
+-  In conjunction with ext/FFI (dangerous extension), we may allow FFI
+   functionality only in preloaded PHP files, but not in regular ones
+-  It's possible to perform more aggressive optimizations and generate
+   better JIT code for preloaded functions and classes (similar to HHVM
+   Repo Authoritative mode in HHVM)
+-  It would be great, to extend preloading with some kind of deployment
+   mechanism, to update preloaded bundle(s) without server restart.
+
+Proposed Voting Choices
+-----------------------
+
+The RFC requires 50%+1 majority. The voting started **2018-11-06** and
+will close on **2018-11-14**
+
+Question: Include preloading ability into PHP-7.4
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+The pull request for RFS is at: https://github.com/php/php-src/pull/3538
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. merged into 7.4
+#. git commit
+   `f6d227ed4f5d4c0276eb720806e808baceb37f10 <https://github.com/php/php-src/commit/f6d227ed4f5d4c0276eb720806e808baceb37f10>`__
+#. a
+   `link <http://php.net/manual/en/opcache.configuration.php#ini.opcache.preload>`__
+   to the PHP manual entry for the feature
+
+References
+----------
+
+Links to external references, discussions or RFCs
+
+-  `Java HotSpot Class Data
+   Sharing <https://docs.oracle.com/javase/8/docs/technotes/guides/vm/class-data-sharing.html>`__
+-  `Class Data Sharing Presentation by Volker
+   Simonis <https://simonis.github.io/JBreak2018/CDS/cds.xhtml>`__
+-  `Code Sharing among Virtual
+   Machines <http://www.inf.usi.ch/faculty/nystrom/papers/cdn02-ecoop.pdf>`__
+-  `Repo Authoritative mode in
+   HHVM <https://docs.hhvm.com/hhvm/advanced-usage/repo-authoritative>`__
+-  `Immutable Classes implementation in
+   PHP <https://github.com/php/php-src/commit/d57cd36e47b627dee5b825760163f8e62e23ab28>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: Dmitry Stogov, dmitry@zend.com
+:Slug: preload
+:Wiki URL: https://wiki.php.net/rfc/preload

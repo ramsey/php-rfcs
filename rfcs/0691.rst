@@ -1,0 +1,330 @@
+Write-Once Properties
+=====================
+
+:PHP-RFC: 0691
+:Title: Write-Once Properties
+:Author: Máté Kocsis <kocsismate@php.net>
+:Status: Declined
+:Type: Standards Track
+:Created: 2020-02-18
+:PHP-Version: 8.0
+:Version: 1.0
+
+Introduction
+------------
+
+This RFC proposes to add support for a new property modifier that would
+allow properties to be initialized, but not modified afterwards. This
+feature would be useful in situations where one wants to guarantee that
+a property remains the same for the lifetime of an object - which is
+usually the case for Value Objects or Data Transfer Objects. Other
+languages, like Java and C# also have similar - but not exactly the same
+- concepts for a long time (``final`` and ``readonly`` respectively).
+
+Proposal
+--------
+
+Run-time behaviour
+~~~~~~~~~~~~~~~~~~
+
+"Write-once" properties in PHP (the actual keyword is to be decided)
+could be initialized by an assignment operation. Contrary to how
+``final`` properties in Java work, this RFC proposes to allow the
+initialization of object properties after object construction. The main
+purpose of choosing this approach is to make lazy loading possible -
+which is an important aspect for many PHP applications. In addition to
+object properties, class properties can also use the modifier in
+question with the same rules.
+
+As soon as initialization is done, any other attempt to assign a value
+to "write-once" properties results in an exception. Besides assignment,
+the increment, decrement, and unset operations are also forbidden. As
+arrays are an immutable data structure in PHP, any attempt to mutate a
+property of array type (adding/removing/changing items) is forbidden.
+However, properties that have an object type still remain mutable
+internally (see example below). In order to avoid possible problems,
+references on "write-once" properties are forbidden as well.
+
+.. code:: php
+
+
+   class Foo
+   {
+       <keyword> public int $a;
+       <keyword> public array $b;
+       <keyword> public object $c;
+
+       public function __construct()
+       {
+           $this->a = 1;
+           $this->b = ["foo"];
+       }
+   }
+
+   $foo = new Foo();
+
+   $foo->a = 2;        // EXCEPTION: property a has already been initialized
+   $foo->a++;      // EXCEPTION: incrementing/decrementing is forbidden
+   unset($foo->b);     // EXCEPTION: unsetting is forbidden
+   $foo->b[] = "bar";  // EXCEPTION: array values can't be modified
+   next($foo->b);      // EXCEPTION: internal pointer of arrays can't be modified as well
+   $var = &$this->b;   // EXCEPTION: reference isn't allowed
+   $this->b; = &$var;  // EXCEPTION: reference isn't allowed
+
+   key($foo->b);           // SUCCESS: internal pointer of arrays is possible to read
+   $foo->c = new stdClass();   // SUCCESS: property c hasn't been initialized before
+   $foo->c->foo = "foo";       // SUCCESS: objects are still mutable internally
+
+Furthermore, cloning objects with "write-once" properties is supported,
+in which case properties remain in the state (initialized/uninitialized)
+they were before. In other words, once a "write-once" property is
+initialized, it can't be changed after cloning. If you still want to
+modify them, you have to create a new object. Although this behaviour
+might be inconvenient in some cases, I decided not to address the
+problem in the current RFC in order to reduce its scope. The solution
+could be to add support for either object initializers or property
+mutation **during** the ``clone`` operation. As these features are
+neither a prerequisite for "write-once" properties, nor a trivial
+problem, it's better to properly discuss the question on its own.
+
+Compile-type restrictions
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+As untyped properties have an implicit default value (``null``) in the
+absense of an explicit one, their usefulness would be very limited. In
+order to avoid the introduction of unintiutive workarounds, this RFC
+proposes to disable the property modifier in question for them.
+Contrarily to untyped properties, typed properties are in uninitialized
+state by default (meaning, they don't have a value yet), so they play
+well with the write-once semantics.
+
+This choice has a slightly inconvenient implication of not being able to
+use "write-once" properties together with resources - since PHP doesn't
+have the ``resource`` type declaration. Currently, a possible workaround
+is to wrap resources in objects, but another way to solve the issue
+could be provided from PHP's side by adding support for a ``mixed``
+type.
+
+Another restriction of "write-once" properties is that they can't have a
+default value. Thus, the following syntax is forbidden:
+
+.. code:: php
+
+
+   class Foo {
+       <keyword> public int $a = 0;
+   }
+
+Instead, property ``$a`` should be initialized via an assignment either
+in the constructor or somewhere else. The purpose of this restriction is
+to avoid offering two syntaxes for declaring class constants as well as
+keeping our freedom to add new features to PHP that would otherwise have
+the possibility to interfere with the semantics of default values of
+"write-once" properties.
+
+Furthermore, the introduction of "write-once" properties impose slight
+changes to property variance validation. Namely, "write-once" properties
+must not override regular properties because the parent class expects
+them to be mutable. That's why the following example results in a
+compilation error:
+
+.. code:: php
+
+
+   class Foo {
+       public int $a;
+   }
+
+   class Bar extends Foo {
+       <keyword> public int $a;
+   }
+
+However, regular properties can override "write-once" properties like
+below:
+
+.. code:: php
+
+
+   class Foo {
+       <keyword> public int $a;
+   }
+
+   class Bar extends Foo {
+       public int $a;
+   }
+
+Serialization
+~~~~~~~~~~~~~
+
+"Write-once" properties can be serialized just like other properties.
+However, a new rule will apply to them: malformed serialized data which
+sets a "write-once" property multiple times throws an exception.
+
+Reflection
+~~~~~~~~~~
+
+At last, I'm proposing to add a new ``ReflectionProperty`` method with
+which it would be possible to retrieve if a property has the modifier in
+question. Depending on the keyword choice, I'd suggest using the
+``isImmutable()``, ``isLocked()``, ``isReadonly()``, or
+``isWriteonce()`` method names.
+
+Alternative Approaches
+----------------------
+
+As there are quite a few alternatives to implement a similar feature, I
+would like to highlight why the current one was chosen. Please find
+below a short evaluation about the various possibilities that were also
+considered, but got rejected.
+
+Read-only semantics
+~~~~~~~~~~~~~~~~~~~
+
+This is the implementation that Java and C# both use. It has really
+clear rules: a ``final`` or ``readonly`` property has to be initialized
+before object construction ends by assigning value to them exactly once,
+and no further changes are allowed afterwards. On the plus side, we can
+always be sure that a property has a value, but the downside is that
+lazy initialization is not possible anymore with this approach. Apart
+from the (unnecessarily) strict behaviour, another problem is that this
+implementation is hardly applicable in PHP where object construction is
+a "fuzzy" term.
+
+Write-before-construction semantics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+According to this idea, a property could be assigned to multiple times
+before object construction ends, and no further changes would be allowed
+from that point on. Even though this approach makes it easier to deal
+with bigger class hierarchies (in which case it's likely that multiple
+constructors are involved in object creation, increasing the chance of
+assigning to the same property multiple times), it also has the same
+disadvantages as the read-only approach.
+
+Property accessors
+~~~~~~~~~~~~~~~~~~
+
+Although actually "write-once" properties and property accessors are
+orthogonal to each other, it's arguable whether we still needed
+"write-once" properties if we had property accessors. The case against
+having both features is that property accessors can alone prevent
+unwanted or unintended modifications while guaranteeing read access to
+the properties. The only problem with solely relying on property
+accessors is that they can't prevent changes in the private/protected
+scope (depending on visibility). Furthermore, there are quite a few
+easy, but admittedly esoteric ways to circumvent visibility protections
+(see my examples at the following link: https://3v4l.org/fNTRa). This is
+the reason why we currently don't have any way to ensure the
+immutability of a property - and property accessors wouldn't change this
+fact.
+
+Open Questions
+--------------
+
+As there is no consensus about the name of the modifier, I'd like to put
+it to vote. You can find below the ideas that came up during discussion
+along with some pros/cons:
+
+-  ``final``: This keyword currently affects inheritance, but not
+   mutability rules in PHP, thus a ``final`` property modifier would be
+   confusing in this form
+-  ``sealed``: This keyword affects inheritance rules in other languages
+   (e.g. in C#), thus it is also not a good candidate in our case
+-  ``immutable``: It's a descriptive name which sounds well, although
+   it's also a little bit misleading since its usage with mutable data
+   structures (objects, resources) are not restricted in any way
+-  ``locked``: Although ``locked`` sounds well, it's little bit vague a
+   term that doesn't tell much about the feature. But at least it's not
+   misleading.
+-  ``writeonce``: It's the most technically accurate name, however, it
+   sounds exotic, and it might be confusing from the end-user
+   perspective, as they are generally not expected to write these
+   properties
+-  ``readonly``: Although it's not as technically accurate as
+   "writeonce", it represent the feature perfectly for end-users who are
+   expected to only read these properties. C# also uses the same term
+   for a similar purpose.
+
+Considering the above, ``immutable``, ``locked``, ``writeonce``, and
+``readonly`` are going to be proposed as voting choices of the decision
+about the keyword.
+
+Backward Incompatible Changes
+-----------------------------
+
+There are no backward incompatible changes in this proposal except for
+the fact that ``immutable``, ``locked``, ``writeonce``, or ``readonly``
+would become a reserved keyword depending on the outcome of the
+secondary vote.
+
+Future Scope
+------------
+
+Adding support for "write-once" properties would lay the groundwork for
+immutable objects - for which I'm going to create a proposal should the
+current RFC be accepted. I also plan to address the problem with cloning
+mentioned in the "Proposal" section.
+
+Additionally, as mentioned in the "Compile-Type Restrictions" section,
+adding support for the ``mixed`` type would make it possible to use
+"write-once" properties together with resources. Besides this, we could
+allow the definition of default values later on as soon as we have a
+good use-case for them.
+
+Finally, "write-once" properties could in principle support covariance.
+That is, a subclass would be allowed to tighten the property type that
+is inherited from the parent class, while other properties must stay
+invariant. All this would be possible because of the quasi-immutable
+nature of "write-once" properties: they are generally expected to be
+assigned to only once, in the constructor - which is exempt from LSP
+checks. There is a gotcha though: in practice, "write-once" properties
+could be written from places other than the constructor. Although there
+might not be many practical use-cases for it, the infamous setter
+injection is certainly one (as shown at https://3v4l.org/DQ3To), in
+which case property covariance would be a problem.
+
+Vote
+----
+
+The vote starts on 2020-03-17 and ends on 2020-03-31. The primary vote
+requires 2/3, while the secondary one requires a simple majority to be
+accepted.
+
+Question: Do you want to add support for write-once properties?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+--------------
+
+Question: Which keyword to use?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  immutable
+-  locked
+-  writeonce
+-  readonly
+
+References
+----------
+
+Prior RFC proposing ``immutable`` properties:
+https://wiki.php.net/rfc/immutability
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5186
+:Original Authors: Máté Kocsis kocsismate@php.net
+:Original PHP Version: PHP 8.0
+:Slug: write_once_properties
+:Wiki URL: https://wiki.php.net/rfc/write_once_properties

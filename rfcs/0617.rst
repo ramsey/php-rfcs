@@ -1,0 +1,204 @@
+Improve Openssl_random_pseudo_bytes()
+=====================================
+
+:PHP-RFC: 0617
+:Title: Improve Openssl_random_pseudo_bytes()
+:Author: Sammy Kaye Powers <sammyk@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2018-10-19
+:PHP-Version: 7.4
+:Version: 0.1
+
+Introduction
+------------
+
+The ``openssl_random_pseudo_bytes()`` function is a wrapper for
+OpenSSL's `RAND_bytes
+CSPRNG <https://www.openssl.org/docs/man1.0.2/crypto/RAND_bytes.html>`__.
+CSPRNG implementations should always fail closed, but
+``openssl_random_pseudo_bytes()`` fails open pushing critical fail
+checks into userland. It also has an unnecessary second parameter that
+confuses the usage of the API.
+
+The Fail-Open Problem
+---------------------
+
+The ``openssl_random_pseudo_bytes()`` function fails open which means
+code like this:
+
+.. code:: php
+
+   function genCsrfToken(): string
+   {
+       return bin2hex(openssl_random_pseudo_bytes(32));
+   }
+
+...could return an empty string. This forces the developer to do their
+own checks and fail closed in userland.
+
+.. code:: php
+
+   function genCsrfToken(): string
+   {
+       $bytes = openssl_random_pseudo_bytes(32);
+       if (false === $bytes) {
+           throw new \Exception('CSPRNG error');
+       }
+       return bin2hex($bytes);
+   }
+
+A `quick search in
+GitHub <https://github.com/search?l=PHP&q=openssl_random_pseudo_bytes&type=Code>`__
+reveals very little checking of the return value of
+``openssl_random_pseudo_bytes()`` in the wild.
+
+CSPRNG implementations should always fail closed.
+
+The Confusing API Problem
+-------------------------
+
+There is also a confusing pass-by-reference param ``$crypto_strong``.
+According to `the
+docs <http://php.net/manual/en/function.openssl-random-pseudo-bytes.php>`__:
+
+    It also indicates if a cryptographically strong algorithm was used
+    to produce the pseudo-random bytes, and does this via the optional
+    crypto_strong parameter.
+
+This forces yet another check in userland to determine if the bytes are
+strong enough for crypto. The usage of this parameter is unnecessary
+since ``openssl_random_pseudo_bytes()`` already returns false on failure
+and the implementation doesn't allow returning a string of bytes while
+also setting ``$crypto_strong`` to false.
+
+The API is unnecessarily confusing making it easy to get it wrong. The
+above userland example isn't even correct according to the docs. The
+correct usage in userland would actually be:
+
+.. code:: php
+
+   function genCsrfToken(): string
+   {
+       $strong = false;
+       $bytes = openssl_random_pseudo_bytes(32, $strong);
+       if (false === $bytes || false === $strong) {
+           throw new \Exception('CSPRNG error');
+       }
+       return bin2hex($bytes);
+   }
+
+This redundant check is confusing for developers and the documentation
+does not properly describe the behavior of the implementation.
+
+Proposal
+--------
+
+To fix the fail-open problem, we simply throw an ``\Exception`` (just
+like ```random_bytes()``
+does <https://github.com/php/php-src/blob/8d3f8ca12a0b00f2a74a27424790222536235502/ext/standard/random.c#L179>`__).
+This is the Correct Behavior™️ for any CSPRNG implementation.
+
+To fix the the confusing-api problem, we should deprecate the usage of
+the second ``$crypto_strong`` parameter and just make it always set the
+value to true. In PHP 8.0 we'd completely remove the second parameter
+and upgrade the function's ZPP to ``ZEND_PARSE_PARAMS_THROW`` causing
+the following fatal error when attempting to send in the second
+argument.
+
+    PHP Fatal error: Uncaught ArgumentCountError:
+    openssl_random_pseudo_bytes() expects exactly 1 parameter, 2 given
+
+Backward Incompatible Changes
+-----------------------------
+
+False-checks on the return value of ``openssl_random_pseudo_bytes()``
+will do nothing since the function fails closed. Usage of
+``$crypto_strong`` will generate errors.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.4
+
+RFC Impact
+----------
+
+Unaffected PHP Functionality
+----------------------------
+
+The ``openssl_random_pseudo_bytes()`` function will continue to use
+OpenSSL's ``RAND_bytes`` CSPRNG.
+
+Proposed Voting Choices
+-----------------------
+
+Requires a 2/3 majority
+
+Voting started **2018-11-02 @ 19:30 UTC** and will close sometime around
+**2018-11-16 @ 19:30 UTC**
+
+Vote #1: Make openssl_random_pseudo_bytes() fail closed
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Question: Make openssl_random_pseudo_bytes() fail closed
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Vote #2: Deprecate the usage of the $crypto_strong parameter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Question: Deprecate the usage of the $crypto_strong parameter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+#. `The patch &
+   tests <https://github.com/php/php-src/compare/master...SammyK:rfc-improve-openssl-random-pseudo-bytes>`__
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged into
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+References
+----------
+
+#. `Initial discussion <https://externals.io/message/103331>`__
+#. `Under-discussion
+   announcement <https://externals.io/message/103345>`__
+
+Rejected Features
+-----------------
+
+#. The original ping to @internals suggested aliasing
+   ``openssl_random_pseudo_bytes()`` to ``random_bytes()``, but this was
+   not received well so that idea got put in the bin.
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/3649
+:Original Authors: Sammy Kaye Powers sammyk@php.net
+:Original Status: Implemented (in PHP 7.4)
+:Slug: improve-openssl-random-pseudo-bytes
+:Wiki URL: https://wiki.php.net/rfc/improve-openssl-random-pseudo-bytes

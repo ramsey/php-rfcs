@@ -1,0 +1,303 @@
+More Precise Float Value Handling
+=================================
+
+:PHP-RFC: 0408
+:Title: More Precise Float Value Handling
+:Author: Yasuo Ohgaki <yohgaki@ohgaki.net>, Jakub Zelenka <bukka@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2015-07-30
+:PHP-Version: 7.1
+:Version: 1.1
+
+Introduction
+------------
+
+This RFC is based on the discussion about displaying float values in
+json_encode and proposes more precise float value handling overall.
+
+JSON is used to exchange data between systems. Although `JSON RFC "6
+Numbers" <https://tools.ietf.org/html/rfc7159>`__ does not require
+specific implementation for float/int type, a float value should be
+handled as precise as possible by default.
+
+Currently json_encode() uses EG(precision) which is set to 14. That
+means that 14 digits at most are used for displaying (printing) the
+number. IEEE 754 double supports higher precision and
+serialize()/var_export() uses PG(serialize_precision) which set to 17 be
+default to be more precise. Since json_encode() uses EG(precision),
+json_encode() removes lower digits of fraction parts and destroys
+original value even if PHP's float could hold more precise float value.
+
+.. code:: php
+
+   <?php
+   $j = '{ "v": 0.1234567890123456789 }';
+   var_dump(json_decode($j));
+   var_dump(json_encode(json_decode($j)));
+   ini_set('precision', 20);
+   var_dump(json_decode($j));
+   var_dump(json_encode(json_decode($j)));
+   var_dump(0.1234567890123456789);
+   ?>
+
+::
+
+   object(stdClass)#1 (1) {
+     ["v"]=>
+     float(0.12345678901235)
+   }
+   string(22) "{"v":0.12345678901235}"
+   object(stdClass)#1 (1) {
+     ["v"]=>
+     float(0.12345678901234567737)
+   }
+   string(28) "{"v":0.12345678901234567737}"
+   float(0.12345678901234567737)
+
+PHP's float type stores "raw" IEEE 754 double and could display accurate
+fraction value up to 17 digits.
+
+Current PHP outputs meaningless values for oversized
+EG(precision)/PG(serialize_precision).
+
+.. code:: php
+
+   <?php
+   $v = 0.12345678901234567890;
+   var_dump($v);
+   ini_set('precision', 100);
+   var_dump($v);
+   ?>
+
+::
+
+   float(0.12345678901235)
+   float(0.12345678901234567736988623209981597028672695159912109375)
+
+That is caused by used mode for double to string conversion.
+
+Proposal
+--------
+
+This RFC proposes to introduce a new setting EG(precision)=-1 and
+PG(serialize_precision)=-1 that uses zend_dtoa()'s mode 0 which uses
+better algorigthm for rounding float numbers (-1 is used to indicate 0
+mode).
+
+The RFC also proposes changing ini for JSON precision to
+PG(serialize_precision).
+
+Followings are sample codes and outputs of the proposed patch.
+
+NEW behavior
+
+.. code:: php
+
+   <?php
+   $v = 10.0000000000001;
+
+   ini_set('precision', -1);
+   ini_set('serialize_precision', -1);
+
+   var_dump($v);
+   echo var_export($v, true), PHP_EOL;
+   echo json_encode($v), PHP_EOL;
+   echo $v, PHP_EOL;
+   ?>
+
+::
+
+   float(10.0000000000001)
+   10.0000000000001
+   10.0000000000001
+   10.0000000000001
+
+OLD behavior
+
+.. code:: php
+
+   <?php
+   $v = 10.00000000000001;
+
+   ini_set('precision', 14);
+   ini_set('serialize_precision', 17);
+
+   var_dump($v);
+   echo var_export($v, true), PHP_EOL;
+   ini_set('serialize_precision', 14);
+   echo json_encode($v), PHP_EOL;
+   ini_set('serialize_precision', 17);
+   echo $v, PHP_EOL;
+   ?>
+
+::
+
+   float(10)
+   10.000000000000011
+   10
+   10
+
+Please note that IEEE float cannot store exactly precise values. e.g.
+Result of "10/3" - see phpt of the patch. Even with this proposal, there
+will be rounding errors, but the behavior becomes similar to other
+languages and values are more precise in many cases.
+
+Backward Incompatible Changes
+-----------------------------
+
+Setting mode 0 as default can mean that the rounding will be more
+precise which also means that the rounding might be different in
+var_export()/serialize().
+
+The BC break could happen only if someone would rely on exact output but
+that shouldn't be the case. All our existing tests passes when 0 mode is
+used.
+
+None when old INI value is used.
+
+Proposed PHP Version(s)
+-----------------------
+
+-  PHP 7.1
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+PHP overall
+
+-  0 mode (EG(precision)= -1) float outputs values rounded to nearest.
+
+Standard module and JSON
+
+-  serialize(), var_export(), json_encode - Use PG(serialize_precision)
+   and 0 mode by default.
+
+To Opcache
+~~~~~~~~~~
+
+Not affected.
+
+New Constants
+~~~~~~~~~~~~~
+
+None.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+precision
+
+-  hardcoded default values : 14 Unmodified
+-  php.ini-development values : 14 Unmodified
+-  php.ini-production values : 14 Unmodified
+
+serialize_precision
+
+-  hardcoded default values : -1
+-  php.ini-development values : -1
+-  php.ini-production values : -1
+
+Open Issues
+-----------
+
+None.
+
+Unaffected PHP Functionality
+----------------------------
+
+PHP uses "raw" IEEE 754 value internally regardless of precision
+settings. Therefore, this RFC does not affect internal computation.
+
+Future Scope
+------------
+
+WDDX
+
+-  wddx_serialize_vars/value() - Use PG(serialize_precision) and 0 mode.
+   It uses EG(precision) currently.
+
+XML_RPC
+
+-  xmlrpc_encode() - Use PG(serialize_precision) and 0 mode. It uses
+   EG(precision) currently.
+
+Voting
+------
+
+Requires a 2/3 majority for the first vote (mode 0 to become default for
+serialize precision) and 50%+1 majority for the second vote (changing
+default for json).
+
+The both votes are straight Yes/No votes.
+
+Question: Should mode 0 be introduced and set as default for PG(serialize_precision)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Question: Should PG(serialize_precision) be used instead of EG(precision) in json_encode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+The votes started on 2016-06-12 at 19:00 UTC and ended on 2016-06-19 at
+19:00 UTC.
+
+Patches and Tests
+-----------------
+
+The initial PR can be found here:
+
+-  https://github.com/php/php-src/pull/1455
+
+Note that the PR is currently outdated but it will be updated if the RFC
+is accepted.
+
+Implementation
+--------------
+
+Merged into php-src for PHP 7.1:
+https://github.com/php/php-src/commit/75b86a2
+
+After the project is implemented, this section should contain
+
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+-  https://marc.info/?l=php-internals&m=143786181229714&w=2
+-  https://bugs.php.net/bug.php?id=71473
+-  http://blog.reverberate.org/2016/02/06/floating-point-demystified-part2.html
+
+Rejected Features
+-----------------
+
+None
+
+Additional Metadata
+-------------------
+
+:Original Authors: Yasuo Ohgaki yohgaki@ohgaki.net, Jakub Zelenka bukka@php.net
+:Original Status: Implemented (PHP 7.1)
+:Slug: precise_float_value
+:Wiki URL: https://wiki.php.net/rfc/precise_float_value

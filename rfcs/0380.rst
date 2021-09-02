@@ -1,0 +1,255 @@
+Precise URL Include Control
+===========================
+
+:PHP-RFC: 0380
+:Title: Precise URL Include Control
+:Author: Yasuo Ohgaki <yohgaki@ohgaki.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2015-02-27
+:Version: 1.0
+
+Introduction
+------------
+
+When **allow_url_include** was introduced, it was good enough protection
+against "remote script inclusion". However, it causes problem for "local
+script inclusion" protections. This RFC addresses the issue and make
+`"local script inclusion"
+protection <https://wiki.php.net/rfc/script_only_include>`__ more
+effective.
+
+**allow_url_include** is INI_SYSTEM, therefore include/require simply
+ignore the setting for certain stream wrappers always.
+**allow_url_include** does not actually disallow URL form includes. It
+allows "phar://" regardless of **allow_url_include** setting and helps
+attackers obfuscate attack scripts. e.g.
+include("phar://evil_phar_file/evil_script.php") is allowed at anytime.
+Current behavior may allow to bypass certain types of security filters
+and allow attacker's script to be executed.
+
+Current **allow_url_include** behavior is wrong for 3 reasons.
+
+#. Implicit allowance of URL formed filename is problematic. It's
+   "caller" responsibility to set this setting as intended. (Or "callee"
+   must have API for overriding it to do the job)
+#. It does not make "include/require" behave as INI setting name
+   implies.
+#. Being INI_SYSTEM increases risk of security filter bypass.
+
+**allow_url_include** being INI_SYSTEM is false sense of security. It
+also violates simple API principle that
+
+-  "caller" must have responsibility to set correct setting for
+   conditions.
+
+or
+
+-  "callee" must have API/parameter to set correct conditions for the
+   API.
+
+Current **allow_url_include** and related API does not satisfy none of
+them.
+
+We need more precise URL include control.
+
+Proposal
+--------
+
+-  Remove **allow_url_include** INI setting and introduce more precise
+   URL include control.
+
+Option #1
+^^^^^^^^^
+
+-  Introduce 2nd parameter that specifies the prefix of URL (wrapper)
+
+.. code:: php
+
+     include('phar://phar_file/script.php', 'phar://');
+
+Pros:
+
+#. Requires a lot less code modifications = less BC.
+#. Simple string comparison is enough.
+#. More specific which wrapper is used. (Only specified wrapper may be
+   used)
+#. More flexible when new wrapper is added. (No additional code is
+   needed for this)
+
+Cons:
+
+#. 'phar://' looks redundant
+#. 2nd parameter is used solely for specifying wrapper. i.e. Cannot use
+   it for no embedded mode flag, etc. There may be pseudo wrapper like
+   "noembed://".
+
+Option #2
+^^^^^^^^^
+
+-  Introduce "inlcude_type" flags to include*/require*() as 2nd
+   parameter.
+
+.. code:: php
+
+     include 'script.php' [, $include_type=0 ];
+
+where $include_type (bitwise) is
+
+-  PHP_STREAM_LOCAL = 1 - allow local wrappers. phar://, zip://, etc
+-  PHP_STREAM_REMOTE = 2 - allow remote wrappers. http://, https://,
+   ftp://, etc
+-  PHP_STREAM_ALL = 3 (PHP_STREAM_LOCAL \| PHP_STREAM_REMOTE)
+
+Add getType() method to `stream wrapper
+class <http://php.net/manual/en/class.streamwrapper.php>`__ returns
+PHP_STREAM_LOCAL, PHP_STREAM_REMOTE or PHP_STREAM_ALL.
+
+Pros:
+
+#. API looks more systematic/clean
+
+Cons:
+
+#. More complex and needs lots of modifications than option #1 (More BC)
+#. Not precise as option #1
+
+Backward Incompatible Changes
+-----------------------------
+
+-  Some include/require that use implicit URL include need 2nd
+   parameter.
+-  Option #2: If stream wrapper class does not have getType() method, it
+   treated as PHP_STREAM_REMOTE.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.0
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+CLI - loading phar as main script is allowed by default.
+
+php:*input and php:*\ stdin handling
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+php://input and php://stdin must be handled differently. These are
+"remote" input under Web SAPI while these are "local" input under CLI.
+Therefore, these "php" wrappers are handled according to SAPI type.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Modules have stream wrappers.
+
+-  phar
+-  zip
+-  zlib
+-  php
+
+Wrappers defined by PHP source distribution. (There may be others)
+
+::
+
+   $ php -r "var_dump(stream_get_wrappers());"
+   array(12) {
+     [0]=>
+     string(5) "https"
+     [1]=>
+     string(4) "ftps"
+     [2]=>
+     string(13) "compress.zlib"
+     [3]=>
+     string(3) "php"
+     [4]=>
+     string(4) "file"
+     [5]=>
+     string(4) "glob"
+     [6]=>
+     string(4) "data"
+     [7]=>
+     string(4) "http"
+     [8]=>
+     string(3) "ftp"
+     [9]=>
+     string(14) "compress.bzip2"
+     [10]=>
+     string(4) "phar"
+     [11]=>
+     string(3) "zip"
+   }
+
+To Opcache
+~~~~~~~~~~
+
+None
+
+New Constants
+~~~~~~~~~~~~~
+
+There will be constants for stream wrapper. TBD
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+**allow_url_include** ini is removed.
+
+Open Issues
+-----------
+
+Unaffected PHP Functionality
+----------------------------
+
+allow_url_fopen
+
+Future Scope
+------------
+
+**allow_url_fopen** has same issues. However, allow_url_fopen has less
+issue because it does not parse and execute script.
+
+Proposed Voting Choices
+-----------------------
+
+Requires 2/3 majority
+
+Patches and Tests
+-----------------
+
+TBD
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+Links to external references, discussions or RFCs
+
+-  https://wiki.php.net/rfc/script_only_include - This mitigation
+   affects script only include RFC. With this RFC, script include only
+   RFC will be more secure as it should.
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Yasuo Ohgaki yohgaki@ohgaki.net
+:Original Status: Under Discussion
+:Slug: allow_url_include
+:Wiki URL: https://wiki.php.net/rfc/allow_url_include

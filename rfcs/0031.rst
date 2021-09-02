@@ -1,0 +1,543 @@
+Lambda Functions And Closures
+=============================
+
+:PHP-RFC: 0031
+:Title: Lambda Functions And Closures
+:Author: Christian Seiler <chris_se@gmx.net>, Dmitry Stogov <dmitry@zend.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2008-07-01
+:PHP-Version: 5.3
+:Version: 1.2
+
+This RFC discusses the introduction of compile-time lambda functions and
+closures in PHP.
+
+Introduction
+------------
+
+End of 2007 a patch was proposed that would add lambda functions (but
+without closures) to PHP. During the discussion on the mailing list,
+several people suggested that without support for closures, lambda
+functions are not useful enough to add them to PHP. This proposal
+describes a viable method of adding lambda functions with closure
+support to PHP.
+
+The initial posting of this proposal has created quite a bit of
+discussion on the list. This updated proposal including an updated patch
+intends to incorporate the result of that discussion. A lot of changes
+to the original patch by Christian Seiler were made by Dmitry Stogov.
+
+Why do we need closures and lambda functions?
+---------------------------------------------
+
+Closures and lambda functions can make programming much easier in
+several ways:
+
+Lambda Functions
+~~~~~~~~~~~~~~~~
+
+Lambda functions allow the quick definition of throw-away functions that
+are not used elsewhere. Imagine for example a piece of code that needs
+to call preg_replace_callback(). Currently, there are three
+possibilities to achieve this:
+
+#. Define the callback function elsewhere. This distributes code that
+   belongs together throughout the file and decreases readability.
+#. Define the callback function in-place (but with a name). In that case
+   one has to use function_exists() to make sure the function is only
+   defined once. Here, the additional if() around the function
+   definition makes the source code difficult to read. Example
+   code:``function replace_spaces ($text) {
+        if (!function_exists ('replace_spaces_helper')) {
+          function replace_spaces_helper ($matches) {
+            return str_replace ($matches[1], ' ', '&nbsp;').' ';
+          }
+        }
+        return preg_replace_callback ('/( +) /', 'replace_spaces_helper', $text);
+      }``
+#. Use the present create_function() in order to create a function at
+   runtime. This approach has several disadvantages: First of all,
+   syntax highlighting does not work because a string is passed to the
+   function. It also compiles the function at run time and not at
+   compile time so opcode caches can't cache the function.
+
+Closures
+~~~~~~~~
+
+Closures provide a very useful tool in order to make lambda functions
+even more useful. Just imagine you want to replace 'hello' through
+'goodbye' in all elements of an array. PHP provides the array_map()
+function which accepts a callback. If you don't want to hard-code
+'hello' and 'goodbye' into your sourcecode, you have only four choices:
+
+#. Use create_function(). But then you may only pass literal values
+   (strings, integers, floats) into the function, objects at best as
+   clones (if var_export() allows for it) and resources not at all. And
+   you have to worry about escaping everything correctly. Especially
+   when handling user input this can lead to all sorts of security
+   issues.
+#. Write a function that uses global variables. This is ugly,
+   non-reentrant and bad style.
+#. Create an entire class, instantiate it and pass the member function
+   as a callback. This is perhaps the cleanest solution for this problem
+   with current PHP but just think about it: Creating an entire class
+   for this extremely simple purpose and nothing else seems overkill.
+#. Don't use array_map() but simply do it manually (foreach). In this
+   simple case it may not be that much of an issue (because one simply
+   wants to iterate over an array) but there are cases where doing
+   something manually that a function with a callback as parameter does
+   for you is quite tedious.
+
+Note: str_replace also accepts arrays as a third parameter so this
+example may be a bit useless. But imagine you want to do a more complex
+operation than simple search and replace.
+
+Common misconceptions
+---------------------
+
+::
+
+    - Lambda functions / closures are **not** a way of dynamically extending classes by additional methods at runtime. There are several other possibilities to do this, including the already present _ _call semantic.
+    - PHP's notion of scope is quite different than the notion of scope other languages define. Combine this with variable variables ($$var) and it becomes clear that automatically detecting which variables from the outer scope are referenced inside are closure is impossible. Also, since for example global variables are not visible inside functions either by default, automatically making the parent scope available would break with the current language concept PHP follows.
+
+Proposal and Patch
+------------------
+
+The following proposal and patch implement compile-time lambda functions
+and closures for PHP while keeping the patch as simple as possible.
+
+Userland perspective
+~~~~~~~~~~~~~~~~~~~~
+
+Lambda function syntax
+^^^^^^^^^^^^^^^^^^^^^^
+
+The patch adds the following syntax as a valid expression:
+
+.. code:: php
+
+      function & (parameters) use (lexical vars) { body }
+
+The & is optional and indicates that the function should return a
+reference. The use followed by the parentheses is optional and indicates
+that several variables from the current scope should be imported into
+the closure.
+
+Example usage:
+
+.. code:: php
+
+      $lambda = function () { echo "Hello World!\n"; };
+
+The variable $lambda then contains a callable resource that may be
+called through different means:
+
+.. code:: php
+
+      $lambda ();
+      call_user_func ($lambda);
+      call_user_func_array ($lambda, array ());
+
+This allows for simple lambda functions, for example:
+
+.. code:: php
+
+      function replace_spaces ($text) {
+        $replacement = function ($matches) {
+          return str_replace ($matches[1], ' ', '&nbsp;').' ';
+        };
+        return preg_replace_callback ('/( +) /', $replacement, $text);
+      }
+
+You can even put the lambda function inline, for example:
+
+.. code:: php
+
+     function replace_spaces ($text) {
+       return preg_replace_callback ('/( +) /',
+         function ($matches) {
+           return str_replace ($matches[1], ' ', '&nbsp;').' ';
+         }, $text);
+     }
+
+Closure support
+^^^^^^^^^^^^^^^
+
+In order to make use of variables defined in the parent scope, this
+patch proposes the following syntax to import variables from the parent
+scope into the closure scope:
+
+.. code:: php
+
+     function (normal parameters) use ($var1, $var2, &$refvar) {}
+
+The variables $var1, $var2 and $refvar defined in the parent scope will
+be visible inside the lambda function. For the behaviour with regard to
+references, see below.
+
+Simple example:
+
+.. code:: php
+
+      function replace_in_array ($search, $replacement, $array) {
+        $map = function ($text) use ($search, $replacement) {
+          if (strpos ($text, $search) > 50) {
+            return str_replace ($search, $replacement, $text);
+          } else {
+            return $text;
+          }
+        };
+        return array_map ($map, $array);
+      }
+
+The variables $search and $replacement are variables in the scope of the
+function replace_in_array() and they are imported into the scope of the
+closure upon creation of the closure.
+
+Closure lifetime
+^^^^^^^^^^^^^^^^
+
+Closures may live longer as the methods that declared them. It is
+perfectly possible to have something like this:
+
+.. code:: php
+
+      function getAdder($x) {
+        return function ($y) use ($x) {
+          // or: lexical $x;
+          return $x + $y;
+        };
+      }
+
+References vs. Copies
+^^^^^^^^^^^^^^^^^^^^^
+
+By default, all imported variables are copied as values into the
+closure. This makes it impossible for a closure to modify the variable
+in the parent scope. By prepending an & in front of the variable name in
+the use declaration, the variable is imported as a reference instead. In
+that case, changes to the variable inside the closure will affect the
+outside scope.
+
+Example:
+
+.. code:: php
+
+     $x = 1;
+     $lambda1 = function () use ($x) {
+       $x *= 2;
+     };
+     $lambda2 = function () use (&$x) {
+       $x *= 3;
+     };
+     $lambda1 ();
+     var_dump ($x); // gives: 1
+     $lambda2 ();
+     var_dump ($x); // gives: 3
+
+Support for references are necessary in order to achieve true closures
+(like in Javascript, where a variable originating in parent scope can be
+modified by closures) while copying per default fits best with the
+current semantics of PHP and does not cause headaches in loops (for
+example, when importing a loop index into a closure).
+
+Interaction with OOP
+^^^^^^^^^^^^^^^^^^^^
+
+$this support has been removed, see `removal of
+this <rfc/closures/removal-of-this>`__
+
+If a closure is defined inside an object, the closure has full access to
+the current object through $this (without the need to import it
+explicitly) and all private and protected methods of that class. This
+also applies to nested closures. Example:
+
+.. code:: php
+
+        class Example {
+          private $search;
+
+          public function __construct ($search) {
+            $this->search = $search;
+          }
+
+          public function setSearch ($search) {
+            $this->search = $search;
+          }
+
+          public function getReplacer ($replacement) {
+            return function ($text) use ($replacement) {
+              return str_replace ($this->search, $replacement, $text);
+            };
+          }
+        }
+
+        $example = new Example ('hello');
+        $replacer = $example->getReplacer ('goodbye');
+        echo $replacer ('hello world'); // goodbye world
+        $example->setSearch ('world');
+        echo $replacer ('hello world'); // hello goodbye
+
+As one can see, defining a closure inside a class method does not change
+the semantics at all - it simply does not matter if a closure is defined
+in global scope, within a function or within a class method. The only
+small difference is that closures defined in class methods may also
+access the class and the current object via $this. Since $this is saved
+"within the closure" the corresponding object will live at least as long
+as the closure.
+
+Because not all closures defined in class methods need $this, it is
+possible to declare a lambda function to be static:
+
+.. code:: php
+
+        class Example {
+          public function doSomething () {
+            $x = 4;
+            $closure = static function ($y) use ($x) {
+              return $x + $y;
+            };
+            return $closure (6);
+          }
+        }
+
+In this case, $this is not available inside the closure. This may save a
+lot of memory if saves many closures that originated in longer needed
+objects.
+
+Additional goody: \_ \_invoke
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Since closures implement a new type of variable that may be called
+dynamically (i.e. objects), the idea came up that generic callable could
+also be implemented. This patch adds an additional magic method \_
+\_invoke that may be defined in arbitrary classes. If defined, the
+object itself is callable and the new special method will be invoked
+instead of the object. Example:
+
+.. code:: php
+
+   class Example {
+     public function __invoke () {
+       echo "Hello World!\n";
+     }
+   }
+   $foo = new Example;
+   $foo ();
+
+Interaction with reflection (1)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Since closures are anonymous, they do **not** appear in reflection.
+
+However, a new method was added to the ReflectionMethod and
+ReflectionFunction classes: getClosure. This method returns a
+dynamically created closure for the specified function. Example:
+
+.. code:: php
+
+   class Example {
+     static function printer () { echo "Hello World!\n"; }
+   }
+
+   $class = new ReflectionClass ('Example');
+   $method = $class->getMethod ('printer');
+   $closure = $method->getClosure ();
+   $closure ();
+
+This example dynamically creates a callable object of the static method
+"printer" of the "Example" class. Calling that closure is like calling
+the method directly. This also works for non-static methods - here
+getClosure expects a single parameter for the $this pointer:
+
+.. code:: php
+
+   class Example {
+     public $x = 4;
+     function printer () { echo "Hello World: $this->x!\n"; }
+   }
+
+   $class = new ReflectionClass ('Example');
+   $method = $class->getMethod ('printer');
+
+   $object = new Example;
+   $closure = $method->getClosure ($object);
+   $closure ();
+   $object->x = 5;
+   $closure ();
+
+Interaction with reflection (2)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In addition to the previous patch, reflection support was augmented to
+support reflecting closure objects and returning the correct function
+pointer.
+
+.. code:: php
+
+   $closure = function ($a, &$b, $c = null) { };
+   $m = new ReflectionMethod ($closure, '__invoke');
+   Reflection::export ($m);
+
+This will yield:
+
+::
+
+   Method [ <internal> public method __invoke ] {
+
+     - Parameters [3] {
+       Parameter #0 [ <required> $a ]
+       Parameter #1 [ <required> &$b ]
+       Parameter #2 [ <optional> $c ]
+     }
+   }
+
+The following will also work (invoke is implied if no method name is
+specified):
+
+.. code:: php
+
+   $m = new ReflectionMethod ($closure);
+   $p = new ReflectionParameter ($closure, 0);
+   $p = new ReflectionParameter ($closure, 'a');
+   $p = new ReflectionParameter (array ($closure, '__invoke'), 0);
+
+Zend internal perspective
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The patch basically changes the following in the Zend engine:
+
+When the compiler reaches a lambda function, except for details in the
+grammar, a new function zend_do_begin_lambda_function_declaration is
+called - which itself calls zend_do_begin_function_declaration with
+"lambda" as a predefined function name. Immediately hereafter, the
+ZEND_DECLARE_FUNCTION opcode is replaced with a new
+ZEND_DECLARE_LAMBDA_FUNCTION opcode, early binding will therefore never
+occur for lambda functions (and traditional function binding at runtime
+neither, since the ZEND_DECLARE_LAMBDA_FUNCTION opcode does something
+else, see below). The closure has an additional flag ZEND_ACC_CLOSURE.
+
+Lexical variables are done via static variables: For each lexical
+variable an entry in the static variables hash table is added. The entry
+is default NULL but an additional IS_LEXICAL or IS_LEXICAL_REF is XORed
+to the zval type.
+
+An additional internal class "Closure" is added which will be used for
+saving closures.
+
+The ZEND_DECLARE_LAMBDA_FUNCTION opcode looks up the function in the
+function table (it still has its runtime function key the compiler gave
+it and is thus cacheable by any opcode cache), creates a new object of
+the Closure type and stores a copy of the op_array inside. It correctly
+sets the scope of the copied op_array to be the current class scope and
+makes sure all lexical variables are imported from the parent scope into
+the copied hash table of the new op_array. It also creates a reference
+to the current $this object. It returns the newly created object.
+
+Some hooks were added to the opcode handlers, zend_call_function and
+zend_is_callable_ex that allow the 'Closure' object to be called.
+
+In order to make code changes as clean as possible, this logic was
+mainly abstracted into zend_closures.c which defines two main methods:
+zend_create_closure and zend_get_closure. zend_create_closure creates a
+new closure, zend_get_closure retrieves the associated op_array, scope
+and this pointer from the closure. If some logic needs to be changed
+(due to design decisions or - for example - a bug), no binary
+incompatible change will take place but rather those two methods need to
+be changed.
+
+Tests
+~~~~~
+
+The patch contains additional phpt tests that make sure closures work as
+designed.
+
+The patch
+~~~~~~~~~
+
+**Note:** The patches were already applied to PHP_5_3 and HEAD (with
+some minor modifications and fixes).
+
+Current patches:
+
+::
+
+    * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-07-01-1.diff|Patch against PHP_5_3]]
+    * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-07-01-1.diff|Patch against HEAD]]
+
+Older patches for completeness:
+
+::
+
+    * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-use.diff]]
+    * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-use-this.diff]]
+    * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-26-lexical-this.diff]]
+    * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-use.diff]]
+    * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-use-this.diff]]
+    * [[http://www.christian-seiler.de/temp/closures-php-6.0-2008-06-26-lexical-this.diff]]
+    * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-17-3.diff]]
+    * [[http://www.christian-seiler.de/temp/closures-php-5.3-2008-06-16-1.diff]]
+
+**Note** The patch does not contain the diff for
+``zend_language_scanner.c`` since that file can easily be regenerated
+from ``zend_language_scanner.l``.
+
+BC breaks
+~~~~~~~~~
+
+::
+
+    * Creates an additional class named "Closure" that may break existing code. Apparently classes by this name [[http://google.com/codesearch?hl=en&lr=&q=%22class+Closure%22+lang%3Aphp&sbtn=Search|are used to emulate closures]] in current PHP versions.
+    * None otherwise (no new keywords)
+
+Caveats / possible WTFs
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Trailing ``;``
+^^^^^^^^^^^^^^
+
+On writing ``$func = function () { };`` there is a semicolon necessary.
+If left out it will produce a compile error. Since any attempt to remove
+that necessity would unnecessarily bloat the grammar, I suggest we
+simply keep it the way it is. Also, Lukas Kahwe Smith pointed out that a
+single trailing semicolon after a closing brace already exists:
+``do { } while ();``
+
+Misinterpretations of the goal of closures
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+As the discussion on the mailing list showed, there were quite a few
+misconceptions on what closures may or may not achieve. One often used
+suggestion was to use closures in order to extend classes by additional
+methods at run time. This is **not** the goal of closures **and** it can
+already be achieved without closures just by using \_ \_call, see for
+example http://phpfi.com/328105.
+
+Example code
+------------
+
+The example code in this document is available
+`here <http://www.christian-seiler.de/temp/php-5.3-test-closures.txt>`__.
+
+Changelog
+---------
+
+::
+
+    * 2008-08-11 Christian Seiler: Documented additional reflection improvements (see php-internals)
+    * 2008-07-15 Christian Seiler: Updated status of this RFC
+    * 2008-07-01 Christian Seiler: Updated patch yet again
+    * 2008-06-26 Christian Seiler: Revised patch, using objects instead of resources, added tests
+    * 2008-06-18 Christian Seiler: OOP clarifications
+    * 2008-06-17 Christian Seiler: Updated patch
+    * 2008-06-17 Christian Seiler: Clarified interaction with OOP
+    * 2008-06-16 Christian Seiler: Small changes
+    * 2008-06-16 Christian Seiler: Initial creation
+
+Additional Metadata
+-------------------
+
+:Original Authors: Christian Seiler chris_se@gmx.net, Dmitry Stogov dmitry@zend.com
+:Slug: closures
+:Wiki URL: https://wiki.php.net/rfc/closures

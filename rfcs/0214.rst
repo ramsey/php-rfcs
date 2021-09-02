@@ -1,0 +1,449 @@
+Internal Operator Overloading And GMP Improvements
+==================================================
+
+:PHP-RFC: 0214
+:Title: Internal Operator Overloading And GMP Improvements
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2013-05-12
+:PHP-Version: 5.6
+:Version: 0.1
+
+Introduction
+------------
+
+PHP offers facilities for large number and decimal arithmetic (GMP and
+BCMath), but currently using those is a PITA. This RFC proposes to
+improve the situation by adding support for **operator overloading in
+internal classes**. The operator overloading is exemplarily implemented
+for the GMP extension, while also improving GMP in various other ways
+along the way.
+
+Proposal A: Operator overloading
+--------------------------------
+
+Note: This proposal is only about **internal** operator overloading and
+**not** about userland overloading.
+
+Why operator overloading?
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There are several reasons why overloaded operators are preferable over
+``gmp_add($a, $b)`` style functions.
+
+The first is that code using overloaded operators is simply **more
+readable**. As an example, consider the following two code snippets, one
+using ``gmp_*`` functions, the other using overloading:
+
+.. code:: php
+
+   $result = gmp_mod(
+       gmp_add(
+           gmp_mul($c0, gmp_mul($ms0, gmp_invert($ms0, $n0))),
+           gmp_add(
+               gmp_mul($c1, gmp_mul($ms1, gmp_invert($ms1, $n1))),
+               gmp_mul($c2, gmp_mul($ms2, gmp_invert($ms2, $n2)))
+           )
+       ),
+       gmp_mul($n0, gmp_mul($n1, $n2))
+   );
+
+   $result = (
+       $c0 * $ms0 * gmp_invert($ms0, $n0)
+     + $c1 * $ms1 * gmp_invert($ms1, $n1)
+     + $c2 * $ms2 * gmp_invert($ms2, $n2)
+   ) % ($n0 * $n1 * $n2);
+
+Even without understanding what the above code does (it's an excerpt
+from a Coppersmith attack on RSA), it should be obvious that the second
+code is a lot clearer. It makes the structure of the code immediately
+clear (three multiplications are summed up and the modulus is taken),
+whereas the function-based code actively hides any structure in the
+code. For mathematical operations infix notation just comes a lot more
+naturally.
+
+Another advantage of overloaded operators is that it allows
+**polymorphism** for functions doing arithmetic operations. As an
+example, consider manually implementing a function like ``gmp_powm``,
+which calculates a power of a number modulus some other number. Here is
+a sample implementation (direct translation of pseudo-code on
+Wikipedia):
+
+.. code:: php
+
+   function powm($base, $exponent, $modulus) {
+       $result = 1;
+       while ($exponent > 0) {
+           if ($exponent % 2 == 1) {
+               $result = $result * $base % $modulus;
+               $exponent--;
+           }
+           $exponent /= 2;
+           $base = ($base * $base) % $modulus;
+       }
+       return $result;
+   }
+
+With operator overloading this function will work with **any** type of
+"number" that implements the basic arithmetic operators. It can work
+with normal PHP integers, it can work with GMP numbers, it can work with
+BCMath instances (assuming the overloading API is implemented for them
+of course):
+
+.. code:: php
+
+   var_dump(powm(123, 456, 789)); // int(699)
+   var_dump(powm(gmp_init(123), gmp_init(456), gmp_init(789))); // GMP(699)
+   var_dump(powm(
+       gmp_init("123456789123456789"),
+       gmp_init("987654321987654321"),
+       gmp_init("56789567895678956789")
+   )); // GMP(36912902142130032810)
+
+Without operator overloading this would not be possible. Instead one
+would have to implement the same function once using the normal ``+``
+style operators and once using ``gmp_*`` functions (and any other set of
+functions you want to support). Operator overloading brings the
+advantages of polymorphism (a main reason we use object oriented
+programming) to the basic operations of the language.
+
+Applications of operator overloading
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Some examples what the operator overloading capability can be used for,
+apart from the bignum arithmetic outlined in this RFC:
+
+-  Decimal arithmetic. This is particularly important in PHP as PHP
+   commonly deals with monetary values which **can not** be represented
+   as floating point numbers.
+-  Date calculations. Also very common in PHP (``DateTime::add`` etc)
+-  Ratio and complex arithmetic
+-  Unsigned arithmetic and arithmetic on other integral types PHP does
+   not support (e.g. cross platform 64bit integers)
+-  Vector and matrix calculations
+
+Due to potential pitfalls of misusing operator overloading known from
+other languages (most notably C++), the use of this new feature should
+be limited to cases where there are clear definitions to the behavior of
+all overloaded operators. The application of this feature should be for
+mathematical use cases only (as noted above), and not 'creative'
+applications such as changing the white balance of a picture by
+incrementing or decrementing the picture object.
+
+Technical proposal
+~~~~~~~~~~~~~~~~~~
+
+The operator overloading is implemented using two new object handlers:
+
+do_operation
+^^^^^^^^^^^^
+
+The ``do_operation`` handler is called for all overloadable operations
+which do not involve comparison. Its signature is:
+
+::
+
+   typedef int (*zend_object_do_operation_t)(zend_uchar opcode, zval *result, zval *op1, zval *op2 TSRMLS_DC);
+
+Here ``opcode`` is the opcode of the operation (e.g. ``ZEND_ADD``),
+``result`` is the target zval, ``op1`` the first operand and ``op2`` the
+second operand. For binary operations both operands are used, for unary
+operations the second operand is ``NULL``. The return value can be
+either ``SUCCESS`` or ``FAILURE``. If ``FAILURE`` is returned then the
+code falls back to the default behavior for the respective operator.
+
+The following ``opcode`` values are supported:
+
+::
+
+   +   ZEND_ADD
+   -   ZEND_SUB
+   *   ZEND_MUL
+   /   ZEND_DIV
+   %   ZEND_MOD
+   <<  ZEND_SL
+   >>  ZEND_SR
+   .   ZEND_CONCAT
+   |   ZEND_BW_OR
+   &   ZEND_BW_AND
+   ^   ZEND_BW_XOR
+   xor ZEND_BOOL_XOR
+   ~   ZEND_BW_NOT   (unary)
+   !   ZEND_BOOL_NOT (unary)
+
+The unary ``+`` and ``-`` operators are indirectly supported by the
+following compiler transformations:
+
+::
+
+   +$a  ==>  0 + $a
+   -$a  ==>  0 - $a
+
+The compound assignment operators ``+=``, ``-=``, ``*=``, ``/=``,
+``%=``, ``<<=``, ``>>=``, ``.=``, ``|=``, ``&=`` and ``^=`` are
+supported by the runtime transformation ``$a op= $b => $a = $a op $b``.
+
+The prefix operators ``++`` and ``--`` are supported by the runtime
+transformations ``++$a => $a = $a + 1`` and ``--$b => $b = $b - 1``. The
+same applies for the corresponding postfix operators, with the
+difference that a copy of the old value is returned (rather than the
+newly computed value).
+
+compare
+^^^^^^^
+
+The ``compare`` handler is called for comparisons. It has the following
+signature:
+
+::
+
+   typedef int (*zend_object_compare_zvals_t)(zval *result, zval *op1, zval *op2 TSRMLS_DC); 
+
+Here ``result`` is the target zval, ``op1`` the first operand and
+``op2`` the second operand. The ``result`` zval has to be set to one of
+the longs ``-1`` (indicating "greater than"), ``0`` (indicating "equal")
+or ``-1`` (indicating "less than"). The return value can either be
+``SUCCESS`` or ``FAILURE``, which indicate whether the comparison was
+successful. This return value will be the return value of
+``compare_function``.
+
+The ``compare`` handler is called for the ``<``, ``<=``, ``==``, ``!=``,
+``>=`` and ``>`` operators and any other code using ``compare_function``
+(e.g. sorting). The operators ``===`` and ``!==`` are explicitly **not**
+supported, as they have clearly defined semantics (same object handle)
+and I see now reason to break this.
+
+The difference between the ``compare`` handler and the already existing
+``compare_objects`` handler is that ``compare`` is called for **all**
+comparisons involving an object with a ``compare`` handler, whereas
+``compare_objects`` is only called if both operands are objects and have
+the same ``compare_objects`` handler. Thus ``compare_objects`` can not
+be used to implement comparisons like ``$gmp == 0``. A ``compare``
+handler always takes precedence over a ``compare_objects`` handler.
+
+Proposal B: GMP Improvements
+----------------------------
+
+Currently GMP is based on resources. This has several disadvantages:
+
+-  Cannot be serialized
+-  Cannot be directly cast to int/float/string
+-  Cannot be (meaningfully) dumped using ``var_dump``
+-  Coerces to an integer by returning the resource ID. This can easily
+   lead to bugs if you accidentally use the resource with an arithmetic
+   operation. For example a GMP factorial test from out testsuite has
+   been computing the factorial of the resource ID, rather than the
+   factorial of the number.
+-  Cannot make use of the new operator overloading APIs
+-  Bad reporting on leaks. During the port I found that many functions
+   leak resources, especially in error conditions.
+
+This RFC proposes to make GMP use objects (of type ``GMP``) as the
+underlying structure. Using this new structure, the RFC implements
+support for casting, dumping, serialization, cloning and overloaded
+operators. In the following there are examples for the new behaviors:
+
+Casting
+^^^^^^^
+
+.. code:: php
+
+   $n = gmp_init(42);
+   echo $n, "\n";         // 42
+   var_dump((string) $n); // string(2) "42"
+   var_dump((int) $n);    // int(42)
+   var_dump((float) $n);  // float(42)
+
+Serializing and dumping
+^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   var_dump($n = gmp_init(42));
+   var_dump($s = serialize($n));
+   var_dump(unserialize($s));
+
+   // outputs
+
+   object(GMP)#%d (1) {
+     ["num"]=>
+     string(2) "42"
+   }
+   string(33) "O:3:"GMP":1:{s:3:"num";s:2:"42";}"
+   object(GMP)#%d (1) {
+     ["num"]=>
+     string(2) "42"
+   }
+
+Cloning
+^^^^^^^
+
+.. code:: php
+
+   $a = gmp_init(3);
+   $b = clone $a;
+   gmp_clrbit($a, 0);
+   var_dump($a, $b);
+
+   // Output: (Note that $b is still 3)
+
+   object(GMP)#1 (1) {
+     ["num"]=>
+     string(1) "2"
+   }
+   object(GMP)#2 (1) {
+     ["num"]=>
+     string(1) "3"
+   }
+
+Overloaded operators
+^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   $a = gmp_init(42);
+   $b = gmp_init(17);
+
+   var_dump($a + $b);
+   var_dump($a + 17);
+   var_dump(42 + $b);
+
+   // Outputs the following 3 times:
+
+   object(GMP)#%d (1) {
+     ["num"]=>
+     string(2) "59"
+   }
+
+The following operators are supported: ``+``, ``-``, ``*``, ``/``,
+``%``, ``|``, ``&``, ``^``, ``~``, ``<<`` and ``>>``. All operators work
+with two GMP values or one GMP value and one GMP-coercible value (e.g.
+strings and integers).
+
+Overloaded operators: Comparison
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   $a = gmp_init(42);
+   var_dump($a == 42,   $a == 17,    $a < 40,     $a < 100);
+   //       bool(true), bool(false), bool(false), bool(true)
+
+Comparison is supported via the ``==``, ``!=``, ``<``, ``>``, ``<=`` and
+``>=`` operators. Sorting and other comparison-based operations work as
+well:
+
+.. code:: php
+
+   $arr = [gmp_init(0), -3, gmp_init(2), 1];
+   sort($arr);
+   var_dump($arr);
+
+   // Outputs
+
+   array(4) {
+     [0]=>
+     int(-3)
+     [1]=>
+     object(GMP)#1 (1) {
+       ["num"]=>
+       string(1) "0"
+     }
+     [2]=>
+     int(1)
+     [3]=>
+     object(GMP)#2 (1) {
+       ["num"]=>
+       string(1) "2"
+     }
+   }
+
+Other minor changes
+^^^^^^^^^^^^^^^^^^^
+
+During the refactoring of the implementation a few additional, small
+changes were done:
+
+-  If you pass a GMP instance to ``gmp_fact`` you will get the factorial
+   of the GMP number (and not the factorial of the resource ID).
+-  Previously some functions like ``gmp_mod`` returned a long result if
+   the second argument was long. This inconsistent and partially buggy
+   behavior is no longer present and a GMP instance is always returned.
+   As the GMP instance is castable to a long this does not break
+   compatibility with scripts relying on the old behavior.
+-  Due to the previous change ``gmp_div_r`` no longer returns an
+   incorrect result in some rounding modes.
+-  If you pass an invalid rounding mode to a function, you will now get
+   a warning.
+
+Backward Incompatible Changes
+-----------------------------
+
+The addition of operator overloading does not break backwards
+compatibility.
+
+The switch from GMP resources to objects can break scripts that checked
+whether something is a GMP integer using code like
+``is_resource($a) && get_resource_type($a) == 'GMP integer``'.
+
+Performance
+-----------
+
+The addition of operator overloading does not affect performance (or at
+least I couldn't find a measurable difference). This is not surprising
+as the overloading code is usually placed in a rarely reached
+error/catch-all case.
+
+The changes to GMP improve performance in all scenarios I measured (4M
+runs each):
+
+::
+
+                        NEW    OLD
+   a) gmp_add($a, $b)   1.07   1.25
+   b) gmp_add($a, 17)   1.02   1.21
+   c) gmp_add(42, $b)   1.20   1.84
+   d) $a + $b           0.76   ---
+
+The difference between tests b) and c) is that the former makes use of
+an operator specialized on integers rather than creating a temporary GMP
+instance.
+
+Patch
+-----
+
+The pull request for this RFC can be found here:
+https://github.com/php/php-src/pull/342
+
+Vote
+----
+
+The vote started on 10.06.2013 and ended on 17.06.2013. Both proposals
+are accepted.
+
+Question: Should these changes be applied for PHP 5.6?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Internal operator overloading
+-  GMP changes
+-  None
+
+Previous discussions
+--------------------
+
+http://markmail.org/message/y7rq5vcd5ucsbcyb: This is a rather old
+discussion on userland operator overloading (so not really the same as
+this). The patch discussed there is no longer accessible.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Nikita Popov nikic@php.net
+:Original Status: Implemented in PHP 5.6
+:Patch: https://github.com/php/php-src/pull/342
+:Slug: operator_overloading_gmp
+:Wiki URL: https://wiki.php.net/rfc/operator_overloading_gmp

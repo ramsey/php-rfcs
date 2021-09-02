@@ -1,0 +1,225 @@
+Strict And Weak Parameter Type Checking
+=======================================
+
+:PHP-RFC: 0061
+:Title: Strict And Weak Parameter Type Checking
+:Author: Lukas Smith <smith@pooteeweet.org>, Zeev Suraski <zeev@php.net>
+:Status: Draft
+:Type: Unknown
+:Created: 2009-06-03
+:Version: 0.5
+
+This RFC provides a proposal for auto-converting parameter type checking
+for function/method parameters and the disadvantages of introducing
+strict scalar type hinting to PHP.
+
+Introduction
+------------
+
+Several people still have asked to expand array/object type hinting to
+cover other data types, which mostly ask for similar strict type
+checking (without any type juggling) as for arrays and objects, while
+also triggering an E_RECOVERABLE_ERROR for failed checks. However this
+means that the burden for explicit type casting is now on the user of
+the function/method. This RFC tries to address this issue.
+
+Why is strict type checking problematic?
+----------------------------------------
+
+PHP's type system was designed from the ground up so that scalars
+auto-convert depending on the context. That feature became an inherent
+property of the language, and other than a couple of exceptions - the
+internal type of a scalar value is not exposed to end users. The most
+important exception is the === operator - however, this operator is used
+in very specific situations, and obviously only in the context of
+comparisons. While there are other exceptions (e.g. gettype()) - in the
+vast majority of scenarios in PHP, scalar types auto-convert to the
+necessary type depending on the context.
+
+For that reason, developers - even seasoned ones - will feel very
+comfortable sending the string "123" to a function that semantically
+expects an integer. If they know how PHP works internally - they rely on
+the fact the function will auto-convert the type to an integer. If they
+don't (and many don't) - they don't even think about the fact that their
+"123" is a string. It's a meaningless implementation detail.
+
+For these reasons - strict type checking is an alien concept to PHP. It
+goes against PHP's type system by making the implementation detail
+(zval.type) become much more of a front-stage actor.
+
+In addition, strict type checking puts the burden of validating input on
+the callers of an API, instead of the API itself. Since typically
+functions are designed so that they're called numerous times - requiring
+the user to do necessary conversions on the input before calling the
+function is counterintuitive and inefficient. It makes much more sense,
+and it's also much more efficient - to move the conversions to be the
+responsibility of the called function instead. It's also more likely
+that the author of the function, the one choosing to use scalar type
+hints in the first place - would be more knowledgeable about PHP's types
+than those using his API.
+
+Finally, strict type checking is inconsistent with the way internal
+(C-based) functions typically behave. For example, strlen(123) returns
+3, exactly like strlen('123'). sqrt('9') also return 3, exactly like
+sqrt(9). Why would userland functions (PHP-based) behave any different?
+
+Proponents of strict type hinting often argue that input coming from end
+users (forms) should be filtered and sanitized anyway, and that this
+makes for a great opportunity to do necessary type conversions. While
+that may be true, it covers a small subset of type checking scenarios.
+For example, it doesn't cover input coming from 'trusted' sources like a
+database or files. It also doesn't account for the many developers who
+are simply unaware of PHP's internal type system, or that presently
+don't see the need to explicitly do type conversions even if they do
+sanitize their input. Not to mention those that don't sanitize their
+input at all...
+
+Introducing 'weak' or auto-converting type hinting
+--------------------------------------------------
+
+The proposed solution implements a 'weaker' kind of type hinting - which
+arguably is more consistent with the rest of PHP's type system. Instead
+of validating the zval.type property only - it uses rules in line with
+the spirit of PHP and it's auto-conversion system to look into the value
+in question, and determine whether it 'makes sense' in the required
+context. If it does - it will be converted to the required type (if it
+isn't already of that type); If it doesn't - an error will be generated.
+
+For example, consider a function getUserById() that expects an integer
+value. With `strict type
+hinting <http://news.php.net/php.internals/44573>`__, if you feed it
+with $id, which happens to hold a piece of data from the database with
+the string value "42", it will be rejected. With auto-converting type
+hinting, PHP will determine that $id is a string that has an integer
+format - and it is therefore suitable to be fed into getUserById(). It
+will then convert the value it to an integer, and pass it on to
+getUserById(). That means that getUserById() can rely that it will
+**always** get its input as an integer - but the caller will still have
+the luxury of sending non-integer but integer-formatted input to it.
+
+The key advantages of the proposed solutions are that there's less
+burden on those calling APIs (fail only when really necessary). It
+should be noted that most of the time coding is spend consuming existing
+API's and not creating new ones. Furthermore it's consistent with the
+rest of PHP in the sense that most of PHP does not care about exact
+matching zval types, and perhaps most importantly - it does not require
+everyone to become intimately familiar with PHP's type system.
+
+Furthermore, weak type hinting may be a step on the way to create
+generic type casting magic methods along the lines of \__toString(),
+allowing objects to auto-convert to scalar types as necessary (TBD).
+
+Option (1): current type juggeling rules with E_STRICT on data loss
+-------------------------------------------------------------------
+
+The auto-conversion would follow the current type juggeling rules.
+However in case of a cast that leads to data loss (like casting from
+'123abc' to an integer leading to 123 an E_STRICT notice would be
+raised.
+
+For reference, here's the current behavior of zend_parse_parameters,
+used in most internal functions.
+
+==================== ====== ===== ==== ==== =====
+value                string float int  bool array
+==================== ====== ===== ==== ==== =====
+true (boolean)       pass   pass  pass pass fail
+false (boolean)      pass   pass  pass pass fail
+0 (integer)          pass   pass  pass pass fail
+1 (integer)          pass   pass  pass pass fail
+12 (integer)         pass   pass  pass pass fail
+12 (double)          pass   pass  pass pass fail
+12.34 (double)       pass   pass  pass pass fail
+'true' (string)      pass   fail  fail pass fail
+'false' (string)     pass   fail  fail pass fail
+'0' (string)         pass   pass  pass pass fail
+'1' (string)         pass   pass  pass pass fail
+'12' (string)        pass   pass  pass pass fail
+'12abc' (string)     pass   pass  pass pass fail
+'12.0' (string)      pass   pass  pass pass fail
+'12.34' (string)     pass   pass  pass pass fail
+'foo' (string)       pass   fail  fail pass fail
+array (array)        fail   fail  fail fail pass
+array(0=>12) (array) fail   fail  fail fail pass
+NULL (NULL)          pass   pass  pass pass fail
+'' (string)          pass   fail  fail pass fail
+==================== ====== ===== ==== ==== =====
+
+Option (2): new type juggeling rules with E_STRICT on data loss
+---------------------------------------------------------------
+
+The conversion rules proposed here are slightly stricter than PHP's
+auto-conversion rules. Mainly, the string "abc" will be rejected as
+valid input for an integer type-hinted argument, and not be passed-on as
+zero and it would not auto-convert from/to array's.
+
+An E_STRICT would be raised if due to auto-conversion there would be
+data loss. So for example "2", 2 as well as 2.5 would convert to a float
+if one is expected. However 2.5 would not silently convert to an integer
+if one is expected. Similarly "123abc" would not convert to an integer
+or float. This might also be a potential approach to type juggling in
+general in some future version of PHP.
+
+Here is a short list of examples to illustrate the weak type hinting.
+Note that just like the current array/object hints, a NULL is only
+allowed if the parameter defaults to NULL.
+
+(Note the following table should probably be reviewed in light of recent
+updates to this RFC)
+
+======================= ====== ===== ==== ======= ====== ==== =====
+value                   string float int  numeric scalar bool array
+======================= ====== ===== ==== ======= ====== ==== =====
+true (boolean)          fail   fail  fail fail    pass   pass fail
+false (boolean)         fail   fail  fail fail    pass   pass fail
+0 (integer)             fail   pass  pass pass    pass   pass fail
+1 (integer)             fail   pass  pass pass    pass   pass fail
+12 (integer)            fail   pass  pass pass    pass   fail fail
+12 (double)             fail   pass  fail pass    pass   fail fail
+12.34 (double)          fail   pass  fail pass    pass   fail fail
+'true' (string)         pass   fail  fail fail    pass   fail fail
+'false' (string)        pass   fail  fail fail    pass   fail fail
+'0' (string)            pass   fail  fail pass    pass   pass fail
+'1' (string)            pass   fail  fail pass    pass   pass fail
+'12' (string)           pass   fail  fail pass    pass   fail fail
+'12abc' (string)        pass   fail  fail fail    pass   fail fail
+'12.0' (string)         pass   fail  fail pass    pass   fail fail
+'12.34' (string)        pass   fail  fail pass    pass   fail fail
+'foo' (string)          pass   fail  fail fail    pass   fail fail
+array () (array)        fail   fail  fail fail    fail   fail pass
+array (0 => 12) (array) fail   fail  fail fail    fail   fail pass
+NULL (NULL)             fail   fail  fail fail    fail   fail fail
+'' (string)             pass   fail  fail fail    pass   fail fail
+======================= ====== ===== ==== ======= ====== ==== =====
+
+Option (3): current type juggeling rules with E_FATAL on data loss
+------------------------------------------------------------------
+
+The auto-conversion would follow the current type juggeling rules.
+However in case of a cast that leads to data loss (like casting from
+'123abc' to an integer leading to 123 an E_FATAL notice would be raised.
+
+Patch
+-----
+
+-  |auto_converting_type_hinting.diff.txt| - presently implements
+   auto-converting type hinting without any warning on data loss.
+
+Changelog
+---------
+
+-  restructured to provide 3 options (two with current type juggeling
+   rules and E_STRICT or E_FATAL on data loss conversion and one with
+   new type juggeling rules and E_STRICT on data loss.
+
+.. |auto_converting_type_hinting.diff.txt| image:: /rfc/auto_converting_type_hinting.diff.txt
+
+Additional Metadata
+-------------------
+
+:Discussion: http://thread.gmane.org/gmane.comp.php.devel/61324
+:First Published At: http://wiki.php.net/rfc/typechecking
+:Original Authors: Lukas Smith smith@pooteeweet.org, Zeev Suraski zeev@php.net
+:Original Status: In discussion
+:Slug: typecheckingstrictandweak
+:Wiki URL: https://wiki.php.net/rfc/typecheckingstrictandweak

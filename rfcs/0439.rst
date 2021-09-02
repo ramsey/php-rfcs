@@ -1,0 +1,221 @@
+Deprecate (then Remove) Mcrypt
+==============================
+
+:PHP-RFC: 0439
+:Title: Deprecate (then Remove) Mcrypt
+:Author: Scott Arciszewski <security@paragonie.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2016-01-09
+:PHP-Version: 7.1
+:Version: 1.0
+
+Introduction
+------------
+
+Let's get rid of ext/mcrypt, which is abandonware and inhibits the
+growth of the language, as soon as humanly possible.
+
+Proposal
+--------
+
+In PHP 7.1, all mcrypt_\* functions will raise an E_DEPRECATED notice.
+
+In PHP 7.1+1 (be it 7.2 or 8.0), the mcrypt extension will be moved out
+of core and into PECL, where people who \*really\* want to install it
+may still do so if they can install PHP extensions from PECL.
+
+This RFC does not concern itself with the concept of shims or
+compatibility layers, and those topics are out of scope. If this RFC
+passes, another RFC could be drafted by interested parties to propose
+such a feature at a later date.
+
+Background Information (Regarding Security)
+-------------------------------------------
+
+A survey of websites where people share cryptography code reveals a lot
+about how people use mcrypt. You'll most likely find gems like this:
+
+::
+
+   /**
+    * Don't use this. It was copied from StackOverflow to demonstrate how
+    * unsuccessful developers are at using the mcrypt extension:
+    */
+   function fnEncrypt($sValue, $sSecretKey)
+   {
+       return rtrim(
+           base64_encode(
+               mcrypt_encrypt(
+                   MCRYPT_RIJNDAEL_256,
+                   $sSecretKey, $sValue,
+                   MCRYPT_MODE_ECB,
+                   mcrypt_create_iv(
+                       mcrypt_get_iv_size(
+                           MCRYPT_RIJNDAEL_256,
+                           MCRYPT_MODE_ECB
+                       ),
+                       MCRYPT_RAND)
+                   )
+               ), "\0"
+           );
+   }
+
+   function fnDecrypt($sValue, $sSecretKey)
+   {
+       return rtrim(
+           mcrypt_decrypt(
+               MCRYPT_RIJNDAEL_256,
+               $sSecretKey,
+               base64_decode($sValue),
+               MCRYPT_MODE_ECB,
+               mcrypt_create_iv(
+                   mcrypt_get_iv_size(
+                       MCRYPT_RIJNDAEL_256,
+                       MCRYPT_MODE_ECB
+                   ),
+                   MCRYPT_RAND
+               )
+           ), "\0"
+       );
+   }
+
+Problems with this code:
+
+-  It's using `ECB Mode <https://blog.filippo.io/the-ecb-penguin>`__
+-  It's attempting to generate an IV for ECB mode (which is a waste of
+   CPU since IVs aren't used in ECB mode)
+-  It's using MCRYPT_RAND for IV generation, which isn't a CSPRNG
+-  fnEncrypt() will rtrim() null bytes off the encrypted value before
+   base64 encoding it, which means a 1/256 chance of data corruption
+   that prevents decryption
+-  fnDecrypt() will rtrim() null bytes off the decrypted plaintext,
+   which means if your plaintext message was raw binary (e.g. gzip
+   compressed), it's now corrupted
+-  There is no MAC, so you transmit this over a network, `it's
+   vulnerable to chosen-ciphertext
+   attacks <https://tonyarcieri.com/all-the-crypto-code-youve-ever-written-is-probably-broken>`__
+
+Mcrypt has a lot of design warts and puts a lot of burden on the
+implementer to choose the right components (and stitch them together
+correctly). Blaming the implementer leads to error-prone cryptographic
+designs. Error-prone cryptographic designs leads to insecure
+applications.
+
+If libmcrypt were still being maintained, we could work with the
+libmcrypt team to improve it. Unfortunately, it was `abandoned in
+2007 <https://sourceforge.net/projects/mcrypt/files/Libmcrypt/2.5.8/>`__,
+and contains `unfixed bugs <https://sourceforge.net/p/mcrypt/bugs/>`__
+and `patches that will never be
+merged <https://sourceforge.net/p/mcrypt/patches/>`__.
+
+Everything libmcrypt can do, openssl can do too (and often better),
+either out-of-the-box or via its support for pluggable ciphers.
+
+For example: OpenSSL's AES implementation (which mcrypt still called
+MCRYPT_RIJNDAEL_128 before it was abandoned) uses AES-NI on modern
+processors to deliver very fast AES that withstands cache-timing
+attacks. Mcrypt's AES still used S-boxes.
+
+Comparing libmcrypt to openssl, you will find that it is:
+
+-  Less well-maintained
+-  Less standards compliant (NULL byte padding can cause data loss on
+   decryption; PKCS#7 padding, which openssl_encrypt() uses, does not)
+-  More confusing for end-users (not that OpenSSL's API and
+   documentation are stellar)
+-  Slower on modern hardware
+-  Less resistant to active attackers
+-  Less feature-rich (no public-key cryptography)
+
+Backward Incompatible Changes
+-----------------------------
+
+Any cryptography code that depends on mcrypt will need to be refactored
+against openssl. This isn't as difficult as it sounds, provided you're
+using a trustworthy cipher (e.g. MCRYPT_RIJNDAEL_128). Based on `this
+3v4l <https://3v4l.org/m4P2C>`__, I can generally conclude that the
+following MCRYPT ciphers are not currently supported by openssl:
+
+-  GOST
+-  TwoFish
+-  Loki97
+-  RC6
+-  Rijndael-192 (not to be confused with AES-192)
+-  Rijndael-256 (not to be confused with AES-256)
+-  Saferplus
+-  Wake
+-  Serpent
+-  XTEA
+-  Enigma
+
+This is an acceptable loss: Most of the ciphers in the list above should
+not be used in new software anyway. Most cryptography experts would
+consider their inclusion in any software written in 2016 to be a code
+smell and indicative of a bad protocol design. Some of them (e.g.
+Enigma) are outright insecure and should not be used at all.
+
+Proposed PHP Version(s)
+-----------------------
+
+Deprecation: Next minor version (7.1.0).
+
+Removal from core: The following major/minor version (7.2.0 or 8.0.0).
+
+Proposed Voting Choices
+-----------------------
+
+Vote "Yes" to raise an E_DEPRECATED notice in PHP 7.1 when any mcrypt
+function is used and to remove the extension from core in 7.1+1.
+
+Vote "No" otherwise.
+
+Since this would break backwards compatibility, a 2/3 majority is
+required.
+
+Question: Deprecate then Remove Mcrypt from the PHP Core?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+This vote is opened on March 15th, 2016 and will close March 22nd at
+17:00 UTC as announced on list.
+
+Patches and Tests
+-----------------
+
+Patches are available:
+
+-  [STRIKEOUT:<]\ https://github.com/php/php-src/pull/1995\ [STRIKEOUT:>]
+-  <https://github.com/php/php-src/pull/1996> (merged)
+
+References
+----------
+
+-  `Remi on
+   mcrypt <http://blog.remirepo.net/post/2015/07/07/About-libmcrypt-and-php-mcrypt>`__
+-  `If you're typing the word MCRYPT into your PHP code, you're doing it
+   wrong <https://paragonie.com/blog/2015/05/if-you-re-typing-word-mcrypt-into-your-code-you-re-doing-it-wrong>`__
+-  `A story about Jessica (regarding the usability and accessibility of
+   computer
+   security) <http://swiftonsecurity.tumblr.com/post/98675308034/a-story-about-jessica>`__
+-  `Why Johnny Can't Encrypt <http://www.gaudior.net/alma/johnny.pdf>`__
+-  `Error-prone cryptographic
+   designs <https://cr.yp.to/talks/2015.01.07/slides-djb-20150107-a4.pdf>`__
+-  `More about cache-timing
+   attacks <http://blog.ircmaxell.com/2014/11/its-all-about-time.html>`__
+
+Rejected Features
+-----------------
+
+Additional Metadata
+-------------------
+
+:Original Authors: Scott Arciszewski, security@paragonie.com
+:Original Status: Implemented (PHP 7.1)
+:Slug: mcrypt-viking-funeral
+:Wiki URL: https://wiki.php.net/rfc/mcrypt-viking-funeral

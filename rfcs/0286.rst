@@ -1,0 +1,496 @@
+Big Integer Support
+===================
+
+:PHP-RFC: 0286
+:Title: Big Integer Support
+:Author: Andrea Faulds <ajf@ajf.me>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2014-06-20
+:Version: 0.1.8
+
+Introduction
+------------
+
+Since the beginning, PHP has had only two numeric types: integer, and
+float. The former has been a platform-dependent C long, usually either
+32-bit or 64-bit, and the latter has been a platform-dependent C double,
+usually an IEEE 754 double-precision floating-point number.
+
+Both work relatively well, but beyond the maximum integer value on a
+specific platform, things get a bit messy. Typically, PHP will have
+integers overflow to floats, resulting in a loss of precision. Integer
+size is platform-specific, so code dealing with large integers won't act
+the same on a 32-bit machine versus a 64-bit machine.
+
+Some applications need to deal with very large integers beyond 32-bit or
+64-bit and for this they can resort to extensions like gmp. However,
+dealing with these so-called "big integers" or "bigints" is rather
+clumsy. You must write all your code to deal with them specifically, and
+you must create objects for them rather than simply using numeric
+literals like for the built-in integer and float types.
+
+Hence, this RFC proposes the addition of built-in bigint support to PHP.
+Now, you can do operations with integers of any size, so long as you
+have enough memory. While there are now two types internally (long and
+bigint), userland code will continue to see only "integers", and the two
+types will be indistinguishable.
+
+The advantages of doing this are numerous. Now integers will always be
+consistent across platforms, with programmers not needing to worry about
+the size of a long – 32-bit, 64-bit or otherwise – on their platform.
+Operations, too, will always be consistent. This will help the
+portability of PHP code and mean less time wasted by programmers dealing
+with platform differences, strengthening PHP's cross-platform
+guarantees. Dealing with extremely large data sets becomes easier, as
+you no longer need to anticipate if your IDs will exceed 32 or 64 bits.
+Integer overflow is largely relegated to being an issue for internals
+programmers, as userland code will never have to deal with it, and there
+is no risk of a loss of precision as they will no longer become floats.
+All this combined is likely to make for more robust, less buggy
+applications. Finally, being able to deal with large integers "natively"
+makes PHP more attractive for web developers needing to do large integer
+math, such as applications dealing with currency, or perhaps statistical
+applications.
+
+Proposal
+--------
+
+New type
+~~~~~~~~
+
+To complement the existing internal IS_LONG and IS_DOUBLE types, a new
+IS_BIGINT type is introduced. IS_BIGINT is a reference-counted,
+copy-on-write type which is not garbage collected, much like a string.
+Behind-the-scenes, the a bigint library - LibTomMath by default, but GMP
+can also be used - is used to implement it, but it is abstracted with a
+new family of zend_bigint_\* functions and the zend_bigint type, which
+allows the aforementioned choice of libraries. As stated in the
+Introduction, no new userland type is added to PHP, and instead
+"integer" now covers two internal types: IS_LONG and IS_BIGINT. There
+should be **no visible difference** to userland code between these
+types. Internally, a new "fake type" is also added, namely
+IS_BIGINT_OR_LONG. This is used by a few functions dealing with
+conversions and casts, and is now the "type" that ``(integer)`` will
+cast to.
+
+Type specifiers for zend_parse_parameters that previously yielded a long
+will continue to do so. The type specifiers ``i``, for a bigint or a
+long, and ``I``, for a bigint, are added, along with the corresponding
+``Z_PARAM_BIGINT_OR_LONG``\ (``_EX``) and ``Z_PARAM_BIGINT``\ (``_EX``)
+``FAST_ZPP`` macros.
+
+Changes to operators for the sake of consistency
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In order to make integer arithmetic consistent between longs and
+bigints, certain changes to existing operator behaviour will be made:
+
+-  Bitwise operators will now deal with integers of any size (i.e. both
+   longs and bigints) instead of being bounded by the size of a long on
+   a machine.
+-  Left shifts will promote to bigints rather than overflowing.
+   Similarly, right shifts can deal with bigints, so ``(1 << 67) >> 66``
+   will result in ``2``.
+-  The pow (``*``\ ``*``) operator will now error when an exponent too
+   large is used if it is dealing with an integer. This is because both
+   GMP and LibTomMath can't handle exponents beyond the size of an
+   unsigned long. This restriction will not occur when using the pow
+   operator when either operand is a float.
+
+Standard library changes
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+-  Some math functions accepting integers are updated:
+
+::
+
+       * ''rand'', ''srand'' and ''getrandmax'' are unchanged, because C's random number generator has no support for arbitrary-precision integers
+       * ''mt_rand'', ''mt_srand'' and ''mt_getrandmax'' are unchanged, because PHP's random number generator always produces a fixed-size value
+       * ''intdiv'' supports big integers and will no longer return ''0'' for ''intdiv(PHP_INT_MIN, -1)'' (this is not a BC break assuming this RFC is accepted for PHP 7, because ''intdiv'' is a function introduced in PHP 7)
+       * ''abs'', ''max'' and ''min'' gain big integer support
+       * ''pow'' gains big integer support as a result of the ''*''''*'' operator being updated
+       * ''array_sum'' and ''array_product'' are now implemented in the patch using ''add_function'' and ''mul_function'', respectively. This means that they now support not only bigints, but also internal objects with operator overloading
+       * ''decbin'', ''decoct'', ''dechex'' TBD
+   * Serialisation and unserialisation supports bigints
+   * ''gettype'', ''settype'', ''var_dump'', ''var_export'', ''print_r'', ''is_int''/''is_integer''/''is_long'' and ''debug_zval_dump'' gain bigint support
+
+Examples
+~~~~~~~~
+
+Currently, if an integer gets too large in PHP, it becomes a float,
+accuracy is lost, and operations start behaving differently. Take this
+code for example:
+
+.. code:: php
+
+   $x = PHP_INT_MAX - 1;
+   var_dump($x);
+   $x++;
+   var_dump($x);
+   $x++;
+   var_dump($x);
+   $x++;
+   var_dump($x);
+
+Under PHP 5.5 on a 64-bit machine, it produces the following result:
+
+::
+
+   int(9223372036854775806)
+   int(9223372036854775807)
+   float(9.2233720368548E+18)
+   float(9.2233720368548E+18)
+
+The last six digits are lost, and incrementing suddenly does nothing!
+
+However, the output would be different with this RFC:
+
+::
+
+   int(9223372036854775806)
+   int(9223372036854775807)
+   int(9223372036854775808)
+   int(9223372036854775809)
+
+No digits are lost, incrementing still works, and it's still an integer.
+Under the hood, it may technically be a different type (depending on the
+platform), but from the user's perspective, it's still an integer, and
+it functions exactly the same.
+
+This means you can do arbitrarily large integer operations with full
+accuracy, so long as there is enough memory available. For example:
+
+::
+
+   $ php -r 'var_dump(10 ** 100);'
+   int(10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000)
+   $ php -r 'var_dump((1 << 67) >> 63);'
+   int(16)
+   $ php -r 'var_dump(2 ** 3 ** 4);'
+   int(2417851639229258349412352)
+   $ php -r 'var_dump((10 ** 100) % 10);'
+   int(0)
+   $ php -r 'var_dump(123098209381029380128301298301298309812098213);'
+   int(123098209381029380128301298301298309812098213)
+
+This works consistently across platforms. So, it is possible to handle
+64-bit integers with full precision on a 32-bit machine with exactly the
+same code - indeed, it does not matter how many bits are in the integer,
+so long as there is sufficient memory to store it. Every example above
+works on a 64-bit machine running OS X, but would equally function
+identically on a 32-bit Windows machine, or a 64-bit Linux server, or
+any other platform.
+
+Backward Incompatible Changes
+-----------------------------
+
+As mentioned before, the shift left and shift right operators act
+differently, as does pow for very large exponents.
+
+Longs will no longer overflow to float, but instead become bigints
+(which, so far as userland cares, are just integers). Code expecting
+large integer literals to be floats will now end up with bigints
+instead, which might cause problems. However, if a float is still
+desired, this can be fixed simply by appending ``.0``.
+
+Internals changes
+~~~~~~~~~~~~~~~~~
+
+Some internal APIs, mostly ones dealing with numbers, will necessarily
+change their signatures or behaviour:
+
+#. For example, is_numeric_string/_ex now takes a
+   ``zend_bigint*``\ ``*`` parameter
+#. The cast_object object handler now has to deal with
+   ``IS_BIGINT_OR_LONG`` and ``IS_BIGINT``
+
+Proposed PHP Version(s)
+-----------------------
+
+This is proposed for the next PHP X, currently PHP 7. The patch is based
+on PHP master (originally, phpng).
+
+RFC Impact
+----------
+
+Performance
+~~~~~~~~~~~
+
+The performance penalties are minor for normal integer and float
+arithmetic. While left shifts and right shifts now require overflow
+checks, generally bigints will just take the place of floats in existing
+overflow checks so the performance impact is minimal.
+
+Fatal errors
+~~~~~~~~~~~~
+
+Unfortunately, bigints would introduce two new ways to cause fatal
+errors in PHP.
+
+Firstly, if you do an operation resulting in an extremely large number,
+you might hit your request memory limit.
+
+Secondly, when trying to calculate a value that would require more
+memory than ``size_t`` can describe, we have bail out and throw an
+E_ERROR with the message "Result of integer operation would be too large
+to represent".
+
+Licensing and dependency issues
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To avoid implementing the underlying arithmetic itself, PHP needs to add
+a dependency on a library implementing arbitrary-precision integers.
+
+This patch supports two different libraries, which you can choose
+between when compiling PHP:
+
+-  `LibTomMath <http://www.libtom.net/>`__ - a dual-licensed Public
+   Domain/WTFPL arbitrary-length implementation. It is used by default,
+   and a version is included within the repository to avoid adding an
+   extra external dependency when building PHP, and also because this is
+   required for the custom allocators to work.
+-  `The GNU Multiple Precision Arithmetic Library
+   (GMP <https://gmplib.org/>`__ - an LGPLv3 implementation. It has
+   greatly improved performance over LibTomMath (up to two orders of
+   magnitude).
+
+A choice is allowed to avoid licensing issues with GMP: while it has
+better performance, it uses the GNU Lesser General Public License
+version 3, which may be unacceptable to some people. LibTomMath, by
+contrast, is very liberally licensed.
+
+Arrays
+~~~~~~
+
+Since ``HashTable`` has not been and will not be updated to support
+directly ``IS_BIGINT`` keys, indexing by an ``IS_BIGINT`` key must be
+handled somehow. The RFC proposes to simply convert the bigint to a
+string, thus ``$x[PHP_INT_MAX + 1] = 3;`` would be equivalent to
+``$x[(string)(PHP_INT_MAX + 1)] = 3;``. This is inconsistent with the
+behaviour of floats (which are blindly converted, wrapped and truncated
+by ``zend_dval_to_lval``), but changing their behaviour might cause
+compatibility issues. If that became a problem, it could be addressed in
+a follow-up RFC.
+
+To SAPIs
+~~~~~~~~
+
+This should have no impact on existing SAPIs.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Any extensions which request numeric parameters as zvals rather than
+longs or doubles from zend_parse_parameters will need changes. Those
+dealing with numerical operations specifically will require deeper
+changes. Obviously, ext/standard will need some updating.
+
+ext/gmp will be updated to handle bigints. However, due to behavioural
+and implementation differences between GMP objects and the bigint type,
+it won't just pass through to the built-in operator functions. With the
+addition of bigints, ext/gmp would quickly become irrelevant except for
+backwards-compatibility with existing applications, and might eventually
+be moved to PECL.
+
+Extensions dealing with parts of the Zend API that deal with numbers
+will need to be modified to deal with changes in signatures and
+behaviour. (See "Backwards Incompatible Changes")
+
+To Opcache
+~~~~~~~~~~
+
+Both GMP and LibTomMath can only have one custom allocator, so I weighed
+the options and made that be emalloc, not malloc. I expect this would
+pose a problem for opcache, as any bigints would be destroyed upon the
+end of a request, so opcache would need to store bigints persistently.
+Hence, some sort of import/export mechanism could be added to
+zend_bigint. It is obviously possible to use strings, but gmp also has
+its own format for serialisation which would be more efficient, so that
+might be a good way.
+
+The patch has not yet been updated to support opcache.
+
+New Constants
+~~~~~~~~~~~~~
+
+None.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+No changes.
+
+Open Issues
+-----------
+
+The patch is unfinished. Many tests are still broken and most extensions
+will need some updating. It does not work with opcache.
+
+However, there are no open questions.
+
+TODO
+~~~~
+
+Must be done
+^^^^^^^^^^^^
+
+-  Check if https://github.com/php/php-src/pull/1073 affects bigints
+-  Fix left shift overflow check for negative ``op1`` (need to do check
+   on its absolute value, and account for sign bit)
+-  Finish LibTomMath port
+
+::
+
+       * TODOs
+   * Deal with bigints string indices better. Currently we cast to long, but we should check for it being capped at LONG_MAX/_MIN and throw the "uninitalized index" error. Possibly a novel error ("string index too large"?)
+       * Numeric string offset thing in zend_language_scanner.l
+   * GMP backend needs the segfault fix ext/gmp has (custom allocator switching)
+       * See: https://github.com/php/php-src/commit/3c925b18fa96043e5d7e86f9ce544b143c3c2079
+   * Test coverage:
+       * Fix remaining broken tests on 64-bit and 32-bit
+       * Write more tests for bigints, especially for areas that aren't covered just now
+   * Better extension coverage.
+       * Fully ported:
+           * JSON - Can correctly encode and decode bigints
+       * Partially ported:
+           * standard
+              * Agree on some semi-sane new behaviour for ''decbin''/''dechex''/''decoct'' (or not)
+       * Compiles, not necessarily fully working:
+           * bz2, core, ctype, curl, date, dom, ereg, exif, fileinfo, gd, gettext, hash, iconv, intl, libxml, mbstring, mysql, mysqli, mysqlnd, pcre, pdo_mysql, pdo_mysql, pdo_sqlite, pgsql, phar, reflection, session, shmop, simplexml, soap, sockets, spl, sqlite3, standard, tidy, tokenizer, wddx, xml, xmlreader, xmlwriter, xsl, zip
+       * Need doing:
+           * Basically everything, but in particular:
+           * Important exts (session, PDO, etc.)
+           * Make PHP at least build without ''--disable-all''?
+   * Opcache
+       * Bigints are allocated in non-persistent memory, so we'll have to create some sort of persistent storage format
+
+Optional, possibly future work
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+-  ``IS_BIGINT_OR_LONG`` should be renamed to ``_IS_BIGINT_OR_LONG`` for
+   consistency with ``_IS_BOOL``. That way, it's more obviously a fake
+   type.
+-  Add an unsigned long type, ``u`` (``Z_PARAM_ULONG``), to
+   ``zend_parse_parameters``? This is especially useful on 32-bit
+   systems.
+-  Optimisations:
+
+::
+
+       * We currently use clang and GCC 5.0 checked arithmetic builtins to implement faster overflow checks in ''fast_add_function'', ''fast_sub_function'', ''ZEND_SIGNED_MULTIPLY_LONG'' and ''shift_left_function'', unlike php-src master. For the sake of compilers that aren't GCC 5.0 or clang, some of the old inline assembly routines for this checking could be restored and updated for bigints.
+   * Other optimisations:
+       * Possibly mark the zend_bigint_* functions as to be inlined and move them to the header
+
+Unaffected PHP Functionality
+----------------------------
+
+As previously mentioned, the handling of array keys might need to be
+looked at. Otherwise, it shouldn't affect the behaviour of other PHP
+functionality. Implementation-wise, if something manipulates zvals
+directly and looks at their types, then it needs updating for bigints.
+
+Future Scope
+------------
+
+None I can think of particularly.
+
+Vote
+----
+
+As this is a language change (it affects the language specification),
+this requires a 2/3 majority. It is straight Yes/No vote to accepting
+the RFC.
+
+Voting started on 2015-02-15 and was to end 10 days later on 2015-02-25,
+but voting was cancelled the same day it started.
+
+Question: Big Integer Support RFC
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+A work-in-progress, unfinished pull request for php-src is here:
+https://github.com/php/php-src/pull/876
+
+The branch itself is here:
+https://github.com/TazeTSchnitzel/php-src/tree/bigint
+
+The LibTomMath backend (the default) is a work-in-progress. Use
+``--enable-bigint-gmp`` to use the GMP backend.
+
+Many tests are still broken, as as mentioned previously, I still need to
+deal with extensions and opcache. It is very much unfinished, but it
+does work to a degree.
+
+See the TODO section in Open Issues (above) for unfinished areas.
+
+There is also an incomplete language specification pull request here,
+which currently lacks updated tests:
+https://github.com/php/php-langspec/pull/112
+
+Implementation
+--------------
+
+If/when this is implemented, this section would/will contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+Inspiration
+~~~~~~~~~~~
+
+-  I was inspired in part by Python 2's bigint support with its separate
+   "long" type (different from the machine-dependent "int" type), and
+   how Python 3 unified these into the single "int" type - see
+   http://legacy.python.org/dev/peps/pep-0237/
+
+-  Some other languages also do it: Erlang, Haskell and Smalltalk
+
+Discussion
+~~~~~~~~~~
+
+-  `php-internals discussion of draft
+   RFC <http://marc.info/?l=php-internals&m=140322457728554&w=2>`__
+
+General
+~~~~~~~
+
+-  http://www.libtom.net/ and https://github.com/libtom/libtommath -
+   LibTomMath
+-  https://gmplib.org/ - The GNU Multiple Precision Arithmetic Library
+-  Yasuo's `gmp_number </rfc/gmp_number>`__ RFC is similar in some
+   respects
+
+Changelog
+---------
+
+-  v0.1.8 - Decided on not touching float indexing behaviour for now
+-  v0.1.7 - Minor changes, removed some outdated information
+-  v0.1.6 - LibTomMath built as part of PHP
+-  v0.1.5 - Switchable back-ends
+-  v0.1.4 - LibTomMath migration from GMP
+-  v0.1.3 - Examples
+-  v0.1.2 - Int64 clarifications
+-  v0.1.1 - Added stdlib changes
+-  v0.1 - Not actually the first version, but I kept no changelog until
+   now
+
+Additional Metadata
+-------------------
+
+:Original Authors: Andrea Faulds, ajf@ajf.me
+:Original Date: 2014-06-20 (Initial Draft; Put Under Discussion 2014-10-10, Last updated 2015-02-15)
+:Slug: bigint
+:Wiki URL: https://wiki.php.net/rfc/bigint

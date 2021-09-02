@@ -1,0 +1,480 @@
+Functional Interfaces
+=====================
+
+:PHP-RFC: 0471
+:Title: Functional Interfaces
+:Author: krakjoe
+:Status: Declined
+:Type: Unknown
+:Created: 2016-04-17
+:Version: 0.1
+
+Introduction
+------------
+
+A functional interface is an interface which declares only one abstract
+method, a familiar example is Countable:
+
+.. code:: php
+
+   <?php
+   interface Countable {
+       public function count();
+   }
+   ?>
+
+Such interfaces are also known as SAM (Single Abstract Method)
+interfaces.
+
+While the language has a few examples of functional or SAM interfaces,
+the ecosystem has many more.
+
+Proposal
+--------
+
+A closure is able to provide a way to implement a functional interface:
+
+.. code:: php
+
+   <?php
+   interface IFoo {
+       public function method() : int;
+   }
+
+   $cb = function () implements IFoo : int {
+       return 42;
+   };
+
+There is enough information in the code above for the engine to reason
+that $cb should implement IFoo, and obviously be a Closure.
+
+The engine generates the appropriate class entry using the closure as
+the only public method, having easily determined the correct name for
+that method (there is, and can only be, one possible candidate).
+
+This is extremely powerful, because Closures have lexical scope, and so
+unlike an anonymous class, can access the private properties and other
+symbols where the Closure is declared.
+
+The code below is not good code, it's not the most efficient version of
+the code that could exist. It serves to show the difference between
+implementing a functional interface using a closure, and provides a
+comparison with anonymous classes:
+
+`Functional Interfaces - Counter
+Example <https://3v4l.org/b4AWq/rfc#rfc-func_interfaces>`__
+
+.. code:: php
+
+   <?php
+   class Foo {
+       private $bar = [];
+
+       public function fill($limit = 100) {
+           for ($i = 0; $i < $limit; $i++) {
+               $this->bar[] = mt_rand($i, $limit);
+           }
+       }
+
+       public function getEvenCounter() : Countable {
+           return function () implements Countable {
+               $counter = 0;
+               foreach ($this->bar as $value) {
+                   if ($value % 2 === 0)
+                       $counter++;
+               }
+               return $counter;
+           };
+       }
+
+       public function getOddCounter() : Countable {
+           return function () implements Countable {
+               $counter = 0;
+               foreach ($this->bar as $value) {
+                   if ($value % 2 !== 0) {
+                       $counter++;
+                   }
+               }
+               return $counter;
+           };
+       }
+   }
+
+   $foo = new Foo();
+
+   $even = $foo->getEvenCounter();
+   $odd = $foo->getOddCounter();
+
+   $it = 0;
+
+   while (++$it<10) {
+       $foo->fill(50);
+       var_dump(
+           count($even),
+           count($odd));
+   }
+   ?>
+
+The same code using anonymous classes:
+
+.. code:: php
+
+   <?php
+   class Foo {
+       private $bar = [];
+
+       public function fill($limit = 100) {
+           for ($i = 0; $i < $limit; $i++) {
+               $this->bar[] = mt_rand($i, $limit);
+           }
+       }
+
+       public function getEvenCounter() : Countable {
+           return new class($this->bar) implements Countable {
+               public function __construct(&$bar) {
+                   $this->bar =& $bar;
+               }
+
+               public function count() {
+                   $counter = 0;
+                   foreach ($this->bar as $value) {
+                       if ($value % 2 === 0)
+                           $counter++;
+                   }
+                   return $counter;
+               }
+
+               private $bar;
+           };
+       }
+
+       public function getOddCounter() : Countable {
+           return new class($this->bar) implements Countable {
+               public function __construct(&$bar) {
+                   $this->bar =& $bar;
+               }
+
+               public function count() {
+                   $counter = 0;
+                   foreach ($this->bar as $value) {
+                       if ($value % 2 !== 0) {
+                           $counter++;
+                       }
+                   }
+                   return $counter;
+               }
+
+               private $bar;
+           };
+       }
+   }
+
+   $foo = new Foo();
+
+   $it = 0;
+
+   $even = $foo->getEvenCounter();
+   $odd = $foo->getOddCounter();
+
+   while (++$it<10) {
+       $foo->fill(50);
+
+       var_dump(
+           count($even),
+           count($odd));
+   }
+   ?>
+
+The anonymous class version:
+
+-  must use referencing, or fetch a new Countable object on each
+   iteration,
+-  is extremely verbose
+-  must set dependencies in the constructor
+-  has no support for lexical scope
+
+The functional interface version:
+
+-  is sparse
+-  is easier to reason about
+-  does not require the use of references
+-  supports lexical scope
+
+Functional interface support does not change the definition of an
+interface, and only reuse the definition of a Closure.
+
+Receiving and Invoking Functional Interfaces
+--------------------------------------------
+
+The implementation of a functional interface is an instance of Closure,
+and the interface it was declared to implement, it has the behaviour of
+both.
+
+The implementation would have the following formal definition:
+
+::
+
+   final class {Interface}\0{closure} extends Closure implements Interface
+
+Such that the following is always true:
+
+::
+
+   $instance instanceof Interface && $instance instanceof Closure
+
+`Functional Interfaces - Receiving and
+Invoking <https://3v4l.org/mOJXI/rfc#rfc-func_interfaces>`__
+
+.. code:: php
+
+   <?php
+   interface ILog {
+       public function log(string $message, ... $args) : void;
+   }
+
+   class Foo {
+       public function __construct(ILog $logger) {
+           $this->logger = $logger;
+       }
+
+       public function thing() {
+           $this->logger->log("thing");
+       }
+   }
+
+   $logger = function (string $message, ... $args) implements ILog : void {
+       printf("{$message}\n", ... $args);
+   };
+
+   $foo = new Foo($logger);
+   $foo->thing();
+
+   $logger("next thing");
+
+This means that the receiver (Foo::__construct) can receive, and
+consumer (Foo::thing) can invoke the interface as if it were a normal
+object, while the creator of $logger, who must know it is a Closure, can
+still invoke it as a Closure.
+
+Both methods of invocation are valid in both receiving and declaring
+contexts.
+
+Error Conditions
+----------------
+
+The following conditions will cause compiler errors:
+
+`Functional Interfaces - Compiler Error
+1 <https://3v4l.org/65W6i/rfc#rfc-func_interfaces>`__
+
+.. code:: php
+
+   <?php
+   interface IFoo {
+       public function method1();
+       public function method2();
+   }
+
+   function () implements IFoo {};
+   ?>
+
+::
+
+   Fatal error: cannot implement non functional interface IFoo in /in/65W6i on line 7
+
+*Reason: IFoo cannot be considered a functional interface, because it
+contains more than one abstract method.*
+
+`Functional Interfaces - Compiler Error
+2 <https://3v4l.org/qLbPv/rfc#rfc-func_interfaces>`__
+
+.. code:: php
+
+   <?php
+   interface IFoo {
+       public function foo();
+   }
+   interface IBar extends IFoo {
+       public function bar();
+   }
+
+   function () implements IBar {};
+
+::
+
+   Fatal error: cannot implement non functional interface IBar in /in/qLbPv on line 9
+
+*Reason: Although IBar only declares one abstract method, it extends
+IFoo and so contains two abstract methods*
+
+`Functional Interfaces - Compiler Error
+3 <https://3v4l.org/WT98N/rfc#rfc-func_interfaces>`__
+
+.. code:: php
+
+   <?php
+   abstract class Foo {
+       abstract public function bar();
+   }
+
+   function () implements Foo {};
+
+::
+
+   Fatal error: cannot implement non interface Foo in /in/WT98N on line 6
+
+*Reason: Although Foo contains only one abstract method, it is not an
+interface*
+
+`Functional Interfaces - Compiler Error
+4 <https://3v4l.org/MMuD0/rfc#rfc-func_interfaces>`__
+
+.. code:: php
+
+   <?php
+   new class {
+       public function __construct() {
+           function () implements self {};
+       }
+   };
+
+::
+
+   Fatal error: functional interface cannot implement self in /in/MMuD0 on line 4
+
+*Reason: Although self is a valid scope in that context, self, parent,
+and static, can never be interfaces*
+
+`Functional Interfaces - Compiler Error
+5 <https://3v4l.org/2AiUV/rfc#rfc-func_interfaces>`__
+
+.. code:: php
+
+   <?php
+   interface IFoo {
+       public static function method();
+   }
+
+   function () implements IFoo {};
+
+::
+
+   Fatal error: cannot create non static implementation of static functional interface IFoo in /in/2AiUV on line 6
+
+*Reason: The compiler would raise less specific errors later on*
+
+`Functional Interfaces - Compiler Error
+6 <https://3v4l.org/o9gIB/rfc#rfc-func_interfaces>`__
+
+.. code:: php
+
+   <?php
+   interface IFoo {
+       public function method();
+   }
+
+   static function () implements IFoo {};
+
+::
+
+   Fatal error: cannot create static implementation of non static functional interface IFoo in /in/o9gIB on line 6
+
+*Reason: The compiler would raise less specific errors later on*
+
+Syntax Choices
+--------------
+
+Interface and return type reversed:
+
+::
+
+   function (string $arg) use($thing) : int implements Interface
+
+It looks as if ``int`` is somehow implementing ``Interface``.
+
+Interface before arguments:
+
+::
+
+   function implements Interface (string $arg) use($thing) : int {}
+
+The arguments list looks as if it somehow applies to ``Interface``.
+
+Interface after arguments and before use:
+
+::
+
+   function (string $arg) implements Interface use($thing) : int {}
+
+This looks as if ``Interface`` somehow uses ``$thing``.
+
+Vote
+----
+
+Voting started on May 15th, ended May 29th 2016.
+
+Question: Accept functional interfaces? (2/3+1 majority required)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Backward Incompatible Changes
+-----------------------------
+
+N/A
+
+Proposed PHP Version(s)
+-----------------------
+
+7.1
+
+RFC Impact
+----------
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+The API to create functional interface implementations is exported by
+Zend, and part of the already exported Closure API.
+
+To Opcache
+~~~~~~~~~~
+
+Opcache may need a trivial patching.
+
+Future Scope
+------------
+
+When the concept of functional interfaces is implemented, it may be
+worth discussing the coercion, or explicit cast of callables.
+
+Proposed Voting Choices
+-----------------------
+
+2/3 majority required, simple yes/no vote proposed.
+
+Patches and Tests
+-----------------
+
+https://github.com/php/php-src/pull/1866
+
+3v4l
+----
+
+3v4l have been kind enough to provide testing facilities for this patch.
+
+References
+----------
+
+`php.internals <http://news.php.net/php.internals/92404>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: krakjoe
+:Slug: functional-interfaces
+:Wiki URL: https://wiki.php.net/rfc/functional-interfaces

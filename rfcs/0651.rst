@@ -1,0 +1,518 @@
+Consistent Callables
+====================
+
+:PHP-RFC: 0651
+:Title: Consistent Callables
+:Author: Dan Ackroyd
+:Status: Draft
+:Type: Standards Track
+:Created: 2019-04-28
+:Version: 0.95
+
+Introduction
+------------
+
+In PHP most types are consistent; a float is a float whether it is in a
+function, in a static method, or is a global variable. Ints, bools,
+resource, strings etc are also all consistent, and can be passed safely
+from one function to another.
+
+The callable type is not consistent. It is possible for a callable to be
+valid in one context but not in others, and so people need to consider
+how it is used carefully.
+
+The two aims of this RFC are:
+
+i) to make 'callable' be a consistent type, so that it can be used
+safely without regard to the location where it is being used.
+
+ii) Make call_user_func be equivalent to calling a callable through
+direct invocation. i.e. for a callable that requires zero arguments, if
+the code \`call_user_func($callable);\` works, then the code
+\`$callable();\` will also work.
+
+Summary of changes, aka tl:dr version
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1) Modify the callable type check for parameter and return types, so
+that only values that are universally callable pass the type check.
+
+2) Add function is_callable_type(mixed $var) : bool - returns true if
+the parameter can be passed as a callable type, and is callable in any
+scope, otherwise returns false.
+
+3) Modify the current is_callable() function to only return true for
+values that will be callable in the current scope.
+
+4) self, parent and other non-resolved strings will no longer be usable
+either in string or array based callables i.e. neither 'parent::bar' or
+[B::class, 'parent::bar'].
+
+Example problems
+~~~~~~~~~~~~~~~~
+
+This section lists the problems with the current implementation of
+callables. I believe it is complete, though it may not be due to the
+magic of re-binding methods.
+
+Callable type is inconsistent
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In this example both testFunction and testMethod have the callable type
+for the parameter \`$callable`. For the instance method the parameter
+passes the callable check but for the function it fails, despite it
+being the same value.
+
+.. code:: php
+
+   function testFunction(callable $callable) {
+       echo "testFunction OK";
+   }
+    
+   class Bar {
+       private static function staticMethod() {
+       }
+    
+       public function testMethod(callable $callable) {
+           echo "testInClass OK";
+           testFunction($callable);
+       }
+   }
+    
+   $callable = ['Bar', 'staticMethod'];
+    
+   $obj = new Bar();
+   $obj->testMethod($callable);
+    
+    
+   // output is
+   // testInClass OK
+   // Fatal error: Argument 1 passed to testFunction() must be callable, array given, called in 
+   // %d on line %d and defined in %s on line %d
+
+i.e. even though the parameter was a valid callable type when passed to
+the instance method of the class, it became an invalid callable when
+passed to the function.
+
+Private / protected methods report as callable when they are not
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   class A
+   {
+       public function testIsCallable(callable $param) {
+           return is_callable($param);
+       }
+    
+       private function privateMethod() {
+           echo "This is a private method";
+       }
+    
+       public function test($param) {
+           if ($this->testIsCallable($param)) {
+               $param();
+           }
+       }
+   }
+    
+   class B extends A
+   {
+       public function test($param) {
+           if ($this->testIsCallable($param)) {
+               $param();
+           }
+       }
+   }
+    
+   $a = new A();
+   $b = new B();
+    
+   $callable = [$a, 'privateMethod'];
+    
+   $a->test($callable);
+   $b->test($callable);
+    
+   // Output is 
+   // This is a private method
+   // PHP Fatal error: Call to private method A::privateMethod() from context 'B'
+
+i.e. despite checking with \`is_callable\` if something is callable, the
+program crashes because \`is_callable\` lied to us.
+
+Instance method reported as callable
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The is_callable function reports an instance method as callable on a
+class. It should not be callable and that behaviour is already
+deprecated. Instance methods should only callable on instances.
+
+.. code:: php
+
+
+   class Foo {
+       function bar() {
+           echo "this is an instance method";
+       }
+   }
+    
+   $callable = ['Foo', 'bar'];
+   var_dump(is_callable($callable));
+   $callable();
+    
+    
+   //Output is:
+   //Deprecated: Non-static method Foo::bar() should not be called statically in /in/l7qbj on line 11
+   //this is an instance method
+
+The method invoked varies depending where the callable is called from
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For callables that use \`self\` or \`parent\` as part of the definition
+of the callable, the actual code that will be invoked varies depending
+on where the callable was called from.
+
+.. code:: php
+
+
+   class Foo {
+       public static function getCallable() {
+           return 'self::hello';
+       }
+       public function hello() {
+           echo "This is foo::hello"; //I expect this to refer to Foo::hello 
+       }
+       public function process(callable $callable) {
+           call_user_func($callable);
+       }
+   }
+    
+   class Bar {
+       public function process(callable $callable) {
+           call_user_func($callable);
+       }
+       public function hello() {
+           echo "This is bar::hello";
+       }
+    
+       public static function getCallable() {
+           return 'parent::hello'; //I expect this to refer to Foo::hello
+       }
+   }
+    
+   $foo = new Foo();
+   $bar = new Bar();
+   $callable = $foo->getCallable();
+   $bar->process($callable);
+    
+   $callable = $bar->getCallable();
+   $foo->process($callable);
+    
+    
+   // Output is:
+   // This is bar::hello
+   // Fatal error: Uncaught TypeError: Argument 1 passed to Foo::process() must be 
+   // callable, string given, called in /in/7SCuB on line 34 and defined in /in/7SCuB:10
+
+i.e. calling \`self::hello\` from within Bar changes the callable from
+meaning \`Foo::hello\` to \`Bar::hello\` and calling 'parent::hello'
+from within Foo changes the meaning from \`Foo::hello\` to something
+that breaks.
+
+call_user_func different from is_callable
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In this example the result of calling something through call_user_func
+and invoking it directly is different.
+
+.. code:: php
+
+
+   class foo {
+       public static function getCallable() {
+           return 'self::bar';
+       }
+       public function bar() {
+           echo "This is foo::bar";
+       }
+       public function processCUF(callable $callable) {
+           call_user_func($callable);
+       }
+       public function processInvoke(callable $callable) {
+           $callable();
+       }
+   }
+   $foo = new Foo();
+   $callable = $foo->getCallable();
+   $foo->processCUF($callable);
+    
+   $bar->processInvoke($callable);
+    
+   // Output is:
+   // This is foo::bar
+   // Fatal error: Uncaught Error: Class 'self' not found in /in/DDGHU:14
+
+i.e. despite something being 'callable' it is only callable directly and
+not through call_user_func.
+
+Details of changes
+------------------
+
+Definition of valid values for callable type
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The following would be the complete list of valid values for the
+callable type:
+
+#. A string that is the name of a function.
+#. An array consisting of two elements; a string at index 0 which is a
+   valid fully qualified class name, and a string at index 1 which must
+   meet the conditions:
+
+   -  either be the name of a public static function of the class or the
+      class must have a magic \__callStatic method.
+   -  the name must not be that of an instance method.
+
+#. An array consisting of two elements; an object at index 0, and a
+   string at index 1 where either the string is the name of a public
+   method of the object, or the object has a magic \__call method.
+#. A string of the form \`%CLASS_NAME%::%STATIC_METHOD_NAME%\` where
+   %CLASS_NAME% is fully qualified class name, and %STATIC_METHOD_NAME%
+   which must meet the conditions:
+
+   -  either be the name of a public static function of the class or the
+      class must have a magic \__callStatic method.
+   -  the name must not be that of an instance method.
+
+#. An instance of a class (an object) where the class has a public
+   \__invoke() method.
+#. Closures, which includes anonymous functions.
+
+Note - Does not affect calling private/protected methods in correct
+scope
+
+While they would no longer pass the type checker for the callable type,
+private and protected methods could still be executed through
+call_user_func and direct invocation.
+
+.. code:: php
+
+   class Foo {
+       private function bar() { }
+    
+       private function getCallback() {
+           return [$this, 'bar'];
+       }
+    
+       public execute() {
+           $fn = $this->getCallback();
+           $fn(); // This still works
+           call_user_func($fn); //This also still works.
+           echo is_callable($fn); // true
+           echo is_callable_type($fn); // false - 
+       }
+   }
+
+In this example, although \`$fn\` is not a callable that can be passed
+around to arbitrary scopes, it is valid to call it inside the class
+scope that it's in.
+
+The strings 'self', 'parent', and 'static' are no longer usable as part of a string callable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Currently in PHP a callable can be defined using one of these words in
+place of a classname in a colon separated string like
+“self::methodName”. When something tries to either call that callable,
+or check if it is callable with is_callable(), the keyword is replaced
+with the class name depending on the scope that is active. That means
+that the real value of the callable depends on where it is called from.
+
+By replacing the run time evaluation of these with the compile time
+scope resolution, the variable meaning of the values is removed and
+replaced with a consistent meaning.
+
+To be clear, self::class, parent::class and static::class will still be
+used as part of array based callable e.g. [self::class, 'foo'] or as
+single string form \`self::class . "::foo".\`
+
+Add a is_callable_type() function
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC proposes adding a separate function from is_callable that can
+be used to determine if a parameter can be passed as a callable type.
+
+To be clear the meaning of the two functions will be:
+
+is_callable() - returns true if a the first parameter is callable in the
+current scope.
+
+is_callable_type(mixed $var) : bool - returns true if the parameter can
+be passed as a callable type, and is callable in any scope, otherwise
+returns false.
+
+.. code:: php
+
+   class Foo {
+    
+       private function bar() {}
+    
+       public function test($param) {
+           var_dump(is_callable($param));
+           var_dump(is_callable_type($param));
+       }
+   }
+    
+   $foo = new Foo();
+   $param = [$foo, 'bar'];
+   var_dump(is_callable($param));
+   $foo->test($param);
+    
+
+    
+   output will be:
+    
+   false // as the private method cannot be called from the global scope
+   true  // as the private method can be called from within the class scope
+   false // as the private method cannot be passed as a parameter with callable type
+
+Instance methods will no longer reported as callable for class names
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: php
+
+   class Foo {
+       function bar() {
+           echo "this is an instance method";
+       }
+   }
+    
+   $callable = ['Foo', 'bar'];
+   var_dump(is_callable($callable));
+
+The output for this is currently true, it will be changed to be false.
+
+For an instance method to be part of a valid callable it will need to be
+part of a callable that has an instance as the first element in the
+callable like this:
+
+.. code:: php
+
+   $foo = new Foo();
+   $instanceCallable = [$foo, 'bar'];
+    
+   var_dump(is_callable($callable));
+
+Any additional is_callable cleanup
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Any other errors in is_callable() will be fixed so that if
+is_callable($fn) returns true, trying to invoke the function directly or
+through call_user_func() will not fail due to the callable not being
+actually callable.
+
+.. code:: php
+
+   if (is_callable($fn) === true) {
+       $fn(); 
+       call_user_func($fn);
+       // given a zero argument, both of these will be guaranteed to work.
+   }
+
+call_user_func equivalence to direct invocation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The changes in the rest of the RFC should make this goal be achieved.
+i.e. for any callable that is invokable via
+\`call_user_func($callable);\` then the code \`$callable();\` should
+also work. For callables that require parameters, then passing them via
+\`call_user_func_array($callable, $params);\` should work the same as
+$callable($params[0], $params[1]);
+
+Target versions
+---------------
+
+The various things that need to be done to implement this RFC do not
+need to be all in the same release. There are advantages to having the
+changes implemented in separate versions. Below is this list of all the
+changes needed and the target version for them.
+
+Add function is_callable_type - 7.4
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Add deprecation notices for self and parent usage in string based callable types e.g. 'self::foo' - 7.4
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Add deprecation notices for deprecation notices for self and parent usage in array based callable types e.g. array('B', 'parent::who') - 7.4
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Remove support for "self::methodname" and "parent::methodname" - 8
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Remove support for self and parent names in array('B', 'parent::who') - 8
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Change behaviour of is_callable - 8
+
+Change the behaviour to reflect the new set of things that are listed as
+callable above. This is a non-trivial change, and although it would be
+nice to have it sooner than PHP 8, I can't see any acceptable way to do
+it without making people angry.
+
+Change behaviour of 'callable' type for parameter types - 8
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Change the behaviour to reflect the new set of things that are listed as
+callable above. This is a non-trivial change, and although it would be
+nice to have it sooner than PHP 8, I can't see any acceptable way to do
+it without making people angry.
+
+BC breaks
+---------
+
+All of the BC breaks are targeted at the PHP 8 release. None of the
+other changes should have any BC impact, other than the deprecated
+notices, which will allow people to migrate their code easily.
+
+1. Although there are semantic changes to exactly what is a callable, I
+don't believe these would be that impactful, as the new semantics more
+closely reflect how people actual use callables. e.g. having a private
+method report as callable outside of the class where it is defined is
+just currently not a useful thing, and so I don't think many people will
+be dependent on that behaviour.
+
+2. There may be code in the wild that relies on the dynamic meaning of
+'self::someMethod'. This code would need to be re-written with the
+dynamic resolution of method done in userland, as the dynamic resolution
+would no longer be done by the engine.
+
+.. code:: php
+
+   'self::someMethod'
+
+   // change to 
+
+   self::class . '::someMethod'
+
+3. Parent resolution
+
+.. code:: php
+
+
+   $callable = [FooParent::class, 'parent::bar'];
+
+   //  Would need to be replaced with:
+
+   call_user_func(array(get_parent_class('B'), 'who')); // A
+
+Implementation
+--------------
+
+TBD
+
+Additional Metadata
+-------------------
+
+:Original Authors: Dan Ackroyd
+:Original Status: Under Discussion
+:Slug: consistent_callables
+:Wiki URL: https://wiki.php.net/rfc/consistent_callables

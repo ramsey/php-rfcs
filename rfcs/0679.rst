@@ -1,0 +1,242 @@
+Static Return Type
+==================
+
+:PHP-RFC: 0679
+:Title: Static Return Type
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2020-01-08
+:PHP-Version: 8.0
+:Version: 1.0
+
+Introduction
+------------
+
+The ``static`` special class name in PHP refers to the class a method
+was actually called on, even if the method is inherited. This is known
+as "late static binding" (LSB). This RFC proposes to make ``static``
+also usable as a return type (next to the already usable ``self`` and
+``parent`` types).
+
+There are a number of typical use-cases where ``static`` return types
+appear (currently in the form of ``@return static``).
+
+One are named constructors:
+
+.. code:: php
+
+   class Test {
+       public function createFromWhatever($whatever): static {
+           return new static($whatever);
+       }
+   }
+
+Here we want to specify that ``XXX::createFromWhatever()`` will always
+create an instance of ``XXX``, not of some parent class.
+
+Another are ``withXXX()`` style interfaces for mutating immutable
+objects:
+
+.. code:: php
+
+   class Test {
+       public function withWhatever($whatever): static {
+           $clone = clone $this;
+           $clone->whatever = $whatever;
+           return $clone;
+       }
+   }
+
+Here we want to specify that ``$foobar->withWhatever()`` will return a
+new object of class ``get_class($foobar)``, not of some parent class.
+
+Finally, the likely most common use case are fluent methods:
+
+.. code:: php
+
+   class Test {
+       public function doWhatever(): static {
+           // Do whatever.
+           return $this;
+       }
+   }
+
+Here we actually have a stronger contract than in the previous two
+cases, in that we require not just an object of the same class to be
+returned, but exactly the same object. However, from the type system
+perspective, the important property we need is that the return value is
+an instance of the same class, not a parent class.
+
+Proposal
+--------
+
+Allowed positions
+~~~~~~~~~~~~~~~~~
+
+The ``static`` type is only allowed inside return types, where it may
+also appear as part of a complex type expression, such as ``?static`` or
+``static|array``.
+
+To understand why ``static`` cannot be used as a parameter type (apart
+from the fact that this just makes little sense from a practical
+perspective), consider the following example:
+
+.. code:: php
+
+   class A {
+       public function test(static $a) {}
+   }
+   class B extends A {}
+
+   function call_with_new_a(A $a) {
+       $a->test(new A);
+   }
+
+   call_with_new_a(new B);
+
+Under the Liskov substitution principle (LSP), we should be able to
+substitute class ``B`` anywhere class ``A`` is expected. However, in
+this example passing ``B`` instead of ``A`` will throw a ``TypeError``,
+because ``B::test()`` does not accept a ``A`` as a parameter.
+
+More generally, ``static`` is only sound in covariant contexts, which at
+present are only return types.
+
+For property types, we have the additional problem that the ``static``
+type conflicts with the ``static`` modifier:
+
+.. code:: php
+
+   class A {
+       // Is this an untyped static property,
+       // or an instance property of type static?
+       public static $a;
+   }
+
+For this reason, we disallow ``static`` types in properties/parameters
+already at the grammar level, rather than emitting a nicer error message
+in the compiler.
+
+Variance and Subtyping
+~~~~~~~~~~~~~~~~~~~~~~
+
+For the purpose of variance checks, ``static`` is considered a subtype
+of ``self``. That is, the following inheritance is legal:
+
+.. code:: php
+
+   class A {
+       public function test(): self {}
+   }
+   class B extends A {
+       public function test(): static {}
+   }
+   class C extends B {}
+
+When considering just class ``B``, replacing a ``self`` type with a
+``static`` type results in identical behavior. However, the return value
+of ``C::test()`` is further restricted relative to a ``self`` type. For
+this reason ``static`` is considered a subtype of ``self``.
+
+The converse replacement shown in the following is *not* legal:
+
+.. code:: php
+
+   class A {
+       public function test(): static {}
+   }
+   class B extends A {
+       public function test(): self {}
+   }
+   class C extends B {
+       // To spell out the inherited signature:
+       public function test(): B {}
+   }
+
+In this case, the effective return type of ``C::test()`` is ``B``, even
+though the original type on ``A::test()`` would have required it to be
+``C``. This violates covariance/LSP.
+
+It should be noted that ``self`` here refers to the resolved type of the
+current class, it does not have to be spelled as ``self`` in particular.
+For example, the following is also legal:
+
+.. code:: php
+
+   class A {
+       public function test(): A {}
+   }
+   class B extends A {}
+   class C extends B {
+       public function test(): static {}
+   }
+
+Here, ``self`` is ``C``, which is a subtype of ``A``, making the
+replacement with ``static`` legal.
+
+Reflection
+~~~~~~~~~~
+
+While internally the ``static`` type is treated as a special builtin
+type, it will be reported as a class type in reflection, for symmetry
+with ``self`` and ``parent``.
+
+.. code:: php
+
+   class Test {
+       public function method(): static {}
+   }
+
+   $rm = new ReflectionMethod(Test::class, 'method');
+   $rt = $rm->getReturnType();
+   var_dump($rt->isBuiltin()); // false
+   var_dump($rt->getName()); // "static"
+
+Backward Incompatible Changes
+-----------------------------
+
+There are no backwards incompatible changes in this proposal.
+
+Future Scope
+------------
+
+For the fluent method example above, many projects will use a
+``@return $this`` annotation, rather than ``@return static``. We could
+in principle also support this syntax natively:
+
+.. code:: php
+
+   class Test {
+       public function doWhatever(): $this {
+           // Do whatever.
+           return $this;
+       }
+   }
+
+However, ``$this`` is not a real type, and it is unclear what the
+advantage of specifying ``$this`` rather than ``static`` would be from a
+type system level perspective.
+
+Vote
+----
+
+Voting started 2020-01-28 and ends 2020-02-11.
+
+Question: Add static return type?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5062
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.0
+:Slug: static_return_type
+:Wiki URL: https://wiki.php.net/rfc/static_return_type

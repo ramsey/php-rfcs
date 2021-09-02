@@ -1,0 +1,490 @@
+Function Autoloading
+====================
+
+:PHP-RFC: 0414
+:Title: Function Autoloading
+:Author: Anthony Ferrara <ircmaxell@php.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2015-09-04
+:Version: 0.3
+
+Introduction
+------------
+
+PHP presently offers the ability to import class-like structures
+(classes, interfaces and traits) via a callback (or series of them) that
+can be registered. This lets a developer "catch" the fact that a class
+isn't present, and gives them a chance to load it. This is used to great
+effect in the PHP community.
+
+Presently, other types of symbols tables are not autoloadable. This RFC
+proposes a new unified autoloading mechanism to unify autoloading
+efforts across all four symbol tables (class, function, stream wrapper
+and constant).
+
+Proposal
+--------
+
+This RFC proposes to add a suite of functions and constants in the *php*
+namespace to achieve total control over autoloading.
+
+Constants
+~~~~~~~~~
+
+This proposal registers the following constants:
+
+-  *php\AUTOLOAD_CLASS => 1* - Represents Class autoloading
+-  *php\AUTOLOAD_FUNCTION => 2* - Represents Function autoloading
+-  *php\AUTOLOAD_CONSTANT => 4* - Represents Constant autoloading
+-  *php\AUTOLOAD_STREAM = 8* - Represents Stream autoloading
+
+Userland Functions
+~~~~~~~~~~~~~~~~~~
+
+This proposal registers / modifies the following functions:
+
+bool php\autoload_register(callable $callback, int $type, bool $prepend = false)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This function behaves similar to the current *spl_autoload_register*
+function. You can pass in a bitmask of types to register for this
+autoloader.
+
+bool php\autoload_unregister(callable $callback, int $type = 0)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This function behaves similar to the current *spl_autoload_unregister*
+function, and unregisters a callback that was previously registered.
+Note that if you registered the same callback for multiple types, this
+will unregister all of them unless the *$type* argument is specified.
+
+array php\autoload_list(int $type)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This function will return a list of all registered autoloaders for a
+specific type.
+
+function_exists()
+^^^^^^^^^^^^^^^^^
+
+A new optional boolean argument is added to *function_exists()* to match
+the behavior of *class_exists()* when it comes to autoloading functions.
+
+defined()
+^^^^^^^^^
+
+A new optional boolean argument is added to *defined()* to match the
+behavior of *class_exists()* when it comes to autoloading constants.
+
+Internal Typedefs
+~~~~~~~~~~~~~~~~~
+
+This proposal adds the following internal structures:
+
+zend_autoload_func
+^^^^^^^^^^^^^^^^^^
+
+This structure stores the autoloader function.
+
+.. code:: c
+
+   typedef struct zend_autoload_func {
+       zend_fcall_info fci;
+       zend_fcall_info_cache fcc;
+       zval *callable;
+       int pass_type;
+   } _zend_autoload_func;
+
+Internal Functions
+~~~~~~~~~~~~~~~~~~
+
+This proposal adds the following ZEND_API functions/macros:
+
+void\* zend_autoload_call(zend_string \*name, zend_string \*lname, int type)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This function will call an autoloader of the specified type. It requires
+two versions of the name, one which is the called case, and one which is
+the normalized lookup case. In the case of case-sensitive constants,
+they should be identical. In the case of insensitive constants,
+functions and classes, *lname* should be a lowercase version of the
+name.
+
+int zend_autoload_register(zend_autoload_func\* func, int type, int flags)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This will register an autoload function with the specified flags
+(prepend is currently the only supported flag).
+
+int zend_autoload_unregister(zend_autoload_func\* func, int type)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This will unregister an autoloader function that's passed.
+
+int zend_lookup_function(const char \*name, int name_length, zend_function \**fbc)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Lookup a function by name, using autoloading
+
+int zend_lookup_function_ex(const char \*name, int name_length, const zend_literal \*key, int use_autoload, zend_function \**fbc)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Lookup a function by name, optionally calling the autoloader.
+
+ZEND_LOOKUP_FUNCTION_BY_NAME(name, fbc)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This macro will find a function in the symbol table, or attempt to
+autoload it if not defined. The name must be a zend_string.
+
+ZEND_LOOKUP_FUNCTION_BY_KEY(name, key, fbc)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This macro will find a function in the symbol table, or attempt to
+autoload it if not defined. This separates the called function in *name*
+from the looked up function in *key*. Both name and key must be
+zend_string.
+
+ZEND_LOOKUP_FUNCTION_BY_NS_KEY(name, key, fbc)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This macro will find a function in the symbol table, or attempt to
+autoload it if not defined. This separates the called function in *name*
+from the looked up function in *key*. Both name and key must be
+zend_string.
+
+Behavior
+~~~~~~~~
+
+Registering autoloaders with the new API will allow callbacks to be
+fired on class, function and/or constant missing errors.
+
+Single Type Behavior
+^^^^^^^^^^^^^^^^^^^^
+
+By passing a single constant to the register function, the callback will
+only be called for types that match (the *$type* parameter is still set,
+but will never vary).
+
+.. code:: php
+
+   <?php
+   php\autoload_register(function($name, $type) {
+       var_dump($name, $type);
+       eval("function $name(){}");
+       // We don't need a switch, since we only register for functions.
+   }, php\AUTOLOAD_FUNCTION);
+   foo(); // string(3) "foo" int(2)
+   new foo(); // FATAL_ERROR as no autoloader is registered
+   ?>
+
+Multiple Type Behavior
+^^^^^^^^^^^^^^^^^^^^^^
+
+By passing a bitwise-or'd constant to the register function, the
+callback will only be called for types that match).
+
+.. code:: php
+
+   <?php
+   php\autoload_register(function($name, $type) {
+       var_dump($name, $type);
+       switch ($type) {
+          case php\AUTOLOAD_FUNCTION:
+              eval("function $name(){}");
+              break;
+          case php\AUTOLOAD_CONSTANT:
+              define($name, $name);
+              break;
+       }
+   }, php\AUTOLOAD_FUNCTION | php\AUTOLOAD_CONSTANT);
+   foo(); // string(3) "foo" int(2)
+   FOO; // string(3) "FOO" int(4)
+   new foo(); // FATAL_ERROR as no autoloader is registered
+   ?>
+
+Registering The Same Callback Multiple Times For Different Types
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   $callback = function($name, $type) {
+       var_dump($name);
+       if ($name === 'foo') {
+           eval("function $name(){}");
+       } else {
+           define($name, $name);
+       }
+   };
+   php\autoload_register($callback, php\AUTOLOAD_FUNCTION);
+   php\autoload_register($callback, php\AUTOLOAD_CONSTANT);
+   foo(); // string(3) "foo" int(2)
+   FOO; // string(3) "FOO", "FOO"
+   ?>
+
+Userland Backwards Compatibility
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+SPL
+^^^
+
+This RFC proposes to strip the current *spl_autoload_register*
+functionality, and make *spl_autoload_\** simple proxies for registering
+core autoloaders. They will function exactly as they do now, but under
+the hood they will be using the new interface.
+
+This means that calls to *spl_autoload_functions()* will include any
+autoloader (which indicates support for *php\AUTOLOAD_CLASS*) registered
+through *php\autoload_register()*. However, all autoloaders registered
+via *spl_autoload_register* will set the *pass_type* flag to *0*,
+meaning that only a single argument will be passed to the callback. This
+is for compatiblity.
+
+\__autoload()
+^^^^^^^^^^^^^
+
+The legacy *\__autoload()* function still works (only for classes) if no
+autoloader has been registered. If any autoloader is registered (class,
+function or constant), the legacy system will disable itself (this is
+how it works currently).
+
+C API Backwards Compatibility
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _spl-1:
+
+SPL
+^^^
+
+The autoload related SPL globals have been removed, due to the
+implementation being centralized.
+
+Zend
+^^^^
+
+A pair of new functions have been added:
+
+-  *ZEND_API int zend_lookup_function(const char \*name, int
+   name_length, zend_function \**fbc TSRMLS_DC)*
+-  *ZEND_API int zend_lookup_function_ex(const char \*name, int
+   name_length, const zend_literal \*key, int use_autoload,
+   zend_function \**fbc TSRMLS_DC)*
+
+These will do a normal lookup for a function, and then fall back to an
+autoloader.
+
+A pair of new "helper macros" have also been added:
+
+-  *ZEND_LOOKUP_FUNCTION_BY_NAME(name, name_length, fbc)*
+
+-  *ZEND_LOOKUP_FUNCTION_BY_LITERAL(name, name_length, literal, fbc)*
+
+These two will do a legacy style hash-table lookup before triggering the
+autoloading function call (to *zend_lookup_function()*). The reason for
+this is performance.
+
+Opcodes which lookup functions, are using this new macro. This way,
+there should be no performance regression at all (thanks to
+short-circuit operators) for defined functions.
+
+General questions & answers
+---------------------------
+
+Why Rewrite A Complete Autoloader?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Initially, I implemented this as *spl_function_autoload_register*.
+Quickly, it became clear that there was a lot of duplication, and the
+original system was a bit stringy.
+
+This implementation greatly simplifies the (internal) handling of
+autoloading in general.
+
+Why not support multiple "types" for a single autoloader?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Existing autoloaders may support a second parameter. If we attempted to
+provide the type as a second argument to an existing autoloader, it
+could clash. This happens with the existing *spl_autoload()* autoloader.
+
+What Filename Conventions Does This Support?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+None, and all. This proposal presently implements no type of file
+loading handler.
+
+The only thing that is implemented is the ability to register a callback
+to attempt to load a function or constant (or class) when it is missing.
+How the callback maps structures to files is outside of the scope of
+this RFC.
+
+Doesn't This Complicate The Engine?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Nope! The reason is that the current autoloading mechanism for classes
+is extremely fragile as is.
+
+For example, the implementation hinges on a global variable which sets
+the php-level callback to call on autoload. This requires setting up a
+*zend_fcall_info* struct, and a *zend_fcall_info_cache* struct, as well
+as dispatching a function internally to autoload. `The Current
+Implementation <https://github.com/php/php-src/blob/9e17094cf4dde60432569246a9a59e48783530bb/Zend/zend_execute_API.c#L1066>`__.
+
+The implementation of *spl_autoload_call* and *spl_autoload_register*
+are also extremely complicated. `The current SPL
+implementation <https://github.com/php/php-src/blob/9e17094cf4dde60432569246a9a59e48783530bb/ext/spl/php_spl.c#L466>`__.
+
+This refactor cleans both of these pieces up significantly.
+
+Backward Incompatible Changes
+-----------------------------
+
+Userland
+~~~~~~~~
+
+There should be no user-land BC changes.
+
+PECL
+~~~~
+
+EG(autoload_func)
+^^^^^^^^^^^^^^^^^
+
+PECL extensions which rely on the *EG(autoload_func)* global variable
+will break (due to refactor).
+
+A quick scan of LXR shows that only the
+`optimizer <http://lxr.php.net/xref/PECL/optimizer/optimize.c#4660>`__
+extension would change.
+
+autoload_func_info
+^^^^^^^^^^^^^^^^^^
+
+PECL extensions which reply on the SPL type *autoload_func_info* will
+break (due to refactor).
+
+A quick scan of LXR shows that no extensions use this.
+
+SPL_G(autoload_functions)
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+PECL extensions which rely on the SPL globals will break (due to
+refactor).
+
+A quick scan of LXR shows that no extensions use this.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.1.x
+
+SAPIs Impacted
+--------------
+
+None.
+
+Impact to Existing Extensions
+-----------------------------
+
+See Backward Incompatible Changes
+
+php.ini Defaults
+----------------
+
+None.
+
+Open Issues
+-----------
+
+None yet.
+
+Discussion Points
+-----------------
+
+Autoloading Constants
+~~~~~~~~~~~~~~~~~~~~~
+
+Summary
+^^^^^^^
+
+When refactoring the autoloader to support functions, adding support for
+constants isn't significantly difficult, yet can have an advantage.
+
+Stance
+^^^^^^
+
+This RFC takes the stance that it is worth while autoloading constants
+for consistency.
+
+Deprecation of \__autoload()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _summary-1:
+
+Summary
+^^^^^^^
+
+The legacy *function \__autoload()* can be deprecated.
+
+.. _stance-1:
+
+Stance
+^^^^^^
+
+This is out of scope for this RFC.
+
+Deprecation of spl_autoload_register()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _summary-2:
+
+Summary
+^^^^^^^
+
+Since there is a new implementation which supports class autoloading,
+*spl_autoload_register()* is redundant. Therefore, it can be deprecated.
+
+.. _stance-2:
+
+Stance
+^^^^^^
+
+This RFC takes the stance that deprecation should not happen right away,
+if at all. It is therefore out of scope for this RFC.
+
+Patches and Tests
+-----------------
+
+A patch will be created shortly
+
+References
+----------
+
+-  Importing namespaces:
+   http://php.net/manual/en/language.namespaces.importing.php
+-  SPL Autoloading: http://php.net/manual/en/language.oop5.autoload.php
+
+Rejected Features
+-----------------
+
+- None.
+
+Vote
+----
+
+Changelog
+---------
+
+-  2013-08-29 0.1 Initial Creation
+-  2013-08-30 0.2 Add performance section and basic benchmarks
+-  2015-09-04 0.3 Re-proposed
+
+Additional Metadata
+-------------------
+
+:Original Authors: Anthony Ferrara ircmaxell@php.net
+:Original Status: Draft
+:Slug: function_autoloading
+:Wiki URL: https://wiki.php.net/rfc/function_autoloading

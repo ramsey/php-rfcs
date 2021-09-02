@@ -1,0 +1,359 @@
+Argon2 Password Hash Enhancements
+=================================
+
+:PHP-RFC: 0589
+:Title: Argon2 Password Hash Enhancements
+:Author: Charles R. Portwood II <charlesportwoodii@erianna.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2018-01-11
+:PHP-Version: 7.3
+:Version: 0.2
+
+Introduction
+------------
+
+This RFC seeks to enhance the functionality initially introduced in
+http://wiki.php.net/rfc/argon2_password_hash through the addition of
+Argon2id as a hashing algorithm to supersede Argon2i.
+
+Overview of Argon2 and Argon2id specific algorithm
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Argon2 has three variants: Argon2i, Argon2d, and Argon2id. Argon2d is
+faster and uses data-depending memory access, which makes it highly
+resistant against GPU cracking attacks and suitable for applications
+with no threats from side-channel timing attacks (eg. cryptocurrencies).
+Argon2i instead uses data-independent memory access, which is preferred
+for password hashing and password-based key derivation, but it is slower
+as it makes more passes over the memory to protect from tradeoff
+attacks. Argon2id is a hybrid of Argon2i and Argon2d, using a
+combination of data-depending and data-independent memory accesses,
+which gives some of Argon2i's resistance to side-channel cache timing
+attacks and much of Argon2d's resistance to GPU cracking attacks.
+
+Argon2id is now the recommended Argon2 variant to use in the IETF draft
+spec.
+
+Proposal
+--------
+
+The existing password_\* functions provided a forward compatible,
+simplified interface for hashing passwords. This RFC proposes the
+implementation of Argon2id within the password_\* functions for use as a
+secure alternative to the originally proposed Argon2i.
+
+Proposed PHP Version(s)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+PHP NEXT (PHP 7.x => 7.3)
+
+New Constants
+~~~~~~~~~~~~~
+
+This change introduces a new hashing algorithm constant:
+
+.. code:: php
+
+   PASSWORD_ARGON2ID
+
+Changes to password_hash()
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The password_hash() function is altered to accept PASSWORD_ARGON2ID as
+the algorithm.
+
+.. code:: php
+
+   // Argon2id with default cost factors
+   password_hash('password', PASSWORD_ARGON2ID);
+
+This implementation will act identical to the Argon2i implementation in
+that it will accept the same cost variables introduces in the Argon2i
+RFC.
+
+.. code:: php
+
+   // Argon2id by name with custom cost factors behaves the same as PASSWORD_ARGON2I
+   password_hash('password', PASSWORD_ARGON2ID, ['memory_cost' => 1<<17, 'time_cost' => 4, 'threads' => 2]);
+
+Argon2id will use the same default cost measures as the Argon2i
+implementation.
+
+Changes to password_verify()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The password_verify() function work with Argon2id in addition to Argon2i
+
+Changes to password_get_info()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The password_get_info() function is altered to accept Argon2id hashes,
+and to return information about a given Argon2 hash.
+
+.. code:: php
+
+   var_dump(password_get_info('$argon2id$v=19$m=1024,t=2,p=2$ZUhOUVczSHpZRDBDU2ZBRA$k/vI1wKP4s0ecJIpUybRfgBeo3as1PhIV1Od6PvOEFA'));
+
+   array(3) {
+     ["algo"]=>
+     int(3)
+     ["algoName"]=>
+     string(8) "argon2id"
+     ["options"]=>
+     array(3) {
+       ["memory_cost"]=>
+       int(1024)
+       ["time_cost"]=>
+       int(2)
+       ["threads"]=>
+       int(2)
+     }
+   }
+
+Changes to password_needs_rehash()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The password_needs_rehash() function is altered to accept Argon2id
+hashes. If any of the cost factors are changed for an Argon2id hash,
+this function will return true.
+
+.. code:: php
+
+   $hash = password_hash('password', PASSWORD_ARGON2ID);
+   password_needs_rehash($hash, PASSWORD_ARGON2ID); // false
+   password_needs_rehash($hash, PASSWORD_ARGON2ID, ['memory_cost' => 1<<17]); // true
+
+Configure/m4 Changes
+--------------------
+
+Argon2id is only available in reference library >= 20161029. As a result
+of this change, the --with-password-argon2[=dir] option will include
+support for both Argon2i and Argon2id. Configure will fail if libargon2
+is < 20161029.
+
+Backward Incompatible Changes
+-----------------------------
+
+None.
+
+Discussion Issues
+-----------------
+
+Why was Argon2id not included in the original RFC? [CLOSED]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The original Argon2i password_hash RFC
+https://wiki.php.net/rfc/argon2_password_hash was created before
+Argon2id draft spec was complete or made available. When the original
+RFC was introduced, only Argon2i and Argon2d existed.
+
+Argon2id was not introduced into the reference library until after the
+original RFC was voted on, approved, and merged into PHP 7.2. To avoid a
+re-vote and re-implementation of the merge request Argon2id was not
+included in the original Argon2i password_hash RFC.
+
+That being said, a late addition to the implementation include support
+for reference library 20161029 since it changed the argon2_encoded()
+method. This change was made due to uncertainty about what reference
+library implementation would land in Debian Stretch/RHEL, and to ensure
+forward compatibility with the 20161029 library version if that was the
+version that would land in Debian/RHEL.
+
+Should we deprecate Argon2i? [RESOLVED]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+No, I do not believe we should deprecate Argon2i from password_*.
+Argon2i remains a perfectly secure and reasonable choice for password
+hashing. Argon2id simply provides better resistance to some form of
+attacks at the cost of time-memory tradeoffs. Argon2id is recommended at
+this point simply because it provides a blend of Argon2i and Argon2d.
+The existence of Argon2id does not negate the benefits of Argon2i.
+
+Add Secret Parameter? [RESOLVED]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Argon2 exposes via the \_ctx API (which currently isn't used by this
+implementation) a way to inject a separate secret key, which can be used
+to further strength the resulting Argon2 hashes.
+
+There has been some discussion of this both within bugs.php.net
+(https://bugs.php.net/bug.php?id=75388) and within the reference library
+(https://github.com/P-H-C/phc-winner-argon2/issues/222).
+
+I do not feel including the secret parameter within the password_hashing
+API is appropriate for the following reasons:
+
+#. Per the Argon2 documentation, the secret key is intended for keyed
+   hashing. Introducing the secret key parameter adds complexity to the
+   password_hash API. The primary purpose of the password_hash API, per
+   the original spec is to be a *simple* hashing tool. Adding the secret
+   key would require significant documentation about what constitutes a
+   secret key, and at minimum provide detailed documentation on how to
+   manage these keys, if not provide a key management solution. Key
+   management is outside of the scope of the password_hash API, and thus
+   should not be included.
+#. The Argon2 spec doesn't provide a way to re-key this secret should it
+   change. This topic is discussed within the reference library:
+   https://github.com/P-H-C/phc-winner-argon2/issues/222. As the
+   developer is ultimately responsible for handling the re-keying
+   aspect, and as the reference library may one day include the ability
+   to easily re-key, I do not find it appropriate for us to include this
+   functionality at this time. This topic may be suitable for review in
+   the future.
+#. More complex behaviors are available in Libsodium (which is now a
+   core PHP extension).
+
+Custom Salt Value? [RESOLVED]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The salt option was deprecated from password_hash in 7.0. I do not feel
+it is appropriate to re-introduce it again. Moreover, the addition of a
+custom salt attribute was rejected in the original Argon2i RFC.
+
+Configuring // Support for Argon2 >= 20161029 [RESOLVED]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Argon2id is only available in reference library >= 20161029.
+
+After the original RFC was merged the reference library version 20161029
+was created which had Argon2id, which introduced API incompatibility
+between the previous version 20160821, specifically with the
+argon2_encoded() function. Since we didn't know what version would
+ultimately land in Stretch, the existing m4 scripts check for Argon2id
+already and use a pre-processor definition to control how this function
+behaves relative to the Argon2 reference library version.
+
+PHP already knows if Argon2id is available when compiling PHP. As
+Argon2id is a *new* algorithm however, we need to decide how
+--with-password-argon2[=DIR] should behave. Should it include both
+Argon2i and Argon2id? Should we force a minimum reference library
+version? Or should we introduce a new configure flag for this new
+function?
+
+This RFC proposes the first option, of forcing lib >= 20161029 during
+the configure stage making the --with-password-argon2 flag inclusive of
+both Argon2i and Argon2id.
+
+Force lib >= 20161029, making the --with-password-argon2 flag inclusive of both Argon2i and Argon2id [RESOLVED]
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In this scenario we would force the library version to be >= 20161029.
+From configure, –with-password-argon2[=DIR] m4 would fail if Argon2id
+wasn't available, and prompt the user to upgrade their library version.
+The existing implementation already performs a check for the
+availability of Argon2id due to ABI differences with argon2_encoded() in
+different library version.
+
+This change would be the easiest, and most forward thinking since
+Argon2id is the recommended ITEF algorithm. Additionally it would ensure
+that PHP stays up to date with the reference library.
+
+This would require users on Stretch however to manually compile and
+upgrade to lib >= 20161029. The affect on Windows users is minimal as
+we're already providing ref/lib's for Windows compilation. Buster
+(testing) and Sid (unstable) are scheduled with 20161029.
+
+Additionally, it isn't uncommon for PHP to force minimum versions (cite
+OpenSSL, cURL) of library version.
+
+This is my recommended approach as it forces us to be conscious to
+changes in the Argon2 reference library.
+
+Allow --with-password-argon2[=DIR] to conditionally enable Argon2id based upon what's available in the library version. [RESOLVED]
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+As m4 already knows if Argon2id is available in the lib, the
+functionality in PHP would be enabled for Argon2id if and only if
+Argon2id was available in the library.
+
+This approach is offered as a fallback in case option (1) is not
+selected. The greatest failings with this option are that user land
+checks would need to be performed for PASSWORD_ARGON2I and
+PASSWORD_ARGON2ID to determine what is actually available. Disabling
+certain features based upon a library version muddles what was actually
+available since phpinfo() doesn't report the compiled library version.
+Between the user land checks and the inability to easily identify what
+features are actually available likely disqualify this option.
+
+This RFC does not propose this option.
+
+Introduce a new configure argument --with-password-argon2id [RESOLVED]
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A third, less desirable solution would be to explicitly use a new
+configure flag --with-password-argon2id, and run the Argon2id checks
+only if this flag is declared. This flag would be in addition to
+--with-password-argon2. As a end user I would expected
+--with-password-argon2 to be inclusive of any Argon2 algorithm. Moreover
+as the --with-password-argon2 check already determines if Argon2id is
+available, it may introduce more complexity than desired in the
+implementation. This is more visible than option (2) but still suffers
+from the same core problems.
+
+This RFC does not propose this option.
+
+Proposed Voting Choices
+-----------------------
+
+Vote YES to include Argon2id as an alternative to Argon2i within the
+password_\* functions in 7.3.
+
+A 50%+1 majority should be sufficient.
+
+Question: argon2_password_hash_enhancements
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Voting will be from 6/6/2018 to 6/18/2018.
+
+Implementation
+--------------
+
+The reference implementation assumes --with-password-argon2[=DIR] is
+inclusive of both Argon2i and Argon2id. At this time this is provided
+for reference purposes.
+
+#. https://github.com/php/php-src/compare/master...charlesportwoodii:argon2_password_hash_enhancements?expand=1
+
+.. _implementation-1:
+
+Implementation
+--------------
+
+#. Github Merge Request: https://github.com/php/php-src/pull/3311
+#. Merged into PHP:
+   https://github.com/php/php-src/commit/55277a668409b9d62ac42695934aca64e354869f
+
+References
+----------
+
+#. https://password-hashing.net/
+#. https://github.com/P-H-C/phc-winner-argon2/blob/master/argon2-specs.pdf
+#. https://github.com/P-H-C/phc-winner-argon2
+#. https://crypto.stackexchange.com/questions/48935/why-use-argon2i-or-argon2d-if-argon2id-exists%5B1%5D
+#. https://tools.ietf.org/html/draft-irtf-cfrg-argon2-03
+#. https://bugs.php.net/bug.php?id=75224
+
+Changelog
+---------
+
+#. 2018-01-11: 0.1 Initial RFC draft
+#. 2018-02-01: Opened discussion to internals
+#. 2018-05-22: Re-submitted to internals for discussion
+#. 2018-06-06: Opened for Vote
+#. 2018-06-19: Accepted
+#. 2018-06-21: Implemented
+
+Additional Metadata
+-------------------
+
+:Original Authors: Charles R. Portwood II charlesportwoodii@erianna.com
+:Original Status: Implemented (PHP 7.3)
+:Slug: argon2_password_hash_enhancements
+:Wiki URL: https://wiki.php.net/rfc/argon2_password_hash_enhancements

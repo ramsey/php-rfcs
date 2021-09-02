@@ -1,0 +1,341 @@
+Named Parameters Explicit Opt In
+================================
+
+:PHP-RFC: 0755
+:Title: Named Parameters Explicit Opt In
+:Author: Chris Riley <t.carnage@gmail.com>
+:Status: Draft
+:Type: Standards Track
+:Created: 2020-07-24
+:Version: 0.3
+
+Introduction
+------------
+
+The current implementation of named parameters breaks object
+polymorphism.
+
+Consider this example
+
+.. code:: php
+
+   interface Handler {
+       public function handle($message);
+   }
+
+   class RegistrationHandler implements Handler {
+       public function handle($registrationCommand);
+   }
+
+   class ForgottenPasswordHandler implements Handler {
+       public function handle($forgottenPasswordCommand);
+   }
+
+   class MessageBus {
+       /* ... */
+       public function addHandler(string $message, Handler $handler) { /* ... */ }
+       public function getHandler(string $messageType): Handler { /* ... */ }
+       public function dispatch($message)
+       {
+           $this->getHandler(get_class($message))->handle(message: $message);
+       }
+   }
+
+This will raise an Error exception at runtime as you have specified an
+unknown parameter name.
+
+The situation will be further complicated if the method that is being
+called has a variadic argument as in this situation no error will be
+raised, and the unknown parameter will be silently included into the
+variadic array.
+
+.. code:: php
+
+
+   interface Pager 
+   {
+       public function fetch($page = 0, ...$categories);
+   }
+
+   class DbPager implements Pager
+   {
+       public function fetch($seite = 0, ...$kategorien)
+       {
+           /* ... */
+       }
+   }
+
+   $dbPager = new DbPager();
+   $dbPager->fetch(page: 1, categories: 2);
+
+In this situation the error passes unnoticed, and you end up retrieving
+the first results page with categories 1 and 2 instead of the second
+page with just category 2.
+
+Proposals were made for resolutions to this issue however all of them
+require trade offs and could potentially break existing code.
+
+I offer a new proposal which offers some advantages.
+
+Proposal
+--------
+
+The proposal is to make named parameters explicitly opt in using a new
+syntax as follows.
+
+.. code:: php
+
+   function callBar(Foo $:parameterName) {
+       $internalName->bar();
+   }
+
+   $x = new Foo();
+   callBar(parameterName: $x);
+
+This will enable us to resolve the polymorphism issue by restricting
+changes to parameter names in child classes, without impacting existing
+userland code which may rely on renaming parameters already.
+
+If a parameter has not opted in, a compile time error will be raised:
+
+.. code:: php
+
+   function callBar($externalName) {
+       $externalName->bar();
+   }
+
+   $x = new Foo();
+   callBar(externalName: $x); // Error: cannot call function callBar() using parameter $externalName by name.
+
+There are pros and cons to this approach, on the one hand it reduces the
+usefulness of the named parameter syntax by requiring changes to old
+code to enable it (although this could probably be automated fairly
+easily) however using the opt in only named parameter implementation, we
+gain some flexibility to tighten up the LSP rules relating to named
+parameter inheritance. Which allows the bugs/errors from the
+introduction section to be discovered and prevented at compile time.
+
+.. code:: php
+
+   class Foo {
+       public function bar($:param) { /* ... */ }
+   }
+
+   // OK
+   class Bar extends Foo {
+       public function bar($:param) { /* ... */ }
+   }
+
+   // Compile time error cannot rename named parameter $:param (renamed to $:renamedParam)
+   class Baz extends Foo {
+       public function bar($:renamedParam) { /* ... */ }
+   }
+
+While this could be done with the existing named parameters
+implementation it would break any existing code which renames a
+parameter as every parameter would be subject to these rules not just
+those that had opted in to allow named parameters.
+
+In line with the existing RFC on named parameters, named parameter opt
+ins should follow the same rules as for calling functions using named
+parameters. As such:
+
+.. code:: php
+
+
+   // OK
+   function foo($positional, $:named) { /* ... */ }
+
+   // Error: named parameters must follow positional parameters
+   function bar($:named, $positional) { /* ... */ }
+
+Extending classes using named parameters will require that the method
+signature matches with regard to named parameters
+
+.. code:: php
+
+
+   class Foo
+   {
+       public function bar($:namedParam) { /* ... */ }
+   }
+
+   //OK
+   class Bar extends Foo
+   {
+       public function bar($:namedParam, $:anotherNamedParam = "default") { /* ... */ }
+   }
+
+   // Error: parameter $namedParam must be declared as a named parameter
+   class Baz extends Foo
+   {
+    public function bar($namedParam, $:anotherNamedParam) { /* ... */ }
+   }
+
+To aid users upgrading from previous PHP versions, there will **not** be
+an error thrown if the base class is a PHP built in class. Instead, a
+deprecation warning will be raised, and the parameter will be opted in
+automatically. It should be assumed by developers that the deprecation
+will be upgraded to an error in line with user land code in PHP 9.0,
+however this shall be subject to a separate RFC at the time which can
+assess how appropriate that course of action is.
+
+Reflection
+==========
+
+A new method isNamedParameter would be added to the ReflectionParameter
+class, this would return true if the parameter can be called by name and
+false otherwise.
+
+PHP standard library
+====================
+
+It is proposed that all PHP standard functions and methods are opted in
+to named parameters. This will require that some classes have parameter
+names updated to match the entire hierarchy as identified in the initial
+RFC, to which this is a proposed enhancement.
+
+Alternative syntax using Attributes
+===================================
+
+Many people have expressed a preference towards using attributes to
+control the behaviour of named parameters, this is not mutually
+exclusive to this proposal. In fact this proposal could be implemented
+using an attribute instead of the new $: syntax choice. Attributes may
+in fact provide a better solution since they could be used to opt in
+entire functions, methods or classes in one go eg
+
+.. code:: php
+
+   class Foo {
+       public function bar(@@NamedParameter $param) { /* ... */ }
+   }
+
+
+   class Bar {
+       @@NamedParameters
+       public function bar($param, $param2, $param3 ... $paramN) { /* ... */ }
+   }
+
+   @@NamedParameters
+   class Baz {
+       public function foo($param, $param2, $param3 ... $paramN) { /* ... */ }
+       public function bar($param, $param2, $param3 ... $paramN) { /* ... */ }
+       public function baz($param, $param2, $param3 ... $paramN) { /* ... */ }
+   }
+
+All the other examples in this RFC would work in the same way, this
+would just simplify opting in to named parameters for userland code.
+This will be offered as a voting choice against my proposed $: syntax.
+
+Backward Incompatible Changes
+-----------------------------
+
+Userland code which extends PHP built in classes and have renamed the
+arguments will cause a compile time error. It is expected that this will
+be a very small quantity of code based on the same assumptions as the
+original RFC.
+
+Proposed PHP Version(s)
+-----------------------
+
+**PHP 8.0**
+
+This would be a breaking change to the existing named parameters
+implementation if implemented in **8.1**, so if accepted must be
+delivered for **8.0**.
+
+Due to the time constraints I have slimmed down this proposal to focus
+on only the breaking changes that are required for PHP **8.0** If
+accepted, I intend to start a separate RFC to handle the previous
+renaming behaviour for **8.1** using either the attribute or $: syntax
+as accepted.
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+Unknown (probably none?)
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Unknown (probably none?)
+
+To Opcache
+~~~~~~~~~~
+
+The naming changes should be done at compile time, so shouldn't impact
+Opcache from my understanding of it.
+
+New Constants
+~~~~~~~~~~~~~
+
+None
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+None
+
+Future Scope
+------------
+
+A future RFC will bring in the ability to specify different names to be
+used internally to the function/method separate to the callable external
+name. This syntax would look like:
+
+.. code:: php
+
+   function foo($internalName:externalName) { /* ... */ }
+
+as proposed originally in this RFC.
+
+Proposed Voting Choices
+-----------------------
+
+Two votes:
+
+Straight yes/no with 2/3 majority required to require opt-in for named
+parameters
+
+Majority vote between the implementation options of $: or using
+Attributes.
+
+Patches and Tests
+-----------------
+
+No patch yet.
+
+Implementation
+--------------
+
+N/a
+
+References
+----------
+
+This proposal is similar to argument labels in swift:
+https://docs.swift.org/swift-book/LanguageGuide/Functions.html
+
+Change log
+----------
+
+09/07/20: V0.3 - Tightened up scope to focus on opt in and technical
+challenges
+
+26/07/20: V0.2 - Dropped option 1 (rename without explicit opt in) due
+to concerns over feature freeze timing, this option would be better
+targeted at 8.1 if this RFC fails. - Added proposed staging strategy for
+implementation to allay concerns over feature freeze timing - Documented
+objections & rebuttals to RFC
+
+Additional Metadata
+-------------------
+
+:Original Authors: Chris Riley, t.carnage@gmail.com
+:Original Status: In Discussion
+:Slug: renamed_parameters
+:Wiki URL: https://wiki.php.net/rfc/renamed_parameters

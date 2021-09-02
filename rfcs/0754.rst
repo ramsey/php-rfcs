@@ -1,0 +1,509 @@
+Objects Can Be Declared Falsifiable
+===================================
+
+:PHP-RFC: 0754
+:Title: Objects Can Be Declared Falsifiable
+:Author: Josh Bruce <josh@joshbruce.dev>
+:Status: Draft
+:Type: Standards Track
+:Created: 2020-07-16
+:Version: 0.92
+
+Introduction
+------------
+
+This RFC introduces a new interface ``Falsifiable`` and magic method
+``__toBool()`` allowing custom objects (types) to define and declare
+themselves ``true`` or ``false``. Given PHP 8 interprets a valid
+instance as only ``true``, this would give developers (the instance
+itself, and other objects) the opportunity to work with an instance of a
+known object (type) and glean its truthiness from the instance itself,
+not ``null`` or ``empty()`` checks. (Or ``strlen()`` and other
+operator-required checks.)
+
+This RFC has 3 goals:
+
+#. provide a way for an instantiated object to be interpreted as
+   ``false``, without ``null`` while being consistent with similar
+   approaches as of PHP 8,
+#. provide a new ``Falsifiable`` functional interface and ``__toBool()``
+   method, which allows for direct conversion of the object by way of
+   casting to ``bool`` or passing to ``empty()``, and
+#. no BC breaks (no polyfill is planned at this time).
+
+Goal 1: All PHP scalar types have a ``true`` and ``false``
+representation. One of the three compound types (``array``) has a
+``true`` and ``false`` representation. The other two compound types
+(``callable`` and ``object``) only have a ``true`` representation but no
+``false`` representation. As such, developers tend to resort to using
+``null`` assigned to variables or returned from function and method
+calls to represent non-objects; however, this is an inaccurate
+representation as the object cannot be interacted with as that type of
+object. Further, ``null`` itself is a special type separate from the
+scalar and compound types. (See Truthiness tables section.)
+
+Language features have been added and are proposed to address or
+workaround this use of ``null``, namely nullable types (optionals) and
+the proposed nullsafe operator, both of which add syntax while
+addressing interaction with ``null`` causing a fatal error.
+
+This RFC seeks to add another layer. The ability to have a live instance
+(not ``null``) that can still represent ``false`` and be interacted with
+as an instance of that object (type).
+
+Goal 2: To maintain consistency and feel within PHP, this RFC follows
+the ``Countable`` and ``Stringable`` interfaces and implementations. For
+type safety, implementers can explicitly declare the ``Falsifiable``
+interface in their class declarations. Further, the union type
+``bool|Falsifiable`` will be dynamically added at run time to any object
+implementing the reserved ``__toBool()`` method, which would allow
+``stdClass()`` objects to be defined as ``Falsifiable`` also.
+
+The interface stub.
+
+.. code:: php
+
+   interface Falsifiable
+   {
+     public function __toBool(): bool;
+   }
+
+Unlike ``Stringable`` we can explicitly declare (force) the return type
+(``bool``).
+
+A ``__toBool()`` magic method was selected to maintain consistency with
+PHP 8. ``__toString()`` allows developers to specify a string
+representation of the object (with the ``Stringable`` interface for type
+safety). There is an RFC to do similar with ``array`` using a
+``__toArray()`` magic method. Converting to an ``array`` can also be
+done by way of the ``__serialize()`` magic method, but requires the
+object be passed to the ``serialize()`` and ``unserialize()`` functions
+from the standard library. The signature for ``__serialize()`` in PHP 8
+indicates the return type is being changed to an ``array`` not a
+``string``, but still requires being passed to the ``serialize()`` and
+``unserialize()`` functions. Therefore, there seems to be a precedent
+for using magic methods when declaring base type representations of
+custom objects (types).
+
+Goal 3: BC breaks should be minimal, if at all:
+
+#. PHP language guidance reserves methods beginning with two underscores
+   for language features. (Including ``__construct()`` replacing old
+   style constructors in PHP 7.)
+#. The interface would be in the root PHP namespace; therefore, should
+   not collide with other implementations and, if so, can be modified
+   with ``as``.
+#. The implementation does not replace, or interfere with the
+   interactions of ``null`` types; therefore, nullable types and the
+   possibility of nullsafe operators can work as expected.
+
+Proposal
+--------
+
+As-is using a mixed type array:
+
+.. code:: php
+
+   $array = [
+     new stdClass(),
+     [1, 2, 3],
+     "",
+     "Hello",
+     [],
+     new ClassWithToBoolReturningFalse()
+   ];
+
+   $filtered = array_filter($array, function($item) { return (bool) $item });
+
+   // output:
+   // [
+   //   stdClass(),
+   //   [1, 2, 3],
+   //   "Hello",
+   //   ClassWithToBoolReturningFalse()
+   // ];
+
+   $filtered = array_filter($array, function($item) { return empty($item) });
+
+   // output:
+   // [
+   //   "",
+   //   []
+   // ];
+
+To-be with ``Falsifiable`` interface and magic method:
+
+.. code:: php
+
+   $array = [
+     new stdClass(),
+     [1, 2, 3],
+     "",
+     "Hello",
+     [],
+     new ClassWithToBoolReturningFalse()
+   ];
+
+   $filtered = array_filter($array, function($item) { return (bool) $item });
+
+   // output:
+   // [
+   //   stdClass(),
+   //   [1, 2, 3],
+   //   "Hello"
+   // ];
+
+   $filtered = array_filter($array, function($item) { return empty($item) });
+
+   // output:
+   // [
+   //   "",
+   //   [],
+   //   ClassWithToBoolReturningFalse()
+   // ];
+
+To get the same output from the "To-be" sample, without the
+``Falsifiable`` interface being interpreted automatically from PHP
+(removing the double underscore to reduce unneeded syntax).
+
+.. code:: php
+
+   $array = [
+     new stdClass(),
+     [1, 2, 3],
+     "",
+     "Hello",
+     [],
+     new ClassWithIsEmptyReturningFalse()
+   ];
+
+   $filtered = array_filter($array, function($item) { 
+     return (is_object($item) and $item instanceof Falsifiable)
+       ? $item->toBool()
+       : (bool) $item;
+   });
+
+   // output:
+   // [
+   //   stdClass(),
+   //   [1, 2, 3],
+   //   "Hello"
+   // ];
+
+   $filtered = array_filter($array, function($item) { 
+     return (is_object($item) and $item instanceof Falsifiable)
+       ? ! $item->toBool()
+       : empty($item);
+   });
+
+   // output:
+   // [
+   //   "",
+   //   [],
+   //   ClassWithToBoolReturningFalse()
+   // ];
+
+Type juggling tables
+--------------------
+
+With no modifications or interventions by the developer and all types
+are empty (or false in the case of boolean):
+
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| Cast  | Type: |       |       |       |       |       |       |       |
+| to    |       |       |       |       |       |       |       |       |
++=======+=======+=======+=======+=======+=======+=======+=======+=======+
+|       | null  | c     | o     | array | float | in    | s     | bool  |
+|       | (u    | ustom | bject |       |       | teger | tring | (ean) |
+|       | nset) | type  |       |       |       |       |       |       |
+|       |       | (e    |       |       |       |       |       |       |
+|       |       | mpty) |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| unset | null  | null  | null  | null  | null  | null  | null  | null  |
+| (nul  |       |       |       |       |       |       |       |       |
+| lify) |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| c     | error | error | error | error | error | error | error | error |
+| ustom |       |       |       |       |       |       |       |       |
+| type  |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| o     | o     | no    | no    | o     | o     | o     | o     | o     |
+| bject | bject | c     | c     | bject | bject | bject | bject | bject |
+|       | (e    | hange | hange |       | (s    | (s    | (s    | (s    |
+|       | mpty) |       |       |       | calar | calar | calar | calar |
+|       |       |       |       |       | of 0) | of 0) | of    | of    |
+|       |       |       |       |       |       |       | "")   | f     |
+|       |       |       |       |       |       |       |       | alse) |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| array | []    | []    | []    | no    | [0]   | [0]   | [""]  | [f    |
+|       |       |       |       | c     |       |       |       | alse] |
+|       |       |       |       | hange |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| float | 0     | error | error | 0     | no    | 0     | 0     | 0     |
+|       |       |       |       |       | c     |       |       |       |
+|       |       |       |       |       | hange |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| in    | 0     | error | error | 0     | 0     | no    | 0     | 0     |
+| teger |       |       |       |       |       | c     |       |       |
+|       |       |       |       |       |       | hange |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| s     | ""    | error | s     | error | "0"   | "0"   | no    | ""    |
+| tring |       |       | tring |       |       |       | c     |       |
+|       |       |       |       |       |       |       | hange |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| bo    | false | true  | true  | false | false | false | false | no    |
+| olean |       |       |       |       |       |       |       | c     |
+|       |       |       |       |       |       |       |       | hange |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+
+Truthiness tables
+-----------------
+
+Scalar types and their relationship to ``false``:
+
++---------+--------------+--------------+--------------+--------------+
+| Type    | V            | Result from  | Result from  | Result from  |
+|         | alue/Context | (bool) cast  | empty()      | conditional  |
+|         |              |              |              | if ({value}) |
+|         |              |              |              | {}           |
++=========+==============+==============+==============+==============+
+| string  | "Hello"      | true         | false        | true -       |
+|         |              |              |              | inside       |
+|         |              |              |              | braces       |
++---------+--------------+--------------+--------------+--------------+
+| integer | >= 1         | true         | false        | true         |
++---------+--------------+--------------+--------------+--------------+
+| integer | <= -1        | true         | false        | true         |
++---------+--------------+--------------+--------------+--------------+
+| float   | > 0          | true         | false        | true         |
++---------+--------------+--------------+--------------+--------------+
+| float   | < 0          | true         | false        | true         |
++---------+--------------+--------------+--------------+--------------+
+| string  | ""           | false        | true         | false -      |
+|         |              |              |              | outside      |
+|         |              |              |              | braces       |
++---------+--------------+--------------+--------------+--------------+
+| integer | 0            | false        | true         | false        |
++---------+--------------+--------------+--------------+--------------+
+| float   | 0.0          | false        | true         | false        |
++---------+--------------+--------------+--------------+--------------+
+
+Compound types (no pseudo-types) and their relationship to ``false``:
+
++----------+-------------+-------------+-------------+-------------+
+| Type     | Va          | Result from | Result from | Result from |
+|          | lue/Context | (bool) cast | empty()     | conditional |
+|          |             |             |             | if          |
+|          |             |             |             | ({value})   |
+|          |             |             |             | {}          |
++==========+=============+=============+=============+=============+
+| array    | [1, 2, 3]   | true        | false       | true        |
++----------+-------------+-------------+-------------+-------------+
+| callable | function()  | true        | false       | true        |
+|          | {}          |             |             |             |
++----------+-------------+-------------+-------------+-------------+
+| object   | new         | true        | false       | true        |
+|          | stdClass()  |             |             |             |
++----------+-------------+-------------+-------------+-------------+
+| array    | []          | false       | true        | false       |
++----------+-------------+-------------+-------------+-------------+
+
+``null`` and its relationship to ``false``:
+
++------+--------------+--------------+--------------+--------------+
+| Type | V            | Result from  | Result from  | Result from  |
+|      | alue/Context | (bool) cast  | empty()      | conditional  |
+|      |              |              |              | if ({value}) |
+|      |              |              |              | {}           |
++======+==============+==============+==============+==============+
+| NULL | --           | false        | true         | false        |
++------+--------------+--------------+--------------+--------------+
+
+Outliers (beyond the scope of this RFC):
+
++--------+--------------+--------------+--------------+--------------+
+| Type   | V            | Result from  | Result from  | Result from  |
+|        | alue/Context | (bool) cast  | empty()      | conditional  |
+|        |              |              |              | if ({value}) |
+|        |              |              |              | {}           |
++========+==============+==============+==============+==============+
+| string | "0"          | false        | true         | false        |
++--------+--------------+--------------+--------------+--------------+
+
+Row 1: Even though the string contains a character, it is considered
+``false`` and ``empty`` as it appears the value is passed through
+``intval()``, which results in zero and is automatically inerpeted as
+``false`` and ``empty`` as of PHP 8.
+
+Backward Incompatible Changes
+-----------------------------
+
+No known incompatibles.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 8.1 or later
+
+RFC Impact
+----------
+
+No known negative impacts.
+
+Open Issues
+-----------
+
+July 16, 2020
+~~~~~~~~~~~~~
+
+-   Default value for parameters with a class type can only be NULL
+
+July 15, 2020
+~~~~~~~~~~~~~
+
+-  How type safe is this really? (desire is to increase type safety -
+   partially by being able to return a single type from a method that
+   resolves to false)
+-  Impact to static analysis. Multiple static analyzers for PHP exist:
+   Phan (Rasmus and Morrison), PHPStan (Mirtes), Psalm (Vimeo), and a
+   general list - https://github.com/exakat/php-static-analysis-tools
+-  Interaction with equality operators.
+-  Language around ``bool|Falsifiable`` implementation and need.
+-  What version of PHP switched to only allowing ``__construct()``
+
+.. _july-15-2020-1:
+
+< July 15, 2020
+~~~~~~~~~~~~~~~
+
+-  Presumes impact similar to ``__toString()`` and ``Stringable``. RFC
+   for ``Stringable`` listed concerns related to ``__toString()``
+   already being a method. Would look at the implementation as it should
+   be similar, level of knowledge to implement is not there yet.
+-  As of this writing I do not have the knowledge, practice, and
+   practical understanding of implementing within PHP internals to
+   implement this myself. If you're interested in (helping) implement
+   this concept, please do reach out (help may be in the form guidance
+   and instruction or full implementation, up to you).
+
+Unaffected PHP Functionality
+----------------------------
+
+-  ``null`` behavior remains unchanged.
+-  Object can define other methods that return ``bool`` including one
+   named ``toBool()``.
+
+Future Scope
+------------
+
+Leaves open, and does not directly pursue, the possibility of a future
+emptiness check or return. If passed to ``empty()`` a false instance
+would be considered empty; however, there may come a future in PHP
+wherein developers could specify the "emptiness" of an instance.
+
+Proposed Voting Choices
+-----------------------
+
+yes/no
+
+Patches and Tests
+-----------------
+
+Links to any external patches and tests go here.
+
+If there is no patch, make it clear who will create a patch, or whether
+a volunteer to help with implementation is needed.
+
+Make it clear if the patch is intended to be the final patch, or is just
+a prototype.
+
+For changes affecting the core language, you should also provide a patch
+for the language specification.
+
+Implementation
+--------------
+
+Temporary PR for implementation, with status notes:
+https://github.com/joshbruce/php-src/pull/1
+
+After the project is implemented, this section should contain
+
+-  the version(s) it was merged into
+-  a link to the git commit(s)
+-  a link to the PHP manual entry for the feature
+-  a link to the language specification section (if any)
+
+References
+----------
+
+These RFCs are identified as similar in spirit to this [concept],
+possibly helped by this [concept], or this [concept] is potentially
+helped by the result of the linked RFC.
+
+Originally posted on GitHub, edit history available there:
+`0.2.0 <https://bit.ly/php-0002>`__ and
+`0.1.0 <https://bit.ly/php-0001>`__
+
+Implemented:
+
+-  `PHP RFC: Union Types
+   2.0 <https://wiki.php.net/rfc/union_types_v2>`__ - accept multiple
+   types, including ``null``
+-  `PHP RFC: Counting of non-countable
+   objects <https://wiki.php.net/rfc/counting_non_countables>`__ -
+   return ``1`` or ``0``, not ``null``.
+
+Accepted:
+
+-  `PHP RFC: Nullable Types <https://wiki.php.net/rfc/nullable_types>`__
+   - return ``null`` or one (or more) types from function or method
+-  `PHP RFC: Add Stringable
+   interface <https://wiki.php.net/rfc/stringable>`__ - implementation
+   reference, automatically view object as string
+-  `PHP RFC: Ensure correct signatures of magic
+   methods <https://wiki.php.net/rfc/magic-methods-signature>`__ -
+   implementation reference
+
+Under review and discussion:
+
+-  `PHP RFC: Nullsafe
+   operator <https://wiki.php.net/rfc/nullsafe_operator>`__ - chained
+   method calls do not halt when encountering ``null``
+-  `PHP RFC: Pipe Operator
+   v2 <https://wiki.php.net/rfc/pipe-operator-v2>`__ - chain using
+   object instance using ``__invoke()``
+-  `PHP RFC:__toArray() <https://wiki.php.net/rfc/to-array>`__ -
+   implementation reference and where magic method should live
+
+Declined:
+
+-  `PHP RFC: Userspace operator
+   overloading <https://wiki.php.net/rfc/userspace_operator_overloading>`__
+   - could facilitate ``__toBool()`` by proxy via operators
+
+Other:
+
+-  `Official thread <https://externals.io/message/111009>`__
+-  `Mention of type juggling tables being
+   added <https://externals.io/message/111076>`__ - started as new
+   thread
+-  `Declaring emptiness <https://externals.io/message/110967>`__ - alt
+   thread that was still exploring ideas for this RFC
+-  `Instance as boolean <https://externals.io/message/110881>`__ -
+   original thread related to this RFC
+-  `\__toBoolean() brief
+   discussion <https://externals.io/message/39323#39331>`__ 11 years ago
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Implementer: seeking (or someone willing to answer specific questions when I have them)
+:Original Authors: Josh Bruce, josh@joshbruce.dev
+:Original Status: Under discussion
+:Slug: objects-can-be-falsifiable
+:Wiki URL: https://wiki.php.net/rfc/objects-can-be-falsifiable

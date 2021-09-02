@@ -1,0 +1,593 @@
+Constructor Property Promotion
+==============================
+
+:PHP-RFC: 0706
+:Title: Constructor Property Promotion
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2020-03-26
+:PHP-Version: 8.0
+:Version: 1.0
+
+Introduction
+------------
+
+Currently, the definition of simple value objects requires a lot of
+boilerplate, because all properties need to be repeated at least four
+times. Consider the following simple class:
+
+.. code:: php
+
+   class Point {
+       public float $x;
+       public float $y;
+       public float $z;
+
+       public function __construct(
+           float $x = 0.0,
+           float $y = 0.0,
+           float $z = 0.0,
+       ) {
+           $this->x = $x;
+           $this->y = $y;
+           $this->z = $z;
+       }
+   }
+
+The properties are repeated 1) in the property declaration, 2) the
+constructor parameters, and 3) two times in the property assignment.
+Additionally, the property type is repeated twice.
+
+Especially for value objects, which commonly do not contain anything
+more than property declarations and a constructor, this results in a lot
+of boilerplate, and makes changes more complicated and error prone.
+
+This RFC proposes to introduce a short hand syntax, which allows
+combining the definition of properties and the constructor:
+
+.. code:: php
+
+   class Point {
+       public function __construct(
+           public float $x = 0.0,
+           public float $y = 0.0,
+           public float $z = 0.0,
+       ) {}
+   }
+
+This short-hand code is strictly equivalent to the previous example, but
+more concise. The choice of syntax is adopted from our sister language
+`Hack <https://docs.hhvm.com/hack/classes/constructors#constructor-parameter-promotion>`__.
+
+Proposal
+--------
+
+When a method parameter is prefixed with one of the visibility keywords
+``public``, ``protected`` or ``private``, it is considered to be
+"promoted". For each promoted parameter, a property with the same name
+will be added, and a forwarding assignment to that property included in
+the body of the constructor, according to the detailed rules outlined in
+the following.
+
+Constraints
+~~~~~~~~~~~
+
+Promoted parameters may only occur inside non-abstract constructors. As
+such, all of the following are illegal:
+
+.. code:: php
+
+   // Error: Not a constructor.
+   function test(private $x) {}
+
+   abstract class Test {
+       // Error: Abstract constructor.
+       abstract public function __construct(private $x);
+   }
+
+   interface Test {
+       // Error: Abstract constructor.
+       public function __construct(private $x);
+   }
+
+While unusual, promoted parameters may occur inside trait constructors.
+
+Promoted properties have to be prefixed by one of the visibility
+keywords, use of ``var`` is not supported:
+
+.. code:: php
+
+   class Test {
+       // Error: "var" keyword is not supported.
+       public function __construct(var $prop) {}
+   }
+
+Properties declared through promoted parameters are subject to the same
+restrictions as normal property declarations. In particular, it is not
+possible to declare the same property twice:
+
+.. code:: php
+
+   class Test {
+       public $prop;
+
+       // Error: Redeclaration of property.
+       public function __construct(public $prop) {}
+   }
+
+It is also not possible to use the ``callable`` type, because it is `not
+supported <https://wiki.php.net/rfc/typed_properties_v2#callable_type>`__
+as a property type:
+
+.. code:: php
+
+   class Test {
+       // Error: Callable type not supported for properties.
+       public function __construct(public callable $callback) {}
+   }
+
+Similarly, because promoted parameters imply a property declaration,
+nullability must be explicitly declared, and is not inferred from a null
+default value:
+
+.. code:: php
+
+   class Test {
+       // Error: Using null default on non-nullable property
+       public function __construct(public Type $prop = null) {}
+
+       // Correct: Make the type explicitly nullable instead
+       public function __construct(public ?Type $prop = null) {}
+   }
+
+Variadic parameters cannot be promoted:
+
+.. code:: php
+
+   class Test {
+       // Error: Variadic parameter.
+       public function __construct(public string ...$strings) {}
+   }
+
+The reason is that in this case the type of the individual arguments
+(here: string), and the type of the variadic parameter into which they
+are collected (here: array of string) differ. While we could implicitly
+give the ``$strings`` property an ``array`` type for variadic
+parameters, this makes the transform less transparent.
+
+Explicit property declarations and properties promoted from constructor
+arguments may be combined. A constructor may also have both promoted and
+non-promoted parameters.
+
+.. code:: php
+
+   // Legal.
+   class Test {
+       public string $explicitProp;
+
+       public function __construct(public int $promotedProp, int $normalArg) {
+           $this->explicitProp = (string) $normalArg;
+       }
+   }
+
+Desugaring
+~~~~~~~~~~
+
+Promoted properties follow a simple desugaring, where the following
+transformation is applied for all promoted parameters:
+
+.. code:: php
+
+   // From:
+   class Test {
+       public function __construct(public Type $prop = DEFAULT) {}
+   }
+
+   // To:
+   class Test {
+       public Type $prop;
+
+       public function __construct(Type $prop = DEFAULT) {
+           $this->prop = $prop;
+       }
+   }
+
+The visibility and type of the automatically declared property match
+that of the promoted parameter. Notably, the property is declared
+without a default value (i.e. it starts out in an uninitialized state),
+and the default value is only specified on the constructor parameter.
+
+While repeating the default value on the property declaration would
+currently appear harmless, there are forward-compatibility reasons why
+it is preferable to only specify the default once.
+
+The first is a possible future extension to allow arbitrary expressions
+in parameter and property defaults:
+
+.. code:: php
+
+   // From:
+   class Test {
+       public function __construct(public Dependency $prop = new Dependency()) {}
+   }
+
+   // To:
+   class Test {
+       public Dependency $prop /* = new Dependency() */;
+
+       public function __construct(Dependency $prop = new Dependency()) {
+           $this->prop = $prop;
+       }
+   }
+
+In this case, if the default value were duplicated to the property
+declaration, we would end up constructing the optional ``Dependency``
+object twice, which is undesirable and violates the single-evaluation
+rule.
+
+Additionally, under the rules of the recent `readonly property
+proposal </rfc/write_once_properties>`__ the assignment in the
+constructor would not be legal if the property declared a default value.
+
+If the promoted parameter is passed by reference, then the forwarding
+assignment is also performed by reference:
+
+.. code:: php
+
+   // From:
+   class Test {
+       public function __construct(public array &$array) {}
+   }
+
+   // To:
+   class Test {
+       public array $array;
+
+       public function __construct(array &$array) {
+           $this->array =& $array;
+       }
+   }
+
+The forwarding property assignments occur at the start of the
+constructor. As such, it is possible to access both the parameter and
+the property in the constructor, for example to enforce additional
+validation:
+
+.. code:: php
+
+   // This works.
+   class PositivePoint {
+       public function __construct(public float $x, public float $y) {
+           assert($x >= 0.0);
+           assert($y >= 0.0);
+       }
+   }
+
+   // This also works.
+   class PositivePoint {
+       public function __construct(public float $x, public float $y) {
+           assert($this->x >= 0.0);
+           assert($this->y >= 0.0);
+       }
+   }
+
+Reflection
+~~~~~~~~~~
+
+Reflection (and other introspection mechanisms) will observe the state
+after desugaring. This means that promoted properties will appear the
+same way as explicitly declared properties, and promoted constructor
+arguments will appear as ordinary constructor arguments.
+
+While PHP does not expose doc comments on parameters, doc comments on
+promoted properties will be retained:
+
+.. code:: php
+
+   class Test {
+       public function __construct(
+           /** @SomeAnnotation() */
+           public $annotatedProperty
+       ) {}
+   }
+
+   $rp = new ReflectionProperty(Test::class, 'annotatedProperty');
+   echo $rp->getDocComment(); // "/** @SomeAnnotation */"
+
+As the example indicates, this allows using doc comment based
+annotations with promoted properties.
+
+Additionally, two new methods are added:
+
+-  ``ReflectionProperty::isPromoted()`` returns true for properties that
+   have been implicitly generated as part of constructor promotion.
+-  ``ReflectionParameter::isPromoted()`` returns true for parameters
+   that have resulted in the generation of an implicit property as part
+   of constructor promotion.
+
+Most reflection code should not care whether properties are generated or
+not, but this information will allow reconstructing the structure or the
+original code more easily.
+
+Inheritance
+~~~~~~~~~~~
+
+Constructor promotion can be used in conjunction with inheritance, but
+has no special interaction with it beyond what is implied by the
+desugaring. A typical use-case involving inheritance is shown in the
+following, based on an abstract syntax tree representation:
+
+.. code:: php
+
+   abstract class Node {
+       public function __construct(
+           protected Location $startLoc = null,
+           protected Location $endLoc = null,
+       ) {}
+   }
+
+   class ParamNode extends Node {
+       public function __construct(
+           public string $name,
+           public ExprNode $default = null,
+           public TypeNode $type = null,
+           public bool $byRef = false,
+           public bool $variadic = false,
+           Location $startLoc = null,
+           Location $endLoc = null,
+       ) {
+           parent::__construct($startLoc, $endLoc);
+       }
+   }
+
+The ``ParamNode`` class declares a number of promoted properties (those
+prefixed with ``public``) and additionally takes two normal parameters
+(those not prefixed with ``public``), which are simply forwarded to the
+parent constructor. The code is equivalent to the following desugaring:
+
+.. code:: php
+
+   abstract class Node {
+       protected Location $startLoc;
+       protected Location $endLoc;
+
+       public function __construct(
+           Location $startLoc = null,
+           Location $endLoc = null,
+       ) {
+           $this->startLoc = $startLoc;
+           $this->endLoc = $endLoc;
+       }
+   }
+
+   class ParamNode extends Node {
+       public string $name;
+       public ExprNode $default;
+       public TypeNode $type;
+       public bool $byRef;
+       public bool $variadic;
+
+       public function __construct(
+           string $name,
+           ExprNode $default = null,
+           TypeNode $type = null,
+           bool $byRef = false,
+           bool $variadic = false,
+           Location $startLoc = null,
+           Location $endLoc = null,
+       ) {
+           $this->name = $name;
+           $this->default = $default;
+           $this->type = $type;
+           $this->byRef = $byRef;
+           $this->variadic = $variadic;
+           parent::__construct($startLoc, $endLoc);
+       }
+   }
+
+It should be noted that the property assignments happen before the
+parent constructor is invoked. This is unusual in terms of coding style,
+but should not impact behavior for non-degenerate cases.
+
+Attributes
+~~~~~~~~~~
+
+As PHP 8 also introduces `attributes </rfc/attributes_v2>`__, we need to
+consider how these features interact. Attributes are allowed both on
+properties and on parameters.
+
+.. code:: php
+
+   class Test {
+       public function __construct(
+           <<ExampleAttribute>>
+           public int $prop,
+       ) {}
+   }
+
+This code could desugar in one of four ways:
+
+#. The attribute is applied only to the parameter.
+#. The attribute is applied only to the implied property.
+#. The attribute is applied both to the parameter and the property.
+#. Attributes on promoted properties are forbidden, due to ambiguity.
+
+Here are the possible transformations:
+
+.. code:: php
+
+   // Option 1: Attribute applies only to parameter.
+   class Test {
+       public int $prop;
+       
+       public function __construct(
+           <<ExampleAttribute>>
+           int $prop,
+       ) {}
+   }
+
+   // Option 2: Attribute applies only to property.
+   class Test {
+       <<ExampleAttribute>>
+       public int $prop;
+       
+       public function __construct(
+           int $prop,
+       ) {}
+   }
+
+   // Option 3: Attribute applies to both
+   class Test {
+       <<ExampleAttribute>>
+       public int $prop;
+       
+       public function __construct(
+           <<ExampleAttribute>>
+           int $prop,
+       ) {}
+   }
+
+   // Option 4: Error, cannot use attributes with constructor parameter promotion.
+
+This RFC proposes to use option 3 (applying the attribute to both
+property and parameter), as it is the most flexible. The
+``isPromoted()`` Reflection APIs can be used by attribute validation
+code to discard the property or parameter attribute, if necessary.
+
+However, I consider this to be something of an implementation detail. If
+further work on attributes prior to the PHP 8 release shows that it
+would be advantageous to place the attribute only on the property, we
+should be open to such a change.
+
+Coding Style Considerations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This section gives non-normative coding style recommendations.
+
+If constructor property promotion is used, it is recommended that the
+constructor be placed as the first method in the class, and directly
+following any explicit property declarations. This ensures that all
+declared properties are grouped together and visible at a glance. Coding
+standards that currently require static methods to be placed first
+should be adjusted to place the class constructor first.
+
+If ``@param`` annotations on promoted properties are used, these
+annotations should also be treated as ``@var`` annotations by PHP
+documentation tooling:
+
+.. code:: php
+
+   // From:
+   class Point {
+       /**
+        * Create a 3D point.
+        *
+        * @param float $x The X coordinate.
+        * @param float $y The Y coordinate.
+        * @param float $z The Z coordinate.
+        */
+       public function __construct(
+           public float $x = 0.0,
+           public float $y = 0.0,
+           public float $z = 0.0,
+       ) {}
+   }
+
+   // To:
+   class Point {
+       /**
+        * @var float $x The X coordinate.
+        */
+       public float $x;
+       
+       /**
+        * @var float $y The Y coordinate.
+        */
+       public float $y;
+       
+       /**
+        * @var float $z The Z coordinate.
+        */
+       public float $z;
+
+       /**
+        * Create a 3D point.
+        *
+        * @param float $x The X coordinate.
+        * @param float $y The Y coordinate.
+        * @param float $z The Z coordinate.
+        */
+       public function __construct(
+           float $x = 0.0,
+           float $y = 0.0,
+           float $z = 0.0,
+       ) {
+           $this->x = $x;
+           $this->y = $y;
+           $this->z = $z;
+       }
+   }
+
+Finally, it should be noted that constructor property promotion is just
+a convenient short-hand notation that covers the most common cases. A
+promoted property can always be converted into an explicit property with
+custom initialization logic at a later point in time. Such a change does
+not constitute a backwards-compatibility break.
+
+Backward Incompatible Changes
+-----------------------------
+
+None.
+
+Future Scope
+------------
+
+Larry provided some broader vision on how this feature can be combined
+with other features to improve our object initialization story in
+https://hive.blog/php/@crell/improving-php-s-object-ergonomics.
+
+Prior Art
+---------
+
+This feature, or something very similar, is already supported by a
+number of other languages.
+
+-  `Hack <https://docs.hhvm.com/hack/classes/constructors#constructor-parameter-promotion>`__
+-  `TypeScript <https://www.typescriptlang.org/docs/handbook/classes.html#parameter-properties>`__
+-  `Kotlin <https://kotlinlang.org/docs/reference/classes.html#constructors>`__
+   (primary constructors serve a similar purpose)
+
+There have also been three previous RFCs on related topics:
+
+-  `Automatic property
+   initialization </rfc/automatic_property_initialization>`__: This
+   introduces a weaker form of promotion that still requires separate
+   property declarations, but saves the assignment boilerplate.
+-  `Constructor Argument Promotion </rfc/constructor-promotion>`__: This
+   is pretty much the same as this RFC...
+-  `Code free constructor </rfc/code_free_constructor>`__: This pursues
+   the Kotlin approach instead.
+
+Vote
+----
+
+Voting started 2020-05-15 and closes 2020-05-29.
+
+Question: Add support for declaring properties in the constructor signature?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5291
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.0
+:Slug: constructor_promotion
+:Wiki URL: https://wiki.php.net/rfc/constructor_promotion

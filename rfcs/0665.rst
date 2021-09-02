@@ -1,0 +1,543 @@
+Reclassifying Engine Warnings
+=============================
+
+:PHP-RFC: 0665
+:Title: Reclassifying Engine Warnings
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2019-08-27
+:PHP-Version: 8.0
+:Version: 1.0
+
+Introduction
+------------
+
+While newly introduced error conditions in the engine typically use
+``Error`` exceptions, we have many old error conditions that use
+inappropriate severity levels for historical reasons. For example,
+accessing an undefined variable, while being a very severe programming
+error, only generates a notice. This RFC proposes to reevaluate existing
+error conditions and reclassify their severity level as appropriate.
+
+Proposal
+--------
+
+General Guidelines
+~~~~~~~~~~~~~~~~~~
+
+As we don't have any existing rules on the matter, here are some general
+guidelines I try to follow in the following reclassification:
+
+-  Error exceptions should be the baseline for error conditions that
+   indicate a programming error.
+-  If there is an expectation that a certain error condition is commonly
+   intentionally suppressed, especially in legacy code, an exception
+   should not be used.
+-  If the error condition is data-dependent, it may be preferable not to
+   use an exception.
+-  For error conditions that have known false positives, a notice should
+   be used.
+-  Avoid promoting from notice directly to Error exception. I'm only
+   proposing this for the case of undefined variables, because it is so
+   severely misclassified right now.
+
+Proposed Classification
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The following table contains a list of errors with notice or warning
+severity generated in the engine, excluding warnings that are generated
+by functions which have an optimized opcode implementation.
+
+The table shows both the current error level, as well as the proposed
+level. A rationale for the proposed change (or non-change) is provided
+below each group of errors.
+
+The "undefined variable", "undefined array index" and "division by zero"
+error conditions are discussed separately below, because they are more
+controversial.
+
++------------------------------+---------------+---------------------+
+| Message                      | Current Level | Proposed Level      |
++==============================+===============+=====================+
+| Attempt to                   | Warning       | Error exception     |
+| increment/decrement property |               |                     |
+| '%s' of non-object           |               |                     |
++------------------------------+---------------+---------------------+
+| Attempt to modify property   | Warning       | Error exception     |
+| '%s' of non-object           |               |                     |
++------------------------------+---------------+---------------------+
+| Attempt to assign property   | Warning       | Error exception     |
+| '%s' of non-object           |               |                     |
++------------------------------+---------------+---------------------+
+| Creating default object from | Warning       | Error exception     |
+| empty value                  |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** These errors  |               |                     |
+| are generated when a         |               |                     |
+| property is accessed on a    |               |                     |
+| non-object inside a write    |               |                     |
+| context. If the non-object   |               |                     |
+| is "truthy" a warning is     |               |                     |
+| generated and the operation  |               |                     |
+| is ignored, if it is "falsy" |               |                     |
+| an empty stdClass object is  |               |                     |
+| created instead. While       |               |                     |
+| auto-vivification is a core  |               |                     |
+| part of the language for     |               |                     |
+| arrays, the same is not the  |               |                     |
+| case for objects, and        |               |                     |
+| creating a property on a     |               |                     |
+| non-object is almost         |               |                     |
+| certainly a programming      |               |                     |
+| error rather than an         |               |                     |
+| intentional action.          |               |                     |
++------------------------------+---------------+---------------------+
+| Trying to get property '%s'  | Notice        | Warning             |
+| of non-object                |               |                     |
++------------------------------+---------------+---------------------+
+| Undefined property: %s::$%s  | Notice        | Warning             |
++------------------------------+---------------+---------------------+
+| **Rationale:** The first     |               |                     |
+| warning is for the same case |               |                     |
+| as above, but for read       |               |                     |
+| contexts. This is classified |               |                     |
+| as a warning, because it     |               |                     |
+| usually indicates a          |               |                     |
+| programming error (in modern |               |                     |
+| code, all non-magic          |               |                     |
+| properties tend to be known  |               |                     |
+| and fixed). However, object  |               |                     |
+| properties can also be       |               |                     |
+| dynamic (e.g. JSON in object |               |                     |
+| form), in which case         |               |                     |
+| accessing an undefined       |               |                     |
+| property may be a less       |               |                     |
+| severe issue. Generally, PHP |               |                     |
+| is somewhat lenient with     |               |                     |
+| read accesses to "missing"   |               |                     |
+| data.                        |               |                     |
++------------------------------+---------------+---------------------+
+| Cannot add element to the    | Warning       | Error exception     |
+| array as the next element is |               |                     |
+| already occupied             |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** This error    |               |                     |
+| condition occurs when trying |               |                     |
+| to push to an array for      |               |                     |
+| which the ``PHP_INT_MAX``    |               |                     |
+| key is already used. This    |               |                     |
+| error condition practically  |               |                     |
+| never occurs outside of      |               |                     |
+| specially crafted code, and  |               |                     |
+| implies data loss if it      |               |                     |
+| does. As such, it is changed |               |                     |
+| into an exception.           |               |                     |
++------------------------------+---------------+---------------------+
+| Cannot unset offset in a     | Warning       | Error exception     |
+| non-array variable           |               |                     |
++------------------------------+---------------+---------------------+
+| Cannot use a scalar value as | Warning       | Error exception     |
+| an array                     |               |                     |
++------------------------------+---------------+---------------------+
+| Trying to access array       | Notice        | Warning             |
+| offset on value of type %s   |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** These         |               |                     |
+| diagnostics are generated    |               |                     |
+| when trying to use scalars   |               |                     |
+| as arrays. The first two     |               |                     |
+| occur in write contexts, the |               |                     |
+| latter in read contexts. The |               |                     |
+| latter was introduced in PHP |               |                     |
+| 7.4 as a notice with express |               |                     |
+| intention to elevate the     |               |                     |
+| severity in PHP 8.0. In line |               |                     |
+| with the symmetrical case on |               |                     |
+| objects, the write case is   |               |                     |
+| treated more severely here,  |               |                     |
+| as it usually implies data   |               |                     |
+| loss.                        |               |                     |
++------------------------------+---------------+---------------------+
+| Only arrays and Traversables | Warning       | TypeError exception |
+| can be unpacked              |               |                     |
++------------------------------+---------------+---------------------+
+| Invalid argument supplied    | Warning       | TypeError exception |
+| for foreach()                |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** These are     |               |                     |
+| simple type errors and       |               |                     |
+| should be treated as such.   |               |                     |
++------------------------------+---------------+---------------------+
+| Illegal offset type          | Warning       | TypeError exception |
++------------------------------+---------------+---------------------+
+| Illegal offset type in isset | Warning       | TypeError exception |
+| or empty                     |               |                     |
++------------------------------+---------------+---------------------+
+| Illegal offset type in unset | Warning       | TypeError exception |
++------------------------------+---------------+---------------------+
+| **Rationale:** These are     |               |                     |
+| generated if an array or     |               |                     |
+| object is used as an array   |               |                     |
+| key. Once again this is a    |               |                     |
+| simple type error.           |               |                     |
++------------------------------+---------------+---------------------+
+| Indirect modification of     | Notice        | (Notice)            |
+| overloaded element of %s has |               |                     |
+| no effect                    |               |                     |
++------------------------------+---------------+---------------------+
+| Indirect modification of     | Notice        | (Notice)            |
+| overloaded property %s::$%s  |               |                     |
+| has no effect                |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** These notices |               |                     |
+| occur if ``__get()`` or      |               |                     |
+| ``offsetGet()`` return a     |               |                     |
+| non-reference, but are used  |               |                     |
+| in a write context. Because  |               |                     |
+| our detection of write       |               |                     |
+| context has false positives  |               |                     |
+| right now, these should      |               |                     |
+| remain notices until we can  |               |                     |
+| be sure that the diagnostic  |               |                     |
+| is always legitimate.        |               |                     |
++------------------------------+---------------+---------------------+
+| Object of class %s could not | Notice        | (Notice)            |
+| be converted to              |               |                     |
+| int/float/number             |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** Comparison    |               |                     |
+| between objects and scalars  |               |                     |
+| currently works by casting   |               |                     |
+| the object to the            |               |                     |
+| appropriate type, which is   |               |                     |
+| why comparisons like         |               |                     |
+| ``$obj == 1`` will currently |               |                     |
+| also throw this notice,      |               |                     |
+| while they should not. Until |               |                     |
+| this issue is resolved, the  |               |                     |
+| classification as notice     |               |                     |
+| should remain.               |               |                     |
++------------------------------+---------------+---------------------+
+| A non-numeric value          | Warning       | (Warning)           |
+| encountered                  |               |                     |
++------------------------------+---------------+---------------------+
+| A non well formed numeric    | Notice        | (Notice)            |
+| value encountered            |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** The           |               |                     |
+| difference between these two |               |                     |
+| warnings is whether a string |               |                     |
+| is completely non-numeric,   |               |                     |
+| or whether it has a numeric  |               |                     |
+| prefix. This is a runtime    |               |                     |
+| issue based on the specific  |               |                     |
+| string value involved in an  |               |                     |
+| operation, which may be      |               |                     |
+| user-controlled. For this    |               |                     |
+| reason we don't promote to   |               |                     |
+| exceptions.                  |               |                     |
++------------------------------+---------------+---------------------+
+| Accessing static property    | Notice        | (Notice)            |
+| %s::$%s as non static        |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** This notice   |               |                     |
+| is somewhat confusing in     |               |                     |
+| what it does: It is thrown   |               |                     |
+| when accessing               |               |                     |
+| ``$obj->staticProp`` but     |               |                     |
+| does **not** actually read   |               |                     |
+| the static property. Instead |               |                     |
+| it will fall back to using   |               |                     |
+| the dynamic property named   |               |                     |
+| ``staticProp``. There is     |               |                     |
+| more inconsistency in this   |               |                     |
+| area, in that accessing a    |               |                     |
+| protected static property on |               |                     |
+| the object will generate an  |               |                     |
+| Error exception, even though |               |                     |
+| it would not actually access |               |                     |
+| that property. I'm not sure  |               |                     |
+| what to do here, but would   |               |                     |
+| be inclined to just leave it |               |                     |
+| alone.                       |               |                     |
++------------------------------+---------------+---------------------+
+| Array to string conversion   | Notice        | Warning             |
++------------------------------+---------------+---------------------+
+| **Rationale:** This is       |               |                     |
+| generally a bug (and the     |               |                     |
+| "Array" string you get is    |               |                     |
+| meaningless), but in many    |               |                     |
+| cases also not a             |               |                     |
+| particularly severe one.     |               |                     |
+| Since `string conversion     |               |                     |
+| exceptions <                 |               |                     |
+| /rfc/tostring_exceptions>`__ |               |                     |
+| are supported now, we could  |               |                     |
+| also promote this to an      |               |                     |
+| Error exception, and I'm     |               |                     |
+| generally open to that.      |               |                     |
++------------------------------+---------------+---------------------+
+| Resource ID#%d used as       | Notice        | Warning             |
+| offset, casting to integer   |               |                     |
+| (%d)                         |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** This is in    |               |                     |
+| principle a meaningful       |               |                     |
+| operation, but exotic enough |               |                     |
+| that intent should be        |               |                     |
+| indicated with an explicit   |               |                     |
+| integer cast.                |               |                     |
++------------------------------+---------------+---------------------+
+| String offset cast occurred  | Notice        | Warning             |
++------------------------------+---------------+---------------------+
+| Illegal string offset '%s'   | Warning       | (Warning)           |
++------------------------------+---------------+---------------------+
+| **Rationale:** The former is |               |                     |
+| thrown when using            |               |                     |
+| null/bool/float as a string  |               |                     |
+| offset, the latter if the    |               |                     |
+| string is not integral. Both |               |                     |
+| of these should use the same |               |                     |
+| severity.                    |               |                     |
++------------------------------+---------------+---------------------+
+| Uninitialized string offset: | Notice        | Warning             |
+| %d                           |               |                     |
++------------------------------+---------------+---------------------+
+| Illegal string offset: %d    | Warning       | (Warning)           |
++------------------------------+---------------+---------------------+
+| **Rationale:** The former is |               |                     |
+| used when reading an         |               |                     |
+| out-of-bounds string offset, |               |                     |
+| the latter when writing to   |               |                     |
+| an out-of-bounds *negative*  |               |                     |
+| string offset (for positive  |               |                     |
+| offsets, the string is       |               |                     |
+| extended instead). In line   |               |                     |
+| with undefined               |               |                     |
+| index/property, we           |               |                     |
+| consistently generate a      |               |                     |
+| warning here.                |               |                     |
++------------------------------+---------------+---------------------+
+| Cannot assign an empty       | Warning       | Error exception     |
+| string to a string offset    |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** This          |               |                     |
+| operation is not meaningful  |               |                     |
+| and indicates some kind of   |               |                     |
+| logic error.                 |               |                     |
++------------------------------+---------------+---------------------+
+| Only variables should be     | Notice        | (Notice)            |
+| passed by reference          |               |                     |
++------------------------------+---------------+---------------------+
+| Only variable references     | Notice        | (Notice)            |
+| should be returned by        |               |                     |
+| reference                    |               |                     |
++------------------------------+---------------+---------------------+
+| Only variable references     | Notice        | (Notice)            |
+| should be yielded by         |               |                     |
+| reference                    |               |                     |
++------------------------------+---------------+---------------------+
+| Only variables should be     | Notice        | (Notice)            |
+| assigned by reference        |               |                     |
++------------------------------+---------------+---------------------+
+| Attempting to set reference  | Notice        | (Notice)            |
+| to non referenceable value   |               |                     |
++------------------------------+---------------+---------------------+
+| Cannot pass by-reference     | Warning       | (Warning)           |
+| argument %d of %s%s%s() by   |               |                     |
+| unpacking a Traversable,     |               |                     |
+| passing by-value instead     |               |                     |
++------------------------------+---------------+---------------------+
+| **Rationale:** The use of    |               |                     |
+| values where a reference is  |               |                     |
+| expected is currently        |               |                     |
+| somewhat inconsistent, with  |               |                     |
+| everything from compiler     |               |                     |
+| errors, Error exceptions,    |               |                     |
+| warnings and notices being   |               |                     |
+| possible depending on the    |               |                     |
+| specific case. Passing a     |               |                     |
+| non-variable to a reference  |               |                     |
+| argument is often a          |               |                     |
+| programming error, because   |               |                     |
+| it will not be possible to   |               |                     |
+| modify the passed value and  |               |                     |
+| the reference cannot serve   |               |                     |
+| its purpose. However, this   |               |                     |
+| is complicated by optional   |               |                     |
+| reference arguments or       |               |                     |
+| return values that are       |               |                     |
+| optionally references. In    |               |                     |
+| both cases the warning may   |               |                     |
+| be a false positive. It's    |               |                     |
+| not really clear what to do  |               |                     |
+| here, so I'm retaining the   |               |                     |
+| current classification for   |               |                     |
+| now.                         |               |                     |
++------------------------------+---------------+---------------------+
+
+Undefined variable
+~~~~~~~~~~~~~~~~~~
+
+In most cases, accessing an undefined variable is a severe programming
+error. The current low classification is a legacy from the Dark Ages of
+PHP, where features like register_globals made conditionally defined
+variables more typical, and code quality standards were lower.
+
+Ideally, undefined variables should be compile errors, but as the
+dynamic nature of PHP precludes a reliable compile-time analysis, this
+RFC proposes to generate an Error exception instead.
+
+However, throwing an exception may complicate the upgrading of legacy
+code that currently suppresses the generation of notices wholesale, as
+the issue can no longer be ignored. Some people have even suggested that
+the use of undefined variables is a legitimate coding style choice.
+
+For this reason, a separate vote will decide whether we should throw an
+Error exception, generate a warning or keep the current notice.
+
+Undefined array index
+~~~~~~~~~~~~~~~~~~~~~
+
+Similarly to undefined variables or an undefined object properties,
+reading an undefined array index/key would generally be considered a
+programming error in modern PHP code. However, while variables and
+object properties are predominantly statically known (i.e., when
+variable variables and dynamic object properties are not used), the same
+is not true to array keys, which tend to be dynamic.
+
+Some languages, such as JavaScript, do not consider accesses to
+undefined array keys to be an error condition at all, and allow such an
+operation to be performed silently. While it is not predominant in the
+PHP world, some people subscribe to such a coding style also for PHP
+code, and as such would prefer undefined array key access to remain an
+easily suppressible notice.
+
+A separate vote will decide whether to elevate undefined array
+offset/index conditions to a warning, or leave them as notices.
+
+Division by zero
+~~~~~~~~~~~~~~~~
+
+Division by zero currently has somewhat inconsistent behavior. The ``%``
+operator throws a ``DivisionByZeroError``. However, the ``/`` throws a
+"Division by zero" warning and returns one of +Inf, -Inf or NaN,
+following IEEE 754 semantics.
+
+The rationale for this behavioral discrepancy is as follows: The ``%``
+operator works on integers. As such the conjugated operation is actually
+not ``/``, but rather ``intdiv()``, which *does* throw
+``DivisionByZeroError``. An integer operation shouldn't return a
+floating point number, so throwing an Error exception is the only choice
+here.
+
+Not throwing an Error exception for division by zero using ``/`` is
+motivated by the fact that such division does have a well-defined result
+under IEEE 754. In some areas of application (such as numerics) it may
+be useful to not treat division by zero as an error condition at all,
+though such applications are unusual for PHP. Similarly, Bob Weinand
+argued that for reporting code that makes heavy use of divisions, it may
+be preferable to have the ability to suppress this error condition.
+
+On the other hand, the current behavior, and especially the discrepancy
+with ``%`` is quite unexpected, and many people expect that a division
+by zero error will in fact generate a DivisionByZeroError (duh). This
+discussion has already come up multiple times on the internals list and
+in pull requests.
+
+As I think that both sides have a reasonable argument here, there will
+be a separate vote on whether to change the division by zero behavior.
+
+Backward Incompatible Changes
+-----------------------------
+
+Conversion of notices to warnings is fairly harmless, because both
+continue execution after the diagnostic has been generated. Conversion
+to exceptions implies that the current control flow will be aborted.
+
+This may impact code that makes very liberal use of the error
+suppression operator ``@`` or disables error reporting wholesale. The
+proposal does try to avoid changing notices that are more likely to be
+suppressed into exceptions.
+
+If desired, an error handler can be provided that filters out the error
+conditions that will be turned into an exception, so that projects can
+focus on addressing them prior to an upgrade.
+
+Vote
+----
+
+All the following votes are **independent**. Each requires a 2/3
+majority and may pass/fail independent of other votes. Voting closes
+2019-09-26.
+
+As the "undefined variable" vote is a 3-way vote, acceptance is
+determined as follows: "Error exception" is accepted if it has 2/3
+majority. Otherwise, "Warning" is accepted if the first two options
+together have 2/3 majority. Otherwise, "Keep Notice" applies.
+
+Question: Change undefined variable severity to?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Error exception
+-  Warning
+-  Keep Notice
+
+.
+
+Question: Change undefined array index severity to?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Warning
+-  Keep Notice
+
+.
+
+Question: Change division by zero severity to?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-2:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  DivisionByZeroError exception
+-  Keep Warning
+
+.
+
+Question: Accept remaining classifications shown in the table above?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-3:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Changelog
+---------
+
+-  2019-09-12: Split out undefined index/offset into a separate section.
+-  2019-09-10: Keep current classification for reference errors.
+-  2019-08-28: Split off the "undefined variable" case into a separate
+   vote, as it was a major point of contention on-list.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.0
+:Slug: engine_warnings
+:Wiki URL: https://wiki.php.net/rfc/engine_warnings

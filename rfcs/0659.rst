@@ -1,0 +1,156 @@
+Normalize Arrays' "auto-increment" Value On Copy On Write
+=========================================================
+
+:PHP-RFC: 0659
+:Title: Normalize Arrays' "auto-increment" Value On Copy On Write
+:Author: WesNetmo
+:Status: Draft
+:Type: Standards Track
+:Created: 2019-06-19
+:Version: 0.1
+
+Introduction
+------------
+
+If two ``array``\ s are equal/identical, they should remain
+equal/identical ``array``\ s after the same ``array_push(..., $val)``
+call is executed on both of them:
+
+.. code:: php
+
+   assert($array1 === $array2); // identical/equal
+   $array1[] = $array2[] = 123;
+   assert($array1 === $array2); // still identical/equal
+
+This is currently not guaranteed, and because of ``array``\ s' all-doing
+nature, it is not possible to always enforce this property -- but it
+should be in some dangerous cases, namely when functions from
+(potential) different authors are interacting.
+
+--------------
+
+When an ``array`` is assigned to a new reference, and it is copied,
+before a modification, due to the copy-on-write behavior, it will result
+in an ``array`` that is identical in any way to the original one,
+inclusive of its "auto-increment" value:
+
+.. code:: php
+
+   $array1 = [0, 1, 2];
+   unset($array1[1], $array1[2]);
+
+   $array2 = $array1;
+   assert($array2 === [0]);
+   $array2[] = "push"; // triggers COW and then pushes the new entry
+
+   print_r($array2);
+   // Array
+   // (
+   //     [0] => 0
+   //     [3] => push
+   // )
+
+This happens also between different function scopes. Our functions can
+receive "broken" ``array``-lists from third-parties that only appear to
+be well-indexed, but that in reality are not, because they were misused
+during their lifetime (classic example, it was used
+``unset($array[$lastIndex])`` on them, instead of
+``array_pop($array)``).
+
+As result of that, despite "copy on write", the value-type semantics,
+and even a different scope, the following assertion can fail in some
+cases:
+
+.. code:: php
+
+   function test(array $array){
+       if($array === [0, 1, 2]){
+           $array[] = 3;
+           assert($array === [0, 1, 2, 3]);
+       }
+   }
+
+   // For example:
+   $poison = [0, 1, 2, 3];
+   unset($poison[3]);
+   test($poison);
+
+Proposal
+--------
+
+This RFC proposes to reset the "auto-increment" value in copies
+triggered by "copy on write", in order to guarantee a deterministic
+behavior to foreign scopes especially. The "auto-increment" value of the
+new variable reference must be equivalent to the "auto-increment" value
+that the ``array`` would have if it was re-created entry by entry, as
+follows:
+
+.. code:: php
+
+   $array_copy = [];
+   foreach($array as $key => $value){
+       $array_copy[$key] => $value;
+   }
+
+The reset is not limited to new function scopes but any new by-value
+reference:
+
+.. code:: php
+
+   $array = [0, 1, 2, 3];
+   unset($array[3], $array[2]);
+   $arrayCopy = $array;
+   $arrayCopy[] = 2;
+   assert($arrayCopy === [0, 1, 2]); // this assertion must pass; it doesn't currently
+
+Backward Incompatible Changes
+-----------------------------
+
+This change is not backward compatible; code relying on the
+"auto-increment" value being remembered between copies of copy-on-write
+will break. However, the proposed change should be considered a bug-fix,
+rather than a behavior change; it offers protection against
+``array``-lists that were misused with ``unset()`` instead of
+``array_pop/_splice/_shift`` and thus will only affect code that is
+already a candidate for improvements. Furthermore, the "auto-increment"
+value is copied inconsistently, when the ``array`` is empty:
+
+.. code:: php
+
+   $a = [0, 1];
+   unset($a[1]);
+   $b = $a;
+   $b[] = 2;
+   // $b is [0 => 0, 2 => 2]
+
+   $a = [0, 1];
+   unset($a[0], $a[1]);
+   $b = $a;
+   $b[] = 2;
+   // $b is [0 => 2], rather than [2 => 2]
+
+The proposed change would make the behavior consistent and safer.
+
+Proposed PHP Version(s)
+-----------------------
+
+7.4
+
+Proposed Voting Choices
+-----------------------
+
+Vote will require 2/3 majority
+
+References
+----------
+
+-  `Pre-vote discussion on
+   externals.io <https://externals.io/message/105992>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: Wes (@WesNetmo)
+:Original Status: Under discussion
+:Slug: normalize-array-auto-increment-on-copy-on-write
+:Wiki URL: https://wiki.php.net/rfc/normalize-array-auto-increment-on-copy-on-write

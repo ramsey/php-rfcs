@@ -1,0 +1,668 @@
+Namespace Visiblity For Class, Interface And Trait
+==================================================
+
+:PHP-RFC: 0609
+:Title: Namespace Visiblity For Class, Interface And Trait
+:Author: Dustin Wheeler <mdwheele@ncsu.edu>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2018-07-18
+:Version: 0.1
+
+Introduction
+------------
+
+Namespace visibility modifiers, in one shape or another (or by other
+names), have been a topic of discussion in the PHP community for more
+than a decade (ever since the introduction of formal namespaces in PHP
+5.4). Within the last 3 years, access modifiers for classes and class
+members has been partially realized through a proof-of-concept patch to
+support namespace-private classes.
+
+A few years ago, a proof-of-concept implementation of namespace private
+classes was submitted to the project. The topic and implementation
+generated a lot of discussion and it felt like the room was ready to
+move forward. The implementation stalled after much progress and is
+currently blocked by namespaces existing only-during compile-time and
+not being available for run-time checks (to prevent unauthorized
+instantiation of classes).
+
+The purpose of this RFC is to officially propose the idea of namespace
+visibility modifiers for classes, interfaces and traits in PHP;
+leveraging current internal data structures rather than requiring
+re-engineering of namespaces as a whole.
+
+What does "visible" mean?
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In this context, "visible" refers to the top-level visibility of a
+class, interface or trait and has NO implications on the visibility of
+it's members. Static access is always denied for non-visible classes and
+instance access is controlled by the visibility of class members;
+regardless of top-level visibility.
+
+Static access includes things like:
+
+-  Instantiating or extending a class
+-  Implementing or extending an interface
+-  Using a trait
+-  Calling static methods of a class
+-  Reading or writing to static properties of a class
+
+Instance access includes things like:
+
+-  Calling an instance method
+-  Reading or writing instance properties of a class
+-  Cloning an object (it's the same as calling a instance method, in
+   PHP)
+
+Top-level visibility primarily controls static access to a class. It
+does not affect access to instances of a class or its members. That is
+left to the visibility declarations of those members.
+
+A reasonable metaphor might be that if you can't **see** a class, then
+you can't instantiate or extend it. However, your visibility of a class
+has no effect on your visibility of an **object** at runtime, so your
+ability to work with an object from a ``private`` class is unhindered.
+
+Why?
+~~~~
+
+Namespace visibility modifiers afford library developers the ability to
+control instantiation of classes, interfaces and traits outside the
+library namespace. Many of the most popular frameworks / libraries in
+PHP currently rely on a conventional ``@internal`` docblock to
+distinguish classes that end-users should not be using and there is some
+IDE support for *warning* users when they are using an internal class.
+There is currently not a reasonable way for developers to enforce the
+notion that a class, interface or trait is for "internal use only".
+
+In other languages that have namespace-like features, visibility
+modifiers (in one way or another) are available for use. PHP is not
+other languages, certainly. However, the problem of visibility control
+is common in many object-oriented languages. C# classes are
+``internal``, by default (meaning the class can be accessed by any code
+in the same "assembly"). Classes in C# can be declared ``public``,
+allowing them to be instatiated in any "assembly". Java, similarly, has
+a concept of "package-private" or ``public`` classes. Classes in Java
+are "package-private", by default; meaning that the class is only
+visible within its "package" (or namespace). ``public`` classes are
+visible everywhere.
+
+Proposal
+--------
+
+This RFC adds support for namespace visibility modifiers to class,
+interface and trait declarations. These visibility modifiers govern
+where each can be statically accessed (i.e. instantiated, implemented or
+``use``-ed), but have no effect on member visibility during runtime.
+
+The following example illustrates the basic syntax for classes:
+
+.. code:: php
+
+   namespace Example {
+       public class A 
+       {
+          private $property;
+       }
+
+       protected class B
+       {
+          public $property;
+       }
+
+       private class C
+       {
+          protected $property;
+       }
+   }
+
+   namespace OtherVendor {
+       public class Factory
+       {
+           public function A()
+           {
+               return new \Example\A();  // Allowed by public
+           }
+
+           public function B()
+           {
+               return new \Example\B();  // Not allowed because 
+                                          // namespace is not shared
+           }
+
+           public function C()
+           {
+               return new \Example\C();  // Not allowed because
+                                          // not from same namespace
+           }
+       }
+   }
+
+Supported Modifiers
+~~~~~~~~~~~~~~~~~~~
+
+``public``, ``protected`` and ``private`` visibility modifiers are added
+for top-level class, interface and trait declarations:
+
+#. Public declarations will be visible from anywhere, which is the
+   current behaviour. If no modifier is supplied, public shall be the
+   default to maintain backwards compatibility with this behaviour.
+#. Protected declarations will be visible from anywhere that **shares**
+   a higher-level namespace with the target of the visibility modifier.
+   For example, ``Vendor\SampleClass`` and ``Vendor\Deeper\SampleClass``
+   share ``Vendor``.
+#. Private declarations will only be visible from the namespace in which
+   they are declared.
+
+Classes, interfaces and traits may only have a single modifier. Use of
+multiple modifiers will result in a Fatal Error.
+
+.. code:: php
+
+   private public class Example     
+   {
+       // ILLEGAL
+   }
+
+   private class LegalExample       
+   {
+       // legal
+   }
+
+Instantiation of Classes
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Namespace visibility can be used to control where a class is allowed to
+be instantiated from. This is an important driver for the use-cases
+supported by this RFC. Package maintainers can use this feature to
+enforce that classes that are "internal" implementation details are not
+abused outside their namespace.
+
+Class declarations may be marked ``public``, ``protected`` or
+``private``. If no modifier is specified, the default visibility is
+``public``. In other languages, the default would be "package-private"
+(or approximately ``protected``, as this RFC defines it). In PHP, this
+would be a massive backwards incompatibility that is not worth blocking
+the added value presented by namespace visibility.
+
+.. code:: php
+
+   namespace Example {
+       // May be instantiated from anywhere.
+       public class PublicClass {}
+
+       // May only be instantiated from a shared namespace.
+       protected class ProtectedClass {}
+
+       // May only be instantiated from classes in \Example.
+       private class PrivateClass {}
+   }
+
+There is nothing different about how visibility is enforced when
+instantiating a class inside a closure, a function, a class method or
+anywhere else.
+
+.. code:: php
+
+   namespace Example\Nested {
+       // May be instantiated because namespace is shared.
+       $success = new \Example\ProtectedClass();
+
+       // Fails because not same namespace.
+       $fail = new \Example\PrivateClass();
+
+       // Fails because not same namespace.
+       function factory() {
+          return new \Example\PrivateClass();
+       }
+       factory();
+
+       // Fails because not same namespace.
+       $object = function () {
+         return new \Example\PrivateClass();
+       }
+       $object();
+
+       // Runtime shenanigans will not work around
+       // namespace visibility.
+       $classString = "\Example\PrivateClass";
+       $fail = new $classString();
+   }
+
+Because ``\Example\Nested`` shares a parent-namespace with
+``\Example\ProtectedClass``, it can instantiate the class through its
+``protected`` namespace visibility. Instantiation of classes within
+functions and closures behaves no different than if executed at the root
+of the namespace. All that matters is the namespace that the code is
+executing **from** compared to the **target class** namespace and
+modifier.
+
+.. code:: php
+
+   namespace SomeOtherVendor {
+       class Factory {
+           // Legal to declare, but illegal at runtime.
+           public function make() {
+               return new \Example\PrivateClass();
+           }
+       }
+
+       new \Example\ProtectedClass();            // ILLEGAL
+       (new Factory())->make();                 // ILLEGAL
+
+       new \Example\PublicClass();               // legal
+   }
+
+In another namespace, instantiation of ``private`` classes is illegal.
+Instantiation of ``protected`` classes that do not share a namespace
+parent is also illegal. In the above example, the only legal
+instantiation is of a ``public`` class.
+
+.. code:: php
+
+   namespace {
+       new \Example\ProtectedClass();            // ILLEGAL
+       new \Example\PrivateClass();              // ILLEGAL
+
+       new \Example\PublicClass();               // legal
+       new \SomeOtherVendor\Factory()            // legal
+   }
+
+Namespace visibility is enforced at the global space as well.
+Enforcement of visibility does not change if the calling scope does not
+have a named namespace (or any namespace at all). The rules for
+enforcement still apply. Developers can instantiate ``public`` classes
+and will be disallowed from instantiating ``protected`` or ``private``
+classes by virtue that there is no shared namespace (in the
+``protected`` case) and the absence of namespace is, by definition, NOT
+the same namespace.
+
+Interfaces
+~~~~~~~~~~
+
+Interface declarations may be marked ``public``, ``protected`` or
+``private``. If no modifier is specified, the default visibility is
+``public``.
+
+.. code:: php
+
+   namespace Example {
+       // May be implemented in any namespace.
+       public interface PublicInterface {}
+
+       // Equivalent to public.
+       interface PublicInterface {}
+
+       // May only be implemented in a shared namespace.
+       protected interface ProtectedInterface {}
+
+       // May only be implemented by classes in \Example.
+       private interface PrivateInterface {}
+   }
+
+.. code:: php
+
+   namespace Example\Nested {
+       // Always works because interface is public.
+       class SuccessfulImplementation implements \Example\PublicInterface
+       {
+           /* ... */
+       }
+
+       // May implement interface because namespace is shared.
+       class SuccessfulImplementation implements \Example\ProtectedInterface
+       {
+           /* ... */
+       }
+
+       // Fails because not same namespace.
+       class FailingImplementation implements \Example\PrivateInterface
+       {
+           /* ... */
+       }
+   }
+
+``\Example\Nested`` shares a namespace with the declared interfaces in
+``\Example``. Because of this, ``SuccessfulImplementation`` may
+implement the ``protected`` interface in ``\Example``. However, because
+``FailingImplementation`` is not in the exact same namespace, it is
+restricted from implementing the ``private`` interface in the
+``\Example`` namespace.
+
+.. code:: php
+
+   namespace SomeOtherVendor {
+       class VendorImplementation implements \Example\PublicInterface
+       {
+           // legal
+       }
+
+       class FailedImplementation implements \Example\ProtectedInterface
+       {
+           // ILLEGAL
+       }
+
+       class FailedImplementation implements \Example\PrivateInterface
+       {
+           // ILLEGAL
+       }
+   }
+
+In a completely separate space that shares no common namespace with
+``\Example``, the only legal implementation is of the ``public``
+interface from ``\Example``. All other implementations are illegal
+because they either don't share a namespace (in the ``protected`` case)
+or are not the **same** namespace (in the ``private`` case).
+
+.. code:: php
+
+   namespace {
+       class GlobalImplementation implements \Example\PublicInterface
+       {
+           // legal
+       }
+
+       class FailedImplementation implements \Example\ProtectedInterface
+       {
+           // ILLEGAL
+       }
+
+       class FailedImplementation implements \Example\PrivateInterface
+       {
+           // ILLEGAL
+       }
+   }
+
+Likewise, the only legal implementation in the global space is of
+``\Example\PublicInterface``.
+
+Traits
+~~~~~~
+
+Trait declarations may be marked ``public``, ``protected`` or
+``private``. If no modifier is specified, the default visibility is
+``public``.
+
+.. code:: php
+
+   namespace Example {
+       // May be used by classes in any namespace.
+       public trait PublicTrait {}
+
+       // Equivalent to public.
+       trait PublicTrait {}
+
+       // May only be used by classes in a shared namespace.
+       protected trait ProtectedTrait {}
+
+       // May only be used by classes in \Example.
+       private trait PrivateTrait {}
+   }
+
+.. code:: php
+
+   namespace Example\Nested {
+       class UseTheTraits
+       {
+           use \Example\PublicTrait;       // legal
+           use \Example\ProtectedTrait;    // legal
+           use \Example\PrivateTrait;      // ILLEGAL
+       }
+   }
+
+.. code:: php
+
+   namespace SomeOtherVendor {
+       class UseTheTraits
+       {
+           use \Example\PublicTrait;       // legal
+           use \Example\ProtectedTrait;    // ILLEGAL
+           use \Example\PrivateTrait;      // ILLEGAL
+       }
+   }
+
+.. code:: php
+
+   namespace {
+       class UseTheTraits
+       {
+           use \Example\PublicTrait;       // legal
+           use \Example\ProtectedTrait;    // ILLEGAL
+           use \Example\PrivateTrait;      // ILLEGAL
+       }
+   }
+
+Inheritance
+~~~~~~~~~~~
+
+Namespace visibility also controls access to where a class or interface
+can be extended.
+
+.. code:: php
+
+   namespace Example {
+       // Extendable from any namespace.
+       public abstract class PublicClass {}
+
+       // Only extendable from namespaces shared by \Example
+       protected class ProtectedClass {}
+
+       // Can only be subclassed within the \Example namespace.
+       private class PrivateClass {}
+
+       // Declared without modifier, this interface
+       // can be implemented or extended in any namespace.
+       interface PublicInterface {}
+
+       // Can only be implemented or extended in the 
+       // \Example namespace.
+       private interface PrivateInterface {}
+   }
+
+.. code:: php
+
+   namespace Example\Shared {
+       class SomeImplementation implements PrivateInterface 
+       {
+           // ILLEGAL
+       }
+
+       private class PrivateClass extends ProtectedClass 
+       {
+           // legal
+       }
+   }
+
+``SomeImplementation`` is not allowed to implement ``PrivateInterface``
+because they are not in the same namespace. ``PrivateClass`` can extend
+``ProtectedClass`` because they share a higher-level namespace.
+
+.. code:: php
+
+   namespace {
+       class InvalidChildClass extends \Example\PrivateClass {}           // ILLEGAL
+       class InvalidImplementation implements \Example\PrivateInterface    // ILLEGAL
+
+       protected class ProtectedClass extends PublicClass {}              // legal
+       class AnotherImplementation implements \Example\PublicInterface {}  // legal
+   }
+
+Nothing changes about how these rules are applied in the global space.
+The only legal sub-classing or implementations are of public classes and
+interfaces.
+
+Cloning
+~~~~~~~
+
+Cloning of objects at runtime is unaffected by namespace visibility as
+cloning is considered to be an instance access concern, not much
+different from property or method access. A private class declared in
+one namespace can be freely cloned in another namespace without issue.
+
+Developers who wish to prevent this behaviour may override ``__clone()``
+and throw an exception if they choose to.
+
+.. code:: php
+
+   namespace A {
+       private class PrivateClass
+       {
+       }
+
+       $original = new PrivateClass();
+
+       var_dump($original);            // object(A\PrivateClass)#1 (0) {}
+   }
+
+   namespace {
+       $cloned = clone $original;
+
+       var_dump($cloned);              // object(A\PrivateClass)#2 (0) {}
+   }
+
+Reflection API
+~~~~~~~~~~~~~~
+
+Developers can reflect on any class, interface or trait, regardless of
+visibility. Four new methods are added to ``ReflectionClass``:
+
+-  ``ReflectionClass::isPublic`` - Checks if the method is public.
+-  ``ReflectionClass::isProtected`` - Checks if the method is protected.
+-  ``ReflectionClass::isPrivate`` - Checks if the method is private.
+-  ``ReflectionClass::setAccessible`` - Set method accessibility.
+
+.. code:: php
+
+   namespace Example {
+       public class PublicClass {}
+       private class PrivateClass {}
+       protected interface ProtectedInterface {}
+       private trait PrivateTrait {}
+   }
+
+   namespace {
+       $a = new ReflectionClass('Example\PublicClass');
+
+       $a->isPublic();     // true
+       $a->isPrivate();    // false
+
+       $b = new ReflectionClass('Example\PrivateClass');
+
+       $b->isProtected();  // false
+       $b->isPrivate();    // true
+
+       $c = new ReflectionClass('Example\ProtectedInterface');
+
+       $c->isInterface();  // true
+       $c->isProtected();  // true
+       $c->isPrivate();    // false
+
+       $d = new ReflectionClass('Example\PrivateTrait');
+
+       $d->isTrait();      // true
+       $d->isPrivate();    // true
+       $d->isPublic();     // false
+
+       // Creating a new instance of a private class is disallowed
+       // unless you ReflectionClass::setAccessible(true)
+       $fail = $b->newInstance();
+
+       $b->setAccessible(true);
+       $success = $b->newInstance();   // legal
+   }
+
+Implementation Details
+----------------------
+
+TBD.
+
+Open Questions
+--------------
+
+1. What operations should be fatal errors at compile time versus run
+time? For example, declaring a closure that instantiates a private class
+outside its namespace; when should this fail? As soon as declared or as
+soon as executed?
+
+Backward Incompatible Changes
+-----------------------------
+
+There are no backwards incompatible changes in this RFC. In many
+languages that support "namespace visibility", the default visibility is
+``private``. To maintain backwards compatibility, the default visibility
+proposed by this RFC is ``public``. This RFC has no impact on current
+PHP codebases.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.4
+
+RFC Impact
+----------
+
+To Opcache
+~~~~~~~~~~
+
+Someone more familiar with the Opcache components will need to review
+the implementation patch for this RFC to apply optimization and sanity
+check things.
+
+Unaffected PHP Functionality
+----------------------------
+
+This RFC does not impact developers in any way. Current codebases can
+remain as-is and experience no change in behaviour. This is because
+non-modified classes, interfaces and traits are ``public``, by default.
+
+Future Scope
+------------
+
+TBD.
+
+Proposed Voting Choices
+-----------------------
+
+Since this is a substantial language change, a 2/3rds majority is
+required.
+
+Patches and Tests
+-----------------
+
+TBD.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged into
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+References
+----------
+
+::
+
+   1. https://externals.io/message/33981
+   2. https://externals.io/message/45620
+   3. https://externals.io/message/51562
+   4. https://externals.io/message/66260
+   5. https://externals.io/message/79873
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Dustin Wheeler, mdwheele@ncsu.edu
+:Original Status: Draft
+:Slug: namespace-visibility
+:Wiki URL: https://wiki.php.net/rfc/namespace-visibility

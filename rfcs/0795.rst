@@ -1,0 +1,222 @@
+New In Initializers
+===================
+
+:PHP-RFC: 0795
+:Title: New In Initializers
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2021-03-02
+:PHP-Version: 8.1
+:Version: 1.0
+
+Introduction
+------------
+
+This RFC proposes to allow use of ``new`` expressions inside parameter
+default values, attribute arguments, static variable initializers and
+global constant initializers.
+
+Currently, code such as the following is not permitted:
+
+.. code:: php
+
+   class Test {
+       public function __construct(
+           private Logger $logger = new NullLogger,
+       ) {}
+   }
+
+Instead, it is necessary to write code along the following lines:
+
+.. code:: php
+
+   class Test {
+       private Logger $logger;
+
+       public function __construct(
+           ?Logger $logger = null,
+       ) {
+           $this->logger = $logger ?? new NullLogger;
+       }
+   }
+
+This makes the actual default value less obvious (from an API contract
+perspective), and requires the use of a nullable argument.
+
+This RFC proposes to relax this restriction and allow the use of ``new``
+inside certain initializer expressions.
+
+Proposal
+--------
+
+``new`` expressions are allowed as part of certain initializer
+expressions. It is possible to pass arguments to the constructor,
+including the use of named arguments:
+
+.. code:: php
+
+   // All allowed:
+   function test(
+       $foo = new A,
+       $bar = new B(1),
+       $baz = new C(x: 2),
+   ) {
+   }
+
+The use of a dynamic or non-string class name or an anonymous class is
+not allowed. The use of argument unpacking is not allowed. The use of
+unsupported expressions as arguments is not allowed.
+
+.. code:: php
+
+   // All not allowed (compile-time error):
+   function test(
+       $a = new (CLASS_NAME_CONSTANT)(), // dynamic class name
+       $b = new class {}, // anonymous class
+       $c = new A(...[]), // argument unpacking
+       $d = new B($abc), // unsupported constant expression
+   ) {}
+
+New expressions are allowed in parameter default values, attribute
+arguments, static variable initializers and global class constant
+initializers. Parameter default values also include defaults for
+promoted properties:
+
+.. code:: php
+
+   static $x = new Foo;
+
+   const C = new Foo;
+
+   function test($param = new Foo) {}
+
+   #[AnAttribute(new Foo)]
+   class Test {
+       public function __construct(
+           public $prop = new Foo,
+       ) {}
+   }
+
+Unsupported positions
+~~~~~~~~~~~~~~~~~~~~~
+
+New expressions continue to not be supported in (static and non-static)
+property initializers and class constant initializers. The reasons for
+this are twofold:
+
+For non-static property initializers, the initializer expression needs
+to be evaluated on each object creation. There are currently two places
+where this could happen: As part of object creation, and as part of the
+constructor call. Doing this as part of object creation can create
+issues for unserialization and any other process that is based on
+``newInstanceWithoutConstructor()`` and does not want to implicitly
+execute potential side-effects.
+
+Performing the initialization by injecting code in the constructor
+avoids the issue, but requires that constructor to actually be called.
+In particular, this would necessitate generating constructors for
+classes that do not explicitly declare them, and the disciplined
+invocation of such constructors from potential child constructors. The
+third option would be to introduce an additional initialization phase
+between creation and construction.
+
+For static property initializers and class constant initializers a
+different evaluation order issue arises. Currently, these initializers
+are evaluated lazily the first time a class is used in a certain way
+(e.g. instantiated). Once initializers can contain potentially
+side-effecting expressions, it would be preferable to have a more
+well-defined evaluation order. However, the straightforward approach of
+evaluating initilizers when the class is declared would break certain
+existing code patterns. In particular, referencing a class that is
+declared later in the same file would no longer work.
+
+As such support in these contexts is delayed until such a time as a
+consensus on the preferred behavior can be reached.
+
+Order of evaluation
+~~~~~~~~~~~~~~~~~~~
+
+Initializer expressions could always contain side-effects through
+autoloaders or error handlers. However, support for ``new`` and the
+accompanying constructor calls make side-effect a more first-class
+citizen in initializer expressions, so it is worthwhile to specify when
+and in what order they are evaluated. For the contexts where ``new`` is
+supported under this proposal:
+
+-  Static variable initializers are evaluated when control flow reaches
+   the static variable declaration.
+-  Global constant initializers are evaluated when control flow reaches
+   the constant declaration.
+-  Attribute arguments are evaluated from left to right on every call of
+   ``ReflectionAttribute::getArguments()`` or
+   ``ReflectionAttribute::newInstance()``.
+-  Parameter default values are evaluated from left to right on every
+   call to the function where the parameter is not explicitly passed.
+
+Additionally, initializers can be accessed through Reflection, in which
+case the following evaluation semantics apply:
+
+-  ``ReflectionFunctionAbstract::getStaticVariables()``: Returns the
+   current value of the static variables and also forces evaluation of
+   any initializers that haven't been reached yet.
+-  ``ReflectionParameter::getDefaultValue()``: Evaluates the default
+   value (on each call).
+-  ``ReflectionParameter::isDefaultValueConstant()`` and
+   ``ReflectionParameter::getDefaultValueConstantName()``: Do not
+   evaluate the default value.
+-  ``ReflectionAttribute::getArguments()`` and
+   ``ReflectionAttribute::newInstance()``: Evaluate attribute arguments
+   on each call.
+
+Nested attributes
+~~~~~~~~~~~~~~~~~
+
+It is worth mentioning explicitly that this RFC effectively adds support
+for nested attributes, which were omitted from the original attributes
+RFC. For example, attributes of the following form are now possible:
+
+.. code:: php
+
+   #[Assert\All(new Assert\NotNull, new Assert\Length(max: 6))]
+
+Backward Incompatible Changes
+-----------------------------
+
+This RFC does not introduce any backwards-incompatible changes, and also
+should not break any major assumptions. The only case where something
+genuinely new is possible are nested attributes.
+
+Future Scope
+------------
+
+This RFC omits support for ``new`` in property and class constant
+initializers. These could be supported in the future, once we have
+figured out the evaluation order issues.
+
+With the precedent set by ``new``, it would probably also make sense to
+allow other call expressions. For example, this would allow use of
+static factor methods.
+
+Vote
+----
+
+Voting opened on 2021-06-30 and closes on 2021-07-14.
+
+Question: Support new in initializers as proposed?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/7153
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.1
+:Slug: new_in_initializers
+:Wiki URL: https://wiki.php.net/rfc/new_in_initializers

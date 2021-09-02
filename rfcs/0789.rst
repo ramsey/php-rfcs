@@ -1,0 +1,616 @@
+ImmutableIterable (immutable, Rewindable, Memory-efficient, Allows Any Key&repeating Keys)
+==========================================================================================
+
+:PHP-RFC: 0789
+:Title: ImmutableIterable (immutable, Rewindable, Memory-efficient, Allows Any Key&repeating Keys)
+:Author: Tyson Andre <tandre@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2021-02-06
+:Version: 0.4
+
+Introduction
+------------
+
+Currently, PHP does not provide a built-in way to store the state of an
+arbitrary iterable for reuse later (when the iterable has arbitrary
+keys, or when keys might be repeated). It would be useful to do so for
+many use cases, such as:
+
+#. Creating a rewindable copy of a non-rewindable Traversable (e.g. a
+   ``Generator``) before passing that copy to a function that consumes
+   an iterable/Traversable. (``new ImmutableIterable(my_generator())``)
+#. Generating an ``IteratorAggregate`` from a class still implementing
+   ``Iterator`` (e.g. ``SplObjectStorage``) so that code can
+   independently iterate over the key-value sequences.
+   (e.g.
+   ``foreach ($immutableKeyValueSequence as $k1 => $v1) { foreach ($immutableKeyValueSequence as $k2 => $v2) { /* process pairs */ } }``)
+#. Providing internal or userland helpers such as
+   ``iterable_flip(iterable $input)``,
+   ``iterable_take(iterable $input, int $limit)``,
+   ``iterable_chunk(iterable $input, int $chunk_size)`` that act on
+   iterables with arbitrary key/value sequences and have return values
+   including iterables with arbitrary key/value sequences
+#. Providing constant time access to both keys and values of arbitrary
+   key-value sequences at any offset (for binary searching on keys
+   and/or values, etc.)
+
+Having this implemented as an internal class would also allow it to be
+`much more efficient than a userland solution <#benchmarks>`__ (in terms
+of time to create, time to iterate over the result, and total memory
+usage).
+
+Proposal
+--------
+
+Add a class ``ImmutableIterable`` that contains an immutable copy of the
+keys and values of the iterable it was constructed from. (references
+inside of arrays within those keys/values will remain modifiable
+references, and objects within those keys/values will remain mutable)
+
+.. code:: php
+
+   final class ImmutableIterable implements 
+       IteratorAggregate,
+       Countable,
+       JsonSerializable 
+   {
+       public function __construct(iterable $iterator) {}
+       public function getIterator(): InternalIterator {}
+       public function count(): int {}
+       // [[$key1, $value1], [$key2, $value2]]
+       public static function fromPairs(array $pairs): ImmutableIterable {}
+       // [[$key1, $value1], [$key2, $value2]]
+       public function toPairs(): array{}
+       public function __serialize(): array {}  // [$k1, $v1, $k2, $v2,...]
+       public function __unserialize(array $data): void {}
+       public static function __set_state(array $array): ImmutableIterable {}
+
+       // useful for converting iterables back to arrays for further processing
+       public function keys(): array {}  // [$k1, $k2, ...]
+       public function values(): array {}  // [$v1, $v2, ...]
+       // useful to efficiently get offsets at the middle/end of a long iterable
+       public function keyAt(int $offset): mixed {}
+       public function valueAt(int $offset): mixed {}
+
+       // '[["key1","value1"],["key2","value2"]]' instead of '{...}'
+       public function jsonSerialize(): array {}
+       // dynamic properties are forbidden
+   }
+
+ImmutableIterables are IteratorAggregates, so foreach loops do not
+interfere with each other.
+
+.. code:: php
+
+   $x = new ImmutableIterable([0 => 100, 'key' => 'value']);
+   foreach ($x as $key1 => $value1) {
+       echo "$key1 $value1:\n";
+       foreach ($x as $key2 => $value2) {
+           echo "- $key2 $value2\n";
+       }
+   }
+   /*
+   0 100:
+   - 0 100
+   - key value
+   key value:
+   - 0 100
+   - key value
+    */
+
+ImmutableIterables can be used to cache and efficiently process results of Traversables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+ImmutableIterables can be created from any iterable (arrays or
+Traversables). They eagerly evaluate the results of Traversables (e.g.
+Generators) and store an exact copy of the keys and values that can be
+processed in many ways.
+
+In comparison to php's ``array``/``ArrayObject`` type:
+
+-  Arrays can only store integers and strings
+-  Arrays coerce stringified integers to integers, potentially causing
+   unexpected Errors/notices (especially when ``strict_types=1``)
+-  Arrays cannot represent repeated keys
+
+.. code:: php
+
+   function my_generator() {
+       yield from ['first array'];
+       yield from ['repeated key is allowed'];
+       yield '0' => 'string key is preserved';
+       yield ['an array'] => null;  // any type can be used as keys
+       echo "Finished iterating over the generator\n";
+   }
+
+   $x = new ImmutableIterable(my_generator());
+   foreach ($x as $k => $v) {
+       printf("%s: %s\n", json_encode($k), json_encode($v));
+   }
+   /*
+   Finished iterating over the generator
+   0: 'first array'
+   0: 'repeated key is allowed'
+   '0': 'string key is preserved'
+   ["an array"]: null
+    */
+
+   printf("Keys: %s\n", json_encode($x->keys()));
+   printf("Values: %s\n", json_encode($x->values()));
+   /*
+   Keys: [0,0,"0",["an array"]]
+   Values: ["first array","repeated key is allowed","string key is preserved",null]
+    */
+   printf("Last key: %s\n", json_encode($x->keyAt(count($x) - 1)));
+   // Last key: ["an array"]
+
+ImmutableIterables are immutable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+ImmutableIterable is a final class.
+
+Dynamic properties are forbidden on ImmutableIterables.
+
+The keys and values of the ImmutableIterable cannot be modified or
+appended to after an instance is constructed, though objects and
+references within those values can be modified.
+
+This makes it useful for returning to wrap the keys and values that
+would be returned by a generator or single-use ``Iterator`` (it can't be
+modified after being constructed by other applications or libraries)
+
+ImmutableIterables can be created from pairs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This can be done imperatively, to avoid the need to manually create a
+generator with the sequence of keys and values to pass to the
+constructor. The values of an iterable (array or Traversable) can be
+used.
+
+.. code:: php
+
+   $it = ImmutableIterable::fromPairs([['first', 'x'], [(object)['key' => 'value'], null]]);
+   foreach ($it as $key => $value) {
+       printf("key=%s value=%s\n", json_encode($key), json_encode($value));
+   }
+   /*
+   key="first" value="x"
+   key={"key":"value"} value=null
+   */
+   var_dump($it);
+   /*
+   object(ImmutableIterable)#2 (1) {
+     [0]=>
+     array(2) {
+       [0]=>
+       string(5) "first"
+       [1]=>
+       string(1) "x"
+     }
+   }
+   */
+   php > echo json_encode((array)$it), "\n";
+   [["first","x"],[{"key":"value},null]]
+
+ImmutableIterables can also be converted back into pairs for further
+processing (e.g. using the wide array of helper methods php has for
+processing arrays):
+
+.. code:: php
+
+   php > $reversedIt = ImmutableIterable::fromPairs(array_reverse($it->toPairs()));
+   php > echo json_encode($reversedIt->toPairs());
+   [[{"key":"value"},null],["first","x"]]
+
+Benchmarks
+----------
+
+ImmutableIterables are memory-efficient
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Similarly to how ``SplFixedArray`` is a memory-efficient way to store a
+list of values, ``ImmutableIterable`` is a memory-efficient way to
+eagerly evaluate and store a sequence of arbitrary keys and values.
+
+.. code:: php
+
+   <?php
+
+   function show_array_memory(int $n) {
+       gc_collect_cycles();
+       $before = memory_get_usage();
+       $result = array_flip(range(10, 10 + $n - 1));  // create an **associative** array of size $n
+       $after = memory_get_usage();
+       printf("array memory:          (n=%5d) %7d bytes\n", count($result), $after - $before);
+   }
+   function show_cachediterable_memory(int $n) {
+       gc_collect_cycles();
+       $before = memory_get_usage();
+       // create a ImmutableIterable from an **associative** array of size $n
+       $result = new ImmutableIterable(array_flip(range(10, 10 + $n - 1)));
+       $after = memory_get_usage();
+       printf("ImmutableIterable memory: (n=%5d) %7d bytes\n", count($result), $after - $before);
+   }
+   foreach ([1, 8, 12, 16, 2**16] as $n) {
+       show_array_memory($n);
+       show_cachediterable_memory($n);
+   }
+   /*
+   array memory:             (n=    1)     376 bytes
+   ImmutableIterable memory: (n=    1)      88 bytes
+   array memory:             (n=    8)     376 bytes
+   ImmutableIterable memory: (n=    8)     312 bytes
+   array memory:             (n=   12)    1336 bytes
+   ImmutableIterable memory: (n=   12)     440 bytes
+   array memory:             (n=   16)    1336 bytes
+   ImmutableIterable memory: (n=   16)     568 bytes
+   array memory:             (n=65536) 4198480 bytes
+   ImmutableIterable memory: (n=65536) 2097232 bytes
+    */
+
+ImmutableIterables are much more efficient than a polyfill object
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For a simple example, this uses much less time to construct. It is
+almost 6 times faster to iterate over and process results than a
+polyfill in that example, and uses half as much additional memory.
+
+.. code:: php
+
+   <?php
+   /*
+   Time to construct PolyfillImmutableIterator: 0.244787
+   Time to iterate: 0.183351, memory usage: 67117328
+   result:999000000
+
+   Time to construct         ImmutableIterable: 0.130534
+   Time to iterate: 0.021905, memory usage: 32002128
+   result:999000000
+    */
+
+   /**
+    * THIS IS AN INCOMPLETE POLYFILL THAT ONLY SUPPORTS ITERATION, AND DOES NOT INCLUDE ERROR HANDLING.
+    *
+    * Barely any of the functionality in the proposal is implemented.
+    * This is just here to compare a fast (in terms of time to iterate) userland polyfill
+    * against ImmutableIterable.
+    *
+    * Not an IteratorAggregate for simplicity.
+    */
+   class PolyfillImmutableIterator implements Iterator {
+       public $i = 0;
+       public $count = 0;
+       public $keys;
+       public $values;
+       public function __construct(iterable $data) {
+           $keys = [];
+           $values = [];
+           foreach ($data as $key => $value) {
+               $keys[] = $key;
+               $values[] = $value;
+           }
+           $this->keys = $keys;
+           $this->values = $values;
+           $this->count = count($keys);
+       }
+       public function rewind() { $this->i = 0; }
+       public function valid(): bool { return $this->i < $this->count; }
+       public function key() { return $this->keys[$this->i]; }
+       public function current() { return $this->values[$this->i]; }
+       public function next(): void { $this->i++; }
+   }
+
+   function a_generator() {
+       for ($i = 0; $i < 1000; $i++) {
+           for ($j = 0; $j < 1000; $j++) {
+               yield $j => $i;
+           }
+       }
+   }
+
+   function benchmark(string $class) {
+       gc_collect_cycles();
+       $memory_usage_1 = memory_get_usage();
+       $t1 = microtime(true);
+       $it = new $class(a_generator());
+       $t2 = microtime(true);
+       $total = 0;
+       foreach ($it as $k => $v) {
+           $total += $k + $v;
+       }
+       $t3 = microtime(true);
+       gc_collect_cycles();
+       $memory_usage_2 = memory_get_usage();
+       printf("Time to construct %25s: %.6f\nTime to iterate: %.6f, memory usage: %d\nresult:%d\n\n",
+           $class, $t2 - $t1, $t3 - $t2, $memory_usage_2 - $memory_usage_1, $total);
+   }
+   benchmark(PolyfillImmutableIterator::class);
+   benchmark(ImmutableIterable::class);
+
+ImmutableIterables support constant-time access to keys and values
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``ImmutableIterable``\ s support constant-time access to keys and
+values, allowing the result to be used in a wide variety of ways in an
+application. For example, it is possible to do binary search on keys
+(and/or values) without using any additional time or memory to create a
+copy of the keys. (Same for values).
+
+.. code:: php
+
+   <?php
+   /**
+    * @return int the offset of the first key in $it that is >= $target.
+    * Returns count($it) if all keys are smaller than $target.
+    */
+   function do_binary_search_on_key(ImmutableIterable $it, int $target) {
+       $lowOffset = 0;
+       $highOffset = count($it) - 1;
+       while ($lowOffset <= $highOffset) {
+           $mid = $lowOffset + (($highOffset - $lowOffset) >> 1);
+           $key = $it->keyAt($mid);
+           if ($key < $target) {
+               echo "at offset $mid: $key <= $target\n";
+               $lowOffset = $mid + 1;
+           } else {
+               echo "at offset $mid: $key > $target\n";
+               $highOffset = $mid - 1;
+           }
+       }
+       echo "offset $lowOffset has the first key ({$it->keyAt($lowOffset)}) >= $target " .
+            ": associated value={$it->valueAt($lowOffset)}\n";
+       return $lowOffset;
+   }
+
+   mt_srand(123);
+   $data = [];
+   $N = 1000;
+   for ($i = 0; $i < $N; $i++) {
+       $data[mt_rand()] = "value$i";
+   }
+   ksort($data);
+   $it = new ImmutableIterable($data);
+
+   do_binary_search_on_key($it, mt_rand());
+   /*
+   at offset 499: 1039143806 > 457052171
+   at offset 249: 595271545 > 457052171
+   at offset 124: 262516026 <= 457052171
+   at offset 186: 438739745 <= 457052171
+   at offset 217: 511637778 > 457052171
+   at offset 201: 468958912 > 457052171
+   at offset 193: 442664110 <= 457052171
+   at offset 197: 455906707 <= 457052171
+   at offset 199: 462794419 > 457052171
+   at offset 198: 459587085 > 457052171
+   offset 198 has the first key (459587085) >= 457052171 : associated value=value530
+    */
+
+Backward Incompatible Changes
+-----------------------------
+
+None, except that the class name ``ImmutableIterable`` will be declared
+by PHP and conflict with applications declaring the same class name in
+that namespace.
+
+Proposed PHP Version(s)
+-----------------------
+
+8.1
+
+Future Scope
+------------
+
+-  This will enable adding internal iterable functions such as
+   ``*take(iterable $input, int $limit): ImmutableIterable`` or
+   ``*flip(iterable $input): ImmutableIterable`` or
+-  More methods may be useful to add to ``ImmutableIterable``, e.g. for
+   returning a sorted copy, returning a slice(range of entries),
+   returning a copy sorted by keys/values, quickly returning the
+   index/corresponding value of the first occurrence of ``mixed $key``
+   etc.
+-  This may or may not be useful for future data types, e.g. a
+   ``MapObject`` (hash map on any key type) type and may potentially be
+   useful for converting some existing internal/user-defined
+   ``Iterable`` types to ``IteratorAggregate`` types.
+
+   -  A new ``IterableAggregate`` subclass such as
+      ``CachedIterator``/``CachedIterable`` could be added to compute
+      values
+      `lazily(on-demand) <https://en.wikipedia.org/wiki/Lazy_evaluation>`__
+      in contrast to ``ImmutableIterable``, which `evaluates the entire
+      iterable in the
+      constructor <https://en.wikipedia.org/wiki/Eager_evaluation>`__.
+
+Vote
+----
+
+This is a Yes/No vote, requiring a 2/3 majority. Voting started on June
+15, 2021 and ends on June 29, 2021.
+
+Question: Add ImmutableIterable to core
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Poll: Reason for voting against this RFC
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Question: Reasons for voting against the ImmutableIterable RFC
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Object to the namespace choice
+-  Object to the name
+-  Object to the implementation
+-  Don't see a use case
+-  Other
+
+References
+----------
+
+-  `Proposal: Add ReverseArrayIterator and ForwardArrayIterator to
+   SPL <https://externals.io/message/113061#113066>`__
+-  `Straw poll: Namespace to use for CachedIterable and iterable
+   functionality </rfc/cachediterable_straw_poll>`__
+-  https://externals.io/message/114834 RFC: CachedIterable (rewindable,
+   allows any key&repeating keys)
+-  `[VOTE] ImmutableIterable (immutable, rewindable, allows any
+   key&repeating keys) <https://externals.io/message/114887>`__
+
+Rejected Features
+-----------------
+
+Rejected: Alternative namespaces
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+`Straw poll: Namespace to use for CachedIterable and iterable
+functionality </rfc/cachediterable_straw_poll>`__ did not indicate a
+majority of voters preferred alternative namespace choices for a
+namespace over not using a namespace for newly added caches. This
+chooses the global namespace to maintain consistency with existing spl
+classes and interfaces.
+
+Rejected: ArrayAccess
+~~~~~~~~~~~~~~~~~~~~~
+
+From https://github.com/php/php-src/pull/6655#issuecomment-770444285
+    I think ``ArrayAccess`` would lead to more bugs in application code
+    for those expecting ``$cachedIt[$i]`` to find the value
+    corresponding to the first key occurrence of ``$i`` - adding
+    ``keyAt(int $offset): mixed``, ``valueAt(int $offset): mixed``,
+    ``keyIndex(mixed $key): int``, ``valueIndex(mixed $value): int``
+    would be my preference for fetching values.
+
+Rejected: Lazy Evaluation
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``ImmutableIterable`` evaluates the entire iterable in its constructor
+(`eagerly <https://en.wikipedia.org/wiki/Eager_evaluation>`__ instead of
+`lazily <https://en.wikipedia.org/wiki/Lazy_evaluation>`__) for the
+following reasons:
+
+-  If this is generated from a data structure, the behavior may be
+   unintuitive if the underlying data is modified while iterating over
+   the sequence of keys and values if this were to be evaluated lazily
+   instead of eagerly.
+-  Evaluating the entire iterable in the constructor ensures that
+   exceptions will be thrown during construction instead of during
+   iteration or call to count()/keyAt()/valueAt() - it would be
+   unintuitive for those iteration methods to throw
+   ``SomeUserlandFrameworkException``
+-  This is easier to understand, debug, serialize, and represent
+-  If the underlying iterable (e.g. a Generator) has side effects,
+   having those side effects take place immediately instead of being
+   interleaved with other parts of the program may be easier to reason
+   about.
+-  The majority of use cases of ``Traversable``\ s would iterate over
+   the entire Traversable at some point.
+-  Eagerly evaluating iterables reduces the memory needed by the
+   implementation. The amount of memory needed to represent this is much
+   lower (without the need to store the underlying iterable, potentially
+   the most recent exception(s) thrown by the undlying iterable, etc).
+
+The addition of an iterable library class that evaluates arguments
+on-demand is mentioned in the "future scope" section.
+
+https://externals.io/message/114805#114798
+
+    <blockquote> 2) Userland library/application authors that are
+    interested in lazy generators could use or implement something such
+    as https://github.com/nikic/iter instead. My opinion is that the
+    standard library should provide something that is easy to
+    understand, debug, serialize or represent, etc. I expect the inner
+    iterable may be hidden entirely in a (lazy) CachedIterable from
+    var_dump as an implementation detail.
+
+    3) It would be harder to understand why SomeFrameworkException is
+    thrown in code unrelated to that framework when a lazy (instead of
+    eager) iterable is passed to some function that accepts a generic
+    iterable, and harder to write correct exception handling for it if
+    done in a lazy generation style.
+
+    Many RFCs have been rejected due to being perceived as being likely
+    to be misused in userland or to make code harder to understand.
+
+    4) It is possible to implement a lazy alternative to
+    (ImmutableIterable) that only loads values as needed. However, I
+    hadn't proposed it due to doubts that 2/3 of voters would consider
+    it widely useful enough to be included in php rather than as a
+    userland or PECL library.
+
+CachedIterable should load from the underlying datastore lazily -- there
+is hardly any visible impact from the user if this happens, because for
+the most part it looks and behaves the same as it does today. The only
+visible changes are around loading data from the underlying iterable.
+
+For example, if the user calls the count method on the CachedIterable,
+it would then load the remainder of the underlying data-store (and then
+drop its reference to it). If the user asks for valueAt($n) and it's
+beyond what's already loaded and we haven't finished consuming the
+underlying iterable, then it would load until $n is found or the end of
+the store is reached.
+
+I understand your concerns with map, filter, etc. CachedIterable is
+different because it holds onto the data, can be iterated over more than
+once, including the two nested loop cases, even if it loads data from
+the underlying iterable on demand. </blockquote>
+
+    <blockquote> Thanks for explaining 4 months ago about my concern. I
+    think I understand the main real impact of an eager iterable cache
+    vs a lazy iterable cache from a functional point of view:
+
+    -  exceptions are thrown during construction vs during the first   
+    iteration -  predictable performance also on the first iteration.
+
+    How did you gather the information that eager implementation is more
+    valuable than lazy one? I'm mostly curious also how to assess this
+    as technically to me it also looks the other way around. Maybe
+    mention that in the RFC. I was even thinking that CachedIterable
+    should be lazy and an EagerCachedIterable would be built upon that
+    with more methods. Or have it in the same class with a constructor
+    parameter.
+
+One of the reasons was size/efficiency. Adding the functionality to
+support lazy evaluation would require extra properties to track internal
+state and extra checks at runtime, point to the original iterable and
+the functions being applied to that iterable - so an application that
+creates lots of small/empty cached iterables would have a higher memory
+usage.
+
+Having a data structure that tries to do everything would do other
+things poorly (potentially not support serialization, use more memory
+than necessary, have unintuitive behaviors when attempting to
+var_export/var_dump it, surprisingly throw when being iterated over,
+etc) </blockquote>
+
+Changelog
+~~~~~~~~~
+
+-  0.2: Use optimized build with opcache enabled for benchmark timings
+-  0.3: Rename from ``CachedIterable`` to ``ImmutableKeyValueSequence``
+   (the lack of clarity about the functionality associated with the name
+   ``CachedIterable`` being eagerly evalulated was mentioned \*after\*
+   most of the responses to the straw poll were already submitted).
+   Other names starting with ``Cached*`` were rejected for the same
+   reason.
+-  0.3.1: Add ``__set_state``
+-  0.4.0: Rename from ``ImmutableKeyValueSequence`` to
+   ``ImmutableIterable``
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/6655
+:Original Authors: Tyson Andre, tandre@php.net
+:Slug: cachediterable
+:Wiki URL: https://wiki.php.net/rfc/cachediterable

@@ -1,0 +1,275 @@
+Nullsafe Calls
+==============
+
+:PHP-RFC: 0337
+:Title: Nullsafe Calls
+:Author: Josh Watzman <jwatzman@fb.com>, Drew Paroski
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2014-12-09
+:Version: 1.0
+
+Introduction
+------------
+
+**The RFC has been returned to draft stage after discussion on internals
+in order to figure out how to deal with short circuiting. See the "open
+issues" section below. The rest of the RFC currently stands as
+originally submitted to internals.**
+
+This RFC proposes a new operator, the "nullsafe" operator ``?->``, which
+allows safe chaining of method calls. This is useful to easily propagate
+errors forward to the end of a computation which should fail if any of
+its sub-computations should fail.
+
+Proposal
+--------
+
+A very common pattern is to have some a computation consisting of a
+series of method calls, any one of which can return null. If any of them
+do return null, the entire computation should fail. Right now, writing
+something like this in PHP requires a bunch of boilerplate checks after
+each call. For example:
+
+.. code:: php
+
+   function f($o) {
+     $o2 = $o->mayFail1();
+     if ($o2 === null) {
+       return null;
+     }
+
+     $o3 = $o2->mayFail2();
+     if ($o3 === null) {
+       return null;
+     }
+
+     $o4 = $o3->mayFail3();
+     if ($o4 === null) {
+       return null;
+     }
+
+     return $o4->mayFail4();
+   }
+
+This certainly works, but it's a lot of boilerplate for a fairly common
+pattern, and it's also a lot of explicit checks that the runtime must
+do. Instead, a new operator is added to the language: ``?->``. Calling
+``$obj?->foo(..)`` behaves identically to ``$obj->foo(..)`` if ``$obj``
+is not null. If ``$obj`` is null, then it returns null.
+
+This means that calls using this new operator can be chained together.
+For example, the code above, rewritten with the new operator:
+
+.. code:: php
+
+   function f($o) {
+     return $o?->mayFail1()?->mayFail2()?->mayFail3()?->mayFail4();
+   }
+
+Short Circuit
+~~~~~~~~~~~~~
+
+If ``$obj`` is null, when ``$obj?->foo(..)`` executes, the arguments
+will still be evaluated. In other words, ``?->`` does **not** have short
+circuit semantics when evaluating arguments.
+
+This is done because it parallels what the ``->`` operator does. The
+arguments are evaluated whether or not the function being called
+actually consumes them. Furthermore, ``?->`` is effectively an error
+suppression/propagation mechanism. This means that its usage should not
+affect the way arguments are evaluated; doing anything else would be
+very confusing for the programmer.
+
+It's worth noting that this point has deep implications for the
+implementation, which must at least begin to actually execute the call
+opcode, so that arguments can be evaluated. It cannot simply be
+implemented as a syntactic transform into a ternary or similar!
+
+Implications
+~~~~~~~~~~~~
+
+For the purpose of clarity, some implications of the above definition;
+all of these stem from consistency between ``->`` and ``?->``, and
+trying to avoid strange behavioral changes when the left-hand side is or
+is not null.
+
+-  If ``$obj`` is an object whose class does **not** define a method
+   "foo", then ``$obj?->foo(..)`` will still raise a fatal error.
+-   If ``$obj`` is anything other than null or object, then
+   ``$obj?->foo(..)`` will still raise a fatal error.
+
+Prior Art
+~~~~~~~~~
+
+-  C#, CoffeeScript, and Groovy all have a "safe navigation operator"
+   which was the original inspiration for this feature.
+-  Haskell has the "maybe monad", which syntactically looks quite
+   different but morally provides a similar mechanism to propagate any
+   failure in a computation forward to the end of the computation.
+-  Hack has already implemented a proposal identical to this one.
+
+Backward Incompatible Changes
+-----------------------------
+
+Due to an implementation detail, this decreases the maximum number of
+arguments a function can be called with from ``2^32`` to ``2^31``, and
+adds an error when that limit is reached. (The engine would previously
+just wrap around, to potentially disastrous consequences.)
+
+This is just a technicality... all of my attempts to actually hit that
+limit put my machine into swapdeath long before I got close :-P
+
+See also "RFC Impact To Existing Extensions" below.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP7.
+
+RFC Impact
+----------
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Extensions have access to an opline's ``extended_value``, and the
+current implementation re-uses a single bit at the top of it for a new
+purpose. This is a backwards compatibility break for extensions which
+read the ``extended_value`` out of the "begin fcall" opcode -- though
+arguably extensions like RunKit which do this probably shouldn't be
+anyways ;)
+
+If this impact is deemed too much, there are certainly other
+implementation options, which I think are less attractive. We could add
+a new ``OP_DATA`` opcode after the begin fcall, but that seems like
+dramatic overkill for storing a single bit.
+
+New Constants
+~~~~~~~~~~~~~
+
+Nothing accessible from outside the internals of the engine.
+
+Open Issues
+-----------
+
+Make sure there are no open issues when the vote starts!
+
+.. _short-circuit-1:
+
+Short Circuit
+~~~~~~~~~~~~~
+
+The behavior for (not) short circuiting argued for above is not clearly
+the right behavior. There are actually at least *three* meaningful
+possibilities here. I'm currently investigating implementation
+feasibility in both PHP7 and in HHVM, as well as generally thinking
+about what the right thing to do is, and will bring the discussion back
+up on internals once I've got my thoughts together better.
+
+As a quick preview, the three options can be seen as to how to desugar
+the following code. I'm not going to argue for or against any of them
+yet, just show what the range of possibilities are. (I also haven't
+extensively looked at the following examples, they might have errors or
+just not make sense, I need more time to put this together properly,
+dumping here for completeness only, please wait for the full revised
+proposal to internals :))
+
+.. code:: php
+
+   $r = $x?->a(f())->b(g());
+
+Option 1: no short circuit
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Arguments are evaluated even if we are doing the nullsafe call on null.
+
+.. code:: php
+
+   $_tmp1 = f();
+   $_tmp2 = g();
+   $_tmp3 = $x === null ? null : $x->a($_tmp1);
+   $r = $_tmp3->b($_tmp2);
+
+Option 2: one-level short circuit
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Arguments are not evaluated if we are doing the nullsafe call on null.
+The nullsafe behavior only applies to the single function call where the
+nullsafe operator is used.
+
+.. code:: php
+
+   $_tmp1 = $x === null ? null : $x->a(f());
+   $r = $_tmp1->b(g());
+
+Option 3: full short circuit
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Arguments are not evaluated if we are doing the nullsafe call on null.
+The nullsafe behavior applies to all calls chained after the nullsafe
+operator.
+
+.. code:: php
+
+   $r = $x === null ? null : $x->a(f())->b(g());
+
+Unaffected PHP Functionality
+----------------------------
+
+This RFC does not change any existing PHP behavior, including the ``->``
+operator, the ``??`` operator, the ``@`` operator, or other error
+suppression mechanisms.
+
+Future Scope
+------------
+
+The ``?->`` operator is not valid to use for a member access, and will
+generate an ``E_COMPILE_ERROR`` if this is attempted. Defining such
+functionality is left to a further RFC.
+
+Proposed Voting Choices
+-----------------------
+
+This is pretty clearly a core language change and so requires 2/3. The
+vote will be a straight yes/no vote on accepting the new operator.
+
+Patches and Tests
+-----------------
+
+-  php-src: I have a branch at
+   https://github.com/jwatzman/php-src/compare/nullsafe-prototype?expand=1
+   with a working implementation. Includes tests copied from HHVM's
+   implementation.
+-  PHP spec: not yet, but will do if the RFC is accepted.
+-  PHP docs: import Hack's documentation when they add it:
+   https://github.com/hhvm/hack-hhvm-docs/issues/360 (that task will get
+   completed well before this RFC is voted on, accepted, merged, etc)
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+HHVM's implementation for the Hack language is at
+https://github.com/facebook/hhvm/commit/8fd5a78b02d2d62538e77fcbc927df759c1722f9.
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Josh Watzman (jwatzman@fb.com), Drew Paroski
+:Original Status: Obsolete
+:Slug: nullsafe_calls
+:Wiki URL: https://wiki.php.net/rfc/nullsafe_calls

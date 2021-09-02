@@ -1,0 +1,394 @@
+Namespace-scoped Declares
+=========================
+
+:PHP-RFC: 0512
+:Title: Namespace-scoped Declares
+:Author: Nikita Popov <nikic@php.net>
+:Status: Draft
+:Type: Standards Track
+:Created: 2016-09-20
+:PHP-Version: 7.3
+:Version: 0.9
+
+Introduction
+------------
+
+PHP 7 introduced the ``strict_types`` declare directive, which controls
+how scalar type declarations behave in a certain file. A common
+complaint is that this directive has to be specified in every single
+file. This RFC proposes the addition of namespace-scoped declares, which
+allows specifying a default declare directive for an entire namespace.
+While this improves the usability of strict types specifically, this
+feature could also form the basis to opt-out of certain undesirable
+language semantics, without breaking library-interoperability or
+backwards compatibility.
+
+Here is an example of how this functionality could look like:
+
+.. code:: php
+
+   // bootstrap.php
+   namespace_declare('Vendor\Lib', ['strict_types' => 1]);
+
+This would make ``strict_types=1`` the default in the namespace
+``Vendor\Lib`` and all sub-namespaces (i.e. all namespaces starting with
+``Vendor\Lib\``). A specific file in this namespace could of course
+override this default using a specific ``declare(strict_types=0);``
+directive.
+
+Motivation and Vision
+---------------------
+
+The motivation behind this proposal is broader than just saving a single
+``declare()`` in each file of a project. This kind of namespace-scoped
+declare may provide the means for introducing certain changes that make
+the language "stricter" without breaking backwards compatibility or
+library-interoperability (as ini directives do).
+
+For example, in modern PHP code it is nearly always a bug to dynamically
+create a property on an object that has not previously been declared.
+However disallowing this globally would be unthinkable, because a lot of
+software relies on it, and some use-cases legitimately benefit from the
+ability to do this. Adding an ini-setting to control this behavior is
+not possible either, because this would prevent using libraries that
+assume different values for this setting (which is the same reason for
+why strict_types is not an ini setting).
+
+Using a declare() directive for this purpose would solve the
+inter-operability issues and would additionally provide an
+"escape-hatch" for the cases where the functionality is legitimately
+needed. However if the number of such directives increases, specifying
+them for every single file in a project would quickly become unwieldy.
+Additionally, it is likely that a library will want to use the same
+directives for all files. Changing the value of a directive would then
+require performing an update on all files. Namespace-scoped declares
+solve this by specifying such options in a single bootstrap file:
+
+.. code:: php
+
+   // bootstrap.php
+   namespace_declare('Vendor\Lib', [
+       'strict_types' => 1,
+       'dynamic_object_properties' => 0,
+       ...
+   ]);
+
+For libraries using Composer this bootstrap file would be specified as a
+"files" autoloader:
+
+.. code:: json
+
+   {
+       "autoload": {
+           "psr-4": { "Vendor\\Lib\\": "src/" },
+           "files": ["src/bootstrap.php"]
+       }
+   }
+
+However, if this kind of approach should prove popular, it might be
+possible to include this information directly in the ``composer.json``
+and let Composer manage it:
+
+.. code:: json
+
+   {
+       "declares": {
+           "Vendor\\Lib\\": {
+               "strict_types": 1,
+               "dynamic_object_properties": 0
+           }
+       }
+   }
+
+Proposal
+--------
+
+The introduction of a ``namespace_declare`` function with the following
+signature is proposed:
+
+.. code:: php
+
+   function namespace_declare(string $namespace, array $declares) : void;
+
+The given ``$declares`` will be used as default values for all code
+inside the namespace ``$namespace`` or a sub-namespace. A sub-namespace
+is any namespace that starts with ``$namespace . "\\"``. Namespaces in
+PHP are case-insensitive, so ``namespace_declare`` also applies
+case-insensitively.
+
+If the provided ``$namespace`` is the empty string, an ``Error`` is
+thrown. It is explicitly not possible to specify a global default. If
+``$namespace`` starts or ends with a backslash, an ``Error`` is thrown.
+
+If ``namespace_declare`` was already called for a certain
+``$namespace``, another call with the same namespace will result in an
+``Error``.
+
+If code using ``$namespace`` or a sub-namespace has already been loaded,
+an ``Error`` is thrown. This avoids situations where code in a namespace
+is loaded, subsequently ``namespace_declare()`` is used and more code
+from the namespace is loaded. Without this check, code in the same
+namespace would end up using inconsistent declare directives.
+
+``namespace_declare`` has no impact on aliases created using
+``class_alias`` and entities declared by internal code.
+
+Nesting behavior
+~~~~~~~~~~~~~~~~
+
+If ``namespace_declare`` has been called for namespaces ``A`` and
+``A\B``, where ``A\B`` is a sub-namespace of ``A``, then the directive
+defaults for ``A\B`` take precedence before those of ``A``. Consider the
+following example:
+
+.. code:: php
+
+   namespace_declare('A', ['strict_types' => 1, 'dynamic_object_properties' => 0]);
+   namespace_declare('A\B', ['dynamic_object_properties' => 1]);
+
+Given the above calls, code in namespace ``A\B`` will have the following
+declare directives active (assuming they are not overwritten with
+``declare()``):
+
+::
+
+   dynamic_object_properties=1 // Because this was specified on A\B
+   strict_types=1              // Because this was not specified on A\B, but specified on A
+   ticks=0                     // Because this was not specified on A\B or A, so the global default is used
+   ...
+
+The nesting behavior does not depend on the order in which
+``namespace_declare`` is called. As such the following code results in
+the same behavior:
+
+.. code:: php
+
+   namespace_declare('A\B', ['dynamic_object_properties' => 1]);
+   namespace_declare('A', ['strict_types' => 1, 'dynamic_object_properties' => 0]);
+
+Interaction with files using mixed namespaces
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If multiple namespaces are mixed in a single file, all used namespaces
+are required to have consistent namespace-scoped declares. For example,
+the following code is illegal:
+
+.. code:: php
+
+   // bootstrap.php
+   namespace_declare('A', ['strict_types' => 1]);
+   namespace_declare('B', ['strict_types' => 0]);
+
+   // some_file.php
+   namespace A; // strict_types=1
+   ...
+
+   namespace B; // strict_types=0
+   ...
+
+This restriction is introduced for two reasons: Firstly, lack of such a
+restriction would imply that language behavior can silently change in
+the middle of a single file, which would be very confusing. Secondly,
+there are are significant implementational complexities associated with
+allowing this type of code due to limitations of specific declare
+directives. In particular the current implementation of ``strict_types``
+only permits a consistent ``strict_types`` value for a whole file.
+Lifting the declare-consistency requirement would require changing the
+``strict_types`` implementation to support this and, more importantly,
+commitment to support this for all future declare directives we
+introduce, which may be non-trivial.
+
+Supported declare directives
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Currently PHP supports three declare directives, ``ticks``,
+``strict_types`` and ``encoding``.
+
+``namespace_declare()`` does not support ``encoding`` and will generate
+an ``Error`` if it is specified. The reason is that ``encoding`` has
+very special semantics, and requires the directive to be resolved
+already at parse-time, so that the lexer behavior may be influenced. At
+the point where the first namespace is encountered, it may already be
+too late to act on this directive.
+
+For ``ticks`` the passed value must be a non-negative integer, otherwise
+an ``Error`` is thrown.
+
+For ``strict_types`` the passed value must be integer ``0`` or ``1``,
+otherwise an ``Error`` is thrown.
+
+Open Question: Handling of unknown directives
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``declare()`` statement will throw a compile-time warning if an
+unknown directive is used. This has the advantage that typos can be
+easily spotted. On the other hand this is bad for forward-compatibility,
+because specifying a directive that is only known in newer PHP versions
+would generate a warning in older versions. If the directive only exists
+to make certain checks stricter (such as the
+``dynamic_object_properties`` example) it would be preferably if it
+would simply be (silently) ignored on older versions.
+
+If we go for throwing a warning here, it might be beneficial to add a
+``supports_declare()`` function, which allows you to determine whether a
+certain declare directive is supported, without resorting to a PHP
+version check (which would likely be unreliable with regard to
+alternative PHP implementations).
+
+Open Question: Introspection functionality
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It might be useful to also provide a mechanism to retrieve the active
+namespace-scoped declares at runtime, e.g. using a
+``get_namespace_declares()`` function. One could either make this return
+the declarations for all namespaces exactly as given, or return the
+computed declarations for a specific namespace. I'm not sure what the
+specific use-case for this kind of introspection functionality would be,
+though.
+
+Implementation considerations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Declare directives have to be known at compile-time, because they may
+directly influence the emitted opcodes. Files will always be compiled
+for the current declare configuration and opcache will cache them for
+that specific configuration. Opcache additionally stores which
+namespaces and namespace-scoped declares are used and will verify that
+the (relevant) namespace-scoped declares did not change when the file is
+loaded again. If the (relevant) namespace-scoped declares changed, the
+file will be invalidated and compiled again for the new configuration.
+
+Disadvantages
+-------------
+
+Reduced explicitness
+~~~~~~~~~~~~~~~~~~~~
+
+It could be argued that the introducing of namespace-scoped declares
+will make it less discoverable which declare values are active inside a
+given file, because they are no longer required to be specified at the
+top of the file.
+
+This if course correct, in that namespace-scoped declares are by
+necessity less explicit. However I believe that this is unlikely to
+cause confusion as long as libraries and projects stick to the simple
+best-practice of specifying all namespace-scoped declares inside a
+single file. Composer integration could further help mitigate this
+issue.
+
+Additionally it should be noted that the same problem (to an even worse
+degree) exists for the ini system, where ini options can be specified
+from many different sources (including multiple ini files, htaccess
+files and inline in PHP code). In practice this does not appear to be a
+major problem.
+
+Finally, while namespace-scoped declares may be less explicit, they fit
+better into the mental model we use as programmers. Libraries generally
+do not haphazardly switch between different strict_types files and
+instead use a consistent mode for the entire project. Namespace-scoped
+declares codify this and prevent mistakes like forgetting to add a
+declare directive when creating a new file.
+
+Proliferation of declare directives
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+While this RFC proposes specific functionality (namespace-scoped
+declares), the Motivation section outlined a likely future application
+of this mechanism, which is the introduction of additional declare
+directives that modify language behavior to be "stricter" in some sense,
+without breaking compatibility or interoperability.
+
+A danger I see in this approach is a proliferation of many declare
+directives controlling small bits of the language. In this RFC I used a
+``dynamic_object_properties`` directive as an example. Recently a
+discussion has come up for a ``strict_comparison`` directive, which
+makes operators such as ``<`` type-strict. On top of this we could add a
+``strict_conditionals`` directive to make conditions only accept
+booleans. Maybe ``strict_arg_counts`` to forbid passing too many
+arguments to a userland function. You get the picture. Increasingly
+minor issues would end up covered by their own declare directive, so
+that you'd have to specify dozens of different directives to enable
+everything.
+
+This problem might motivate one to instead introduce The One True Strict
+Mode, similar to ``"use strict"`` in JavaScript. A single ``strict=1``
+directive that enables a certain, carefully chosen set of "strict"
+functionality. If there were just a single directive you have to specify
+at the top of each file, we could probably also live without the
+functionality proposed by this RFC.
+
+Of course, such a general strict mode would also have its own set of
+issues. For once, it is something that we can only do once. Extending
+the functionality of the strict mode after it has been introduce would
+constitute a backwards-compatibility break. Additionally, a general
+strict mode requires a wide consensus on what functionality it should
+include. I know people who would welcome stricter language semantics in
+some areas but are also vehemently opposed to including
+``strict_types=1`` in the ``strict=1`` mode. If the strict mode can't
+include strict types, what \*can\* it include? I suspect that this
+approach will lead to the strict mode only including a small set of the
+most uncontroversial changes, decreasing its usefulness.
+
+Nonetheless, I think that proliferation of declare directives is a real
+danger and we need to ensure that new directives are not added
+frivolously.
+
+Discussion: Potential for abuse
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+One issue that came up repeatedly during the first discussion, is that
+people perceived a potential for abuse in this feature. The concern is
+that it would be possible to call ``namespace_declare()`` on a namespace
+one doesn't own, and consequently break code using that namespace.
+
+I honestly do not understand this concern. PHP is already oversaturated
+with ways in which you could break external library code if one wants to
+(such as hijacking autoloading). If breaking library code is your goal,
+you don't need this feature to achieve that. However, the question
+remains why anyone would want to this, as in the end you only sabotage
+yourself.
+
+Alternatives
+------------
+
+The main alternative to this proposal I see is the introduction of a
+"proper module system", which would allow per-module specification of
+declares, similar to package attributes in Java. However this is just a
+very vague concept in my mind and would certainly require major language
+changes.
+
+While not an alternative to this feature, the general strict mode
+mentioned in the previous section might obsolete the need for
+namespace-scoped declares.
+
+Backward Incompatible Changes
+-----------------------------
+
+The global function name ``namespace_declare`` will no longer be usable.
+
+Vote
+----
+
+As this is a language change, a 2/3 majority is required.
+
+Patches and Tests
+-----------------
+
+PR: https://github.com/php/php-src/pull/2972
+
+TODOs
+-----
+
+-  Resolve open question "Handling of unknown directives"
+-  Resolve open question "Introspection functionality"
+
+Additional Metadata
+-------------------
+
+:Ml Thread: http://externals.io/thread/326
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 7.3
+:Original Status: Under Discussion
+:Pr: https://github.com/php/php-src/pull/2972
+:Slug: namespace_scoped_declares
+:Wiki URL: https://wiki.php.net/rfc/namespace_scoped_declares

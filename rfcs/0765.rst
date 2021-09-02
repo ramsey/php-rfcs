@@ -1,0 +1,375 @@
+Pattern Matching
+================
+
+:PHP-RFC: 0765
+:Title: Pattern Matching
+:Author: Larry Garfield <larry@garfieldtech.com>, Ilija Tovilo <tovilo.ilija@gmail.com>
+:Status: Draft
+:Type: Standards Track
+:Created: 2020-11-11
+:Version: 0.9
+
+Introduction
+------------
+
+This RFC introduces the beginning of a pattern matching syntax for PHP.
+It does not include complete matching of all possible pattern types in
+order to keep the initial implementation simple and reduce bikeshedding,
+but does lay out the mechanism by which pattern matching operates. The
+Future Scope section includes recommendations for continued improvement
+in future RFCs.
+
+`Pattern Matching <https://en.wikipedia.org/wiki/Pattern_matching>`__ as
+a language concept contains two parts: Matching a variable against a
+potentially complex data structure pattern, and optionally extracting
+values out of that variable into their own variables. In a sense it
+serves a similar purpose for complex data structures as regular
+expressions do for strings. When properly applied, it can lead to very
+compact but still readable code, especially when combined with
+conditional structures such as ``match()``.
+
+Pattern matching is found in a number of languages, including Haskell,
+C#, ML, Rust, and Swift, among others. The syntax offered here is
+inspired primarily by C#, but is not intended as as direct port.
+
+This RFC is part of the `Enumerations
+Epic </rfc/enumerations_and_adts>`__. It is a stepping stone toward full
+Enumerations but stands on its own as useful functionality.
+
+Proposal
+--------
+
+This RFC introduces a new keyword and binary operator: ``is``. The
+``is`` keyword indicates that its right hand side is a pattern against
+which its left hand side should be applied. The ``is`` operator is
+technically a comparison operator, and always returns a boolean ``true``
+or ``false``.
+
+::
+
+   if($var is <pattern>) {
+
+   }
+
+The left-hand side of ``is`` will be evaluated first until it is reduced
+to a single value (which could be an arbitrarily complex object or
+array). That value will then be compared to the pattern, and ``true`` or
+``false`` returned.
+
+While patterns may resemble other language constructs, whatever follows
+``is`` is a pattern, not some other instruction.
+
+``is`` may be used in any context in which a boolean result is
+permissible. That includes variable assignment, ``if`` conditions,
+``while`` conditions, ``match()`` statements, etc.
+
+Supported patterns
+~~~~~~~~~~~~~~~~~~
+
+Type pattern
+^^^^^^^^^^^^
+
+A pattern may be a type signature, including both class and primitive
+types as well as compound types. In this case, ``is`` will match the
+left hand side value against the specified type. That is, the following
+are all legal:
+
+.. code:: php
+
+   $foo is string;    // Equivalent to is_string($foo)
+   $foo is int|float; // Equivalent to is_int($foo) || is_float($foo)
+   $foo is Request;   // Equivalent to $foo instanceof Request
+   $foo is User|int;  // Equivalent to $foo instanceof User || is_int($foo)
+   $foo is ?array;    // Equivalent to is_array($foo) || is_null($foo)
+
+A type match may be any syntax supported by a parameter type; in a
+sense, ``$foo is pattern`` is equivalent to "would $foo pass a type
+check if passed to a parameter with this type specification." As more
+complex type checks become allowed (such as intersection types, type
+aliases, etc.) they will become valid in a pattern as well.
+
+Type patterns respect the strict/weak typing mode of the file in which
+it is evaluated.
+
+Literal pattern
+^^^^^^^^^^^^^^^
+
+Any literal may be a pattern. This is a degenerate case and not
+generally useful, but is included for consistency when used with
+``match()`` (see below).
+
+.. code:: php
+
+   $foo is 5;         // Equivalent to $foo === 5
+   $foo is 'yay PHP'; // Equivalent to $foo === 'yay PHP'
+
+Global constants are NOT permitted in a pattern. They cannot be
+disambiguated from a class name, and are of minimal if any use in
+practice.
+
+Object property pattern
+^^^^^^^^^^^^^^^^^^^^^^^
+
+A pattern may also define an class and matches against scope-accessible
+properties of that object. Only a single class type may be used, but any
+number of properties may be matched. The properties must be accessible
+in the scope in which the pattern executes. That is, a pattern evaluated
+outside the class may only match against public properties; a pattern
+inside the class may match against public, private, or protected; a
+pattern in a child class may match against protected properties of its
+parent but not private; etc.
+
+.. code:: php
+
+
+   class Point {
+     public function __construct(public int $x, public int $y, public int $z) {}
+   }
+
+   $p = new Point(3, 4, 5);
+
+   $p is Point {x: 3};
+   // Equivalent to:
+   $p instanceof Point && $p->x === 3;
+
+   $p is Point {y: 37, x: 2,};
+   // Equivalent to:
+   $p instanceof Point && $p->y === 37 && $p->x === 2;
+
+Properties may be listed in any order. A trailing comma is permitted.
+
+``match()`` enhancement
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Pattern matching is frequently used in conjunction with branching
+structures, in particular with enumerations. To that end, this RFC also
+enhances the ``match()`` structure. Specifically, if the ``is`` keyword
+is used in ``match()`` then ``match()`` will perform a pattern match
+rather than an identity comparison.
+
+That is, this code:
+
+.. code:: php
+
+   $result = match ($somevar) is {
+       Foo => 'foo',
+       Bar => 'bar',
+       Baz|Beep => 'baz',
+   };
+
+is equivalent to the following:
+
+.. code:: php
+
+   $result = match (true) {
+       $somevar is Foo => 'foo',
+       $somevar is Bar => 'bar',
+       $somevar is Baz|Beep => 'baz',
+   };
+
+Variable binding
+~~~~~~~~~~~~~~~~
+
+One of the prime uses of pattern matching is to extract a value from a
+larger structure, such as an object (or Enumeration/ADT, in the future).
+This RFC supports such variable binding. A variable that should be bound
+is denoted by a % and a variable. If the input variable matches the rest
+of the pattern, then the corresponding value will be extracted and
+assigned to a variable of that name in the current scope. It will remain
+in scope as long as normal variable rules say it should.
+
+In the currently supported patterns, it is only relevant for object
+pattern matching.
+
+.. code:: php
+
+   class Point {
+     public function __construct(public int $x, public int $y, public int $z) {}
+   }
+
+   $p = new Point(3, 4, 5);
+
+   if ($p is Point {x: 3, y: %$y} ) {
+     print "x is 3 and y is $y.";
+   }
+   // Equivalent to:
+   if ($p instanceof Point && $p->x === 3) {
+     $y = $p->y;
+     print "x is 3 and y is $y.";
+   }
+
+   if ($p is Point {z: %$z, x: 3, y: %$y} ) {
+     print "x is 3 and y is $y and z is $z.";
+   }
+   // Equivalent to:
+   if ($p instanceof Point && $p->x === 3) {
+     $y = $p->y;
+     $z = $p->z;
+     print "x is 3 and y is $y and z is $z.";
+   }
+
+If the variable name to extract to is the same as the name of the
+property, then the property name may be omitted. That is, the last
+example can be abbreviated as:
+
+.. code:: php
+
+   if ($p is Point {%$z, x: 3, %$y} ) {
+     print "x is 3 and y is $y and z is $z.";
+   }
+
+Variable binding is especially useful in ``match()`` statements, where
+there is no simple logical equivalent that doesn't involve additional
+functions.
+
+.. code:: php
+
+   $result = match ($p) is {
+     Point{x: 3, y: 9, %$z} => "x is 3, y is 9, z is $z",
+     Point{%$z, %$x, y: 4} => "x is $x, y is 4, z is $z",
+     Point{x: 5, %$y} => "x is 5, y is $y, and z doesn't matter",
+     // This will always match.
+     Point{%$x, %$y, %$z} => "x is $x, y is $y, z is $z",
+   };
+
+Note that in this case, the variables ``$x``, ``$y``, and ``$z`` may or
+may not be defined after the ``match()`` statement executes depending on
+which pattern was matched.
+
+Backward Incompatible Changes
+-----------------------------
+
+A new keyword is added, ``is``. That conflicts with a global constant
+named ``is``.
+
+No other BC breaks are expected.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 8.next (aka 8.1).
+
+RFC Impact
+----------
+
+Open Issues
+-----------
+
+Do any other patterns need to be included in the initial RFC?
+
+The % flag for binding is still an open question. It would be necessary
+if we want to allow variables to be used in the pattern, but so far we
+haven't decided if variables belong in the pattern. Open question for
+discussion.
+
+Future Scope
+------------
+
+Numerous other, more robust (and complex) patterns can be supported in
+the future. This RFC keeps to the MVP implementation and most common
+cases. The following additional patterns are possible future additions
+for other RFCs. (Please don't bikeshed them here; they are shown as an
+example of where pattern matching can extend to in the future.)
+
+Array structure pattern
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: php
+
+   $arr is ['a' => 'A', 'b' => $b];
+
+   // Equivalent to:
+   is_array($arr) && $arr['a'] === 'A' && $arr['b'] === $b);
+
+Range pattern
+~~~~~~~~~~~~~
+
+.. code:: php
+
+   $foo is 0..=10;
+
+   // Equivalent to:
+   $foo >=0 && $anInt <= 10;
+
+   $foo is 0..<10;
+
+   // Equivalent to:
+   $foo >=0 && $anInt < 10;
+
+   $foo is >10;
+
+   // Equivalent to:
+   $foo > 10;
+
+Boolean pattern combination
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: php
+
+   $foo is 1 or 2;
+
+   // Equivalent to:
+   $foo === 1 || $foo === 2;
+
+   $foo is User or 1..=5;
+
+   // Equivalent to:
+   $foo instanceof User || ($foo >= 0 && $foo <= 5);
+
+Regex pattern
+~~~~~~~~~~~~~
+
+.. code:: php
+
+   $foo is /^http:\/\/%$domain/
+
+   // Equivalent to:
+   $matches = [];
+   preg_match('/^http:\/\/%$domain/', $foo, $matches);
+   $domain == $matches[0];
+
+Proposed Voting Choices
+-----------------------
+
+This is a simple up-or-down vote, requiring 2/3 Yes to pass.
+
+Patches and Tests
+-----------------
+
+Links to any external patches and tests go here.
+
+If there is no patch, make it clear who will create a patch, or whether
+a volunteer to help with implementation is needed.
+
+Make it clear if the patch is intended to be the final patch, or is just
+a prototype.
+
+For changes affecting the core language, you should also provide a patch
+for the language specification.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged into
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+References
+----------
+
+Links to external references, discussions or RFCs
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Larry Garfield (larry@garfieldtech.com), Ilija Tovilo (tovilo.ilija@gmail.com)
+:Slug: pattern-matching
+:Wiki URL: https://wiki.php.net/rfc/pattern-matching

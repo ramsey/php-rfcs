@@ -1,0 +1,289 @@
+Locale-independent Float To String Cast
+=======================================
+
+:PHP-RFC: 0695
+:Title: Locale-independent Float To String Cast
+:Author: George Peter Banyard <girgias@php.net>, Máté Kocsis <kocsismate@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2020-03-11
+:PHP-Version: 8.0
+:Version: 1.0
+
+Introduction
+------------
+
+The string representation of floats in PHP depends on the current locale
+as the decimal separator varies between locales. This can lead to subtle
+bugs in certain locales
+(https://en.wikipedia.org/wiki/Decimal_separator#Arabic_numerals) as the
+``float`` to ``string`` cast won't yield the original value.
+
+Proposal
+--------
+
+Make PHP's float to string conversion locale-independent, meaning it
+will always use the dot ``.`` decimal separator, in PHP 8.0. The change
+would also affect internal functions that currently convert ``float``\ s
+to ``string``\ s locale-dependently. Some examples:
+
+.. code:: php
+
+   setlocale(LC_ALL, "de_DE");
+   $f = 3.14;
+
+   (string) $f;        // 3,14 would become 3.14
+   strval($f);     // 3,14 would become 3.14
+   print_r($f);        // 3,14 would become 3.14
+   var_dump($f);       // float(3,14) would become float(3.14)
+   debug_zval_dump($f);    // float(3,14) would become float(3.14)
+   settype($f, "string");  // 3,14 would become 3.14
+   implode([$f]);      // 3,14 would become 3.14
+   xmlrpc_encode($f);  // 3,14 would become 3.14
+
+It should be noted that some functions and extensions already use a
+locale-independent string representation for floats. One such extension
+is PDO, which has dedicated code to ensure a consistent string
+representation for floats.
+`[1 <https://github.com/php/php-src/blob/master/ext/pdo/pdo_stmt.c#L232-L242>`__]
+A couple of other functions where the locale does not affect the string
+representation:
+
+.. code:: php
+
+   echo var_export($f, true);  // 3.14
+   echo serialize($f);     // d:3.14
+   echo json_encode($f);       // 3.14
+
+Moreover, the \*\ ``printf`` family of functions won't be modified as
+they already have the ``%F`` modifier to specify a non-locale aware
+conversion:
+
+.. code:: php
+
+   printf("%.2f\n", $f);       // 3,14
+   printf("%.2F\n", $f);       // 3.14
+
+Generally speaking, all functions that implicitly cast floats to
+strings, will change their behaviour so that the conversion will be done
+locale-independently.
+
+Rationale
+---------
+
+The issue has been raised multiple times over the years on the PHP
+Internals mailing list `[2 <https://externals.io/message/69458>`__]
+`[3 <https://externals.io/message/103638>`__] and as bug reports
+`[4 <https://bugs.php.net/bug.php?id=39305>`__]
+`[5 <https://bugs.php.net/bug.php?id=55160>`__]
+`[6 <https://bugs.php.net/bug.php?id=79317>`__], but no action has been
+taken yet, however there are many reasons why the problem has to be
+addressed:
+
+Having a consistent string representation for floats is very important.
+Such values may be stored in database columns with a string type, or
+sent to an external API using a protocol where everything is represented
+as strings, such as HTTP. Therefore, the external API might refuse these
+values as not well formed, or even worse, they might try to interpret
+them as numerical values by dropping everything past the decimal
+separator. Apart from this, the behaviour is not always easy to notice,
+and highly surprising, therefore does not follow the Principle of Least
+Astonishment.
+`[7 <https://en.wikipedia.org/wiki/Principle_of_least_astonishment>`__]
+
+To make things even worse, locale-sensitive casting causes some weird
+inconsistencies and inexplicable bugs. For example, performing the
+``float`` to ``string`` and ``string`` to ``float`` casts consecutively
+won't result in the original value:
+
+.. code:: php
+
+   setlocale(LC_ALL, "de_DE");
+
+   $f = 3.14;      // float(3,14)
+   $s = (string) $f;   // string(4) "3,14"
+   $f = (float) $s;    // float(3)
+
+Another problematic case is when a ``float`` is directly concatenated
+with a string, in which case a compile-time optimization (SCCP)
+performed by OPCache produces the string before any locale could be set:
+
+.. code:: php
+
+   setlocale(LC_ALL, "de_DE");
+
+   $s = 3.14 . "";     // string(4) "3.14"
+
+We propose to modify the current behaviour without going through any
+deprecation period as emitting a deprecation notice would come with a
+large performance penalty for a core feature like casting - something we
+consider unacceptable.
+
+Migration path
+--------------
+
+We acknowledge that users may need to know where these locale-dependent
+conversions are taking place. Therefore a temporary INI setting
+``debug_locale_sensitive_float_casts`` could be introduced which
+controls if a warning is emitted or not each time a ``float`` to
+``string`` conversion would have been locale-sensitive in PHP 7, but not
+any more. This would allow users to find related issues in a development
+or testing environment where performance isn't a concern.
+
+.. code:: php
+
+   ini_set("debug_locale_sensitive_float_casts", "1");
+
+   setlocale(LC_ALL, "de_DE");
+
+   $s = (string) 3.14; // A warning is generated
+   $s = implode([3.14]);   // A warning is generated
+
+   setlocale(LC_ALL, "en_US");
+
+   $s = (string) 3.14; // No warning is generated
+   $s = implode([3.14]);   // No warning is generated
+
+As this flag is meant to help the migration from PHP 7.x to PHP 8.0, it
+would be removed in PHP 8.1.
+
+Alternative Approaches
+----------------------
+
+Deprecating locale aware conversions in PHP 8 for removal in PHP 9
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The normal procedure for altering behaviour is to have a deprecation
+phase. However, we deem this approach is not suited for this change.
+Compared to the `PHP RFC: Deprecate left-associative ternary
+operator </rfc/ternary_associativity>`__ whose behavioural usage is
+minimal, float to string conversion are a very common operation thus
+emitting a deprecation warning on each of these conversions has the
+following consequences:
+
+-  Emitting a deprecation warning has a performance impact which on such
+   a common operation will be consequential.
+-  This implies ``setlocale()`` or a different locale than the C-locale
+   should not be used, and therefore should be explicitly deprecated.
+   See next subsections for more details.
+-  Harmless float to string conversions where the decimal separator is
+   not important would need to use the ``@`` operator or use a
+   workaround just to suppress this warning.
+-  Following from the previous point, an implication is that float to
+   string casts are problematic and are discouraged.
+
+Introducing a temporary INI setting just to suppress this warning will
+lead to the same issue as just changing the behaviour in PHP 8.0, as
+people could just ignore this warning altogether until PHP 9.
+
+Deprecating setlocale()
+~~~~~~~~~~~~~~~~~~~~~~~
+
+A different approach would be to deprecate ``setlocale()`` in PHP 8 as
+this would, as a by-product, fix this issue. However, last time this was
+discussed on the PHP internals list in 2016
+`[8 <https://externals.io/message/85638>`__] the main discussion was
+about it's non-thread safe behaviour as it affects global state, and the
+conclusion was that a thread safe variant should be introduced based on
+an HHVM patch.
+
+As there are other reasons to use a locale than just for the decimal
+separator, we deem this as not the correct approach to tackle this
+issue.
+
+Emitting an E_STRICT error
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An E_STRICT has the benefit of being easily toggled on and off. Which
+leads us to the same issue as changing the behaviour in PHP 8 directly
+as users might never see these errors.
+
+Moreover, an E_STRICT error does not imply a change of behaviour in a
+future major version making this type of error incompatible with the
+type of change proposed.
+
+It should be noted that E_STRICT usage has been removed during the PHP 7
+release cycle for a more appropriate classification, and we believe that
+we should not start reusing this error level until it's formal meaning
+has been clarified and defined.
+
+Backward Incompatible Changes
+-----------------------------
+
+Outputting floats as strings in locales which change the decimal
+separator will have a slightly different output. In our opinion, the
+backward compatibility break won't be very serious in practice, since
+the workarounds that have already been in place where locale-independent
+casting is needed will still work (but become unnecessary), while other
+use-cases (e.g. presentation) where locale-dependent casting is the
+expected behaviour, are likely less sensitive to the change. All in all,
+the benefits of having a consistent float to string conversion outweigh
+the impact which may be caused by this change.
+
+To retain the old behaviour users can use the ``number_format()``
+function, Intl's ``NumberFormatter`` class to format the number
+explicitly or use the \*\ ``printf`` family of functions if they wish to
+still rely on the locale.
+
+Future Scope
+------------
+
+None.
+
+Vote
+----
+
+The vote starts on 2020-04-23 and ends on 2020-05-07. The primary vote
+requires 2/3, while the secondary one requires a simple majority to be
+accepted.
+
+Question: Make float to string casts always locale-independent?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+--------------
+
+Question: Should the debug_locale_sensitive_float_casts INI setting be added?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Changelog
+---------
+
+| 0.1: Initial version
+| 0.2: Add a debug INI setting to emit a warning when a locale-aware
+  float to string conversion would have occurred in PHP 7
+
+References
+----------
+
+| [1]
+  https://github.com/php/php-src/blob/master/ext/pdo/pdo_stmt.c#L232-L242
+| [2] https://externals.io/message/69458
+| [3] https://externals.io/message/103638
+| [4] https://bugs.php.net/bug.php?id=39305
+| [5] https://bugs.php.net/bug.php?id=55160
+| [6] https://bugs.php.net/bug.php?id=79317
+| [7] https://en.wikipedia.org/wiki/Principle_of_least_astonishment
+| [8] https://externals.io/message/85638
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5224
+:Original Authors: George Peter Banyard girgias@php.net, Máté Kocsis kocsismate@php.net
+:Original PHP Version: PHP 8.0
+:Slug: locale_independent_float_to_string
+:Wiki URL: https://wiki.php.net/rfc/locale_independent_float_to_string

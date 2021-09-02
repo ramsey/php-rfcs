@@ -1,0 +1,292 @@
+Native TLS For Globals In ZTS
+=============================
+
+:PHP-RFC: 0038
+:Title: Native TLS For Globals In ZTS
+:Author: Arnaud Le Blanc <arnaud.lb@gmail.com>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2008-08-24
+:Version: 2.0
+
+Currently ZTS builds are slower than non-ZTS builds. This RFC is about
+avoiding some of the major overhead of ZTS builds by using native thread
+local storage.
+
+Introduction
+------------
+
+Currently the way globals work forces to pass a thread-local-storage
+pointer across function calls, which involves some overhead. Also, not
+all functions get the pointer as argument and need to use
+TSRMLS_FETCH(), which is slow. For instance emalloc() involves a
+TSRMLS_FETCH(). An other overhead is accessing globals, using multiple
+pointers in different locations.
+
+Initial patch
+-------------
+
+The first proposed patch makes each global a native TLS variable so that
+accessing them is as simple as global_name->member. This removes the
+requirement of passing the tls pointer across function calls, so that
+the two major overheads of ZTS builds are avoided.
+
+Results for bench.php:
+
+======================================== ===== ======
+non-PIC                                               
+======================================== ===== ======
+non-ZTS                                  3.7s         
+ZTS unpatched                            5.2s         
+ZTS patched                              4.0s         
+ZTS patched and static globals           3.8s         
+PIC                                      IA-32 X86_64 
+non-ZTS                                  4.7s  3.7s   
+ZTS                                      6.4s  4.7s   
+ZTS patched, static globals, dynamic TLS 4.8s  3.8s   
+======================================== ===== ======
+
+So the patch made ZTS builds mostly as fast as non-ZTS builds.
+
+Unfortunately the TLS model used in these tests was the static model,
+which is restrictive, and in particular does not allow to use it in
+shared libraries which will be loaded dynamically. (c.f `TLS
+internals <tls#tls_internals>`__ bellow).
+
+For the PHP module to be able to be loaded at runtime in Apache or an
+other server with this patch enabled, it has to be built with the
+dynamic TLS model (on gcc, -ftls-model=global-dynamic), which also
+requires to build position independent code. While the last makes a big
+difference on IA-32, this is the default on x86_64 and the results on
+bench.php on an unpatched PHP are the same as IA-32/PIC builds.
+
+Native TLS can be enabled with --with-tsrm-__thread-tls or
+--with-tsrm-full__thread-tls. The last declares globals statically
+instead of making them pointers.
+
+Second patch
+------------
+
+The second patch is based on some research I made on various TLS
+implementations.
+
+In fact mostly all implementations I tested (Linux, FreeBSD, Solaris)
+allocate a surplus of TLS memory especially to allow to dlopen()
+libraries using static TLS. This memory being allocated in addition to
+any TLS memory needed by libraries loaded before program startup, it is
+guaranteed that this memory is always available and is reserved for this
+case.
+
+Based on that, and as long as it can be tested at configure time, it
+seems reasonable to expect that we will always have space for at least a
+single TLS pointer. Unfortunately Windows was the only implementation I
+tested that do not allowed that at all and the following will not work
+on it.
+
+So the second patch uses only one TLS variable, tsrm_ls_cache, which is
+used to cache tsrm_ls, so that it is not required to pass it across
+function calls.
+
+Here are the results after having applied only this change:
+
+=============================== ====
+Results                         
+=============================== ====
+ZTS                             5.2s
+ZTS-patched, native TLS enabled 4.6s
+=============================== ====
+
+After that I made some more changes so that accessing a global requires
+less instructions. Actually this mimics the way static TLS works
+internally, each global is accessed using the following code:
+
+.. code:: c
+
+   __thread void *tsrm_ls_cache;
+   (tsrm_ls_cache + global_offset)->member
+
+This needs less instructions compared to the current way of accessing
+globals:
+
+.. code:: c
+
+   void ***tsrm_ls;
+   (*tsrm_ls)[global_id - 1]->element
+
+This change is also enabled when not using native TLS, but tsrm_ls needs
+to be a void*\* instead of a void*:
+
+.. code:: c
+
+   void **tsrm_ls;
+   (*tsrm_ls + global_offset)->member
+
+Results:
+
+================================ ============= ==========
+Results                          IA-32/non-PIC X86_64/PIC 
+================================ ============= ==========
+non-ZTS                          3.7s          3.7s       
+ZTS                              5.2s          4.7s       
+ZTS-patched, native TLS disabled 5.0s          4.4s       
+ZTS-patched, native TLS enabled  4.2s          4.0s       
+================================ ============= ==========
+
+Native TLS can be enabled with --with-tsrm-native-tls.
+
+So we have two patches:
+
+-  The first one will work only with position independent code, and is
+   the faster on targets where this is the default or when comparing
+   only to PIC builds. At least Debian builds PHP --with-pic, and I
+   guess this is the case on other distributions too.
+-  The second one does not requires to build PIC code, can not fully
+   take profit of TLS, but is the faster at least on IA-32.
+
+Windows
+-------
+
+Dynamically loaded DLLs can use TLS starting with Windows Vista and
+Server 2008. But there is a restriction: TLS variables can't be
+exported, which means that they can't be accessed outside of the DLL.
+CLI and ISAPI SAPIs works with TLS enabled, but they must be built like
+this is done on other platforms, with all code embeded in the
+executable/library (instead of a separate php5ts.dll linked by SAPIs).
+The same apply for extension, they must be built statically in PHP.
+
+TLS internals
+-------------
+
+On most systems there are two major models of TLS: A static model, the
+faster, and a dynamic model (and some sub-models). The following briefly
+explains how it works and what I found in various implementations.
+
+Static model
+~~~~~~~~~~~~
+
+Each block is allocated at a fixed (loader-defined) offset from an
+address specific to each thread. As this address can be accessed very
+quickly, this allows very quick access to each TLS block. For instance,
+on Linux/IA-32, this thread-specific-address is the Thread Control
+Block, whose address is stored in offset 0 of the %gs segment register.
+
+The way the static model works requires that the memory needed by each
+TLS variable to be allocated before program startup. This means that the
+static model can not be used in shared libraries loaded at runtime.
+
+Implementation
+^^^^^^^^^^^^^^
+
+Linux, Solaris, FreeBSD, Windows.
+
+Linux, Solaris and FreeBSD implementations allocate a fixed amount of
+surplus memory especially to allow dynamically loaded libraries to use
+the static model. Linux allocates 1664 bytes, FreeBSD 64 and Solaris
+512. This amount of memory is always allocated in addition of the memory
+allocated for TLS before program startup, and is always available (this
+memory can be used only by dlopen()ed modules using static TLS). These
+behaviors are undocumented (except by comments in Linux and FreeBSD
+loaders/linkers code). This has been tested with a test program and
+verified by reading the relevant code on Linux and FreeBSD.
+
+On GCC this model can be selected by using -ftls-model=initial-exec. On
+SunStudio: -xthreadvar=no%dynamic. For both, this model is the default
+one when building non-PIC code.
+
+Dynamic model
+~~~~~~~~~~~~~
+
+Each TLS block is allocated dynamically when a shared library is loaded.
+Some data is then stored in the global offset table so that the program
+knows where to find each TLS block. This model allows to load libraries
+at runtime but is slower: It involves a function call (internally) and
+requires to build position independent code. However the implementation
+used on Linux seems to be very efficient and that only the fact that the
+code has been built as position independent makes a real difference when
+comparing to the static model.
+
+.. _implementation-1:
+
+Implementation
+^^^^^^^^^^^^^^
+
+Linux, Solaris, FreeBSD, Windows Vista/Server 2008.
+
+Windows Vista and Server 2008 can use TLS in DLLs loaded using
+LoadLibrary(), but TLS symbols cannot be exported, which means that only
+the DLL where a TLS variable is declared can refer to this variable.
+
+On GCC this model can be selected by using -ftls-model=general-dynamic.
+On SunStudio: -xthreadvar=dynamic. For both, this is the default when
+building PIC code.
+
+Links
+~~~~~
+
+-  GCC: http://gcc.gnu.org/onlinedocs/gcc-3.3.1/gcc/Thread-Local.html
+-  Sun: http://docs.sun.com/app/docs/doc/819-5267/bkbil?a=view
+-  ELF implementation: http://people.redhat.com/drepper/tls.pdf
+-  Windows: http://msdn.microsoft.com/en-us/library/2s9wt68x(VS.80).aspx
+
+Code changes
+------------
+
+Declaring globals
+~~~~~~~~~~~~~~~~~
+
+The current way of declaring a global is a follows:
+
+.. code:: c
+
+   extern ts_rsrc_id my_global_id; /* declare global in headers */
+   ts_rsrc_id my_global_id; /* declare global */
+   ts_allocate_id(&my_global_id, sizeof(type), ctor, dtor); /* allocate global at process startup */
+
+The new way is:
+
+.. code:: c
+
+   TSRMG_DH(type, my_global_id); /* declare global in headers */
+   TSRMG_D(type, my_global_id); /* declare global */
+   TSRMG_ALLOCATE(my_global_id, sizeof(type), ctor, dtor); /* allocate global at process startup */
+
+All this is already done by the patch for code in the Zend Engine and in
+/php-src.
+
+Extensions
+~~~~~~~~~~
+
+There is no changes needed for extensions as long as they use the
+extension-specific macros for declaring globals (as this is done by
+default for extensions created with ext_skel).
+
+SAPIs
+~~~~~
+
+Declaring tsrm_ls explicitly must be avoided.
+
+TSRM does some sort of JIT initialization of thread data, relying on the
+fact that TSRMLS_FETCH() calls ts_resource_ex, which will do the
+initialization if needed. However with the patch TSRMLS_FETCH() does
+nothing at all, and ts_resource_ex must be called explicitly at least
+one time in each thread. The TSRMLS_INIT() macro has been created for
+this purpose, and must be called at least one time in each thread.
+
+#ifdef ZTS
+~~~~~~~~~~
+
+As the patch avoids passing tsrm_ls across function calls, #ifdef ZTS is
+not anymore relevant to check that. The new PASS_TSRMLS macro is now
+defined when tsrm_ls needs to be passed across function calls. For
+instance this is needed by ZEND_ATTRIBUTE_FORMAT and some other places.
+
+Additional Metadata
+-------------------
+
+:Current Patch: http://gist.github.com/659724
+:First Published At: http://marc.info/?l=php-internals&m=121893972814818&w=2
+:Initial Patch: http://gist.github.com/659731
+:Original Authors: Arnaud Le Blanc arnaud.lb@gmail.com
+:Original Status: Under Discussion
+:Slug: tls
+:Wiki URL: https://wiki.php.net/rfc/tls

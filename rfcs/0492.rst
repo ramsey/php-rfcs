@@ -1,0 +1,180 @@
+Additional Context In Pcntl_signal Handler
+==========================================
+
+:PHP-RFC: 0492
+:Title: Additional Context In Pcntl_signal Handler
+:Author: David Walker <dave@mudsite.com>, Bishop Bettini <bishop@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2016-06-14
+:PHP-Version: 7.1
+:Version: 1.0
+
+Introduction
+------------
+
+Modern UNIX kernels include additional, contextual information when
+delivering a signal, however the callable handler for
+`pcntl_signal <http://php.net/manual/en/function.pcntl-signal.php>`__
+does not receive this information. Developers coordinating multiple
+processes through signals must arrange to gather and send this same
+information using alternative channels, which is time-consuming,
+error-prone, and unnecessary.
+
+Proposal
+--------
+
+Currently the signal handler receives only one formal argument, the
+`number of the
+signal <http://man7.org/linux/man-pages/man7/signal.7.html>`__ sent.
+This proposal would add a second formal argument, an array of signal
+info as provided by the underlying system's kernel.
+
+One possible use case is identifying the process ID of the signal
+*sender*, `described at the C level in this StackOverflow
+Q&A <http://serverfault.com/a/94995/204816>`__ and implemented in PHP as
+seen here:
+
+.. code:: php
+
+   <?php
+   pcntl_signal(SIGUSR1, function ($signo, $siginfo) {
+       printf('USR1 from %s', $siginfo['pid'] ?? 'unknown');
+   });
+   posix_kill(posix_getpid(), SIGUSR1);
+   pcntl_signal_dispatch();
+
+Other uses cases include identifying the cause of the signal (such as
+asynchronous I/O or timer expiration), identifying the sending user, and
+finding the consumed user & system time of an exited process.
+
+The ``$siginfo`` array may contain `one or more of the following
+keys <https://www.mkssoftware.com/docs/man5/siginfo_t.5.asp>`__,
+depending upon the system support for signal information and the nature
+of the sent signal:
+
+-  **``signo``**, the signal number being sent (duplicates the first
+   argument to the handler).
+-  **``code``**, the signal code, which depends upon the signal sent and
+   provides context-specific reason *why* the signal was sent.
+-  **``value``**, the value for the code, if appropriate for the code.
+-  **'' errno''**, the error number associated with the signal, if
+   appropriate for the signal *and* non-zero.
+-  **``pid``**, the process ID of the signal sender, if appropriate for
+   the signal.
+-  **``uid``**, the real user ID of the signal sender, if appropriate
+   for the signal.
+-  **``addr``**, the address at which the faulting signal occurred: only
+   faulting signals like ``SIGFPE`` include this.
+-  **``status``**, the status code of an exiting process: only exiting
+   signals like ``SIGCHLD`` include this.
+-  **``band``**, the asynchronous I/O band, if appropriate for the
+   signal.
+-  **``mtime``**, the time of last data modification, if appropriate for
+   the signal.
+
+The naming of ``$siginfo`` and its keys comes from the
+``pcntl_sigwaitinfo`` implementation. (So for example, "``signo``" in
+PHP comes from "``si_signo``" in the C structure, the leading "si_"
+having been removed by the PHP engine.) Name normalization does not
+apply to the values of the ``code`` field, as those represent
+system-specific values that follow no normative naming convention.
+
+Some older systems not conforming to
+`POSIX.1-2001 <https://standards.ieee.org/findstds/standard/1003.1-2001.html>`__
+(where this structure was formally codified) may not support passing the
+additional context. In such case, PHP will pass ``null`` as the second
+argument to the handler.
+
+Backward Incompatible Changes
+-----------------------------
+
+There are no backward compatibility breaks.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 7.x, currently 7.1.
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+The ``pcntl`` extension will be updated.
+
+To Opcache
+~~~~~~~~~~
+
+None.
+
+Discussion
+----------
+
+Instead of updating ``pcntl_signal``, it was suggested to add a method
+``pcntl_sigaction``, which would "keep maximum compatibility and
+eliminate unnecessary additional overhead". This suggestion was later
+withdrawn as perhaps adding more complication than the patch itself,
+though a later `PR <https://github.com/php/php-src/pull/1985>`__
+addressed parts of the suggestion.
+`Reference. <https://www.mail-archive.com/internals@lists.php.net/msg86504.html>`__
+
+Performance was raised as a concern. Having run tests through callgrind
+there is an additional 0.0001% cost for the feature. The profiled code
+defined an empty function, set the handler, and triggered the signal.
+Passing the additional information resulted in 2000 extra instructions,
+out of a total 13 million. This seems negligible compared to the cost of
+acquiring the same information through other means (eg message queues,
+temporary files, etc.).
+
+Open Issues
+-----------
+
+None.
+
+Proposed Voting Choices
+-----------------------
+
+Vote shall be Yes or No to deliver kernel-provided additional context to
+the ``pcntl_signal`` handler.
+
+Requires a 50%+1 majority.
+
+Question: Provide additional context in pcntl signal handler?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Voting shall close one week after opening on Thursday, July 14, 2016 at
+23:59 UTC.
+
+Patches and Tests
+-----------------
+
+-  `Implementation with
+   tests. <https://github.com/php/php-src/pull/1993>`__
+
+References
+----------
+
+-  `Initial ping to
+   php.internals <https://marc.info/?l=php-internals&m=146584196929126&w=2>`__
+-  `Discussion <https://marc.info/?l=php-internals&m=146670242109688&w=2>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: David Walker dave@mudsite.com, Bishop Bettini bishop@php.net
+:Original Status: Accepted
+:Slug: additional-context-in-pcntl-signal-handler
+:Wiki URL: https://wiki.php.net/rfc/additional-context-in-pcntl-signal-handler

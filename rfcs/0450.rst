@@ -1,0 +1,241 @@
+Callable Constructors
+=====================
+
+:PHP-RFC: 0450
+:Title: Callable Constructors
+:Author: Dan Ackroyd <Danack@php.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2016-02-25
+:Version: 1.0
+
+Introduction
+------------
+
+Currently in PHP, the constructor methods of classes can only be
+directly invoked through the language construct of 'new', they cannot be
+called as a callable variable.
+
+This RFC seeks to remove this limitation, to allow more convenient
+programming paradigms.
+
+Current situation
+-----------------
+
+We have a class:
+
+.. code:: php
+
+   class Foo {
+       public function __construct() { }
+   }
+
+Attempting to call the constructor via a callable will error:
+
+.. code:: php
+
+   $fn = 'Foo::__construct';
+   $foo = $fn();
+
+   // Non-static method Foo::__construct() cannot be called statically
+
+Proposal
+--------
+
+The proposal of this RFC is to make callables that are of the form
+
+.. code:: php
+
+   ['Foo', '__construct']
+
+or
+
+.. code:: php
+
+   "Foo::__construct"
+
+be a valid callable, that will act in the same way that
+
+.. code:: php
+
+   $fn = "Foo::__construct";
+   $object = $fn();
+
+would be equivalent to the current functionality of:
+
+.. code:: php
+
+   $object = new foo();
+
+Why
+---
+
+In general, it would be useful for this limitation to be removed, as it
+would allow constructors to be called without needing to use the special
+'new' language construct.
+
+The author of this RFC has encountered two situations where not being
+able to use a contructor as a callable has been annoying.
+
+Can't be used as strings in class properties
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It would be useful to be able to define a constructor as a callable for
+a property in a factory object.
+
+.. code:: php
+
+   class FooFactory {
+       // Use the default constructor of Foo as the default 'factory' callable
+       private $factoryCallable = 'Foo::__construct';
+
+       public function setFactoryCallable(callable $fn) {
+           $this->factoryCallable = $fn;
+       }
+
+       public function create() {
+           $fn = $this->factoryCallable;
+           return $fn();
+       }
+   }
+
+It is not possible to define the property \`$factoryCallable\` as a
+closure, as only constant expressions can be used to define the initial
+value of a property.
+
+It would be possible to rewrite the code to work around this
+limitation....but we could also just remove the limitation in the
+language.
+
+Can't be used in string based configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It is a common pattern to use 'configuration' to define which
+implementations should be used by an application.
+
+Whether this configuration is stored in a plain text file, a cache like
+APCu or the environment variables, the information is fundamentally
+stored as strings. It is easiest for the developer if the information
+can be used directly, without needing to be parsed or otherwise
+interpreted before being used.
+
+.. code:: php
+
+   class Foo {
+       public function __construct() { }
+   }
+
+   $fooFactory = getenv('FooFactory');
+   // $fooFactory is 'Foo::__construct';
+   $foo = $fooFactory();
+
+If it was possible to use ``Foo::__construct`` as a callable, that code
+would work.
+
+Currently because the constructor is not callable, extra code is needed.
+
+.. code:: php
+
+
+   $fooFactory = getenv('FooFactory');
+
+   // $fooFactory is "Foo::__construct";
+   $constructorPosition = stripos($fooFactory, '::__construct');
+
+   if ($constructorPosition !== false) {
+       $objectName = substr($fooFactory, 0, $constructorPosition);
+
+       $callable = function () use ($objectName) {
+           return new $objectName;
+       };
+   }
+
+   $foo = $callable();
+
+And this is not as good a solution, as the parameters which are needed
+by 'Foo' objects are lost.
+
+It would be much better if the constructor could be called directly as a
+callable.
+
+Backward Incompatible Changes
+-----------------------------
+
+There is a single BC break known. When the \__construct method is called
+statically from within the scope of the containing class, and the call
+is made with call_user_function, rather than being called with $fn()
+syntax, then the function is erroneously called through the 'instance'
+scope, rather than through static scope.
+
+.. code:: php
+
+
+   class A {
+       public function __construct() {
+           return "Why would you even do this.";
+       }
+       
+       public function foo() {
+           $fn = [self::class, '__construct'];
+           // Calling directly as a callable like:
+           // $result = $fn();
+           // Correctly fails with the error message:
+           // Error: Non-static method A::__construct() cannot be called statically
+           
+           // However calling with 'call user function', is erroneously allowed.
+           $result = call_user_func($fn);
+           var_dump($result);
+       }
+   }
+
+   $a = new A;
+   $a->foo();
+
+
+   // Current output is: 
+   // string(27) "Why would you even do this."
+
+   // Output after RFC would be:
+   // object(A)#1 (0) {
+   // }
+
+The code would need to be changed to call the \__construct method
+through the instance to continue to have the code behave as before. i.e.
+
+.. code:: php
+
+   $fn = [$this, '__construct'];
+   //This calls the constructor as an instance method, without creating a new object, in exactly the same
+   // way as `$foo->__contruct();` calls the method without creating an object.
+
+Proposed PHP Version
+--------------------
+
+7.1
+
+Proposed Voting Choices
+-----------------------
+
+Yes or no, with a 2/3 majority needed to pass.
+
+Patches and Tests
+-----------------
+
+Patch will be available before voting commences.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+Additional Metadata
+-------------------
+
+:Original Authors: Dan Ackroyd, Danack@php.net
+:Original Status: Under Discussion
+:Slug: callableconstructors
+:Wiki URL: https://wiki.php.net/rfc/callableconstructors

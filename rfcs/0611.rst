@@ -1,0 +1,284 @@
+Covariant Returns And Contravariant Parameters
+==============================================
+
+:PHP-RFC: 0611
+:Title: Covariant Returns And Contravariant Parameters
+:Author: Levi Morrison <levim@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2018-09-20
+:PHP-Version: 7.4
+:Version: 0.3
+
+Introduction
+------------
+
+Currently PHP has mostly invariant parameter types and mostly invariant
+return types. This means that if a method of a super-type has a
+parameter or return type constraint of ``T`` then the corresponding
+parameter or return type constraint of method of the sub-type must also
+be ``T``. However, PHP does special case a few things such as removing a
+type constraint on a parameter or adding one where one didn't exist for
+a return type; here is an example of both cases:
+
+.. code:: php
+
+   interface A {
+     function m(B $z);
+   }
+   interface B extends A {
+     // permitted
+     function m($z): A;
+   }
+
+However, PHP does not permit choosing less specific parameter types or
+more specific return types even though these substitutions are
+type-safe:
+
+.. code:: php
+
+   interface X {
+     function m(Y $z): X;
+   }
+   interface Y extends X {
+     // not permitted but type-safe
+     function m(X $z): Y;
+   }
+
+This RFC aims to support these additional cases.
+
+Proposal
+--------
+
+When determining the compatibility of an method with its parent's the
+engine should now permit less specific parameter types and more specific
+return types as long as the new types still accept the types specified
+by the parents. In other words: a parameter type can be substituted for
+one of its super-types and a return type can substitute a sub-type.
+
+This RFC will also fix `Bug #76451: Aliases during inheritance type
+checks affected by opcache <https://bugs.php.net/bug.php?id=76451>`__.
+
+This RFC adds variance support to the ``object`` type. Variance on the
+object type was previously rejected when the ``object`` type was added,
+presumably on the grounds it should be added when variance is made more
+general, which is the purpose of this RFC.
+
+This RFC does not add variance support to the ``callable`` type. Anyone
+desiring improved ``callable`` type support should create a different
+RFC.
+
+This RFC also expands support for compile-time resolving of the "parent"
+pseudo-type. The existing engine does this in some places, but not
+extensively. This work is included in the RFC because it made the code
+for the RFC a bit easier, but if necessary this work can be split out.
+
+Examples
+~~~~~~~~
+
+Covariant return type with ``object``:
+
+.. code:: php
+
+   interface Factory {
+       function make(): object;
+   }
+
+   class UserFactory implements Factory {
+       function make(): User;
+   }
+
+Contravariant parameter type with ``iterable``:
+
+.. code:: php
+
+   interface Concatable {
+       function concat(Iterator $input); 
+   }
+
+   class Collection implements Concatable {
+       // accepts all iterables, not just Iterator
+       function concat(iterable $input) {/* . . . */}
+   }
+
+Refining an iterator returned by ``IteratorAggregate::getIterator``:
+
+.. code:: php
+
+   interface QueueIterator extends Iterator { /*...*/ }
+   interface Queue extends IteratorAggregate {
+       /*...*/
+       function getIterator(): QueueIterator;
+   }
+   final class ArrayQueueIterator implements QueueIterator { /*...*/ }
+   final class ArrayQueue implements Queue {
+       /*...*/
+       function getIterator(): ArrayQueueIterator {}
+   }
+
+Auto-loading and Order of Definition Issues
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Consider the following code, all of which is defined in the same file:
+
+.. code:: php
+
+   interface Collection extends Countable, IteratorAggregate {
+     function getIterator(): Iterator;
+   }
+
+   class Vector implements Collection {
+     function getIterator(): VectorIterator {
+       /* . . . */
+     }
+   }
+
+   class VectorIterator implements Iterator {
+     /* . . . */
+   }
+
+All three types will need runtime variance checks because they extend or
+implement another type. To prevent issues with autoloading and
+order-of-definition issues, the implementation delays the variance
+verification until after the last consecutive type declaration. Here is
+what the relevant opcodes looked like from a preliminary implementation
+(output from ``phpdbg``):
+
+::
+
+   L1-13 {main}() /tmp/rfc_autoload.php - 0x7f6b49a89000 + 7 ops
+    L2    #0     DECLARE_CLASS           "collection"
+    L6    #1     DECLARE_CLASS           "vector"
+    L10   #2     DECLARE_CLASS           "vectoriterator"
+    L12   #3     VERIFY_VARIANCE         "collection"
+    L12   #4     VERIFY_VARIANCE         "vector"
+    L12   #5     VERIFY_VARIANCE         "vectoriterator"
+    L13   #6     RETURN<-1>              1
+
+Note that all 3 types are declared, then all 3 are verified in the same
+order they were written in.
+
+At the moment the implementation will tolerate consecutive class and
+function definitions.
+
+Pass By Reference / Return By Reference
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Whether a parameter is passed by-reference or not does not impact the
+variance. This is because the type checks are moment-in-time checks, not
+lifetime checks. For example, this is valid:
+
+.. code:: php
+
+   function array_baz(array &$in) {
+     $in = 1;
+   }
+   $array = [];
+   array_baz($array); // valid
+   var_export($array); // 1
+
+Therefore, by-reference parameters are still contravariant, and
+by-reference returns are still covariant. It is possible that in the
+future we may get ``out`` or ``inout`` parameter types, which behave
+more like references to typed properties. These would probably have
+different variance requirements.
+
+Backward Incompatible Changes
+-----------------------------
+
+There are no intended incompatibilities. All incompatibilities should be
+reported and treated as bugs.
+
+This patch does emit a new ``E_DEPRECATED`` warning when the "parent"
+pseudo-type is used in places that do not have a parent type. In the
+next major version (currently 8.0) this should elevated to an
+``E_COMPILE_ERROR``. Emitting new warnings are generally not considered
+backwards incompatible changes even though they technically can break
+things with custom error handlers. Again, this work with compile-time
+resolving of "parent" can be split out from the RFC if necessary.
+
+RFC Impact To Existing Extensions
+---------------------------------
+
+TODO: New functions and macros should be introduced to make working with
+variant types in C easier.
+
+Proposed PHP Versions
+---------------------
+
+This RFC targets PHP 7.NEXT because it does not have any known
+compatibility issues.
+
+Voting
+------
+
+This RFC requires two-thirds of voters to select "yes" for this RFC to
+pass.
+
+Voting will be open until at least January 2nd, 2019 (2019-01-02).
+
+Question: Accept Covariant Returns and Contravariant Parameters?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+A preliminary implementation can be found at
+https://github.com/php/php-src/compare/master...morrisonlevi:variance2.
+This is a preliminary patch with some obvious duplication of work, so
+performance impact has not been measured. However, there will be some
+impact as this adds new opcodes to verify variance at runtime, which
+obviously has some cost.
+
+Tests are included in the implementation, but more tests are always
+welcome. Notably, some tests should be added to deal with multiple
+parents with differing but compatible signatures.
+
+Future Scope
+------------
+
+A future RFC may consider other super-types for existing types:
+
+-  ``mixed``: includes all types that exist or will ever exist including
+   null; this matches our usage of mixed in our documentation.
+-  ``scalar``: includes bool, int, float, and string; this matches our
+   ``is_scalar`` function.
+-  ``numeric``: this probably needs even more discussion because
+   ``is_numeric`` does not deal exclusively with types: it also checks
+   string values.
+
+Improving ``callable`` type support is also out of scope for this RFC
+and could be a good candidate for its own RFC.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged into
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+References
+----------
+
+Announcement to Internals mailinglist:
+
+-  `marc.info <https://marc.info/?l=php-internals&m=154326760510934&w=2>`__
+-  `externals.io <https://externals.io/message/103511>`__
+-  `news.php.net <http://news.php.net/php.internals/103511>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: Levi Morrison levim@php.net
+:Original Status: Implemented (in PHP 7.4)
+:Slug: covariant-returns-and-contravariant-parameters
+:Wiki URL: https://wiki.php.net/rfc/covariant-returns-and-contravariant-parameters

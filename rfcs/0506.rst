@@ -1,0 +1,410 @@
+Object Typehint
+===============
+
+:PHP-RFC: 0506
+:Title: Object Typehint
+:Author: Michał Brzuchalski <michal.brzuchalski@gmail.com>, Dan Ackroyd <danack@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2016-08-12
+:PHP-Version: 7.2
+:Version: 1.1
+
+Introduction
+------------
+
+PHP 7 introduced scalar types for parameters and also for declaring
+return types for functions.
+
+However it is not currently possible to declare that a function either
+needs to be passed an object as a parameter, or to declare that a
+function must return an object.
+
+Proposal
+--------
+
+This RFC proposes that ``object`` should be used as a parameter type and
+as a return type. Any object would pass the type check.
+
+Passing a value that is not an object to a parameter that is declared as
+type ``object`` would fail the type check, and a TypeError would be
+thrown.
+
+Similarly, if a function is declared as returning an ``object`` but does
+not return an object, again a TypeError would be thrown.
+
+As it would be used internally, object would become a reserved
+classname, unavailable for use as a class name in userland code.
+
+For class methods that use object as either a parameter or return type,
+the inheritance checks would use contravariance for parameter types, and
+covariance for return types.
+
+Examples
+--------
+
+Parameter type
+~~~~~~~~~~~~~~
+
+.. code:: php
+
+   function acceptsObject(object $obj) {
+       ...
+   }
+
+   // This code can be statically analyzed to be correct
+   acceptsObject(json_decode('{}'));
+
+   // This code can be statically analyzed to be correct
+   acceptsObject(new \MyObject());
+
+   // This can be statically analysed to contain an error.
+   // and would throw an TypeError at runtime.
+   acceptsObject("Ceci n'est pas une object.");
+
+Return type
+~~~~~~~~~~~
+
+Functions and methods can be declared with an object return type, to
+enforce that the function must return an object.
+
+.. code:: php
+
+   // This function can be statically analysed to conform to the
+   // return type
+   function correctFunction() : object {
+       $obj = json_decode('{}');
+
+       return $obj;
+   }
+
+   // This function can be statically analysed to contain an error
+   // and will also fail at runtime.
+   function errorFunction() : object {
+       return [];
+   }
+
+Benefits
+--------
+
+Make code easier to understand
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Although most code deals with specific types, there are several types of
+library where it is common to handle arbitrary object types.
+
+Hydrators + data extractor
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Hydrators allow objects to be filled with data from an array. Extractors
+do the opposite, they take an object and return an array of data.
+
+.. code:: php
+
+   interface Hydration {
+     // Hydrate an object by populating data
+     public function hydrate(array $data, object $object) : object;
+   }
+
+   interface Extraction {
+     // Extract values from an object
+     public function extract(object $object) : array;
+   }
+
+The extraction step can take an arbitrary object as the sole parameter.
+The hydration step can take an arbitrary object as the second parameter,
+and will return an arbitrary object. Having the type for the parameters
+and the return type be set as ``object`` will make the expected types be
+clearer to anyone using these functions, as well as detect incorrect
+types if there is an error in the code.
+
+Service containers and DIC libraries
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For both service containers and dependency injection libraries, it is
+common to want to put services and other objects into the container.
+
+.. code:: php
+
+   interface ServiceContainer {
+     // Set service definition
+     public function set(string $id, object $service);
+
+     // Retrieve service object from container
+     public function get(string $id) : object;
+   }
+
+Additionally, ORM libraries such as Doctrine have functions that will
+either consume or produce arbitrary objects.
+
+Catching return errors
+~~~~~~~~~~~~~~~~~~~~~~
+
+Having an object return type would allow some errors to be detected more
+quickly. The following function is meant to return an object. With the
+object return typ set for the function, failing to return an object
+would cause a TypeError to be thrown in the location where the bug is.
+
+.. code:: php
+
+   function unserialize($data) : object {
+
+       $type = $data['type'];
+       
+       switch ($type) {
+           case 'foo': { return new Foo(); }
+           case 'bar': { return new Bar(); }
+           case 'zot': { new zot(); }  // Ooops, this is an error
+       }
+   }
+
+Without the object return type, an incorrect value of null is returned
+from the function. This error can only be found by debugging at runtime.
+
+Enforcing signature in inheritance
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Currently, as PHP does not allow 'object' to be used as a return type,
+it is not possible to enforce the return type in a child class. In this
+example the method is supposed to return an object, but a programmer has
+changed what the function does in the child class.
+
+.. code:: php
+
+   class WidgetFactory {
+       function create() {
+           return new Widget();
+       }
+   }
+
+   class CustomWidgetFactory extends WidgetFactory {
+       function create() {
+           $object = new Widget();
+
+           return true; //This is an error that cannot be statically analyzed.
+       }
+   }
+
+This type of error can only be detected when running the code.
+
+If we had object as a type, even if a programmer misunderstood what the
+method was supposed to do, and accidentally tried to create a child
+class that had a different signature, the code would not compile, and
+the error would be caught before the code is run:
+
+.. code:: php
+
+   class WidgetFactory {
+       function create() : object {
+           return new Widget();
+       }
+   }
+
+   class CustomWidgetFactory extends WidgetFactory {
+       // This class would not compile, as the signature of the metod in
+       // the child class is not compatible with the method signature in 
+       // the parent class.
+       function create() : bool {
+          ...
+       }
+   }
+
+If the programmer wrote the correct signature for the method in the
+child class, but returned the wrong value, this error would also be
+caught:
+
+.. code:: php
+
+   class WidgetFactory {
+       function create() : object {
+           return new Widget();
+       }
+   }
+
+   class CustomWidgetFactory extends WidgetFactory {
+       function create() : object {
+           $object = new Widget();
+
+           // returning something that is not an object throws a TypeError exception.
+           return true;
+       }
+   }
+
+This would also be an error detectable by a static analyzer.
+
+Variance
+~~~~~~~~
+
+Argument typehint contravariance
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Classes that extend another class, or implement an interface may broaden
+a parameter type from a specific class, to more generic 'object'
+typehint.
+
+.. code:: php
+
+   class Foo {
+   }
+
+   class Bar {
+       public function foo(Foo $object) : object {
+           return $object;
+       }
+   }
+
+   class Baz extends Bar {
+       public function foo(object $object) : object {
+           return $object;    
+       }
+   }
+
+This is normally known as
+`contravariant <https://en.wikipedia.org/wiki/Covariance_and_contravariance_(computer_science)#Contravariant_method_argument_type>`__.
+
+Classes extending/implementing may not narrow method arguments types
+from 'object' to more specific type.
+
+.. code:: php
+
+   class Foo {
+   }
+
+   class Bar {
+       public function foo(object $object) : object {
+           return $object;
+       }
+   }
+
+   class Baz extends Bar {
+       public function foo(Foo $object) : object {
+           return $object;    
+       }
+   }
+
+In this situation the standard PHP warning for incompatible signatures
+will be raised.
+
+.. code:: php
+
+   Declaration of Baz::foo(Foo $object): object should be compatible with Bar::foo(object $object): object
+
+Return type covariance
+^^^^^^^^^^^^^^^^^^^^^^
+
+Classes extending/implementing may narrow methods return types from
+'object' to specified class name. This behavior is the similar as that
+proposed for 'iterable' and is normally called
+`covariant <https://en.wikipedia.org/wiki/Covariance_and_contravariance_(computer_science)#Covariant_method_return_type>`__.
+
+.. code:: php
+
+   class Foo {
+   }
+
+   class Bar {
+       public function foo(object $object) : object {
+           return $object;
+       }
+   }
+
+   class Baz extends Bar {
+       public function foo(object $object) : Foo {
+           return $object;    
+       }
+   }
+
+In above example 'object' return type was narrowed to 'Foo' type in
+extending class.
+
+Reflection
+----------
+
+There are two changes in reflection:
+
+-  ReflectionType::isBuiltin returns true for parameters and return
+   types declared as 'object'.
+
+-  ReflectionType::__toString returns 'object' for parameters and return
+   types declared as 'object'.
+
+Backward Incompatible Changes
+-----------------------------
+
+Although 'object' is already a soft reserved word, this RFC adds object
+as fully reserved classname.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.2.
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+None.
+
+Unaffected PHP Functionality
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This doesn't affect the behaviour of cast operators.
+
+Proposed Voting Choices
+-----------------------
+
+Voting will run from 2017-05-17, for two weeks, until 2017-05-31. As
+this is a language change, a 2/3 majority is required. The vote is a
+straight Yes/No vote for accepting the RFC and merging the patch. The
+additional vote is also a straight Yes/No vote for accepting variance
+behaviour on the object type.
+
+Question: Accepting the object typehint RFC for PHP 7.2?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Question: Object type should implement variance?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+-  PR\ `#2080 <https://github.com/php/php-src/pull/2080>`__
+-  Online Runtime Execution at `3v4l.org <https://3v4l.org/>`__ on tab
+   "RFC Branches"
+
+Discussions
+-----------
+
+-  `[RFC][DISCUSSION] Object type hint, now with added
+   variance <https://externals.io/thread/514>`__
+-  `[RFC][DISCUSSION] Object type
+   hint <https://externals.io/thread/412>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: Michał Brzuchalski michal.brzuchalski@gmail.com, Dan Ackroyd danack@php.net
+:Original Status: Implemented (in PHP 7.2)
+:Slug: object-typehint
+:Wiki URL: https://wiki.php.net/rfc/object-typehint

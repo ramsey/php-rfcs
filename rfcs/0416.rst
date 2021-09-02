@@ -1,0 +1,226 @@
+Ext/curl HTTP/2 Server Push Support
+===================================
+
+:PHP-RFC: 0416
+:Title: Ext/curl HTTP/2 Server Push Support
+:Author: Davey Shafik <davey@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2015-10-01
+:PHP-Version: 7.1
+:Version: 0.1
+
+Introduction
+------------
+
+With the introduction of HTTP/2 support in libcurl, PHP 7.0 now has
+`some support for HTTP/2
+requests <https://github.com/php/php-src/pull/1497>`__, but it does not
+yet support one of the (potentially) most powerful features: Server
+push.
+
+Server push allows the server to push additional resources relevant to
+the requested resource directly to the client proactively.
+
+Server push is available in libcurl since 7.44.0, but broken till the
+as-yet-unreleased 7.46.0 (See:
+`this <https://github.com/bagder/curl/issues/529>`__ and
+`this <https://github.com/bagder/curl/issues/530>`__ github issues for
+details).
+
+Libcurl Implementation
+----------------------
+
+libcurl supports registering a callback for multi handlers to handle
+server pushes via the ``CURLMOPT_PUSHFUNCTION`` and
+``CURLMOPT_PUSHDATA`` options for ``curl_multi_setopt()``.
+
+The callback will be passed the parent curl handle (the request the
+client made), a new curl handle for the pushed request, the number of
+headers, the ``PUSH_PROMISE`` headers, and a user-defined pointer (set
+using ``CURLMOPT_PUSHDATA``).
+
+The callback then returns either ``CURL_PUSH_OK`` if can handle the
+push, or ``CURL_PUSH_DENY`` to reject it.
+
+The new curl handle is then added to the multi handler and is then
+included in the handling of multiple requests.
+
+Suggested Implementation
+------------------------
+
+.. code:: php
+
+   <?php
+   $transfers = 1;
+
+   $callback = function($parent_ch, $pushed_ch, array $headers) use (&$transfers) {
+       $transfers++; // increment to keep track of the number of concurrent requests
+       return CURL_PUSH_OK;
+   };
+
+   $mh = curl_multi_init();
+
+   curl_multi_setopt($mh, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
+   curl_multi_setopt($mh, CURLMOPT_PUSHFUNCTION, $callback);
+
+   $ch = curl_init();
+   curl_setopt($ch, CURLOPT_URL, "https://localhost:8080/index.html");
+   curl_setopt($ch, CURLOPT_HTTP_VERSION, 3);
+   curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+
+   // Debugging/Local stuff
+   //curl_setopt($ch, CURLOPT_VERBOSE, 1); // will output curl debugging information
+   curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0); // self-signed cert
+   curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0); // self-signed cert
+
+   curl_multi_add_handle($mh, $ch);
+
+   $active = null;
+   do {
+       $status = curl_multi_exec($mh, $active);
+
+       do {
+           $info = curl_multi_info_read($mh);
+           if (false !== $info && $info['msg'] == CURLMSG_DONE) {
+               $handle = $info['handle'];
+               if ($handle !== null) {
+                   $transfers--; // decrement remaining requests
+           $out = curl_multi_getcontent($info['handle']); // Response body
+                   curl_multi_remove_handle($mh, $handle);
+                   curl_close($handle);
+               }
+           }
+       } while ($info);
+   } while ($transfers);
+
+   curl_multi_close($mh);
+
+Implementation
+--------------
+
+Within `the PHP implementation of
+curl_multi_setopt() <https://github.com/php/php-src/blob/master/ext/curl/multi.c#L409>`__
+(referenced as ``php\curl_multi_setopt()``) there is a switch that
+handles different options. When ``CURLMOPT_PUSHFUNCTION`` is set a C
+callback is registered that will call the callable set in
+``php\curl_multi_setopt()`` (and passed to the C callback using curls
+``CURLMOPT_PUSHDATA``).
+
+We do not support ``CURLMOPT_PUSHDATA``. Instead, the user can use
+closures and ``use`` with references to replicate this behavior.
+
+libcurl exposes the push headers with two functions functions
+``curl_pushheader_bynum()`` and ``curl_pushheader_byname()``. We can use
+``curl_pushheader_bynum()`` to create an array of header lines. These
+would then be parsed in user land (as with regular request headers).
+
+Backward Incompatible Changes
+-----------------------------
+
+No breaks
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.1
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+No impact
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+No impact outside of BC compatible changes to ext/curl
+
+To Opcache
+~~~~~~~~~~
+
+No impact on Opcache
+
+New Constants
+~~~~~~~~~~~~~
+
+-  ``CURLMOPT_PUSHFUNCTION``
+-  ``CURL_PUSH_OK``
+-  ``CURL_PUSH_DENY``
+
+These are directly exposed from libcurl, and documentation can be taken
+from there.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+None
+
+Open Issues
+-----------
+
+Possibly a memory leak in libcurl
+
+Future Scope
+------------
+
+This change should track libcurl.
+
+Vote
+----
+
+Simple Yes/No option. Requires 50%+1 to be accepted.
+
+This vote will close on 13:00 UTC on Wed 2015-12-23
+
+Question: Add HTTP/2 Server Push Support to ext/curl
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+#. Working patch can be found
+   `here <https://github.com/dshafik/php-src/compare/curl-http2-push>`__
+#. Docker container for easy testing can be found
+   `here <http://github.com/dshafik/php-http2-push-example>`__
+
+.. _implementation-1:
+
+Implementation
+--------------
+
+Server push support has been implemented in PHP 7.1 with `commit
+ad15e1cc <http://git.php.net/?p=php-src.git;a=commit;h=ad15e1ccdabc678103e356535919e829ba9a0281>`__,
+and is documented in the `curl_multi_setopt man
+page <http://php.net/manual/function.curl-multi-setopt.php>`__.
+
+The language specification is not affected by this RFC.
+
+References
+----------
+
+#. `libcurl HTTP/2
+   implementation <https://github.com/bagder/curl/wiki/HTTP-2-Server-Push>`__
+#. `libcurl creators blog post about the
+   implementation <http://daniel.haxx.se/blog/2015/06/03/server-push-to-curl/>`__
+
+Rejected Features
+-----------------
+
+None
+
+Additional Metadata
+-------------------
+
+:Original Authors: Davey Shafik, davey@php.net
+:Original Status: Implemented (PHP 7.1)
+:Slug: curl_http2_push
+:Wiki URL: https://wiki.php.net/rfc/curl_http2_push

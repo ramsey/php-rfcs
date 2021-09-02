@@ -1,0 +1,301 @@
+New Custom Object Serialization Mechanism
+=========================================
+
+:PHP-RFC: 0624
+:Title: New Custom Object Serialization Mechanism
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2019-01-24
+:PHP-Version: 7.4
+:Version: 1.0
+
+Introduction
+------------
+
+PHP currently provides two mechanisms for custom serialization of
+objects: The ``__sleep()``/``__wakeup()`` magic methods, as well as the
+``Serializable`` interface. Unfortunately, both approaches have issues
+that will be discussed in the following. This RFC proposes to add a new
+custom serialization mechanism that avoids these problems.
+
+Problems with existing custom object serialization mechanism
+------------------------------------------------------------
+
+Serializable
+~~~~~~~~~~~~
+
+Classes implementing the ``Serializable`` interface are encoded using
+the ``C`` format, which is basically
+``C:ClassNameLen:"ClassName":PayloadLen:{Payload}``, where the
+``Payload`` is an arbitrary string. This is the string returned by
+``Serializable::serialize()`` and almost always produced by a nested
+call to ``serialize()``:
+
+.. code:: php
+
+   public function serialize() {
+       return serialize([$this->prop1, $this->prop2]);
+   }
+
+In order to represent object identity (the same object being used
+multiple times in a serialized value graph) and PHP references, the
+serialization format uses backreferences to previous values in the
+serialized string. For example in ``[$obj, $obj]`` the first element
+will be serialized as usual, while the second element will be a
+backreference of the form ``r:1``.
+
+In order to preserve object identity (and references) between values
+that are part of Serializable objects, the nested ``serialize()`` calls
+inside ``Serializable::serialize()`` share serialization state with the
+outer ``serialize()`` call.
+
+Unfortunately, this means that strings produced by nested
+``serialize()`` calls are only valid if they are also unserialized in
+the same context. One notable and common case where this is not the case
+is when one attempts to compose serialization through the use of
+``parent::serialize()``:
+
+.. code:: php
+
+   class A implements Serializable {
+       private $prop;
+       public function serialize() {
+           return serialize($this->prop);
+       }
+       public function unserialize($payload) {
+           $this->prop = unserialize($payload);
+       }
+   }
+   class B extends A {
+       private $prop;
+       public function serialize() {
+           return serialize([$this->prop, parent::serialize()])
+       }
+       public function unserialize($payload) {
+           [$prop, $parent] = unserialize($payload);
+           parent::unserialize($parent);
+           $this->prop = $prop;
+       }
+   }
+
+Code of this form does not work reliably, because the nested
+``serialize()`` and ``unserialize()`` calls are performed in different
+orders:
+
+During serialization first the ``serialize()`` call in
+``A::serialize()`` is performed, and then the one in ``B::serialize()``.
+Conversely, during unserialization first the ``unserialize()`` call in
+``B::unserialize()`` is performed, and then the one in
+``A::unserialize()``. Because of this discrepancy in call order,
+backreferences created during serialization will no longer be correct
+during unserialization.
+
+For this reason, code using ``parent::serialize()`` is generally broken,
+even though issues might not manifest immediately (for example because
+no backreferences happen to be used).
+
+The second main issue that ``Serializable`` suffers from is that calls
+to ``Serializable::unserialize()`` have to be performed *immediately*
+when such an object is encountered during unserialization, otherwise
+unserialization would not occur in the correct context.
+
+Executing arbitrary code in the middle of unserialization is dangerous
+and has led to numerous ``unserialize()`` vulnerabilities in the past.
+For this reason ``__wakeup()`` calls are now delayed until the end of
+unserialization. First, the whole value graph is constructed, and only
+afterwards all queued ``__wakeup()`` methods are called.
+
+This leaves us in a situation where ``Serializable::unserialize()`` is
+called immediately, while ``__wakeup()`` is delayed. As such, the former
+method sees objects before they have been fully unserialized. For
+example, this makes using ``DateTime`` objects within
+``Serializable::unserialize()`` unsafe, as they will not be fully
+initialized yet.
+
+The third issue with ``Serializable`` is more technical in nature.
+Because ``Serializable::serialize()`` can return data in an arbitrary
+format, there is no general way to analyze serialized strings. PHP's
+serialization mechanism could be made much more robust (and likely
+faster), by first performing a pass that detects all used
+backreferences. However, ``Serializable`` prevents this, as the payloads
+it produces are completely opaque (even though often they will follow
+the normal serialization format).
+
+\__sleep() and \__wakeup()
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The older ``__sleep()``/``__wakeup()`` mechanism is not *fundamentally*
+broken in the way that ``Serializable`` is, it mostly suffers from
+usability issues due to the narrow usage it enforces.
+
+In particular, ``__sleep()`` can only be used to exclude properties from
+serialization, but is cumbersome to use if the serialized representation
+should be significantly different from the in-memory form (this would
+require adding additional dummy properties used only for serialization).
+Additionally ``__sleep()`` does not compose, as the return value of
+``parent::__sleep()`` is generally not directly usable due to visibility
+restrictions.
+
+Similarly, ``__wakeup()`` is also bound tightly to the idea that
+serialization state should be encoded in properties. If the serialized
+representation differs significantly from the in-memory representation,
+this also necessitates the use of dummy properties. Unlike
+``__sleep()``, the ``__wakeup()`` method does compose, in that it is
+generally both safe and meaningful to call ``parent::__wakeup()``.
+
+Proposal
+--------
+
+The proposed serialization mechanism tries to combine the generality of
+``Serializable`` with the implementation approach of
+``__sleep()``/``__wakeup()``.
+
+Two new magic methods are added:
+
+.. code:: php
+
+   // Returns array containing all the necessary state of the object.
+   public function __serialize(): array;
+
+   // Restores the object state from the given data array.
+   public function __unserialize(array $data): void;
+
+The usage is very similar to the ``Serializable`` interface. From a
+practical perspective the main difference is that instead of calling
+``serialize()`` inside ``Serializable::serialize()``, you directly
+return the data that should be serialized as an array.
+
+The following example illustrates how
+``__serialize()``/``__unserialize()`` are used, and how they compose
+under inheritance:
+
+.. code:: php
+
+   class A {
+       private $prop_a;
+       public function __serialize(): array {
+           return ["prop_a" => $this->prop_a];
+       }
+       public function __unserialize(array $data) {
+           $this->prop_a = $data["prop_a"];
+       }
+   }
+   class B extends A {
+       private $prop_b;
+       public function __serialize(): array {
+           return [
+               "prop_b" => $this->prop_b,
+               "parent_data" => parent::__serialize(),
+           ];
+       }
+       public function __unserialize(array $data) {
+           parent::__unserialize($data["parent_data"]);
+           $this->prop_b = $data["prop_b"];
+       }
+   }
+
+This resolves the issues with ``Serializable`` by leaving the actual
+serialization and unserialization to the implementation of the
+serializer. This means that we don't have to share the serialization
+state anymore, and thus avoid issues related to backreference ordering.
+It also allows us to delay ``__unserialize()`` calls to the end of
+unserialization.
+
+Encoding and interoperability
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``__serialize()`` and ``__unserialize()`` methods reuse the ``O``
+serialization format used by ordinary object serialization, as well as
+``__sleep()``/``__wakeup()``. This means that the data array returned by
+``__serialize()`` will be stored as-if it represented object properties.
+
+In principle, this makes existing strings serialized in ``O`` format
+fully interoperable with the new serialization mechanism, the data is
+just provided in a different way (for ``__wakeup()`` in properties, for
+``__unserialize()`` as an explicit array). If a class has both
+``__sleep()`` and ``__serialize()``, then the latter will be preferred.
+If a class has both ``__wakeup()`` and ``__unserialize()`` then the
+latter will be preferred.
+
+If a class both implements ``Serializable`` and
+``__serialize()``/``__unserialize()``, then serialization will prefer
+the new mechanism, while unserialization can make use of either,
+depending on whether the ``C`` (Serializable) or ``O`` (__unserialize)
+format is used. As such, old serialized strings encoded in ``C`` format
+can still be decoded, while new strings will be produced in ``O``
+format.
+
+Magic methods vs interface
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC proposes the addition of new magic methods, but using an
+interface instead would also be possible, though it will require some
+naming gymnastics to avoid ``RealSerializable``.
+
+This proposal uses magic methods for two reasons. First, they
+interoperate well. ``__serialize()`` and ``__unserialize()`` can be
+added to a class without compatibility concerns: They will be used on
+PHP 7.4 or newer and ignored on PHP 7.3 or older. Using an interface
+instead requires either raising the version requirement to PHP 7.4, or
+dealing with the definition of a stub interface in a compatible manner.
+
+Second, they are semantically more correct. In PHP all objects are
+serializable by default. The ``Serializable`` interface is a misnomer in
+that sense, because an object that does not implement ``Serializable``
+can be (and usually is) still serializable. On the contrary,
+``Serializable`` might be implemented specifically for the purpose of
+forbidding serialization, by throwing an exception. The magic methods
+``__serialize()`` and ``__unserialize()`` are just hooks to customize
+the serialization functionality, they do not determine whether an object
+can be serialized, and code should generally have no reason to check for
+their presence or absence.
+
+Creating objects in \__unserialize()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Some people have expressed a desire to make ``__unserialize()`` a static
+method which creates and returns the unserialized object (rather than
+first constructing the object and then calling ``__unserialize()`` to
+initialize it).
+
+This would allow an even greater degree of control over the
+serialization mechanism, for example it would allow to return an already
+existing object from ``__unserialize()``.
+
+However, allowing this would once again require immediately calling
+``__unserialize()`` functions (interleaved with unserialization) to make
+the object available for backreferences, which would reintroduce some of
+the problems that ``Serializable`` suffers from. As such, this will not
+be supported.
+
+Backward Incompatible Changes
+-----------------------------
+
+This proposal has no BC breaks. However, it should be noted that it is
+written with a subsequent deprecation and removal of the severely broken
+``Serializable`` interface in mind. (There is no particular pressing
+need to phase out ``__sleep()`` and ``__wakeup()``.)
+
+Vote
+----
+
+Voting started 2019-03-01 and ends 2019-03-15.
+
+Question: Include proposed serialization mechanism in PHP 7.4?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/3761
+:Original Authors: Nikita Popov nikic@php.net
+:Original Status: Implemented (in PHP 7.4)
+:Slug: custom_object_serialization
+:Wiki URL: https://wiki.php.net/rfc/custom_object_serialization

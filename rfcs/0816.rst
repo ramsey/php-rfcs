@@ -1,0 +1,328 @@
+First-class Callable Syntax
+===========================
+
+:PHP-RFC: 0816
+:Title: First-class Callable Syntax
+:Author: Nikita Popov <nikic@php.net>, Joe Watkins <krakjoe@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2021-05-20
+:PHP-Version: 8.1
+:Version: 1.0
+
+Introduction
+------------
+
+This RFC proposes the introduction of a first-class callable syntax,
+which supersedes existing encodings using strings and arrays. The
+advantage is that the new syntax is accessible to static analysis, and
+respects the scope at the point where the callable is created.
+
+.. code:: php
+
+   $fn = Closure::fromCallable('strlen');
+   $fn = strlen(...);
+
+   $fn = Closure::fromCallable([$this, 'method']);
+   $fn = $this->method(...)
+
+   $fn = Closure::fromCallable([Foo::class, 'method']);
+   $fn = Foo::method(...);
+
+In this example, each pair of expressions is equivalent. The
+``strlen(...)`` syntax creates a ``Closure`` that refers to the
+``strlen()`` function, and so on.
+
+The ``...`` can be seen akin to the argument unpacking syntax
+``...$args``, with the actual arguments not yet filled in:
+
+.. code:: php
+
+   $fn = Foo::method(...);
+   // Think of it as:
+   $fn = fn(...$args) => Foo::method(...$args);
+
+The syntax is forward-compatible with `partial functions
+application </rfc/partial_function_application>`__.
+
+Proposal
+--------
+
+The syntax ``CallableExpr(...)`` is used to create a ``Closure`` object
+that refers to ``CallableExpr`` with the same semantics as
+``Closure::fromCallable()``.
+
+``CallableExpr`` can be any expression that can be directly called in
+the PHP grammar. The following provides a non-exhaustive list of
+possible syntaxes:
+
+.. code:: php
+
+   strlen(...);
+   $closure(...);
+   $invokableObject(...);
+   $obj->method(...);
+   $obj->$methodStr(...);
+   ($obj->property)(...);
+   Foo::method(...);
+   $classStr::$methodStr(...);
+   self::{$complex . $expression}(...);
+   'strlen'(...);
+   [$obj, 'method'](...);
+   [Foo::class, 'method'](...);
+
+Scope
+~~~~~
+
+And advantage of the first-class callable syntax is that it uses the
+scope at the point where the callable is acquired. Consider the
+following example:
+
+.. code:: php
+
+   class Test {
+       public function getPrivateMethod() {
+           return [$this, 'privateMethod']; // does not work
+           return Closure::fromCallable([$this, 'privateMethod']); // works, but ugly
+           return $this->privateMethod(...); // works
+       }
+       
+       private function privateMethod() {
+           echo __METHOD__, "\n";
+       }
+   }
+
+   $test = new Test;
+   $privateMethod = $test->getPrivateMethod();
+   $privateMethod();
+
+If a classical array callable like ``[$this, 'privateMethod']`` is used,
+then visibility will be checked at the point where the call is
+performed. If the new ``$this->privateMethod(...)`` syntax is used, then
+the visibility is checked at the point where the callable is created.
+``Closure::fromCallable()`` already allows you to use those semantics
+now, with more syntactical boilerplate.
+
+Object creation
+~~~~~~~~~~~~~~~
+
+The ``new Foo()`` syntax is not considered a call, and as such also not
+supported by the ``new Foo(...)`` syntax. It should be noted that there
+is also no way to express object creation with traditional callable
+syntax, and it is thus also not supported by
+``Closure::fromCallable()``.
+
+The general expectation is that ``new Foo(...)`` would be creating a new
+instance of ``Foo`` on each call, rather than creating a single instance
+of ``Foo`` and then repeatedly calling the constructor. To support this,
+it would effectively be necessary to generate a trampoline function of
+the form
+
+.. code:: php
+
+   fn(...$args) => new Foo(...$args)
+
+and acquire a callable to that trampoline instead. While certainly
+possible, this takes a step backwards from the straightforward semantics
+of the ``foo(...)`` syntax for ordinary calls.
+
+Nullsafe calls
+~~~~~~~~~~~~~~
+
+The first-class callable syntax cannot be combined with the nullsafe
+operator. Both of the following result in a compile-time error:
+
+.. code:: php
+
+   $obj?->method(...);
+   $obj?->prop->method(...);
+
+The ``$obj?->method(...)`` syntax has two potential interpretations:
+
+.. code:: php
+
+   $fn = $obj?->method(...);
+   // could be
+   $fn = $obj !== null ? $obj->method(...) : null;
+   // or
+   $fn = fn(...$args) => $obj?->method(...$args);
+
+If this syntax were supported, it would likely follow the first
+interpretation, as the second interpretation does not correspond to a
+proper callable. However, this behavior is not particularly useful (as
+the return type is ``?Closure``) and likely surprising.
+
+Strict types
+~~~~~~~~~~~~
+
+The first-class callable syntax interacts with ``declare(strict_types)``
+the same way as ``Closure::fromCallable()``: The ``strict_types`` mode
+at the point where the callable is acquired does not matter. Only the
+``strict_types`` mode at the time the call is made is considered.
+
+Rationale
+---------
+
+Partial Function Application
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC can be seen as an alternative to the `partial functions
+application (PFA) </rfc/partial_function_application>`__ RFC. I believe
+that PFA use-cases can be divided into roughly three categories:
+
+The first is the use of PFA to acquire a callable, without partially
+applying any arguments. I believe that the vast majority of PFA uses
+would be for this purposes. This RFC proposes to provide special support
+for this use-case **only**.
+
+The second is use in conjunction with the `Pipe Operator
+(V2) </rfc/pipe-operator-v2>`__ proposal. Taking an example from the
+RFC:
+
+.. code:: php
+
+   $result = $var
+    |> step_one(?)
+    |> step_two(?, 'config')
+    |> $obj->stepThree('param', ?);
+
+However, PFA is only required for this particular form of the pipe
+operator. The `Pipe Operator (V1) </rfc/pipe-operator>`__ proposal
+instead used a syntax that is specific to the pipe operator:
+
+.. code:: php
+
+   $result = $var
+    |> step_one($$)
+    |> step_two($$, 'config')
+    |> $obj->stepThree('param', $$);
+
+If this definition of the pipe operator is adopted, then PFA is no
+longer needed for use with the pipe operator. Both approaches to the
+pipe operator have their advantages. The ``$$`` based variant allows
+using more than plain function calls in each pipeline step (e.g. you
+could have ``$$->getName()`` as a step, something not possible with
+PFA), and is also trivially free. A PFA-based optimization would entail
+significant overhead relative to simple function calls, unless special
+optimization for the pipe operator usage is introduced (which may not be
+possible, depending on precise semantics).
+
+Finally, while these two are the primary use-cases of PFA, there will
+also be the occasional usage in other contexts. For example:
+
+.. code:: php
+
+   $array = array_filter($array, str_contains(?, 'foo'));
+
+Under this proposal, no dedicated syntax would be available for this
+use-case, and one would have to use an arrow function:
+
+.. code:: php
+
+   $array = array_filter($array, fn($s) => str_contains($s, 'foo'));
+
+I think that the existing syntax is already sufficiently concise that
+there is no strong need to introduce an even shorter one.
+
+As such, I believe that adding a first-class callable syntax, and using
+the original approach to the pipe operator, would give us most of the
+benefit of PFA at a much lower complexity cost. The PFA proposal has
+gone through many iterations, because nailing down the precise semantics
+turned out to be surprisingly hard. The final proposal is simple on a
+conceptual level, but very involved when it comes to detailed behavior.
+
+Syntax choice
+~~~~~~~~~~~~~
+
+The proposed syntax is forward-compatible with the latest iteration of
+the PFA proposal. As such, it would be possible to expand it into a full
+PFA feature in the future.
+
+The call-based syntax also has the advantage that it is unambiguous: It
+represents exactly the callable that would be invoked by a direct call
+of the same syntax. This cannot be said of some other syntax choices
+that have been discussed in the past, for example:
+
+.. code:: php
+
+   // Proposed syntax is unambiguous and follows existing semantics:
+   $this->foo(...);   // Refers to a method
+   ($this->foo)(...); // Refers to a callable stored in a property
+
+   // What does this mean?
+   $this->foo::function;
+
+This can be resolved by limiting the ``::function`` syntax to
+referencing proper symbols only, and not supporting its use to convert
+legacy callables to closures using ``$callable::function``. Those would
+require an explicit ``Closure::fromCallable($callable)`` call.
+
+A problem with the ``strlen::function`` syntax in particular is that it
+has a false analogy to ``Foo::class``. The latter will just return a
+string, while the whole point of a first-class callable syntax is that
+it returns a ``Closure`` object, **not** a simple string or array.
+
+Here are some commonly suggested syntax choices for first-class
+callables that are definitely **not** possible due to ambiguities:
+
+.. code:: php
+
+   // Using "&" sigil:
+   &foo->bar;
+   // Is ambiguous with by-reference assignment:
+
+   $x = &$foo->bar;
+   // is currently interpreted as
+   $x =& $foo->bar;
+
+   // Using no sigil:
+   strlen; // Is ambiguous with constant strlen
+   Foo::bar; // Is ambiguous with class constant Foo::bar
+   $foo->bar; // Is ambiguous with object property $foo->bar
+
+Here are syntax choices that are (mostly) unambiguous if only usage with
+proper symbols is allowed:
+
+.. code:: php
+
+   // As mentioned above, people might expect this to return "strlen", not a Closure object:
+   strlen::function;
+   // Same as previous, and we'd rather avoid the legacy "callable" terminology.
+   strlen::callable;
+
+   // Unlike the "&" sigil, this is not ambiguous. It is also not particularly meaningful though.
+   *strlen;
+   // This also applies to various other sigils that are not yet used in unary position, but are equally meaningless:
+   ^strlen;
+
+I am generally open to using a different syntax, as I don't think
+forward-compatibility with a potential PFA feature is critical, but none
+of the choices are particularly great.
+
+Backward Incompatible Changes
+-----------------------------
+
+None.
+
+Vote
+----
+
+Voting started on 2021-07-02 and closes on 2021-07-16.
+
+Question: Introduce first-class callable syntax as proposed?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/7019
+:Original Authors: Nikita Popov nikic@php.net, Joe Watkins krakjoe@php.net
+:Original PHP Version: PHP 8.1
+:Slug: first_class_callable_syntax
+:Wiki URL: https://wiki.php.net/rfc/first_class_callable_syntax

@@ -1,0 +1,200 @@
+Password Hashing Registry
+=========================
+
+:PHP-RFC: 0615
+:Title: Password Hashing Registry
+:Author: Sara Golemon <pollita@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2018-10-15
+:PHP-Version: 7.4
+:Version: 1.0
+
+Introduction
+------------
+
+The **password_*()** functions introduced a means to support
+standardized password hashing mechanisms for use by applications.
+Support for bcrypt was included in the initial launch, with argon2i and
+argon2id being added later (if and only if libargon was available on the
+system at the time of compilation.
+
+This qualification about the availability of libargon is a complicating
+factor for linux distributions where the core of php-src is often kept
+intentionally lean, with additional extensions being provided in
+separate packages to be loaded only by those installations who want the
+additional functionality. This means that some percentage of distro
+package users either have a library dependency they didn't want, or lack
+functionality they did want.
+
+This proposal seeks to remedy this by introducing a password hashing
+registry mechanism similar to the Hash extension's
+php_hash_register_algo() API.
+
+Proposal
+--------
+
+Internal API
+============
+
+::
+
+     struct php_password_algo {
+       const char* name; // Symbolic name of the algorithm, e.g. "argon2id"
+       zend_string* (*hash)(const zend_string* password, zend_array* options);
+       zend_bool (*verify)(const zend_string* password, const zend_string* hash);
+       zend_bool (*needs_rehash)(const zend_string* hash, zend_array *options);
+       int (*get_info)(zval *return_value, const zend_string* hash);
+       zend_bool (*valid)(const zend_string* hash);
+     };
+
+::
+
+     PHPAPI int php_password_algo_register(const char* ident, const php_password_algo*);
+     PHPAPI void php_password_algo_unregister(const char* ident);
+     PHPAPI const php_password_algo* php_password_algo_default();
+     PHPAPI zend_string *php_password_algo_extract_ident(const zend_string* hash);
+     PHPAPI const php_password_algo* php_password_algo_find(const zend_string* ident);
+     PHPAPI const php_password_algo* php_password_algo_get_named(const zend_string* name);
+     PHPAPI php_password_algo* php_password_algo_identify(const zend_string* hash);
+     
+
+Extensions wishing to provide an algorithm implementation will setup a
+(typically global const) structure to contain the four method pointers
+and call **php_password_algo_register()** during MINIT to hook in.
+
+The **hash**, **verify**, and **needs_rehash** method pointers function
+exactly as their PHP userspace functions describe, but don't require an
+algo ID, as this has already been determined by the exported functions
+in looking up the algorithm.
+
+The **get_info** method pointer allows adding entries to an array return
+value for the password_get_info() userspace command. This function must
+return SUCCESS or FAILURE.
+
+The **valid** method pointer is the mechanism used for determining what
+algorithm handler is appropriate for a given hash string. For example,
+only the **bcrypt** handler should return true for a hash string
+beginning with "$2y$". This callback may be NULL if the name alone is
+sufficient to identify an algorithm. For example, the bcrypt algorithm
+has a length check in addition to its name identifier.
+
+Because the registry is organized as an associative array, any attempt
+to re-register an already present password mechanism will result in a
+failure.
+
+Userspace API
+=============
+
+An additional function, password_algos(), will be added to return a
+complete list of all registered password hashing algorithms as a vector.
+The value element will be the human hash identity which may or may not
+correspond to the human readable name for the algo. For example:
+
+::
+
+     > print_r(password_algos());
+     Array (
+         [0] => "2y" // Ident for "bcrypt"
+         [1] => "argon2i"
+         [2] => "argon2id"
+     )
+
+Backward Incompatible Changes
+-----------------------------
+
+Algorithm identifiers are now (nullable) strings rather than numbers.
+Applications correctly using the constants such as PASSWORD_DEFAULT,
+PASSWORD_BCRYPT, etc... will continue to function correctly.
+
+Note that PASSWORD_DEFAULT === null.
+
+Minimizing impact to BC
+=======================
+
+In order to minimize the impact of the above BC. we could overload the
+**password_hash()** and **password_needs_rehash()** methods to accept
+integer values 0, 1, 2, and 3 to function as aliases for DEFAULT,
+BCRYPT, ARGIN2I, and ARGON2ID, respectively. Using an int would
+therefore work, but would produce a deprecation warning. This is being
+presented as a separate vote below.
+
+Extension Changes
+-----------------
+
+ext/standard will continue to register the bcrypt algo, as well as
+argon2i and argon2id if the library is available at compile time in
+order to maintain compatibility with older builds. The ext/sodium
+extension will be extended to make "standard" an explicit dependency,
+then will check to see if argon2i/argon2id were registered already. If
+not, they will be registered by ext/sodium to produce compatible results
+available via dynamic load.
+
+Proposed PHP Version(s)
+-----------------------
+
+7.next
+
+Future Scope
+------------
+
+-  Review ext/sodium to see if there are additional password hashing
+   algorithms it may be appropriate to enable.
+-  Consider exposing the registry to script code for the purpose of
+   polyfill libraries.
+
+Proposed Voting Choices
+-----------------------
+
+Simple 50% +1, make the password hashing system extensible via
+internal-only registry.
+
+Question: Make the password hashing system extensible via internal-only registry?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Should the above poll pass, the following 50%+1 question asks if we
+should additionally provide the overloaded behavior described above in
+"minimizing impact to BC".
+
+Question: Support integer constants 0-3 to password_hash() et. al. for BC
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Vote Open: 2018-11-06 17:00 UTC
+
+Vote Closes: 2018-11-20 17:00 UTC
+
+Patches and Tests
+-----------------
+
+Work in progress...
+
+-  https://github.com/php/php-src/pull/3609
+
+Implementation
+--------------
+
+#. Implementation:
+   <http://git.php.net/?p=php-src.git;a=commit;h=534df87c9e3c28001986e70844e0ad04e5708d3d>
+#. Documentation: to be done.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Sara Golemon, pollita@php.net
+:Original Status: Implemented (PHP 7.4)
+:Slug: password_registry
+:Wiki URL: https://wiki.php.net/rfc/password_registry

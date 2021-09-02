@@ -1,0 +1,238 @@
+Type Parsing Modifications
+==========================
+
+:PHP-RFC: 0377
+:Title: Type Parsing Modifications
+:Author: François Laupretre <francois@php.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2015-02-22
+:Version: 0.4
+
+Introduction
+------------
+
+This RFC proposes changes in the ruleset used to filter and convert
+input arguments to internal functions.
+
+History
+-------
+
+The changes proposed here are based on concerns that arose during the
+discussion about `scalar type
+hints <https://wiki.php.net/rfc/scalar_type_hints>`__.
+
+While the discussion mostly opposed 'weak' and 'strict' mode proponents,
+each camp showing use cases to prove it was right, we decided to gather
+all these use cases and go exploring another way : search a single-mode
+compromise that would satisfy both camps.
+
+It was soon clear that the strongest argument of strict-typing
+proponents was that 'weak' mode was way too permissive, allowing, for
+instance, true or '7 years' as integer value.
+
+As the 'weak' mode of the proposed type hinting mechanism was based on
+the ZPP layer, and as everyone agreed any single-mode mechanism should
+keep using it, we decided to propose a new more restrictive ruleset to
+be implemented in ZPP.
+
+Note: In the whole document, we use the 'ZPP' term as a union set
+including Z_PARAM macros, zend_parse_arg_xxx() functions, and
+zend_parse_parameters() as, whatever the ruleset, these mechanisms must
+keep implementing the same logic.
+
+Proposal
+--------
+
+Current ruleset
+~~~~~~~~~~~~~~~
+
+The ZPP ruleset authorizes implicit conversions for IS_NULL, IS_FALSE,
+IS_TRUE, IS_LONG, IS_DOUBLE, and IS_STRING zval types only.
+
+Actually, it also implement a mechanism for (object -> string) but, as
+this one will remain unchanged, it will be ignored here.
+
+The following table shows the current rules used to accept and convert
+an input zval through ZPP :
+
++--------+--------+--------+--------+--------+--------+--------+---+---+
+|        | Zval   |        |        |        |        |        |   |   |
+|        | type   |        |        |        |        |        |   |   |
++========+========+========+========+========+========+========+===+===+
+| ZPP    | I      | IS     | I      | I      | IS_    | IS_    |   |   |
+| type   | S_NULL | _FALSE | S_TRUE | S_LONG | DOUBLE | STRING |   |   |
++--------+--------+--------+--------+--------+--------+--------+---+---+
+| bool   | Yes    | <n     | <n     | Yes    | Yes    | Yes    |   |   |
+|        | (->    | ative> | ative> | (1)    | (1)    | (2)    |   |   |
+|        | false) |        |        |        |        |        |   |   |
++--------+--------+--------+--------+--------+--------+--------+---+---+
+| long   | Yes    | Yes    | Yes    | <n     | Yes    | (3)    |   |   |
+|        | (-> 0) | (-> 0) | (-> 1) | ative> | (5)    |        |   |   |
++--------+--------+--------+--------+--------+--------+--------+---+---+
+| double | Yes    | Yes    | Yes    | Yes    | <n     | (4)    |   |   |
+|        | (->    | (->    | (->    |        | ative> |        |   |   |
+|        | 0.0)   | 0.0)   | 1.0)   |        |        |        |   |   |
++--------+--------+--------+--------+--------+--------+--------+---+---+
+| string | Yes    | Yes    | Yes    | Yes    | Yes    | <n     |   |   |
+|        | (->    | (->    | (->    |        |        | ative> |   |   |
+|        | "")    | "")    | "1")   |        |        |        |   |   |
++--------+--------+--------+--------+--------+--------+--------+---+---+
+
+-  (1) false if null, true if non null
+-  (2) "" and "0" -> false, other values -> true
+-  (3) Run string through is_numeric_str_function() and detect error. If
+   double returned, convert it to long
+-  (4) Run string through is_numeric_str_function() and detect error. If
+   int returned, convert it to double
+-  (5) Discard fractional part, if any
+
+The conversion of IS_STRING to int/float is done through
+\_is_numeric_string_ex(). Among others, this function has the following
+behavior :
+
+-  Stop conversion at first non digit character with no error (ignore
+   every trailing char).
+
+Proposed changes
+~~~~~~~~~~~~~~~~
+
+-  Disable IS_FALSE/IS_NULL to anything except bool.
+-  IS_STRING to bool: Convert every string that would be converted to 0
+   or 0.0 to false, instead of just “0”.
+-  Disable IS_NULL to be accepted for any ZPP type except the new
+   'null'.
+-  Disable (IS_DOUBLE -> long) if the fractional part of the input value
+   is non null.
+-  When converting from IS_STRING to long, reject conversion if string
+   contains the representation of a number with a non null fractional
+   part.
+-  Add a 'null' ZPP type. This type accepts IS_NULL only. While quite
+   useless for input arguments, it is used as return type and as element
+   of union types.
+
+In \_is_numeric_string_ex() :
+
+-  Add a check for trailing characters : trailing blanks are accepted,
+   the first non-blank character encountered raises an error (note that
+   blanks are supported as leading or trailing chars only).
+
+Future ruleset
+~~~~~~~~~~~~~~
+
+This table shows a synthetic view of the resulting ruleset ('-' means
+'Disabled'):
+
+======== ========= ======== ======== ======== ========= =========
+\        Zval type                                                 
+======== ========= ======== ======== ======== ========= =========
+ZPP type IS_NULL   IS_FALSE IS_TRUE  IS_LONG  IS_DOUBLE IS_STRING  
+null     <native>  -        -        -        -         -          
+bool     -         <native> <native> Yes (1)  Yes (1)   Yes (5)    
+long     -         -        -        <native> (2)       (3)        
+double   -         -        -        Yes      <native>  (4)        
+string   -         -        -        Yes      Yes       <native>   
+======== ========= ======== ======== ======== ========= =========
+
+-  (1) false if null, true if non null
+-  (2) error if fractional part is non null
+-  (3) Run string through is_numeric_str_function() and detect error. If
+   double with null fractional part returned, convert to long, else
+   error
+-  (4) Run string through is_numeric_str_function() and detect error. If
+   int returned, convert to double
+-  (5) If string is numeric and contains a representation of a null
+   number (anything that would convert to 0 or 0.0), or if string is
+   empty, -> false, otherwise -> true.
+
+and the new behavior of \_is_numeric_string_ex() :
+
+-  Ignore trailing blanks
+-  Error on any non-blank trailing char
+
+Backward Incompatible Changes
+-----------------------------
+
+Every change we propose here is a BC break.
+
+Proposed PHP Version(s)
+-----------------------
+
+7.0.
+
+RFC Impact
+----------
+
+Every internal functions are potentially impacted.
+
+Any code converting a string to a number is potentially impacted. If
+this cause an unacceptable BC break, we'll create a private copy of the
+function implemeneting (string -> int/float) and will reserve it for
+ZPP. As long as it is not clearly needed, we'll keep a common code for
+every string to number conversions in PHP.
+
+To Opcache
+~~~~~~~~~~
+
+None
+
+New Constants
+~~~~~~~~~~~~~
+
+None
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+Open Issues
+-----------
+
+Unaffected PHP Functionality
+----------------------------
+
+Future Scope
+------------
+
+String to numeric conversion can be improved and accept a richer syntax.
+
+Proposed Voting Choices
+-----------------------
+
+Requires a 2/3 majority.
+
+Vote will be a single-choice yes/no vote.
+
+Voting date is not planned yet.
+
+Patches and Tests
+-----------------
+
+Work in progress.
+
+As soon as patch is available, extensive testing must be performed to
+evaluate overall BC breaks.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: François Laupretre, francois@php.net
+:Original Status: Inactive
+:Slug: zpp-conversion-rules
+:Wiki URL: https://wiki.php.net/rfc/zpp-conversion-rules

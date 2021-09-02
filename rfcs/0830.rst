@@ -1,0 +1,188 @@
+Unwrap Reference After Foreach
+==============================
+
+:PHP-RFC: 0830
+:Title: Unwrap Reference After Foreach
+:Author: Nikita Popov <nikic@php.net>
+:Status: Draft
+:Type: Standards Track
+:Created: 2021-08-13
+:PHP-Version: 8.2
+:Version: 1.0
+
+Introduction
+------------
+
+After a foreach by reference loop, the value variable currently remains
+a reference to the last array element, which may result in unexpected
+behavior if the variable is later reused. This RFC proposes to unwrap
+the reference after the foreach loop.
+
+This RFC addresses a relatively well known footgun when using foreach by
+reference. Despite a `prominent documentation
+warning <https://www.php.net/manual/en/control-structures.foreach.php>`__,
+we still regularly receive bug reports about this behavior. The issue is
+illustrated in the following:
+
+.. code:: php
+
+   $array = [1, 2, 3];
+   foreach ($array as &$value) { /* ... */ }
+   foreach ($array as $value) { /* ... */ }
+   var_dump($array);
+
+   // Before this RFC:
+   // array(3) {
+   //   [0]=>
+   //   int(1)
+   //   [1]=>
+   //   int(2)
+   //   [2]=>
+   //   &int(2)
+   // }
+
+   // After this RFC:
+   // array(3) {
+   //   [0]=>
+   //   int(1)
+   //   [1]=>
+   //   int(2)
+   //   [2]=>
+   //   int(3)
+   // }
+
+The current behavior looks like a bug at first glance, but is entirely
+consistent with reference semantics in PHP. The reason for this behavior
+becomes apparent if we write out the loops:
+
+.. code:: php
+
+   $array = [1, 2, 3];
+   $value =& $array[0];
+   $value =& $array[1];
+   $value =& $array[2];
+   // $value is still a reference to $array[2] here.
+   $value = $array[0]; // $array will be [1, 2, 1] here.
+   $value = $array[1]; // $array will be [1, 2, 2] here.
+   $value = $array[2]; // $array will be [1, 2, 2] here.
+
+While the behavior is justifiable, it remains unexpected.
+
+Proposal
+--------
+
+This RFC proposes to change the semantics of foreach by reference to
+unwrap the reference after the loop. This means that ``$value`` will
+still have the value of the last (visited) element, but will no longer
+be a reference to it. This also applies if the loop is left using
+``break``, ``continue`` or ``goto``.
+
+While PHP does not have a dedicated language construct for reference
+unwrapping, the operation is logically equivalent to:
+
+.. code:: php
+
+   $tmp =& $value;
+   unset($value); // Unset has reference breaking semantics.
+   $value = $tmp;
+
+For the motivating case, this means that $value is no longer a reference
+after the first loop, which means that the second loop will not modify
+the array:
+
+.. code:: php
+
+   $array = [1, 2, 3];
+   foreach ($array as &$value) { /* ... */ }
+   // $value is no longer a reference here.
+   foreach ($array as $value) { /* ... */ }
+   var_dump($array);
+
+   // array(3) {
+   //   [0]=>
+   //   int(1)
+   //   [1]=>
+   //   int(2)
+   //   [2]=>
+   //   int(3)
+   // }
+
+There is one edge case to consider: The foreach value variable may be
+any writable variable, not necessarily a simple variable. While very
+unusual, all of the following are legal:
+
+.. code:: php
+
+   foreach ($array as &$info['value']) {}
+   foreach ($array as &$arrayCopy[]) {}
+   foreach ($array as &getInfo()['value']) {}
+
+This RFC proposes to only perform the reference unwrapping for simple
+variables of the form ``$value`` ("CV"), but not for complex variables.
+
+The reason is that complex variables may have side effects. The most
+obvious case is ``&$arrayCopy[]``, which would result in an additional
+null element being appended to ``$arrayCopy`` while attempting the
+unwrap. The ``&getInfo()['value']`` case could similarly have arbitrary
+side-effects in the ``getInfo()`` call. Even ``&$info['value']`` might
+be invoking ``__get()``.
+
+Use of complex variables as foreach targets is very unusual, so it is
+rather unlikely that someone will encounter issues with the reused loop
+variables in this context. Always performing the unwrap would certainly
+be possible, but the cure seems worse than disease in this instance.
+
+When foreach is used in conjunction with destructuring, unwrapping will
+be performed on simple destructuring targets:
+
+.. code:: php
+
+   foreach ($array as [&$var, &$complex->var]) {}
+
+In this example, ``$var`` will be unwrapped because it is a simple
+variable, while ``$complex->var`` is not affected. As with the
+non-destructuring case, use of complex variables in this context is
+unusual and may have side-effects.
+
+Backward Incompatible Changes
+-----------------------------
+
+This change is backwards-incompatible, in that it's no longer possible
+to modify the last (visited) array element through the ``$value``
+variable after the foreach loop.
+
+.. code:: php
+
+   foreach ($array as &$value) { /* ... */ }
+   // This assignment no longer has an effect on $array:
+   $value = 'Modify the last element';
+
+This kind of usage is expected to be very rare, and breaking it is
+worthwhile to remove a common gotcha for less experienced PHP
+developers. It's possible to restore the previous behavior by explicitly
+assigning to a separate variable inside the loop:
+
+.. code:: php
+
+   $lastRef = null;
+   foreach ($array as &$value) {
+       /* ... */
+       $lastRef =& $value;
+   }
+   // This will continue to work.
+   $lastRef = 'Modify the last element';
+
+Vote
+----
+
+Yes/No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/7364
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.2
+:Original Status: Under Discussion
+:Slug: foreach_unwrap_ref
+:Wiki URL: https://wiki.php.net/rfc/foreach_unwrap_ref

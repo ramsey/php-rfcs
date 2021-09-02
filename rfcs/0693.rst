@@ -1,0 +1,383 @@
+Increment/Decrement Fixes
+=========================
+
+:PHP-RFC: 0693
+:Title: Increment/Decrement Fixes
+:Author: Rowan Tommins [IMSoP] <rowan.collins@gmail.com>
+:Status: Draft
+:Type: Standards Track
+:Created: 2020-03-08
+:Version: 1.1
+
+Introduction
+------------
+
+Intuitively, the ``++`` and ``--`` operators are equivalent to "add 1 to
+variable" and "subtract 1 from variable", respectively. As such, it
+would be expected that ``$a=$a+1``, ``$a+=1``, and ``++$a`` would end up
+with the same value in ``$a``; and likewise, ``$a=$a-1``, ``$a-=1``, and
+``--$a``. However, because they are implemented separately, this is not
+always the case. This RFC proposes changes to the handling of null and
+array values.
+
+Most arithmetic operators, including ``+`` and ``+=`` are implemented
+for non-numeric types by implicitly casting to integer, then performing
+the requested operation. However, ``++`` and ``--`` are implemented
+separately for each type via a switch statement in the engine; rather
+than coercing the current value to an integer, the default case in this
+switch statement is to silently leave the value unchanged.
+
+On top of this, the ``++`` operator has a specific implementation for
+``null``, but the ``--`` operator does not, leading to an even more
+surprising inconsistency.
+
+Fix or remove?
+--------------
+
+A common concern is that fixing these inconsistencies would imply
+"endorsing" or even "encouraging" the use of these operators with
+non-numeric types. It would perhaps be better to make these operations
+into errors, either immediately in PHP 8.0, or plan ahead to doing so in
+future. If this is likely to happen, then changing the behaviour in any
+backwards incompatible way would mean users having to change code twice,
+which would be undesirable.
+
+The position of this RFC is that arithmetic operators should either be
+consistently allowed or consistently disallowed on a particular type. In
+particular, if ``$a+=1`` and ``$a-=1`` do not error, then ``$a++`` and
+``$a--`` should not error either.
+
+The balance of these factors is assessed for each type below, but in
+summary:
+
+-  For arrays, throw an error in 8.0, because most operators already do
+-  For objects, resources, and booleans, assume that an error will be
+   proposed in a future RFC
+-  For null, continue to allow arithmetic operators, and fix the missing
+   implementation of ``--``
+
+Strings
+-------
+
+Strings overload the ``++`` and ``--`` operators with complex behaviour
+which mixes text and arithmetic logic. Improving this deserves its own
+discussion, so will not be discussed further in this RFC.
+
+Arrays
+------
+
+Adding an integer to an array throws an Error with the message
+"Unsupported operand types", as do most other arithmetic operators.
+However, incrementing or decrementing an array leaves it unchanged, with
+no Notice, Warning, or Error.
+
+This RFC proposes to change the behaviour so that ``$a=[]; $a++;`` (or
+``++$a``) and ``$a=[]; $a--;`` (or ``--$a``) raise the same error as
+``$a = [] + 1;``.
+
++-------+-------+-------+-------+-------+-------+-------+-------+
+|       | In    | $a =  | $a += | ++$a, | $a =  | $a -= | --$a, |
+|       | itial | $a +  | 1     | $a++  | $a -  | 1     | $a--  |
+|       | Value | 1     |       |       | 1     |       |       |
++=======+=======+=======+=======+=======+=======+=======+=======+
+| Cu    | any   | Error | Error | no    | Error | Error | no    |
+| rrent | array |       |       | e     |       |       | e     |
+|       |       |       |       | ffect |       |       | ffect |
++-------+-------+-------+-------+-------+-------+-------+-------+
+| Pro   | any   | Error | Error | Error | Error | Error | Error |
+| posed | array |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+
+
+Objects, resources, and booleans
+--------------------------------
+
+Most arithmetic operations will implicitly cast non-numeric types to
+integer as follows:
+
+-  Objects (other than internal objects with operator overloading) are
+   cast to 1, and an E_NOTICE is raised
+-  Resources are cast to their internal ID
+-  false is cast to 0
+-  true is cast to 1
+
+The ``++`` and ``--`` operators currently have no implementation for
+these types, so silently leave the value unchanged. This leads to the
+following inconsistent behaviour:
+
++---------+---------+---------+---------+---------+---------+---------+
+| Initial | $a = $a | $a += 1 | ++$a,   | $a = $a | $a -= 1 | --$a,   |
+| Value   | + 1     |         | $a++    | - 1     |         | $a--    |
++=========+=========+=========+=========+=========+=========+=========+
+| any     | 2 (with | 2 (with | no      | 0 (with | 0 (with | no      |
+| object  | E_      | E_      | effect  | E_      | E_      | effect  |
+|         | NOTICE) | NOTICE) |         | NOTICE) | NOTICE) |         |
++---------+---------+---------+---------+---------+---------+---------+
+| res     | 2       | 2       | no      | 0       | 0       | no      |
+| ource#1 |         |         | effect  |         |         | effect  |
++---------+---------+---------+---------+---------+---------+---------+
+| res     | 6       | 6       | no      | 4       | 4       | no      |
+| ource#5 |         |         | effect  |         |         | effect  |
++---------+---------+---------+---------+---------+---------+---------+
+| false   | 1       | 1       | false   | -1      | -1      | false   |
++---------+---------+---------+---------+---------+---------+---------+
+| true    | 2       | 2       | true    | 0       | 0       | true    |
++---------+---------+---------+---------+---------+---------+---------+
+
+Possible options:
+
+-  A: Implement ``++`` and ``--`` with an implicit cast, to match other
+   arithmetic operators.
+-  B: Raise an error for ``++`` and ``--``, but leave other operators
+   unchanged.
+-  C: Raise an error for all arithmetic operators.
+
+The position of this RFC is that option A brings very little benefit for
+these types, because the resulting values aren't particularly intuitive
+or useful. On the other hand, option B simply swaps one inconsistency
+for another. Option C has the added benefit of bringing the behaviour of
+these types in line with the behaviour of arrays.
+
+The implications of introducing such an error deserve their own RFC. For
+instance, it was mentioned in
+`rfc/engine_warnings <rfc/engine_warnings>`__ that the ``==`` operator
+currently falls back to an integer cast for cases such as ``$a == 1``
+which should not constitute a Type Error.
+
+The position of this RFC is to leave these types unchanged, in the
+expectation of a further RFC implementing option C.
+
+Null
+----
+
+Nulls deserve special consideration for two reasons:
+
+-  The implicit coercion to int is significantly more useful than for
+   other types
+-  The ``++`` operator already works, leaving just ``--`` as an anomaly
+
+Current inconsistency
+~~~~~~~~~~~~~~~~~~~~~
+
+For nearly all arithmetic operators, ``null`` is silently coerced to
+``0``. Unlike the other types mentioned in this RFC, this applies
+equally to the ``++`` operator. Oddly, however, the ``--`` operator is
+not implemented for null, and leaves the variable unchanged.
+
+This behaviour has been raised as a bug at least three times
+(`#20548 <https://bugs.php.net/bug.php?id=20548>`__,
+`#25674 <https://bugs.php.net/bug.php?id=25674>`__,
+`#41690 <https://bugs.php.net/bug.php?id=41690>`__). All three are
+closed, and it is `documented in the
+manual <https://www.php.net/manual/en/language.operators.increment.php>`__,
+but no evidence has been put forward that this is intentional behaviour,
+rather than a very old bug retained for compatibility.
+
+Consider the following patch, which looks like a straight-forward
+simplification:
+
+.. code:: diff
+
+     function foo($bar) {
+   -     $bar -= 1;
+   +     $bar--;
+         // more code here
+     }
+
+The old code always results in an integer in ``$bar`` after the first
+line of the function; the new code does not do so if a null value is
+passed, because of the missing ``--`` implementation.
+
+The asymmetry of ``++`` and ``--`` is even more confusing. Consider this
+patch:
+
+.. code:: diff
+
+     function repeatThing($extraTimes) {
+   -      for ( $i = 0; $i <= $extraTimes; $i++ ) {
+   +      for ( $i = $extraTimes; $i >= 0; $i-- ) {
+              doThing($i);
+          }
+     }
+
+Again, this looks like a safe change, reversing the order of the loop;
+but if passed a value of NULL, the old code will call doThing() once,
+and the new code will enter an infinite loop.
+
+Options
+~~~~~~~
+
+There are four main options to improve the situation:
+
+-  A: Implement ``--`` with an implicit cast, to match other arithmetic
+   operators including ``++``.
+-  B1: Raise an error for ``--``, but leave other operators including
+   ``++`` unchanged.
+-  B2: Raise an error for both ``++`` and ``--``, but leave other
+   operators unchanged.
+-  C: Raise an error for all arithmetic operators.
+
+Option B1 is in some ways the safest, because it makes the change
+immediately visible, and most cases affected are probably already buggy.
+However, it is hard to justify raising an error for ``$a--`` without at
+least a plan to deprecate the obvious counterpart ``$a++``. A similar
+argument applies to option B2, which would introduce a breaking change
+for ``$a++``, but users could simply switch to ``$a+=1`` and get no
+error.
+
+Removing null to int coercion
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Should we then go with Option C, as proposed for other types? That is,
+should we introduce, either immediately, or via a staged deprecation, a
+Type Error for arithmetic operations where either argument is null?
+
+An important consideration is that undefined variables, array items, and
+object properties are currently treated as having a value of null. While
+it has been suggested to change this to an error in a future version,
+there is no clear consensus to do so. This means operations on null are
+more common than the other types we have discussed, and are likely to
+remain so.
+
+Furthermore, the value when coerced to int is more intuitive, and more
+likely to be useful. It is fairly reasonable that
+``$price * $_GET['quantity']`` will result in zero if no quantity was
+provided; or that ``$price -= $discount`` leaves the value unchanged if
+there is no discount defined.
+
+Even the increment operator itself can be useful with null / unitialised
+values, for instance in this common implementation of "count items in
+each category":
+
+.. code:: php
+
+   $counts = [];
+   foreach ( $items as $item ) {
+       $counts[$item->getCategory()]++;
+   }
+
+If there was no implicit default of zero, an extra line such as
+``$counts[$item->getCategory()] ??= 0;`` would need to be added, but
+this neither expresses the intent (a count of zero is never returned)
+nor avoids any bugs (we know that the array has been initialised empty).
+
+Since the case for removing null to int coercion is much less decisive
+than for other types, this RFC makes the assumption that no such removal
+is likely in the short term. As such, waiting for that removal does not
+solve the immediate problem of inconsistency between ``++`` and ``--``.
+
+Fixing the decrement case
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+As mentioned above, no evidence has been put forward that the missing
+definition of decrement for null is intentional.
+
+This RFC therefore proposes to fix this bug, so that ``$a=null; $a--;``
+or ``$a=null; --$a;`` will result in $a holding -1. This brings it into
+line with all other mathematical operations, including ``$a++``, which
+treat null as equivalent to 0.
+
++-------+-------+-------+-------+-------+-------+-------+-------+
+|       | In    | $a =  | $a += | ++$a, | $a =  | $a -= | --$a, |
+|       | itial | $a +  | 1     | $a++  | $a -  | 1     | $a--  |
+|       | Value | 1     |       |       | 1     |       |       |
++=======+=======+=======+=======+=======+=======+=======+=======+
+| Cu    | null  | 1     | 1     | 1     | -1    | -1    | null  |
+| rrent |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+
+| Pro   | null  | 1     | 1     | 1     | -1    | -1    | -1    |
+| posed |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+
+
+Backward Incompatible Changes
+-----------------------------
+
+The additional error on increment and decrement for arrays is likely to
+mostly affect code which already contains bugs, and as a fatal will be
+easily detected.
+
+The fix to decrement on nulls is harder to detect. While it's unlikely
+that any code is deliberately relying on the current behaviour, it may
+inadvertently be doing so. It would be sensible to provide links in
+official upgrading documentation to static analysis tools which can
+point out potentially affected code.
+
+Proposed PHP Version(s)
+-----------------------
+
+8.0
+
+RFC Impact
+----------
+
+On OpCache
+~~~~~~~~~~
+
+If there is currently any optimisation based on the non-implementation
+of decrement for nulls, or the behaviour of increment and decrement for
+arrays, this will need to be amended if the respective votes pass.
+
+Open Issues
+-----------
+
+None at time of initial discussion.
+
+Unaffected PHP Functionality
+----------------------------
+
+As mentioned above, this RFC proposed no changes to handling of strings,
+booleans, objects, or resources.
+
+It also does not directly propose any changes to operators other than
+``++`` and ``--``, although it recommends that a future RFC does so for
+the above types.
+
+Proposed Voting Choices
+-----------------------
+
+The two proposed changes can be implemented independently, so two
+separate votes are proposed, each requiring the standard 2/3
+super-majority to be accepted:
+
+-  Should decrementing null be fixed in line with incrementing and with
+   subtraction, so that ``$a=null; $a--;`` results in ``-1``? (Yes / No)
+-  Should incrementing or decrementing an array throw an "Unsupported
+   operand types" error, in line with other arithmetic operations? (Yes
+   / No)
+
+Patches and Tests
+-----------------
+
+None yet. The implementation should be a simple addition to the
+``increment_function`` and ``decrement_function`` definitions in
+``Zend/zend_operators.c``.
+
+Implementation
+--------------
+
+TODO
+
+References
+----------
+
+-  `Pre-RFC discussion <https://externals.io/message/108602>`__
+-  `RFC: Alphanumeric
+   Decrement <https://wiki.php.net/rfc/alpanumeric_decrement>`__
+   (rejected)
+-  `RFC: Normalize
+   inc/dec <https://wiki.php.net/rfc/normalize_inc_dec>`__ (inactive)
+
+Rejected Features
+-----------------
+
+A previous version of the RFC proposed fixing the implementation for
+booleans to match integer coercion followed by adding or substracting 1.
+The current draft instead groups booleans with objects and resources, as
+warranting a separate RFC proposing an error.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Rowan Tommins [IMSoP], rowan.collins@gmail.com
+:Original Status: Under Discussion
+:Slug: increment_decrement_fixes
+:Wiki URL: https://wiki.php.net/rfc/increment_decrement_fixes

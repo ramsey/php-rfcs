@@ -1,0 +1,620 @@
+Short Functions
+===============
+
+:PHP-RFC: 0761
+:Title: Short Functions
+:Author: Larry Garfield <larry@garfieldtech.com>
+:Status: Declined
+:Type: Unknown
+:Created: 2020-10-20
+:Version: 1.0
+
+Introduction
+------------
+
+Short lambdas / arrow functions offer a convenient, compact way to write
+simple closures as a single expression. This RFC offers the same
+convenience for named functions and methods that are simple return
+expressions.
+
+Proposal
+--------
+
+This RFC provides an alternate, abbreviated syntax for functions and
+methods, designed to mimic the syntax of short lambdas. Specifically,
+the first function below is semantically identical to the second:
+
+.. code:: php
+
+   function add(int $a, int $b): int => $a + $b;
+
+   function add(int $a, int $b): int 
+   {
+       return $a + $b;
+   }
+
+The same abbreviated form is also available for methods. Both of the
+following methods are semantically identical.
+
+.. code:: php
+
+   class Adder
+   {
+       public function __construct(private int $val) {}
+       
+       public function add(int $in): int => $in + $this->val;
+
+       public function add(int $in): int {
+           return $in + $this->val;
+       }
+   }
+
+More precisely, the form of a short function/method is:
+
+::
+
+   function ($params): returnType => expression;
+
+Where "expression" is any valid PHP expression, the evaluated value of
+which will be returned by the function. That is the same semantic
+behavior as for the body of a short-lambda.
+
+Functions are simpler than lambdas, as there is no need for closing over
+variables contextually. Therefore this patch is implemented 100% in the
+lexer, and thus should have no performance impact whatsoever.
+
+Consistency with closure syntax
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC is designed to complement the `Auto-capturing multi-statement
+closures </rfc/auto-capture-closure>`__ RFC. Both stand on their own and
+offer independent benefits. However, they have been designed such that
+their syntax is complementary and consistent. Specifically:
+
+-  The ``=>`` sigil always means "evaluates to the expression on the
+   right," in all circumstances. (Named functions, anonymous functions,
+   arrays, and ``match()``.)
+-  ``{ ... }`` denotes a statement list, potentially ending in a
+   ``return``.
+-  The ``function`` keyword indicates a function that has no
+   auto-capture.
+-  The ``fn`` keyword indicates a function that will auto-capture
+   variables, by value.
+-  A function with a name is declared globally at compile time. A
+   function without a name is declared locally as a closure at runtime.
+
+These rules are easily recognizable and learnable by developers.
+
+(Further discussion of the possible permutations, and which are not
+useful to begin with, is in the Auto-capturing Closures RFC.)
+
+Reasoning
+~~~~~~~~~
+
+Many functions and methods are, in practice, simple expressions. They
+take input and return some simple output that can be computed in a
+single expression (of arbitrary complexity). When anonymous, short
+lambdas offer a compact way to express that function as a literal
+expression. Named functions, however, currently still require writing
+them as if they would be a long block of statements. That provides extra
+visual clutter (especially when there are several such methods in one
+class). It also forces you to code in "statement headspace" rather than
+"expression headspace." Allowing functions to be written in a more
+expression-y way helps with conceptualizing a program as evaluating
+expressions, not statement steps.
+
+Expressions are becoming increasingly capable, too. match() expressions
+and throw expressions in PHP 8.0, plus proposals such as `PHP RFC: Pipe
+Operator v2 </rfc/pipe-operator-v2>`__, are collectively making it
+easier to write expressive expressions. Enumeration methods are likely
+to consist primarily of a single match() statement. This improvement is
+a part of that larger trend.
+
+The trend in PHP in recent years has been toward more compact but still
+readable syntax that eliminates redundancy. Property promotion, arrow
+functions, the nullsafe operator, and similar recent well-received
+additions demonstrate this trend. This RFC seeks to continue that trend
+to make PHP more pleasant to write while still being just as clear to
+read.
+
+Pure functions
+~~~~~~~~~~~~~~
+
+Expression functions are also more likely to be pure, and thus avoid
+mutable state. That cannot be guaranteed as it is possible to write
+single-expression functions that "leak" via global variables, like so:
+
+.. code:: php
+
+
+   $called = 0;
+
+   function fullName(string $first, string $last): string
+     => sprintf('%s %s %d', $first, $last, $GLOBALS['called']++);
+
+However, such code would be readily apparent as using global mutable
+state, and is easily avoided. That makes short-functions more reliably
+"safe" and thus less prone to stateful errors.
+
+Examples
+--------
+
+Below are some examples of "long form" current code and what the short
+function equivalent would be. This RFC asserts that the shorter version
+is more concise and readable. All code is using standard PSR-12
+formatting.
+
+Match functions
+~~~~~~~~~~~~~~~
+
+A function that encapsulates a match() expression.
+
+.. code:: php
+
+   function pick_one(int $a) 
+   {
+       return match($a) {
+           1 => 'One',
+           2 => 'Two',
+           3 => 'Three',
+           default => 'More',
+       };
+   }
+
+vs.
+
+.. code:: php
+
+   function pick_one(int $a) => match($a) {
+       1 => 'One',
+       2 => 'Two',
+       3 => 'Three',
+       default => 'More',
+   };
+
+   print pick_one(1) . PHP_EOL;
+
+Enum methods
+~~~~~~~~~~~~
+
+In practice, most enum methods are likely to contain only a match
+expression, the evaluated value of which should be returned. That makes
+them a good candidate for short functions and eliminating visual
+clutter.
+
+.. code:: php
+
+   enum Suit 
+   {
+
+       case Hearts;
+       case Diamonds;
+       case Clubs;
+       case Spades;
+       
+       public function color(): string => match($this) {
+           static::Hearts, static::Diamonds => 'Red',
+           static::Clubs, static::Spades => 'Black',
+       };
+       
+       vs:
+       
+       public function color(): string
+       {
+           return match($this) {
+               static::Hearts, static::Diamonds => 'Red',
+               static::Clubs, static::Spades => 'Black',
+           };
+       }
+   }
+
+Getter methods
+~~~~~~~~~~~~~~
+
+Many classes consist primarily or almost entirely of methods that either
+return a property, or some computation off of a property. With
+short-functions, that becomes considerably more concise.
+
+.. code:: php
+
+   class Person
+   {
+       public function __construct(
+           private string $firstName, 
+           private string $lastName,
+       ) {}
+       
+       public function getFirstName(): string
+       {
+           return $this->firstName;
+       }
+
+       public function getLastName(): string
+       {
+           return $this->lastName;
+       }
+
+       public function getFullName(): string
+       {
+           return $this->firstName . ' ' . $this->lastName;
+       }
+   }
+
+vs.
+
+.. code:: php
+
+   class Person
+   {
+       public function __construct(
+           private string $firstName, 
+           private string $lastName,
+       ) {}
+       
+       public function getFirstName(): string => $this->firstName;
+
+       public function getLastName(): string => $this->lastName;
+
+       public function getFullName(): string => $this->firstName . ' ' . $this->lastName;
+   }
+
+Functional code
+~~~~~~~~~~~~~~~
+
+.. code:: php
+
+   function addUp(array $vals) 
+   {
+       return array_reduce($vals, fn($x, $col) => $coll + $x, 0);
+   }
+
+vs.
+
+.. code:: php
+
+   function addUp(array $vals) 
+       => array_reduce($vals, fn($x, $col) => $coll + $x, 0);
+
+More complex lines of short lambdas can be wrapped to a new line like
+this already, and it works just as well for short-functions.
+
+It's also useful for basic API operations that can be expressed in terms
+of other basic API operations:
+
+.. code:: php
+
+   function str_contains(string $haystack, string $needle): bool => strpos($haystack, $needle) !== false;
+
+Conditional methods
+~~~~~~~~~~~~~~~~~~~
+
+A common refactoring technique is to take a complex conditional in an if
+statement and move it to its own method, so it can be given a
+self-descriptive name. Such methods are naturally single-expression.
+Thus, well-factored code is likely to have a large percentage of its
+functions and methods be single-expression, and thus candidates for
+short functions.
+
+.. code:: php
+
+   if ($this->isAdmin() || ($this->hasPermission('foo') && $this->hasPermission('bar'))) {
+       // ...
+   }
+
+Gets factored out to:
+
+.. code:: php
+
+   if ($this->isGroupModerator()) {
+       // ...
+   }
+
+   // ...
+
+   protected function isGroupModerator(): bool
+       => $this->isAdmin() || ($this->hasPermission('foo') && $this->hasPermission('bar'));
+
+Which is more simple and compact than a full function body.
+
+Decorating functions in live code
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Often times, methods exist that are just delegating to some other
+method, either in the same object or a composed object. These are also
+good candidates for a more compact syntax. For example, here's some code
+pulled from the Drupal database layer's Select query builder. (These are
+all real methods; I've just stripped out the comments and converted them
+to PSR-12 style.)
+
+.. code:: php
+
+   class Select extends Query implements SelectInterface
+   {
+     public function hasTag($tag) 
+     {
+       return isset($this->alterTags[$tag]);
+     }
+
+     public function hasAllTags() 
+     {
+       return !(boolean) array_diff(func_get_args(), array_keys($this->alterTags));
+     }
+
+     public function hasAnyTag() 
+     {
+       return (boolean) array_intersect(func_get_args(), array_keys($this->alterTags));
+     }
+
+     public function getMetaData($key) 
+     {
+       return isset($this->alterMetaData[$key]) ? $this->alterMetaData[$key] : NULL;
+     }
+     
+     public function &havingConditions() 
+     {
+       return $this->having->conditions();
+     }
+
+     public function havingArguments()
+     {
+       return $this->having->arguments();
+     }
+
+     public function havingCompile(Connection $connection) 
+     {
+       $this->having->compile($connection, $this);
+     }
+
+     public function &getFields()
+      {
+       return $this->fields;
+     }
+
+     public function &getExpressions() 
+     {
+       return $this->expressions;
+     }
+
+     public function &getOrderBy() 
+     {
+       return $this->order;
+     }
+
+     public function &getGroupBy() 
+     {
+       return $this->group;
+     }
+
+     public function &getTables()
+      {
+       return $this->tables;
+     }
+
+     public function &getUnion() 
+     {
+       return $this->union;
+     }
+
+     public function escapeLike($string)
+      {
+       return $this->connection->escapeLike($string);
+     }
+
+     public function escapeField($string) 
+     {
+       return $this->connection->escapeField($string);
+     }
+
+     public function isPrepared() 
+     {
+       return $this->prepared;
+     }
+     
+     public function join($table, $alias = NULL, $condition = NULL, $arguments = []) 
+     {
+       return $this->addJoin('INNER', $table, $alias, $condition, $arguments);
+     }
+
+     public function innerJoin($table, $alias = NULL, $condition = NULL, $arguments = []) 
+     {
+       return $this->addJoin('INNER', $table, $alias, $condition, $arguments);
+     }
+
+     public function leftJoin($table, $alias = NULL, $condition = NULL, $arguments = [])
+     {
+       return $this->addJoin('LEFT OUTER', $table, $alias, $condition, $arguments);
+     }
+
+     // ... And lots of other multi-line methods we don't care about for now.
+
+   }
+
+That can collapse to this (a bit reordered):
+
+.. code:: php
+
+   class Select extends Query implements SelectInterface
+   {
+     public function hasTag($tag) => isset($this->alterTags[$tag]);
+
+     public function hasAllTags() 
+       => !(boolean) array_diff(func_get_args(), array_keys($this->alterTags));
+
+     public function hasAnyTag() 
+       => (boolean) array_intersect(func_get_args(), array_keys($this->alterTags));
+
+     public function getMetaData($key) 
+       => isset($this->alterMetaData[$key]) ? $this->alterMetaData[$key] : NULL;
+     
+     public function &havingConditions() => $this->having->conditions();
+
+     public function havingArguments() => $this->having->arguments();
+
+     public function havingCompile(Connection $connection) 
+       => $this->having->compile($connection, $this);
+
+     public function &getFields() => $this->fields;
+
+     public function &getExpressions() => $this->expressions;
+
+     public function &getOrderBy() => $this->order;
+
+     public function &getGroupBy() => $this->group;
+
+     public function &getTables() => $this->tables;
+
+     public function &getUnion() => $this->union;
+
+     public function escapeLike($string) => $this->connection->escapeLike($string);
+
+     public function escapeField($string) => $this->connection->escapeField($string);
+
+     public function isPrepared() => $this->prepared;
+     
+     public function join($table, $alias = NULL, $condition = NULL, $arguments = []) 
+       => $this->addJoin('INNER', $table, $alias, $condition, $arguments);
+
+     public function innerJoin($table, $alias = NULL, $condition = NULL, $arguments = [])
+       => $this->addJoin('INNER', $table, $alias, $condition, $arguments);
+
+     public function leftJoin($table, $alias = NULL, $condition = NULL, $arguments = [])
+       => $this->addJoin('LEFT OUTER', $table, $alias, $condition, $arguments);
+
+     // ... And lots of other multi-line methods we don't care about for now.
+
+   }
+
+Which is much more compact, still quite readable, and makes the
+delegation more obvious.
+
+Syntax decisions
+~~~~~~~~~~~~~~~~
+
+The => operator has de facto become the "maps to this expression"
+operator: Short lambdas use it, match() uses it, array literals use
+it... It seemed the natural choice. Anything else would have been more
+confusing.
+
+The use of the ``fn`` keyword was also considered, but rejected. In
+context, ``fn`` currently indicates that auto-capture will happen for
+variables from the lexical scope. (See the discussion above.) However, a
+named function has no meaningful values to capture, making ``function``
+more appropriate.
+
+Related RFCs
+------------
+
+A number of other RFCs in active consideration would complement short
+functions. They may or may not pass, but if they did then they would
+benefit from short functions without any further effort.
+
+Piped functions
+~~~~~~~~~~~~~~~
+
+The `pipe operator </rfc/pipe-operator-v2>`__ \|> is still pending in an
+RFC, but the feedback on it before was generally positive. Short
+functions would allow a function to be easily defined as the composition
+of several other functions.
+
+.. code:: php
+
+   function doAThing(User $u)
+   {
+       return $u |> 'step1' |> 'step2' |> 'step3' |> 'step4';
+   }
+
+vs.
+
+.. code:: php
+
+   function doAThing(User $u) => $u
+       |> 'step1' 
+       |> 'step2' 
+       |> 'step3' 
+       |> 'step4'
+   ;
+
+Which is a really nice way to build up a pipeline through composition.
+Modulo PHP's clumsy way of referencing functions by name, which is a
+separate matter that would be addressed by the `Partial Function
+Application </rfc/partial_function_application>`__ RFC. The three RFCs
+together would allow for this:
+
+.. code:: php
+
+   function doAThing(User $u) => $u
+       |> step1(?) 
+       |> step2(?)
+       |> step3($val, ?) 
+       |> step4(?, $var)
+   ;
+
+clone-with
+~~~~~~~~~~
+
+Although no formal RFC has been proposed, Máté had discussed a
+``clone with`` syntax
+(`code <https://github.com/php/php-src/pull/6538>`__,
+`thread <https://externals.io/message/112624>`__) that would create a
+useful, single-expression clone-with-modification operation. That is an
+excellent candidate for short-function "withX" methods.
+
+.. code:: php
+
+   class Point
+   {
+       public function __construct(private int $x, private int $y) {}
+
+       public function getX(): int => $this->x;
+       public function getY(): int => $this->y;
+       
+       public function withX($x): static => clone($this) with {x: $x};
+       public function withY($y): static => clone($this) with {y: $y};
+   }
+
+Thus making many cases of wither methods just as trivial to write as
+getter methods.
+
+Backward Incompatible Changes
+-----------------------------
+
+None. This would have been a syntax error in the past.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 8.1.
+
+Open Issues
+-----------
+
+None?
+
+Proposed Voting Choices
+-----------------------
+
+This is a simple up-or-down vote, requiring 2/3 approval to pass.
+
+Voting started 2021-05-31 and closes 2021-06-14.
+
+Question: Include short-function syntax in PHP
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+`Pull request with the
+code. <https://github.com/php/php-src/pull/6221>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: Larry Garfield (larry@garfieldtech.com)
+:Slug: short-functions
+:Wiki URL: https://wiki.php.net/rfc/short-functions

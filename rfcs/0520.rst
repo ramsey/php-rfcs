@@ -1,0 +1,263 @@
+Convert Numeric Keys In Object/array Casts
+==========================================
+
+:PHP-RFC: 0520
+:Title: Convert Numeric Keys In Object/array Casts
+:Author: Andrea Faulds <ajf@ajf.me>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2016-10-21
+:PHP-Version: 7.2
+:Version: 1.0
+
+Introduction
+------------
+
+Background
+~~~~~~~~~~
+
+The PHP language has two core data types which are collections of
+key/value pairs.
+
+The first of these, the *array*, is an ordered map of integer or string
+keys to arbitrary values. There is no overlap between integer and string
+keys in arrays; if a string fits the format ``/^(0|(-?[1-9][0-9]*))$/``
+and is small enough (``PHP_INT_MIN`` ≤ n ≤ ``PHP_INT_MAX``), it is
+converted to an integer key. Such strings are termed *numeric strings*.
+
+The second of these, the *object*, is an ordered map of string property
+names to arbitrary values. Integer property names are not permitted,
+these are converted to string property names. Objects have some other
+attributes, but they do not concern us here.
+
+In the Zend Engine, both PHP arrays and PHP objects are internally
+represented using the same data structure, the ``HashTable``.\ :sup:`1`
+The HashTable is, much like the array, an ordered map of integer or
+string keys to arbitrary values. However, unlike arrays, there is no
+guarantee that string and integer keys do not overlap; for instance, a
+HashTable can simultaneously contain the separate keys ``"123"`` and
+``123``, which may correspond to different values.
+
+Because arrays and objects have different restrictions versus the
+underlying HashTable type on what kinds of keys they can have, the Zend
+Engine must enforce their restrictions at a layer above HashTables, in
+the code implementing arrays and objects themselves. This means that if
+that code is bypassed and the underlying HashTables are modified
+directly, arrays and objects can exist with an invalid internal state.
+
+:sup:`1`\ Nitpick: objects with only declared properties do not need
+their own HashTable, but even they use a HashTable for looking up
+properties, it's just part of the class rather than the object itself.
+
+The Problem
+~~~~~~~~~~~
+
+Various edge cases in the Zend Engine exist where array HashTables can
+contain numeric string keys, and object HashTables can contain integer
+keys. In such cases, these keys are inaccessible from PHP code, because
+the code handling arrays will never look for numeric string keys in the
+HashTable (as arrays map those to integer keys), and the code handling
+objects will never look for integer keys in the HashTable (as objects
+map those to string keys).
+
+This RFC focuses on a specific edge case, that of object-to-array casts
+and array-to-object casts. Currently, when using ``(object)`` or
+``settype()`` to convert an object to an array, or when using
+``(array)`` or ``settype()`` to convert an array to an object, the inner
+HashTable is naïvely copied or referenced without its keys being changed
+to reflect the restrictions on array keys and object property names,
+leading to inaccessible array keys or object properties in some cases.
+For example, ``$arr = [0 => 1, 1 => 2, 2 => 3]; $obj = (object)$arr;``
+produces an object with inaccessible properties named ``0``, ``1`` and
+``2``, while
+``$obj = new stdClass; $obj->{'0'} = 1; $obj->{'1'} = 2; $obj->{'2'} = 3; $arr = (array)$obj;``
+produces an array with the inaccessible keys ``"0"``, ``"1"`` and
+``"2"``. The same issue also occurs when using ``get_object_vars()``.
+
+Proposal
+--------
+
+High-level
+~~~~~~~~~~
+
+This RFC proposes to fix this issue for object-to-array casts and
+array-to-object casts, both for the casting operators and for
+``settype()``, and also fix the same issue in ``get_object_vars()``.
+This would be done by converting the keys of array or object HashTables
+as appropriate, so numeric string property names in objects would be
+converted to integer array keys, and vice-versa. Therefore, there would
+be no inaccessible properties. For example,
+``$arr = [0 => 1, 1 => 2, 2 => 3]; $obj = (object)$arr;`` would now
+produce an object with accessible properties named ``"0"``, ``"1"`` and
+``"2"``, and
+``$obj = new stdClass; $obj->{'0'} = 1; $obj->{'1'} = 2; $obj->{'2'} = 3; $arr = (array)$obj;``
+would now produce an array with the accessible keys ``0``, ``1`` and
+``2``.
+
+Internals
+~~~~~~~~~
+
+There have been attempts to fix this issue before, but there is a
+potential performance issue: naïvely copying the HashTable (or instead
+adding another reference to it if possible) without performing key
+conversion is much faster than creating a new HashTable and iterating
+over every key in the old HashTable to manually copy each key/value pair
+to the new HashTable, converting if necessary.
+
+In order to minimise the potential performance impact, the proposed
+implementation would avoid expensively manually duplicating the whole
+HashTable wherever possible, by first checking if this is necessary,
+either by checking flags (for example, `packed
+arrays <http://nikic.github.io/2014/12/22/PHPs-new-hashtable-implementation.html>`__
+are guaranteed to need conversion if being converted to an object), or
+by iterating over the HashTable checking for keys needing conversion. If
+conversion is not necessary, it will fall back to the faster
+``zend_array_dup()``, or merely copy the reference if possible. Because
+it only performs manual duplication where necessary, the most common
+cases (converting arrays with only string keys to objects, and
+converting objects with only non-numeric string property names to
+arrays) see minimal performance impact.
+
+In the case of ``get_object_vars()``, the object HashTable was always
+duplicated anyway, so the only change is that it now checks for numeric
+string property names in its main loop.
+
+For the purpose of these conversions, new
+``zend_symtable_to_proptable()`` (array-style HashTable to object-style
+HashTable) and ``zend_proptable_to_symtable()`` (object-style HashTable
+to array-style HashTable) functions are added to the Zend API.
+
+Backward Incompatible Changes
+-----------------------------
+
+The current behaviour, though arguably an unhelpful oversight, is
+documented. Therefore, fixing this issue means changing documented
+behaviour, and so breaks backwards-compatibility.
+
+The justification for breaking backwards-compatibility here is that the
+existing behaviour is unintuitive and unhelpful. This is an uncommon
+edge case that is unlikely to be relied upon, because it prevents the
+user doing anything useful with the result.
+
+Proposed PHP Version(s)
+-----------------------
+
+This is proposed to be changed in the next minor or major version of
+PHP, whichever comes first. At the present time, that would be 7.2.
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+I do not believe there to be any impact on the behaviour of the SAPIs.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Any extension using the ``convert_to_object()`` and
+``convert_to_array()`` Zend API functions will now see the different
+behaviour described above.
+
+To Opcache
+~~~~~~~~~~
+
+The implementation does not fail any tests when compiled with OPcache.
+
+Performance
+~~~~~~~~~~~
+
+I am yet to benchmark the current implementation, and I have done no
+benchmarks on real-world applications so far.
+
+`I performed a benchmark on an earlier version of the
+patch. <https://gist.github.com/TazeTSchnitzel/89eda3aa5711ca3fd2f7a526bffaa37c#file-pretty-md>`__
+As hoped, it found only small (at worst ~19%) slowdowns versus the
+master branch for the common cases (casting arrays with no integer keys
+to objects and casting objects with no numeric string property names to
+arrays). The uncommon cases (casting arrays with some or all keys
+integers to objects, and casting objects with some or all keys numeric
+to arrays), on the other hand, saw much larger slowdowns (as much as
+~364%). I would argue that this is a bearable performance decrease,
+given that otherwise the uncommon cases produce an unusable result.
+
+Open Issues
+-----------
+
+There are no open issues at this time.
+
+Unaffected PHP Functionality
+----------------------------
+
+This has no impact on the behaviour of arrays or objects, nor the
+operators acting upon them (beyond the cast operators). It also does not
+deal with other edge cases that cause arrays and objects to contain
+invalid keys.
+
+Future Scope
+------------
+
+Object/array casts are not the only edge case which creates arrays and
+objects with invalid keys. It may be worth considering a comprehensive
+solution (for example, performing numeric string to integer
+normalisation universally, rather than solely for arrays) in future.
+That would be a much larger undertaking than this RFC, however, and has
+greater possible downsides (such as reduced performance for property and
+variable accesses).
+
+Vote
+----
+
+This could be construed as a language change, so this RFC requires a 2/3
+majority in voting to be accepted.
+
+It is a single Yes/No vote on whether to accept the RFC and implement it
+in PHP 7.2. Voting started on 2016-11-05 and ended on 2016-11-14. The
+result was to accept the RFC for 7.2.
+
+Question: Accept the Convert numeric keys in object/array casts RFC for PHP 7.2?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+The pull request for the PHP interpreter is here:
+https://github.com/php/php-src/pull/2142
+
+There is no language specification patch, because none is required. The
+language specification did not specify or comment on this bug.
+
+Implementation
+--------------
+
+This is implemented in master, which will become PHP 7.2. The commit is:
+https://github.com/php/php-src/commit/a0502b89a65d24eb191a7c85bcffcf9b91454735
+
+After the project is implemented, this section should contain
+
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+None at present.
+
+Rejected Features
+-----------------
+
+None.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Andrea Faulds, ajf@ajf.me
+:Original Status: Implemented (PHP 7.2)
+:Slug: convert_numeric_keys_in_object_array_casts
+:Wiki URL: https://wiki.php.net/rfc/convert_numeric_keys_in_object_array_casts

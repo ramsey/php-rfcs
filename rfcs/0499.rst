@@ -1,0 +1,543 @@
+New Operator (short Tag) For Context-dependent Escaping
+=======================================================
+
+:PHP-RFC: 0499
+:Title: New Operator (short Tag) For Context-dependent Escaping
+:Author: Michael Vostrikov <michael.vostrikov@gmail.com>
+:Status: Declined
+:Type: Unknown
+:Created: 2016-07-14
+:Version: 1.0
+
+Introduction
+------------
+
+This RFC proposes the addition of new operator for context-dependent
+escaping. This operator is intended mainly for HTML escaping but it
+allows to add handlers for other contexts. This operator requires new
+syntax, so it requires the changes in the language parser.
+
+Problem description
+-------------------
+
+Missing or wrong HTML escaping is the main reason of XSS vulnerabilities
+on many sites. Template engines solve this problem, but there are many
+applications where template engines are not used - which are written on
+custom engines, on CMSs, on frameworks without a template engine by
+default. These projects continue to develop and require to write code.
+
+In applications without template engines output a value from database is
+very frequent operation. Almost all cases of using ``<?= ?>`` operator
+must be with HTML-escaping, and only sometimes it is needed to output
+raw HTML.
+
+I suggest new operator, which make escaping operation more easier, safer
+and useful. Usually it is not very hard to move an application to new
+version of language, but it is almost impossible to rewrite all
+PHP-templates to a special template engine.
+
+Of course, we can make a function with short name like
+``<?= h($something) ?>``. But the problem is not that we don't have a
+function.
+
+The problem is that ``<?= h($something) ?>`` and ``<?= $something ?>``
+both work good, and unsafe variant works exactly as safe one until we
+get unsafe data. There is no such problem with other contexts. If we
+don't call json_encode() when passing an array or object into
+javascript, this only will break the script, and this will be
+noticeable, there won't be a problem with security. Also, because we
+need to call escaping function everywhere, the problem is that we must
+copy-paste it, and there is a possibility to forget to do this sometime.
+
+Calling an escaping function manually on every output is the same as
+calling constructor manually after every 'new' statement:
+
+.. code:: php
+
+   (new User)->__construct(...);
+   (new Profile)->__construct(...);
+
+Main argument against such operator is that main problem is in specific
+context. There are various contexts and each one requires special
+escaping. But I think this is not required to support all of them.
+Because - who asks about it?) There are no requests about special
+operator for json_encode(), but there are many requests for
+htmlspecialchars(). You can not deny the problem with HTML escaping
+really exists. My first goal is to draw the attention on it. Exact
+implementation is a secondary thing.
+
+HTML context is very frequent case, and it can be used together with
+other contexts.
+
+Consider the example:
+
+.. code:: php
+
+   <a href="/things/<?= $thing['name'] ?>" onclick="alert('<?= $thing['name'] ?>');">
+       <?= $thing['name'] ?>
+   </a>
+
+It may seem that different escaping is required here. But it's not. The
+call of htmlspecialchars() is required in all 3 cases:
+
+.. code:: php
+
+   <?php $thing = ['name' => 'Say "Hello")']; ?>
+
+   <a
+       href="/things/<?= htmlspecialchars(urlencode($thing['name'])) ?>"
+       onclick="alert(<?= htmlspecialchars(json_encode($thing['name']), ENT_QUOTES) ?>);"
+   >
+       <?= htmlspecialchars($thing['name']) ?>
+   </a>
+
+Actually, on web page we have 3 external contexts - HTML, <script> tag,
+<style> tag. PHP+CSS generally is not used. PHP+JS is not just escaping.
+It is encoding in special notation, and as I think, it has different
+semantics - 'keep correct markup' (htmlspecialchars) and 'pass a value'
+(json_encode).
+
+But anyway we need to be able to set different flags for
+htmlspecialchars(). So, handling for other contexts also can be added
+the same way. And I have an idea about how to do it.
+
+Purpose
+-------
+
+The purpose of this operator is
+
+#. To make frequent operations for escaping, and especially default
+   escaping, easier to use, to add a simple way to call an escaping
+   function.
+#. To remove copy-paste for calling an escaping function.
+#. To improve a security, because the escaping will become automatic in
+   all places, and this will prevent XSS.
+
+Proposal
+--------
+
+Operator has the following form:
+
+.. code:: php
+
+   <?* $str ?>
+   <?* $str, 'html' ?>
+   <?* $str, $context ?>
+
+Both expressions any constant or variable. Second expression is
+optional. How to handle a context is up to appllication.
+
+I suggest the symbol ``'*'`` because it is not unary operator and it
+gives an error in previous PHP versions. All symbols in ``<?* ?>`` are
+typed with Shift, and they require another way to type, unlike
+``<?= ?>``, so there is a less possibility to write ``'='`` instead. The
+symbol tilde '~' is not present on keyboard layouts for some european
+languages.
+
+Operator is compiled into the following AST:
+
+.. code:: php
+
+   echo escape_handler_call(first_argument, second_argument);
+
+This is done very similar to backticks operator for shell_exec().
+
+There are 3 functions:
+
+.. code:: php
+
+   set_escape_handler($handler);
+   restore_escape_handler();
+   escape_handler_call($string[, $context]);
+
+They work similar to set_error_handler() / restore_error_handler().
+
+Function set_escape_handler() sets user-defined handler which will be
+called from escape_handler_call(). Returns previously set handler or
+null. The handler can be any valid callable value. Arguments for this
+handler are the same as for escape_handler_call().
+
+Function restore_escape_handler() removes current handler and restores
+previously set handler.
+
+Function escape_handler_call() just pass given arguments into
+user-defined handler. Second argument is not required. If the handler is
+not set, it throws an exception. Default context can be set in it as
+default value for second argument.
+
+We can use it like this:
+
+.. code:: php
+
+   <?php
+       // anywhere in application
+       set_escape_handler(function($str, $context = 'html') {
+           if ($context == 'html') {
+               return htmlspecialchars($str, ENT_QUOTES | ENT_HTML5 | ENT_DISALLOWED | ENT_SUBSTITUTE);
+           }
+
+           if ($context == 'js') {
+               return my_js_encode($str);
+           }
+
+           throw new Exception('Unknown context: ' . $context);
+       });
+
+       // or
+
+       // set_escape_handler([$this, 'escape']);
+   ?>
+   <?* $str ?>
+   <?* $str, 'html' ?>
+
+There are no magic constants, problem with autoloading, complicated
+syntax, or big changes in the logic of existing constructions. This is
+just a helper to call user-defined escaper, the same as if he would call
+it manually everywhere.
+
+In this way we can have multiple contexts, default escaping, and full
+control and customization.
+
+Functions
+---------
+
+Implementation is done similar to set_error_handler() mechanism.
+
+.. code:: php
+
+   set_escape_handler($escape_handler_callable);
+   restore_escape_handler();
+   escape_handler_call($string[, $context]);
+
+``callable|null set_escape_handler(callable $handler)``
+
+Sets user-defined handler which will be called from
+escape_handler_call(). Returns previously set handler or null. The
+handler can be any valid callable value. Arguments for this handler are
+the same as for escape_handler_call().
+
+``bool restore_escape_handler()``
+
+Removes current handler and restores previously set handler.
+
+``mixed escape_handler_call(mixed $string[, mixed $context])``
+
+Passes given arguments into user-defined handler. Argumants are passed
+'as is', without any changes. Second argument is not required. If the
+handler is not set, it throws an exception. Default context can be set
+in it as default value for second argument.
+
+Main arguments 'for' and 'against'
+----------------------------------
+
+-  You can write short function in userland
+
+The problem is not that we have no function. The problem is that the
+same action is always repeated, and if we don't repeat it then it leads
+to security problems. More than 90% of output data - is data from DB and
+must be HTML-encoded.
+
+Both variants ``<?= h($something) ?>`` and ``<?= $something ?>`` work
+good. But the second variant is unsafe. One is a subset of another, we
+have the same beginning <?= and then can write helper function or not.
+It is easy to forget to write that main part.
+
+With new operator we can write or <?\* ?>, or <?= ?>, they are mutually
+exclusive, and we need specially write one or another. Safe variant
+becomes as easy as unsafe. And we need to write <?\* ?> almost
+everywhere.
+
+| 
+
+-  It is no place for such operators in the language
+
+| It is no place for a such operators in C++, or C#, or Java. But in the
+  most popular language for web-programming it is very place for such
+  operator. Even in the PHP source code the content outside the PHP tags
+  is designated as T_INLINE_HTML, not just T_EXTERNAL_CONTENT.
+| `zend_language_scanner.l <https://github.com/php/php-src/blob/8f39293b867ced224ae72d512f3e543b6e039bc8/Zend/zend_language_scanner.l#L1838>`__
+
+Maybe it would be better if operator ``<?= ?>`` performs HTML escaping,
+and raw data is output via ``<?php echo ?>`` Maybe if there were not
+operators for switching context between PHP and HTML, escaping operator
+would not be needed. But that is exactly what made PHP what it is. It is
+necessary or remove these operators completely or make them more safer
+and useful.
+
+And we already have similar operator in the language - \`backticks\` for
+shell_exec().
+
+| 
+
+-  You want to add new operator just for your needs
+
+| It's not only my needs for one project. I meet this problem in many
+  projects without template engine.
+| There are many discussions related to HTML escaping. Some feature
+  requests were created in 2002.
+
+-  http://marc.info/?t=145851323800001
+-  http://marc.info/?t=135082660600002
+-  http://marc.info/?t=144225546000001
+-  http://marc.info/?t=101129596100006
+-  http://wiki.php.net/rfc/escaper
+-  http://wiki.php.net/rfc/taint
+-  http://bugs.php.net/bug.php?id=62574
+-  http://bugs.php.net/bug.php?id=20310
+-  http://bugs.php.net/bug.php?id=16007
+-  http://bugs.php.net/bug.php?id=3284
+
+Also I have created the `article <https://habrahabr.ru/post/304162/>`__
+on russian technical site http://habrahabr.ru with the poll about this
+feature.
+
+Results at the moment of writing this RFC:
+
+::
+
+   How often do you work with the projects with template rendering on PHP
+   where template engines are not used?
+   35% (182)  Always
+   23% (116)  Quite often
+   19% (96)   Quite rare
+   23% (120)  Almost never
+
+   Voted 514 people. Abstained 121 people.
+
+
+   How do you think, such an operator would be useful?
+   56% (286)  Yes
+   44% (222)  No
+
+   Voted 508 people. Abstained 136 people.
+
+
+   I don't use PHP template rendering ...
+   50% (153)  and I think that such an operator is not needed
+   50% (151)  but I think that such an operator will come in handy
+
+   Voted 304 people. Abstained 272 people.
+
+| The results of the poll show that it is not only my need. About 60%
+  are "for" this operator, projects of others 40% will not be affected.
+| Maybe it would be good to create some official poll and to know
+  community opinion about it?
+
+Conclusion
+----------
+
+This operator allows to set default escaping, multiple contexts, and
+full control and customization, without any problems with autoloading.
+It is easy to use and has small amount of code. It does not change Zend
+VM opcodes and does not break any existing code. It can be used as a
+replacement for standard '<?= $str ?>' operator in the form like '<?\*
+$str, 'raw' ?>'.
+
+Also it will be useful for beginners, which don't know about HTML
+escaping or forget about it. If there will be special operator for
+HTML-safe output, beginners will use it, because this is simple.
+
+This small change can really improve a security and make development
+easier in many applications - all projects without template engine.
+
+Under discussion
+----------------
+
+What is under discussion:
+
+| Starting sign.
+| Last one is more comfortable to type.
+
+.. code:: php
+
+   <?* $a, $b ?>
+   <?: $a, $b ?>
+
+| Separator sign.
+| Maybe it should differ from standard <?= $a, $b ?> syntax to prevent
+  mistakes like <?= $a, 'html' ?> instead of <?\* $a, 'html' ?>. '|'
+  won't give error, but looks more similar to escaping in template
+  engines.
+
+.. code:: php
+
+   <?* $a , $b ?>
+   <?* $a | $b ?>
+   <?* $a |> $b ?>
+   <?: $a : $b ?>
+
+If to wrap functions in a class or namespace (fully qualified), to not
+clutter up a global namespace:
+
+.. code:: php
+
+   set_escape_handler()
+   restore_escape_handler()
+   escape_handler_call()
+
+   PHPEscaper::setEscapeHandler()
+   PHPEscaper::restoreEscapeHandler()
+   PHPEscaper::escapeHandlerCall()
+
+| 
+| Built-in contexts.
+| Default handler with built-in contexts can cause 'built-in' wrong work
+  of <?\* $str ?> constructions with one parameter in non-HTML contexts
+  like CSV or plain text. But maybe it would be enough to add a
+  possibility to fully unregister default handler.
+
+And also any names in source code or details of implementation, without
+changing main algorithm.
+
+| 
+
+What is not under discussion:
+
+| Multiple arguments.
+| ``<?* $a, 'js', 'html' ?>``
+| I think, it is enough that second argument can be any type, e.g. an
+  array.
+
+| Complicated syntax like ``<?*html*js= $str ?>``.
+| If we allow custom handlers, then we need runtime processing, so the
+  example above cannot be compiled into
+| ``<?= htmlspecialchars(json_encode($str)) ?>``
+| directly, and it will be something like
+| ``<?= escape_handler_call(escape_handler_call($str, 'html'), 'js') ?>``
+| I.e. we anyway need to pass context as a second argument, so why not
+  allow user to do this.
+
+Backward Incompatible Changes
+-----------------------------
+
+Does not break backward compatibility.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 7.x
+
+RFC Impact
+----------
+
+To Language Parser
+~~~~~~~~~~~~~~~~~~
+
+This is new operator, there will be the changes in the language parser.
+
+To Opcache
+~~~~~~~~~~
+
+Not sure but more likely none. It does not change Zend VM opcodes.
+
+To Existsing Applications/Extensions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There may be some applications or extensions which contains <?\* some
+text ?> as raw text in PHP template, or which have the same function
+names.
+
+Unaffected PHP Functionality
+----------------------------
+
+| This is new operator, all existing functionality will not be chagned.
+| There are no php.ini settings, no new Zend VM opcodes.
+
+Proposed Voting Choices
+-----------------------
+
+| Requires a 2/3 majority
+| Voting is open till August 6.
+
+Will this short tag / operator be useful for many people with the
+functionality described above?
+
+Question: Add new operator (short tag) for context-dependent escaping to next PHP 7.x?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+| 
+| Additional questions. Voting is not required if you have voted 'No' in
+  the first vote.
+
+Question: Is default handler required, with a possibility to fully unregister it?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+| 
+
+Question: Is it needed to wrap the functions into static class?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-2:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+| 
+
+Question: Is the comma suitable as a separation sign?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-3:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+| 
+
+Patches and Tests
+-----------------
+
+| Diff with changes:
+| https://github.com/michael-vostrikov/php-src/commit/ca149a3dfea71f529eb1647f2d0ed2b8d63e279d
+
+This is just a concept, to show main idea. All details of implementation
+can fully be changed, depending on discussion result.
+
+Implementation
+--------------
+
+References
+----------
+
+| Discussions:
+| http:*marc.info/?t=146619199100001
+  http:*\ marc.info/?t=146868366400003
+
+Diff with changes:
+
+-  Parser:
+   `zend_language_parser.y <https://github.com/michael-vostrikov/php-src/commit/ca149a3dfea71f529eb1647f2d0ed2b8d63e279d#diff-7eff82c2c5b45db512a9dc49fb990bb8R844>`__
+-  AST handler:
+   `zend_compile.c <https://github.com/michael-vostrikov/php-src/commit/ca149a3dfea71f529eb1647f2d0ed2b8d63e279d#diff-3a8139128d4026ce0cb0c86beba4e6b9R4122>`__
+-  escape_handler_call:
+   `cde.c <https://github.com/michael-vostrikov/php-src/commit/ca149a3dfea71f529eb1647f2d0ed2b8d63e279d#diff-a1a59a5452bf9df0fc5b58bc9fdb6a11R244>`__
+
+Rejected Features
+-----------------
+
+Additional Metadata
+-------------------
+
+:Original Authors: Michael Vostrikov michael.vostrikov@gmail.com
+:Slug: escaping_operator
+:Wiki URL: https://wiki.php.net/rfc/escaping_operator

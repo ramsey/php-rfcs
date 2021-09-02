@@ -1,0 +1,436 @@
+Immutable Classes And Properties
+================================
+
+:PHP-RFC: 0596
+:Title: Immutable Classes And Properties
+:Author: Silvio Marijic <marijic.silvio@gmail.com>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2018-02-19
+:Version: 0.2
+
+Introduction
+------------
+
+This RFC proposes the introduction of immutable classes and properties.
+Currently, the only way of achieving immutability is through
+encapsulation. Because of that, user-land applications are using third
+party libraries or resort to custom implementations, but there is still
+no easy enforcement of immutability. Introducing this feature would help
+bring one unified solution to this problem, and also it would remove
+unnecessary logic from user-land applications. If this mechanism is
+introduced, developers can be sure that they are programming with no
+side effects, meaning that state of the object can not be changed
+without developers being made aware. This is especially useful when
+dealing with concurrency, where we can guarantee that threads will
+always read the same value.
+
+**Pros**
+
+#. Immutability guaranteed by language instead of user-land
+   implementation.
+#. Programming with no side effects.
+#. Safe for concurrency.
+#. Value objects, DTO's etc. can be easily created.
+#. Properties can be public which removes the need for getters without
+   allowing state modification.
+#. (Please point it out more advantages)
+
+**Cons**
+
+#. Currently arrays on immutable properties are not supported.
+
+Proposal
+--------
+
+Immutable Class
+~~~~~~~~~~~~~~~
+
+A class defined as immutable will imply immutability across all of its
+properties by default. After the object is constructed, it is not
+possible to modify the state of the object from any scope.
+
+.. code:: php
+
+
+   immutable class Email {
+     public $email;
+
+     public function __construct ($email) {
+       $this->email = $email;
+     }
+   }
+
+   $email = new Email("foo@php.net");
+   $email->email = "bar@php.net" // Call will result in Fatal Error
+
+Changes to inheritance are made to add constraints when extending an
+immutable class - the child class must also be immutable in order to
+preserve immutability across the whole object.
+
+.. code:: php
+
+   immutable class Foo{}
+   class Bar extends Foo{} // Will result in Fatal Error
+
+Immutable Properties
+~~~~~~~~~~~~~~~~~~~~
+
+Classes have the ability to enforce immutability to only a subset of
+properties if needed, in that case, immutability will be implied only on
+properties that are declared as immutable.
+
+.. code:: php
+
+   class User {
+     private $id;
+     public immutable $email;
+
+     public function __construct ($id, $email) {
+       $this->id = $id;
+       $this->email = $email;
+     }
+   }
+
+If an immutable property contains an object, to preserve immutability,
+the object that is being assigned to the immutable property must also be
+immutable.
+
+.. code:: php
+
+   immutable class Email{}
+
+   class User {
+     public immutable $email;
+
+     public function __construct (Email $email) {
+       $this->email = $email;
+     }
+   }
+
+Resources are not allowed to be assigned to immutable properties because
+of fact that resources by nature are not immutable.
+
+.. code:: php
+
+   class File {
+     public immutable $handle;
+
+     public function __construct ($handle) {
+       $this->handle = $handle;
+     }
+   }
+
+   $file = new File(fopen('file.txt'));
+
+Arrays are not allowed to be assigned to immutable properties..
+
+.. code:: php
+
+   class A {
+     public immutable $x;
+
+     public function __construct ($x) {
+       $this->x = $x;
+     }
+   }
+
+   $a = new A(['foo']);
+
+If an immutable property of a parent class is overridden in a child
+class, it has to be declared as immutable. Since the focus of this RFC
+is immutable objects, having static properties in immutable classes will
+result in a compile error.
+
+References
+~~~~~~~~~~
+
+Assigning by references to immutable properties will result in an error,
+otherwise the object loses control over properties, and immutability can
+be broken.
+
+.. code:: php
+
+   immutable class Email {
+     public $email;
+
+     public function __construct ($email) {
+       // validation
+
+       $this->email = $email;
+     }
+   }
+
+   $email = new Email("foo@php.net");
+   $emailRef = &$email->email;
+   $emailRef = "bar@php.net" // Call will result in Fatal Error
+
+Comparison
+~~~~~~~~~~
+
+Identity of immutable object is based on its value. So two immutable are
+identical if they are of the same type and contain same value.
+
+.. code:: php
+
+   immutable class Email {
+     public $email;
+
+     public function __construct ($email) {
+       // validation
+
+       $this->email = $email;
+     }
+   }
+
+   $email1 = new Email("foo@php.net");
+   $email2 = new Email("foo@php.net");
+   var_dump($email1 === $email2); // bool(true)
+
+Examples
+--------
+
+Notice in above example, changing getters and setters methods to public
+properties is optional. They simply don't need to be protected anymore,
+in fact, immutable class objects are deeply frozen with exceptions on
+write.
+
+Every example shows where internal object state is important. Any
+references to objects passed into an immutable class constructor cannot
+be references to scalars or may be immutable class instances. That gives
+high guarantee you will keep internal state unchanged for all the time.
+
+--------------
+
+Money
+~~~~~
+
+Money Pattern, defined by Martin Fowler and published in Patterns of
+Enterprise Application Architecture, is a great way to represent
+value-unit pairs. It is called the Money Pattern because it emerged in a
+financial context.
+
+.. code:: php
+
+   class Currency {
+
+       private $centFactor;
+       private $stringRepresentation;
+
+       private function __construct(int $centFactor, string $stringRepresentation) {
+           $this->centFactor = $centFactor;
+           $this->stringRepresentation = $stringRepresentation;
+       }
+
+       public function getCentFactor() : int {
+           return $this->centFactor;
+       }
+
+       public function getStringRepresentation() : string {
+           return $this->stringRepresentation;
+       }
+
+       public static function USD() : Currency {
+           return new self(100, 'USD');
+       }
+
+       public static function EUR() : Currency {
+           return new self(100, 'EUR');
+       }
+   }
+
+   class Money {
+
+       private $amount;
+       private $currency;
+
+       public function __construct($amount, Currency $currency) {
+           $this->amount = $amount;
+           $this->currency = $currency;
+       }
+
+       public function getAmount() : float {
+           return $this->amount;
+       }
+
+       public function getCurrency() : Currency {
+           return $this->currency;
+       }
+
+       public function add(Money $other) : Money {
+           $this->ensureSameCurrencyWith($other);
+           return new Money($this->amount + $other->getAmount(), $this->currency);
+       }
+
+       public function subtract(Money $other) {
+           $this->ensureSameCurrencyWith($other);
+           return new Money($this->amount - $other->getAmount(), $this->currency);
+       }
+
+       public function multiplyBy($multiplier, $roundMethod = PHP_ROUND_HALF_UP) {
+           $product = round($this->amount * $multiplier, 0, $roundMethod);
+           return new Money($product, $this->currency);
+       }
+
+       private function ensureSameCurrencyWith(Money $other) {
+           if ($this->currency != $other->getCurrency()) {
+               throw new \Exception("Both Moneys must be of same currency");
+           }
+       }
+   }
+
+   $oneThousand = new Money(1000, Currency::USD());
+
+After refactoring classes to immutable this example will look like this:
+
+.. code:: php
+
+   immutable class Currency {
+
+       /** @var int */
+       public $centFactor;
+       /** @var string */
+       public $stringRepresentation;
+
+       private function __construct(int $centFactor, string $stringRepresentation) {
+           $this->centFactor = $centFactor;
+           $this->stringRepresentation = $stringRepresentation;
+       }
+
+       public static function USD() : Currency {
+           return new self(100, 'USD');
+       }
+
+       public static function EUR() : Currency {
+           return new self(100, 'EUR');
+       }
+   }
+
+   immutable class Money {
+
+       /** @var float */
+       public $amount;
+       /** @var Currency */
+       public $currency;
+
+       public function __construct(float $amount, Currency $currency) {
+           $this->amount = $amount;
+           $this->currency = $currency;
+       }
+
+       public function add(Money $other) : Money {
+           $this->ensureSameCurrencyWith($other);
+           return new Money($this->amount + $other->amount, $this->currency);
+       }
+
+       public function subtract(Money $other) {
+           $this->ensureSameCurrencyWith($other);
+           return new Money($this->amount - $other->amount, $this->currency);
+       }
+
+       public function multiplyBy($multiplier, $roundMethod = PHP_ROUND_HALF_UP) {
+           $product = round($this->amount * $multiplier, 0, $roundMethod);
+           return new Money($product, $this->currency);
+       }
+
+       private function ensureSameCurrencyWith(Money $other) {
+           if ($this->currency != $other->currency) {
+               throw new \Exception("Both Moneys must be of same currency");
+           }
+       }
+   }
+
+   $oneThousand = new Money(1000, Currency::USD());
+
+There is no need for getters because this internally immutable object is
+deeply frozen, and none of his properties cannot be written to anymore.
+All properties accept scalar values or objects which implement the
+immutable class, so there is high guarantee such Money object will keep
+its internal state untouched.
+
+Backward Incompatible Changes
+-----------------------------
+
+No backwardly incompatible changes.
+
+Proposed PHP Version(s)
+-----------------------
+
+To be discussed.
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+No SAPI impact.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+- Reflection is patched.
+
+To Opcache
+~~~~~~~~~~
+
+New Constants
+~~~~~~~~~~~~~
+
+No new constants.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+No changes for INI values.
+
+Open Issues
+-----------
+
+No open issues.
+
+Unaffected PHP Functionality
+----------------------------
+
+Future Scope
+------------
+
+Add support for arrays on immutable properties. Expand immutability to
+regular variables also.
+
+Proposed Voting Choices
+-----------------------
+
+Proposals require 2/3 majority
+
+Patches and Tests
+-----------------
+
+https://github.com/php/php-src/compare/master...smarijic:immutable-rfc
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+.. _references-1:
+
+References
+----------
+
+Rejected Features
+-----------------
+
+- Immutable interfaces
+
+Additional Metadata
+-------------------
+
+:Original Authors: Silvio Marijic marijic.silvio@gmail.com
+:Original Status: In Discussion
+:Slug: immutability
+:Wiki URL: https://wiki.php.net/rfc/immutability

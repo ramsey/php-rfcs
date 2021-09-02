@@ -1,0 +1,126 @@
+Internal Implementation Details For Property Accessors
+======================================================
+
+:PHP-RFC: 0187
+:Title: Internal Implementation Details For Property Accessors
+:Author: Clint Priest <phpdev at zerocue dot com>
+:Status: Unknown
+:Type: Unknown
+:Created: 2012-12-30
+:Version: 1.2
+
+Overview
+~~~~~~~~
+
+The current implementation of property accessors can be thought of as
+properties which have their read/write/isset/unset access guarded by
+accessor functions, the primary changes that permit this functionality
+to work are all within standard zend object handling function calls.
+
+The rest of the code changes are involved in compilation of the property
+accessor syntax, allowing for automatic implementation, etc.
+
+Finally a few functions were added to reflection to reflect on the new
+features.
+
+Memory Structure Changes
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Accessor information is stored as an array of zend_function pointers
+added to the zend_property_info structure.
+
+.. code:: c
+
+   typedef struct _zend_property_info {
+       /* ... */
+       union _zend_function **accs;
+   } zend_property_info;
+
+The memory space is only allocated for the array of pointers if a
+property has accessors.
+
+The correct accessor is referenced by using an enum value from the
+following new enum:
+
+.. code:: c
+
+   /* Offsets into zend_property_info->accs */
+   typedef enum {
+       ZEND_ACCESSOR_GET,
+       ZEND_ACCESSOR_SET,
+       ZEND_ACCESSOR_ISSET,
+       ZEND_ACCESSOR_UNSET,
+   } zend_acc_index;
+   #define ZEND_NUM_ACCESSORS 4
+
+The ``zend_function``\ s of the accessors have the ``ZEND_ACC_ACCESSOR``
+flag set.
+
+Compilation Changes
+~~~~~~~~~~~~~~~~~~~
+
+During compilation if a guarded property is parsed it will create the
+given property, allocate the function pointer array and begin parsing
+the accessor code within the context of a function.
+
+Note that these functions are not methods of the class entry and are
+only referenced through the zend_function pointers of the property_info
+structure, this also means that they may not be called directly by
+userland code, only through accessing the property using ordinary
+property access syntax.
+
+zend_object_handler.c Changes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each of the functions that handled read/write/isset/unset functionality
+checks to see if the property has accessors for the property and if so
+checks that there is an accessor for the specific action (read/write,
+etc) being performed and handles the situation accordingly.
+
+Much of the pre/post magic call code that \__get/__set/__isset/__unset
+used was refactored and centralized into their respective
+zend_std_call_*() functions. The new accessors also utilize these
+functions so that all pre/post condition handling is the same for
+accessors as they are for the magics.
+
+A new function flag was added ``ZEND_ACC_CALL_GUARD`` which flags a
+function as "being called and guarded," this was necessary to allow for
+parent accessors being able to be properly called. In the case of
+recursion with accessors a warning will be emitted if recursion is
+detected and that recursion is not called from the context of the
+validly scoped accessor.
+
+For example a get accessor is allowed to get it's own value and does not
+produce a warning, but instead the ordinary property access routines
+occur while attempts to read that property from a context other than the
+get accessor will emit a warning and the value will be returned as NULL.
+
+\* Error producing lines have been modified to produce a useful error
+report. For example: Cannot override final property getter
+TimePeriod::$Hours
+
+Static Accessors
+~~~~~~~~~~~~~~~~
+
+Static accessors were abandoned due to the unique way in which static
+properties are presently handled, it would require significant engine
+changes to facilitate at this time and is left for another RFC to
+refactor the static property handling to bring it more in line with
+existing zend_object_handlers.c code.
+
+Tests
+~~~~~
+
+Roughly 80 additional tests were added to test the new accessors
+functionality, they are stored in ~/Zend/tests/accessors
+
+Additional Metadata
+-------------------
+
+:Contributors: , Nikita Popov
+:Original Authors: Clint Priest <phpdev at zerocue dot com>
+:Rfc Document: `v1.2 Document <https://wiki.php.net/rfc/propertygetsetsyntax-v1.2>`__
+:Slug: propertygetsetsyntax-implementation-details
+:The Code For This Rfc Are Available Here: https://github.com/cpriest/php-src/tree/accessors
+:Updated: 2013-01-17
+:Wiki URL: https://wiki.php.net/rfc/propertygetsetsyntax-implementation-details

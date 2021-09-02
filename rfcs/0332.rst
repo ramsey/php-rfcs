@@ -1,0 +1,198 @@
+Native TLS
+==========
+
+:PHP-RFC: 0332
+:Title: Native TLS
+:Author: Anatol Belski <ab@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2014-11-19
+:PHP-Version: 7.0
+:Version: 1.0
+
+Introduction
+------------
+
+Currently, to access module globals in TS mode, a global resource array
+is used. That array contains globals from all the threads and per thread
+globals are identified by the thread key. The thread key is passed to
+every function requiring access to the globals. Or, it has to be fetched
+on demand. Consequently
+
+-  many functions have to take an additional argument used only in TS
+   mode, that makes code to be overloaded with TSRMLS_\* macros
+-  forgetting to declare/pass a TS parameter wouldn't do any harm in NTS
+   mode (as those are all macros), but may cause build breach in the TS
+-  additionally it might introduce some C89 incompatibility in NTS mode
+   when TSRMLS_FETCH() is used before var declarations
+-  in some cases TS related code has to be explicitly conditioned with
+   preprocessor directives (#ifdef ZTS)
+-  when the thread id isn't passed directly, TSRMLS_FETCH() has to be
+   used, which is slow
+
+This RFC bases on https://wiki.php.net/rfc/tls , however I don't mention
+it under the "First Published" position. While the key points are the
+same, the patch and the meaning undergone some changes. Still teh base
+RFC contains a lot of useful info about cross platform compatibility and
+various TLS implementations, so I would say it is useful to briefly read
+through it as well.
+
+Proposal
+--------
+
+The technique of passing thread id explicitly should be removed where
+possible. Ideally, one global thread specific variable should be used to
+hold the thread key (while it's not possible exactly the way on every
+platform, see the implementation details).
+
+The current patch focuses on stability and code quality improvement more
+than on performance. Whereby the latest tests show that the patched
+version is at least as fast as the mainstream.
+
+Backward Incompatible Changes
+-----------------------------
+
+-  thread id will not be passed explicitly anymore, many signatures have
+   to loose their TSRM_\* parts
+-  a few places with "#ifdef ZTS" have to be reworked to fetch the
+   thread key the new way
+
+Implementation details
+----------------------
+
+The current implementation is done by the following scheme
+
+#. all the TSRMLS_\* macros was made placebo
+#. TSRMG macro which is used to access the globals now can have two
+   variants
+
+   #. using the tsrm_tls_cache() function which fetches the thread
+      specific globals using the underlaying platform API (for example
+      pthreads on linux or windows specific on windows)
+   #. using a previously defined pointer which is global within a binary
+      unit and is updated per thread
+
+#. core was ported to use the static per binary unit cache (the second
+   variant above), the enablement was done step by step
+
+As also described in the base RFC, the main difficulty to make this
+process cross platform is that not every compiler (for instance Visual
+Studio) support sharing a thread specific variable between shared
+objects. For that reason, the function call to tsrm_get_ls_cache() is
+needed at least once per thread in order to work with the thread
+specific resources. Such an operation is needed to be done within every
+binary unit.
+
+In the patch, almost any macros accessing globals, like EG, CG, etc. are
+ported to use a local TSRMLS pointer which is static to that binary unit
+(i.e. shared extension or SAPI bin/dll/so). For that three steps are
+required
+
+#. defining a tsrmls cache holder for a binary unit
+   (ZEND_TSRMLS_CACHE_DEFINE macro)
+#. externing that pointer in a header file so other C files can use it
+   (ZEND_TSRMLS_CACHE_EXTERN macro)
+#. integrate a mechanism to update that pointer per thread and binary
+   unit (ZEND_TSRMLS_CACHE_UPDATE macro)
+
+These are also the steps required to port an extension/SAPI to be
+compatible with the patch. The porting was done step by step and the
+static TSRMLS cache is only enabled when ZEND_ENABLE_STATIC_TSRMLS_CACHE
+macro is defined from the config.\* script. Otherwise the method with
+dynamic cache fetching per tsrm_get_ls_cache() is used.
+
+**Currently all the ocurrencies with TSRMLS_\* macros evaluate to empty
+but left at their places, so then the diff shows the real change done.
+They are going to be removed once the RFC is accepted and before it was
+merged**
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP7
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+Threading capable SAPIs may need to be reworked. Currently it regards
+only to Apache mpm_worker and mpm_winnt. See implemtation details.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+See implementation details.
+
+To operating systems
+~~~~~~~~~~~~~~~~~~~~
+
+A potential incompatibility to not widely used operating systems can be
+introduced. Any Unix (like) OS using pthreads or other threads
+implementation supported by the TSRM layer, or any x86/x64 Windows
+system, are supported. That covers good 99% of the target OSes (please
+read the base RFC for more details).
+
+Open Issues
+-----------
+
+The patch from the base RFC used an offset mechanism instead of the
+array indexing to access globals. That part wasn't ported in the current
+patch as it has caused too much issues. This however should be still
+done as using offsets would speedup the data access.
+
+Unaffected PHP Functionality
+----------------------------
+
+Userland is not affected, the change is internals only.
+
+Future Scope
+------------
+
+-  faster data access using offsets instead of array indexes
+-  depending on compiler evolution, fetching thread id per function
+   could be replaced with a real global variable shared across all the
+   binary units (.so, .dll, .exe)
+
+Vote
+----
+
+Question: Native TLS
+~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+The vote starts on 12/10/2014 at 21:00 CET and ends on 12/17/2014 at
+21:00 CET. 50%+1 majority required.
+
+Patches and Tests
+-----------------
+
+-  http://windows.php.net/downloads/snaps/ostc/pftt/perf/results-20141028-master_r87c28cc-native_tls_r5747327-7146.html
+
+Implementation
+--------------
+
+-  http://git.php.net/?p=php-src.git;a=shortlog;h=refs/heads/native-tls
+-  http://windows.php.net/downloads/snaps/native-tls/
+
+References
+----------
+
+https://wiki.php.net/rfc/tls
+
+/*===== Rejected Features ===== Keep this updated with features that
+were discussed on the mail lists.*/
+
+Additional Metadata
+-------------------
+
+:Original Authors: Anatol Belski, ab@php.net
+:Original Status: Accepted
+:Slug: native-tls
+:Wiki URL: https://wiki.php.net/rfc/native-tls

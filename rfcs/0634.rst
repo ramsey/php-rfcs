@@ -1,0 +1,223 @@
+Permit Trailing Whitespace In Numeric Strings
+=============================================
+
+:PHP-RFC: 0634
+:Title: Permit Trailing Whitespace In Numeric Strings
+:Author: Andrea Faulds <ajf@ajf.me>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2019-03-06
+:Version: 1.0
+
+Technical Background
+--------------------
+
+The PHP language has a concept of *numeric strings*, strings which can
+be interpreted as numbers. This concept is used in a few places:
+
+-  Explicit conversions of strings to number types, e.g.
+   ``$a = "123"; $b = (float)$a; // float(123)``
+-  Implicit conversions of strings to number types, e.g.
+   ``$a = "123"; $b = intdiv($a, 1); // int(123)`` (if
+   ``strict_types=1`` is not set)
+-  Comparisons, e.g.
+   ``$a = "123"; $b = "123.0"; $c = ($a == $b); // bool(true)``
+-  The ``is_numeric()`` function, e.g.
+   ``$a = "123"; $b = is_numeric($a); // bool(true)``
+
+A string can be categorised in three ways according to its numericness,
+as `described by the language
+specification <https://github.com/php/php-langspec/blob/be010b4435e7b0801737bb66b5bbdd8f9fb51dde/spec/05-types.md#the-string-type>`__:
+
+-  A *numeric string* is a string containing only a
+   `number <https://github.com/php/php-langspec/blob/be010b4435e7b0801737bb66b5bbdd8f9fb51dde/spec/05-types.md#grammar-str-number>`__,
+   optionally preceded by whitespace characters. For example, ``"123"``
+   or ``"  1.23e2"``.
+-  A *leading-numeric string* is a string that begins with a numeric
+   string but is followed by non-number characters (including whitespace
+   characters). For example, ``"123abc"`` or ``"123 "``.
+-  A *non-numeric string* is a string which is neither a numeric string
+   nor a leading-numeric string.
+
+The difference between a numeric string and a leading-numeric string is
+significant, because certain operations distinguish between these:
+
+-  ``is_numeric()`` returns ``TRUE`` only for numeric strings
+-  Arithmetic operations (e.g. ``$a * $b``, ``$a + $b``) accept and
+   implicitly convert both numeric and leading-numeric strings, but
+   trigger the ``E_NOTICE`` “A non well formed numeric value
+   encountered” for leading-numeric strings
+-  When ``strict_types=1`` is not set, ``int`` and ``float`` parameter
+   and return type declarations will accept and implicitly convert both
+   numeric and leading-numeric strings, but likewise trigger the same
+   ``E_NOTICE``
+-  Type casts and other explicit conversions to integer or float (e.g.
+   ``(int)``, ``(float)``, ``settype()``) accept all strings, converting
+   both numeric and leading-numeric strings and producing 0 for
+   non-numeric strings
+-  String-to-string comparisons with ``==`` etc perform numeric
+   comparison if only both strings are numeric strings
+-  String-to-int/float comparisons with ``==`` etc type-juggle the
+   string (and thus perform numeric comparison) if it is either a
+   numeric string or a non-numeric string
+
+It is notable that while a numeric string may contain leading
+whitespace, only a leading-numeric string may contain trailing
+whitespace.
+
+The Problem
+-----------
+
+The current behaviour of treating strings with leading whitespace as
+more numeric than strings with trailing whitespace is inconsistent and
+has no obvious benefit. It is an unintuitive, surprising behaviour.
+
+The inconsistency itself can require more work from the programmer. If
+rejecting number strings from user input that contain whitespace is
+useful to your application — perhaps it must be passed on to a back-end
+system that cannot handle whitespace — you cannot rely on e.g.
+``is_numeric()`` to make sure of this for you, it only rejects trailing
+whitespace; yet simultaneously, if accepting number strings from user
+input that contain whitespace is useful to your application — perhaps to
+tolerate accidentally copied-and-pasted spaces — you cannot rely on e.g.
+``$a + $b`` to make sure of this for you, it only accepts leading
+whitespace.
+
+Beyond the inconsistency, the current rejection of trailing whitespace
+is annoying for programs reading data from files or similar
+whitespace-separated data streams:
+
+.. code:: php
+
+   <?php
+
+   $total = 0;
+   foreach (file("numbers.txt") as $number) {
+       $total += $number; // Currently produces “Notice: A non well formed numeric value encountered” on every iteration, because $number ends in "\n"
+   }
+   ?>
+
+Finally, the current behaviour makes `potential simplifications to
+numeric string handling </rfc/string_to_number_comparison>`__ less
+palatable if they make leading-numeric strings be tolerated in less
+places, because of a perception that a lot of existing code may rely on
+the tolerance of trailing whitespace.
+
+Proposal
+--------
+
+For the next PHP 7.x (currently PHP 7.4), this RFC proposes that
+trailing whitespace be accepted in numeric strings just as leading
+whitespace is.
+
+For the PHP interpreter, this would be accomplished by modifying the
+``is_numeric_string`` C function (and its variants) in the Zend Engine.
+This would therefore affect PHP features which make use of this
+function, including:
+
+-  `Arithmetic operators </rfc/invalid_strings_in_arithmetic>`__ would
+   no longer produce an ``E_NOTICE``-level error when used with a
+   numeric string with trailing whitespace
+-  The ``int`` and ``float`` type declarations would no longer produce
+   an ``E_NOTICE``-level error when passed a numeric string with
+   trailing whitespace
+-  Type checks for built-in/extension (“internal”) PHP functions would
+   no longer produce an ``E_NOTICE``-level error when passed a numeric
+   string with trailing whitespace
+-  The comparison operators will now consider numeric strings with
+   trailing whitespace to be numeric, therefore meaning that, for
+   example, ``"123  " == "  123"`` produces ``true``, instead of
+   ``false``
+-  The ``\is_numeric`` function would return ``true`` for numeric
+   strings with trailing whitespace
+-  The ``++`` and ``--`` operators woukd convert numeric strings with
+   trailing whitespace to integers or floats, as appropriate, rather
+   than applying the alphanumeric increment rules
+
+The PHP language specification's `definition of
+str-numeric <https://github.com/php/php-langspec/blob/master/spec/05-types.md#the-string-type>`__
+would be modified by the addition of ``str-whitespace``\ :sub:```opt```
+after ``str-number``.
+
+This change would be almost completely backwards-compatible, as no
+string that was previously accepted would now be rejected. However, if
+an application relies on trailing whitespace not being considered
+well-formed, it would need updating.
+
+RFC Impact
+----------
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Any extension using ``is_numeric_string``, its variants, or other
+functions which themselves use it, will be affected.
+
+To Opcache
+~~~~~~~~~~
+
+In the patch, all tests pass with Opcache enabled. I am not aware of any
+issues arising here.
+
+Unaffected PHP Functionality
+----------------------------
+
+This does not affect the filter extension, which handles numeric strings
+itself in a different fashion.
+
+Future Scope
+------------
+
+If adopted, this would make Nikita Popov's `PHP RFC: Saner string to
+number comparisons </rfc/string_to_number_comparison>`__ look more
+reasonable.
+
+I would also plan a second RFC in a similar vein to Nikita's, which
+would simplify things by removing the concept of leading-numeric
+strings: strings are either numeric and accepted, or non-numeric and not
+accepted.
+
+Proposed Voting Choices
+-----------------------
+
+Per the Voting RFC, there would be a single Yes/No vote requiring a 2/3
+majority.
+
+Patches and Tests
+-----------------
+
+A pull request for a complete PHP interpreter patch, including a test
+file, can be found here: https://github.com/php/php-src/pull/2317
+
+I do not yet have a language specification patch.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+Changelog
+---------
+
+-  2020-06-24: Take-over by George Peter Banyard with the consent of
+   Andrea Faulds
+-  2019-03-06, v1.0: First non-draft version, dropped the second
+   proposal from the RFC for now, I can make that as a follow-up RFC
+-  2019-02-07 (draft): Added proposal to remove “non-well-formed”
+   numeric strings at the suggestion of Nikita Popov, renamed to “Revise
+   trailing character handling for numeric strings”
+-  2017-01-18 (draft): First draft as “Permit trailing whitespace in
+   numeric strings”
+
+Additional Metadata
+-------------------
+
+:Original Authors: Andrea Faulds, ajf@ajf.me
+:Original Status: Superseded by George Peter Baynard's `PHP RFC: Saner numeric strings <https://wiki.php.net/rfc/saner-numeric-strings>`__ (partly based on this RFC), with permission.
+:Slug: trailing_whitespace_numerics
+:Wiki URL: https://wiki.php.net/rfc/trailing_whitespace_numerics

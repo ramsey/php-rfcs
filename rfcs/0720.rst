@@ -1,0 +1,500 @@
+Pipe Operator V2
+================
+
+:PHP-RFC: 0720
+:Title: Pipe Operator V2
+:Author: Larry Garfield <larry@garfieldtech.com>
+:Status: Declined
+:Type: Unknown
+:Created: 2020-04-20
+:Version: 2
+
+Introduction
+------------
+
+Code like the following is quite common in procedural code:
+
+.. code:: php
+
+   getPromotions(mostExpensiveItem(getShoppingList(getCurrentUser(), 'wishlist'), ['exclude' => 'onSale']), $holiday);
+
+That is ugly, error prone, and hard to read or maintain.
+
+Generally, breaking it up as follows will improve readability:
+
+.. code:: php
+
+   $user = getCurrentUser();
+   $shoppingList = getShoppingList($user, 'wishlist');
+   $mostExpensiveItem = mostExpensiveItem($shoppingList, ['exclude' => 'onSale']);
+   $promotions = getPromotions($mostExpensiveItem, $holiday);
+
+That, however, is still rather verbose and requires defining
+intermediary variables, and thus either coming up with names for them or
+using generic placeholder names like ``$x``. The result is still error
+prone and it is possible to get confused by the variable names without
+realizing it. It's also not intuitively obvious that what's happening is
+passing the output of one function to the next.
+
+In OOP, it's common to answer "well use a fluent interface," which might
+look like this:
+
+.. code:: php
+
+   $promotions = getCurrentUser()
+       ->getShoppingList('wishlist')
+       ->mostExpensiveItem(['exclude' => 'onSale'])
+       ->getPromotions($holiday);
+
+That's easier to read, but requires very specific methods on very
+specific objects, which are not always logical or possible to put there.
+
+This RFC aims to improve this type of code with the introduction of a
+"Pipe Operator," which is a common approach in many other languages.
+
+Proposal
+--------
+
+This RFC introduces a new operator ``|>``, "pipe". Pipe evaluates left
+to right by passing the value (or expression result) on the left as the
+first and only parameter to the callable on the right. That is, the
+following two code fragments are exactly equivalent:
+
+.. code:: php
+
+   $result = "Hello World" |> 'strlen';
+
+.. code:: php
+
+   $result = strlen("Hello World");
+
+For a single call that is not especially useful. It becomes useful when
+multiple calls are chained together. That is, the following two code
+fragments are also exactly equivalent:
+
+.. code:: php
+
+   $result = "Hello World"
+       |> 'htmlentities'
+       |> 'str_split'
+       |> fn($x) => array_map('strtoupper', $x)
+       |> fn($x) => array_filter($x, fn($v) => $v != 'O');
+
+.. code:: php
+
+   $result = array_filter(
+       array_map('strtoupper', 
+           str_split(htmlentities("Hello World"))
+           ), fn($v) => $v != 'O'
+       );
+
+The left-hand side of the pipe may be any value or expression. The
+right-hand side may be any valid PHP callable that takes a single
+parameter, or any expression that evaluates to such a callable.
+Functions with more than one required parameter are not allowed and will
+fail as if the function were called normally with insufficient
+arguments. If the right-hand side does not evaluate to a valid callable
+it will throw an Error.
+
+Language theory
+---------------
+
+The pipe operator is a form of function composition. Function
+composition is a basic, fundamental feature of functional programming
+and functional languages. However, it is also comfortable within
+object-oriented languages as a general tool to pass data from one
+function (or method) to another without intermediary variables or ugly
+nesting.
+
+It also cleanly enables "point-free style", an approach to programming
+that limits the use of unnecessary intermediary variables. Point-free
+style has been gaining popularity in JavaScript circles, so will be
+familiar to JavaScript developers using that style.
+
+Callable syntax
+---------------
+
+Pipes support any callable on the right hand side, using any callable
+syntax supported by PHP now or in the future. As of 8.0, that is
+unfortunately not a particularly strong list. However, over time that
+should improve, such as via the `First-class callable
+syntax </rfc/first_class_callable_syntax>`__ RFC.
+
+Should a version of `Partial Function
+Application </rfc/partial_function_application>`__ be adopted in the
+future, that would also integrate nicely with pipes with no further
+effort.
+
+The examples below largely assume that the first-class-callable RFC has
+passed, which as of this writing appears guaranteed.
+
+Additionally, functions that return callables may be used to
+conveniently produce pipe-compatible callables. The following example
+includes some obvious examples.
+
+Alternate comprehension syntax
+------------------------------
+
+A prior RFC proposed a `dedicated syntax for array
+comprehensions </rfc/comprehensions>`__. The pipe operator would also
+address that use case, in combination with a few user-space functions
+(which the RFC author pledges to write and maintain a library for). For
+example:
+
+.. code:: php
+
+   // array_map() but for any iterable.
+   function itmap(callable $c) {
+     return function(iterable $it) use ($c) {
+       foreach ($it as $val) {
+         yield $c($val);
+       }
+     };
+   }
+
+   // array_filter() but for any iterable.
+   function itfilter(callable $c) {
+     return function(iterable $it) use ($c) {
+       foreach ($it as $val) {
+         if ($c($val)) {
+           yield $val;
+         }
+       }
+     };
+   }
+
+   // count(), but runs out an iterator to do so.
+   function itcount(iterable $it) {
+     $count = 0;
+     foreach ($it as $v) {
+       $count++;
+     }
+     return $count;
+   }
+
+And now comprehension-like behavior can be written using pipes, without
+the need for a dedicated syntax.
+
+.. code:: php
+
+   $list = [1, 2, 3, 4, 5];
+
+   $new_list = $list
+     |> itmap(fn($x) => $x * 2)
+     |> itfilter(fn($x) => $x % 3)
+     |> iterator_to_array(...);
+
+Any combination of map, filter, reduce, or other array-oriented
+operation can be wrapped up this way and added to a pipe chain, allowing
+a similar result to comprehensions without a one-off syntax, and can be
+mixed-and-matched with any other callable as appropriate.
+
+String-oriented functions would be equally easy to produce. They would
+also serve to essentially eliminate the needle/haystack question (when
+used with an appropriate utility function), by splitting the call into
+two: One to capture the non-array/string arguments, and one to just take
+the array/string and apply it.
+
+Additional semantics
+--------------------
+
+Functions that accept their first parameter by reference are allowed, as
+are functions that return by reference. They will behave semantically
+the same as if they were passed a variable by reference or returned a
+variable by reference via a "normal" call. In practice, however,
+reference variables are of little use in pipes so this is more of a
+design artifact than design intent.
+
+When evaluating a pipe, the left-hand side is fully evaluated first,
+then the right-hand side, then the right-hand side is invoked using the
+left-hand side. That is, evaluation is strictly left-to-right.
+
+The pipe operator evaluates immediately. It does not produce a new
+function. However, it is simple to produce a new function by writing an
+arrow function:
+
+.. code:: php
+
+   $array_op = fn(iterable $list) => $list
+     |> itmap(fn($x) => $x * 2)
+     |> itfilter(fn($x) => $x % 3)
+     |> iterator_to_array(...);
+     
+   $result = $array_op([1, 2, 3, 4, 5]);
+
+Further examples
+----------------
+
+Given the utilities above, the following examples would all be valid.
+
+.. code:: php
+
+   // Take a string, sanitize it, 
+   // split it to an array, 
+   // upper-case everything, 
+   // and remove the letter O.
+   $result = "Hello World"
+       |> htmlentities(...)
+       |> str_split(...)
+       |> itmap(strtoupper(...))
+       |> itfilter(fn($v) => $v != 'O');
+
+The example from the start of this RFC could be written as:
+
+.. code:: php
+
+   $holiday = "Lincoln's Birthday";
+   $result = getCurrentUser()
+      |> getShoppingList('wishlist')
+      |> mostExpensiveItem(['exclude' => 'onSale'])
+      |> getPromotions($holiday);
+
+For a more robust example, the following routine would, given a
+directory, give a line count of all files in the directory tree that
+have a specific extension. (Thanks to Levi Morrison for this example.)
+
+.. code:: php
+
+   function nonEmptyLines(\SplFileInfo $file): iterable {
+     try {
+       $object = $file->openFile("r");
+       $object->setFlags(\SplFileObject::SKIP_EMPTY);
+       yield from $object;
+     } catch (\Throwable $error) {
+       // File system error handling irrelevant for the moment.
+     }
+   };
+
+   function getLineCount(string $directory, string $ext): int {
+     return new RecursiveDirectoryIterator('.')
+       |> fn($x) => new RecursiveIteratorIterator($x)
+       |> itfilter(fn ($file) => $file->getExtension() == $ext)
+       |> itmap(nonEmptyLines(...))
+       |> itcount(...)
+     ;
+   }
+
+   print getLineCount('foo/bar/baz', 'php');
+
+Prior art
+---------
+
+A previous RFC, `Pipe Operator
+v1 <https://wiki.php.net/rfc/pipe-operator>`__ from 2016 by Sara Golemon
+and Marcelo Camargo, proposed similar functionality. Its primary
+difference was to model on Hack, which allowed an arbitrary expression
+on the right-hand side and introduced a new ``$$`` magic variable as a
+placeholder for the left-hand side. While promising, the v2 authors
+concluded that short-lambdas made a custom one-off syntax unnecessary.
+The semantics proposed here are more consistent with most languages that
+offer a pipe operator.
+
+Additionally, the comprehension-esque usage noted above would be
+infeasible with a non-callable right hand side.
+
+Portions of this RFC are nonetheless based on the previous iteration,
+and the author wishes to thank the v1 authors for their inspiration.
+
+Existing implementations
+------------------------
+
+Multiple user-space libraries exist in PHP that attempt to replicate
+pipe-like behavior. All are clunky and complex by necessity compared to
+a native solution, but demonstrate that there is desire for pipeline
+behavior.
+
+-  The PHP League has a
+   `Pipeline <https://pipeline.thephpleague.com/>`__ library that
+   encourages wrapping all functions into classes with an ``__invoke()``
+   method to allow them to be referenced, and using a ``->pipe()`` call
+   for each step.
+-  Laravel includes a
+   `Illuminate/Pipeline <https://github.com/illuminate/pipeline>`__
+   package that has an `even more cumbersome
+   syntax <https://agoalofalife.medium.com/pipeline-and-php-d9bb0a6370ca>`__.
+-  The `PHP Standard Library <https://github.com/azjezz/psl>`__ (PSL)
+   library includes a `pipe
+   function <https://github.com/azjezz/psl/blob/1.8.x/src/Psl/Fun/pipe.php>`__,
+   though it is more of a function concatenation operation.
+-  `Sebastiaan
+   Luca <https://github.com/sebastiaanluca/php-pipe-operator>`__ has a
+   pipe library that works through abuse of the ``__call`` method. It
+   only works for named functions, I believe, not for arbitrary
+   callables.
+-  Various blogs speak of "the Pipeline Pattern" (`for
+   example <https://medium.com/@aaronweatherall/the-pipeline-pattern-for-fun-and-profit-9b5f43a98130>`__)
+
+Those libraries would be mostly obsoleted by this RFC, with a more
+compact, more universal, better-performing syntax.
+
+Comparison with other languages
+-------------------------------
+
+Several languages already support a pipe operator, using similar or
+identical syntax. In practice, the semantics proposed here are closest
+to Elixir and F#.
+
+Hacklang
+~~~~~~~~
+
+Hack has `very similar
+functionality <https://docs.hhvm.com/hack/expressions-and-operators/pipe>`__,
+also using the ``|>`` operator. However, in Hack the operator's
+right-hand side is an arbitrary expression in which a special
+placeholder, ``$$`` is used to indicate where the left-hand side should
+be injected. Effectively it becomes a one-off form of partial
+application.
+
+That is atypical among languages with such functionality and introduces
+additional questions about what sigil to use and other implementation
+details. The RFC authors believe that a fully-fleshed out partial
+function application syntax (in a separate RFC) is superior, and
+integrates cleanly with this RFC.
+
+The Hack syntax was the subject of the `v1 Pipe Operator
+RFC <https://wiki.php.net/rfc/pipe-operator>`__.
+
+Haskell
+~~~~~~~
+
+Haskell has a `function concatenation
+operator <https://wiki.haskell.org/Function_composition>`__, ``.``.
+However, its semantics are backwards. ``reverse . sort`` is equivalent
+to ``reverse(sort())``, not to ``sort(reverse())`` It also returns a new
+composed callable rather than invoking immediately.
+
+The inverse ordering is more difficult to reason about, and unfamiliar
+for PHP developers. The ``.`` operator itself would also cause confusion
+with the string concatenation operator, especially as strings can be
+callables. That is:
+
+.. code:: php
+
+   'hello' . 'strlen'
+
+Could be interpreted as evaluating to "hellostrlen" or to int 5. For
+that reason the ``.`` operator is not feasible.
+
+Haskell also has a ``&`` operator, which is the "reverse application
+operator." Its semantics are essentially the same as described here,
+including listing functions "forward" rather than backward.
+
+F#
+~~
+
+F# has no less than four function composition operators: Pipe forward
+``|>``, Pipe back ``<|``, Compose forward ``>>`` and Compose back
+``<<``. The two pipe operators apply a value to a function, while the
+composer operator concatenates two functions to produce a new function
+that is the composition of the specified functions. The forward and back
+variants allow you to put the callable on either the left or right-hand
+side.
+
+The author decided that supporting both forward and back versions was
+too confusing. Additionally, a concatenation operator is unnecessary
+since users can simply form a short-lambda closure themselves.
+
+That is, this RFC proposes an equivalent of only the "pipe forward"
+operator.
+
+Elixir
+~~~~~~
+
+`Elixir has a pipe
+operator <https://elixirschool.com/en/lessons/basics/pipe-operator/>`__,
+``|>``, using essentially the same semantics as described here.
+
+Ruby
+~~~~
+
+`Ruby
+2.6 <https://www.ruby-lang.org/en/news/2018/12/25/ruby-2-6-0-released/>`__
+added a similar syntax, although more akin to F#'s compose forward and
+compose back operators.
+
+Javascript
+~~~~~~~~~~
+
+A pipeline operator ``|>`` has been `proposed for
+Javascript <https://github.com/tc39/proposal-pipeline-operator/wiki>`__.
+As of this writing it is still in early stages and no implementations
+support it, but it may get accepted in the future. The semantics are
+essentially the same as described here.
+
+OCaml
+~~~~~
+
+OCaml includes a `Composition
+operator <https://riptutorial.com/ocaml/example/22018/composition-operators>`__,
+following its common implementation in user-space. It also is denoted
+``|>``, and its semantics are essentially the same as described here.
+
+Future Scope
+------------
+
+This RFC suggests a number of additional improvements. They have been
+left for future work so as to keep this RFC focused and
+non-controversial. Should this RFC pass the authors intend to attempt
+these follow up improvements. (Assistance in doing so is quite welcome.)
+
+\* Generic partial function application. While the prior RFC was
+declined due to its perceived use cases being insufficient to justify
+its complexity, increased use of pipes will likely provide sufficient
+justification. (Alternatively, a less complex implementation might be
+found.)
+
+\* Iterable right-hand side. The pipe operator as presented here can
+only be used in a hard-coded fashion. A possible extension is to support
+an iterable of callables on the right-hand side, allowing for a
+runtime-defined pipeline.
+
+\* A ``__bind`` method or similar on objects. If implemented by an
+object on the left-hand side, the right-hand side would be passed to
+that method to invoke as it sees fit. Effectively this would be operator
+overloading, which could be part of a second attempt at full operator
+overloading or a one-off magic method. It could also be implemented as a
+separate operator instead, for clarity. Such a feature would be
+sufficient to support arbitrary monadic behavior in PHP in a
+type-friendly way.
+
+These options are mentioned here for completeness and to give an
+indication of what is possible, but are \*not\* in scope and are \*not\*
+part of this RFC at this time.
+
+Proposed PHP Version(s)
+-----------------------
+
+8.1
+
+Backward compatibility issues
+-----------------------------
+
+None.
+
+Proposed Voting Choices
+-----------------------
+
+Adopt the Pipe Operator yes/no? Requires a 2/3 majority.
+
+Question: Pipe Operator
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+PR is available here: https://github.com/php/php-src/pull/7214
+
+(It's my first PHP PR. Please be gentle.)
+
+Additional Metadata
+-------------------
+
+:Original Authors: Larry Garfield larry@garfieldtech.com
+:Slug: pipe-operator-v2
+:Wiki URL: https://wiki.php.net/rfc/pipe-operator-v2

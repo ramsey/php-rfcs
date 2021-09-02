@@ -1,0 +1,696 @@
+Precise Session Management
+==========================
+
+:PHP-RFC: 0393
+:Title: Precise Session Management
+:Author: Yasuo Ohgaki <yohgaki@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2015-03-21
+:Version: 1.7
+
+Introduction
+------------
+
+This proposal fixes session management design issue. Session ID
+management requires more precise management. Otherwise,
+
+-  Outstanding session is lost randomly.
+-  Session ID cookie becomes empty randomly and session is lost.
+-  Increase risks of stolen session.
+
+Keeping HTTP session as secure as possible is what the session manager's
+task. **Session manager can improve HTTP session security and stability
+while keeping compatibility for most existing applications.** Please
+note that this RFC is for session manager behavior. Fundamental session
+module design is good enough. It's modular and extensible.
+
+Please note that this RFC solves many race conditions in session
+management. However, this RFC does not aim to resolve all race
+conditions. Refer to "Open Issues" for this.
+
+TL;DR;
+~~~~~~
+
+This RFC solves session_regenerate_id() problems and adds session abuse
+mitigation.
+
+-  Solve random lost session.
+-  Solve session ID being null string randomly.
+-  Add stolen session access mitigation.
+
+   -  Disable access to obsolete(old/expired) session data.
+   -  Allow to detect abuse of stolen session. (False positive could
+      occur, but it should be rare.)
+   -  Disallow keep stolen session forever
+
+      -  Add automatic session ID regeneration.
+      -  Disallow use of uninitialized session ID by default.
+
+In other words, above problems happen and PHP does not have the
+protection/mitigation currently.
+
+Followings will be added/changed to achieve above.
+
+-  Add session module internal data to stored session data.
+-  Keep obsolete(old/expired) session alive for certain period.
+   (Consider obsolete session data is valid for short period.)
+-  Store old session IDs. (Old session IDs may be required for CSRF
+   protection, etc)
+-  Manage session expiration time stricter manner.
+-  Raise error for obsolete(old/expired) session data access.
+-  Regenerate session ID for certain period.
+-  Use more secure INI. Use strict mode by default.
+   (session.use_strict_mode=1)
+
+This RFC also includes minor security improvements like httponly cookie,
+better hash function. Most applications do not have to have access to
+session cookies. MD5 hash is too obsolete.
+
+session_regenerate_id() problems
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+session_regenerate_id() is used to generate new session ID. It's better
+to delete old session data to reduce risk of session hijack. However,
+session_regenerate_id() leaves old session data by default currently.
+(i.e. session_regenerate_id(FALSE) is the default) Old session data is
+active and usable until GC.
+
+Old session is left active for reliable session ID
+regeneration/deletion. Examples are:
+
+-  Browsers connect to web server with multiple connections. When a
+   session ID data is removed, server sends multiple new session ID
+   cookies at once. This causes client side race condition result in
+   empty cookies and lost sessions. i.e. **Session data cannot be
+   removed immediately by client side reason.**
+-  Most save handlers cannot serialize (serialize here means RBMS's
+   serializable transaction isolation level, etc. Not data
+   serialization) session data requests. Clients get empty session data
+   for request immediately after session data removal. To prevent this,
+   save handlers must have serializable transaction, but many handlers
+   lack the feature. i.e. **Session data cannot be removed immediately
+   by server side reason.**
+-  Mobile network may lose radio, may have hand over, etc. i.e. Server
+   sends new session ID cookie, but client may not get it. i.e.
+   **Session data cannot be removed immediately by network reason.**
+-  Large network providers have multiple gateways for off loading
+   traffic and packets may arrive out of order. i.e. **Session data
+   cannot be removed immediately by network reason.**
+
+For reliable session ID regeneration, only short TTL for old session
+(few seconds for wired connections, few minutes for mobile connections)
+is mandatory and enough for stable HTTP session management.
+(Alternatively, server may ask browser to reload page a little later.
+This approach would not be acceptable because of increased response
+time. It still has higher chances of random lost session also.)
+
+Session ID can be stolen various ways. Therefore, session ID should be
+renewed periodically to reduce risk of stolen sessions.
+
+**Leaving old session opens window to attacker widely:** Mandatory
+Protection
+
+#. Old session lives long term and never expires if there is access to
+   it. i.e. Attacker may abuse stolen session forever.
+#. There is no mechanism to detect possibles attack even if session
+   manager may detect attacks.
+
+**Counter measure for session hijack:** Mandatory Protection
+
+#. Session ID regeneration must be reliable.
+#. Make sure old session is deactivated/deleted after certain period.
+#. Raise error/exception for invalid access. (Raise error for should be
+   deleted session access)
+
+**Problem of immediate old session deletion:** Mandatory Requirment
+
+#. Make session ID regeneration unreliable. i.e.
+   session_regenerate_id(TRUE) randomly destroy session data and/or
+   browsers sent empty session ID. See referenced bug reports.
+   (Unacceptable)
+#. Remove alarm for possible attacks. (No detection = Insecure)
+#. Cannot prevent race conditions.
+
+**"Make sure old session is deleted certain period"** and **"Raise
+error/exception for invalid access"** provides much better security as
+well as stability than current way (leave obsolete session invalidation
+to probability based GC) or immediate deletion.
+
+Errors for accessing invalid session may be raised for either legitimate
+user or attacker. If error is raised for legitimate user, legitimate
+user could know they are under attack. (Possibly network is dangerous or
+app has vulnerability or their network connection was too bad) If error
+is raised for attacker, attacker could know their illegal access might
+be caught.
+
+Session storage which does not support serializable transaction cannot
+prevent race condition on immediate deletion. For example, files save
+handler locks session data file and if other request try to read it, it
+waits unlock. If session_regenerate_id(TRUE) is called, file is unlocked
+and unlinked. Later request end up with empty session data that results
+in loss of $_SESSION content. RBDMS based storage can issue transaction
+error and may ask browser to resend request with new session ID, but it
+is difficult for storage supports only simple lock. Resend request has
+problem also. For instance, new request which does not have active
+session may result issuing multiple cookies at once. This may cause
+client side race condition. i.e. Empty session ID cookies.
+
+Session Expiration Problems
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Current session expiration is not precise as it depends on probability
+for deletion, 1/1000 probability by default.
+session_regenerate_id(FALSE) is affected directly by this. Obsolete(old)
+session data is left for GC.
+
+Since session module should not delete old session data immediately,
+session module leave old session removal to GC by default. As a result,
+invalid old session may alive as long as it is accessed.
+
+Session expiration should be more precise. Obsolete session data must be
+removed few seconds to few minutes later.
+
+Risks of stolen session
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Stealing session ID is easy regardless of HTTPS. Attacker can set up
+fake router by ARP spoofing. Most networks do not have ARP spoofing
+prevention, even detection. For HTTP, attacker can view session ID
+simply. For HTTPS, attacker can set up transparent HTTPS stripping proxy
+and steal session ID. Most users do not care much if they are connecting
+via HTTPS or not. This kind of attacks can be done by existing tools.
+i.e. Script kiddies' task. If you are curious, search
+`YouTube <https://www.youtube.com/results?search_query=arp%20spoofing%20tutorial&sm=3>`__
+or net. HTTPS stripping proxy is real threat, so large sites adopt HSTS
+as the protection. Unfortunately, HSTS is not adopted widely.
+
+Attack described is rather advanced method. Current PHP session is too
+weak for simple exploits even with TLS/SSL. For example, there are many
+enterprise networks that sniff TLS/SSL traffic without TLS/SSL warnings.
+Stealing session ID is trivial for admins. If psychical access to device
+is possible, stealing session ID is trivial also. It is just a matter of
+displaying session cookie and take picture of it, then abuse it later.
+
+It is also trivial to set unchangeable cookies to browser. If
+application has JavaScript injection vulnerability, attacker can set
+unchangeable cookie and steal session forever without detection when
+session.use_strict_mode=0. If application does not have stolen session
+protection by JavaScript injections, session_regenerate_id() is mostly
+useless as a stolen session protection.
+
+Uninitialized session ID is rejected by default, session ID is
+regenerated periodically by default, obsolete session data is expired
+precisely and session module raises error for expired session data
+access with this RFC. Therefore, above attacks can be
+prevented/detected.
+
+This is known design issue for a long time
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Even if there is only recent bug report for this, this bug is known for
+a long time.
+
+-  https://bugs.php.net/bug.php?id=69127
+-  https://bugs.php.net/bug.php?id=68063
+-  https://bugs.php.net/bug.php?id=70584
+
+When session_regenerate_id(TRUE) (remove old session data immediately)
+is called, it causes problems like above bug reports. When
+session_regenerate_id(FALSE) is called, it causes problems such as keep
+using old session ID, session abuse being undetectable.
+
+Proposal
+--------
+
+Based on the fact that
+
+-  Old session data cannot be deleted immediately.
+-  Obsolete old session data must be removed by reliable manner.
+
+This RFC proposes followings
+
+-  Add transparent Session module internal array data
+   $_SESSION['__PHP_SESSION__'] to keep access time stamp, etc. Note:
+   This array could be used to store data for automatic CSRF protection
+   in the future also.
+-  Add session.ttl INI (Default 1800 seconds) Take over the purpose of
+   session.gc_maxlifetime.
+-  Add session.ttl_update INI (Default 300 seconds. Last access time
+   stamp update frequency)
+-  Add session.ttl_destroy INI (Default 300 seconds. Session destroy
+   TTL)
+-  Add session.regenerate_id INI (Default 18 hours in seconds. Time to
+   automatic session ID regeneration)
+-  Add session.num_sids INI (Default 8. Number of stored session IDs in
+   session internal data)
+-  Add session_info() function that returns internal data.
+-  Add session_gc() function for periodic GC task.
+-  Remove immediate old session data deletion from
+   session_regenerate_id().
+-  Make immediate session destroy by session_destroy() optional.
+-  Make sure old session becomes unusable after certain period.
+-  [STRIKEOUT:Reject null string session ID.] (Already fixed as bug fix)
+-  Use stronger/more secure settings. Use strict mode by default
+   (Mandatory. Disallows stealing session forever). Use httponly cookie
+   by default. Use SHA1 as hash (and use 5 bits for hashed value string
+   for better compatibility)
+
+How session_regenerate_id() will work
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Session manager sets following data when there is session data should be
+deleted. i.e. session_regenerate_id() is called.
+
+Obsolete session data has NEW_SID and it is valid upto
+"UPDATED+session.ttl_destroy".
+
+.. code:: php
+
+     $_SESSION['__PHP_SESSION__']['NEW_SID'] = <new session ID>;
+
+New session data has CREATED, UPDATED, SIDS.
+
+.. code:: php
+
+     $_SESSION['__PHP_SESSION__']['CREATED'] = time();
+     $_SESSION['__PHP_SESSION__']['UPDATED'] = time();
+     $_SESSION['__PHP_SESSION__']['SIDS'] = array('SESS ID1', 'SESS ID2');
+
+Under normal session usage, $_SESSION['__PHP_SESSION__'] is checked/used
+as follows in php_session_initialize(). The "entry" variable which is
+zval stores $_SESSION['__PHP_SESSION__'] content.
+
+.. code:: c
+
+   /* Handle internal session data */
+   entry = zend_hash_str_find(Z_ARRVAL_P(Z_REFVAL(PS(http_session_vars))),
+                      PSDK_ARRAY, sizeof(PSDK_ARRAY)-1);
+   if (entry) {
+       zval *new_sid, *created, *updated;
+
+       ZVAL_COPY(&PS(internal_data), entry);
+       if (php_session_validate_internal_data(&PS(internal_data)) == FAILURE) {
+           php_session_set_timestamps(1);
+           /* Do not raise error for PHP7, but PHP 8 */
+           /*
+           php_error_docref(NULL, E_WARNING, "Broken internal session data detected. Broken data has been wiped");
+           */
+       }
+       zend_hash_str_del(Z_ARRVAL_P(Z_REFVAL(PS(http_session_vars))),
+               PSDK_ARRAY, sizeof(PSDK_ARRAY)-1);
+       new_sid = zend_hash_str_find(Z_ARRVAL(PS(internal_data)),
+               PSDK_NEW_SID, sizeof(PSDK_NEW_SID)-1);
+       created = zend_hash_str_find(Z_ARRVAL(PS(internal_data)),
+               PSDK_CREATED, sizeof(PSDK_CREATED)-1);
+       updated = zend_hash_str_find(Z_ARRVAL(PS(internal_data)),
+               PSDK_UPDATED, sizeof(PSDK_UPDATED)-1);
+
+       /* Check destroyed/regenerated session TTL is reached */
+       if (new_sid && Z_LVAL_P(updated) + PS(ttl_destroy) < now) {
+           switch (Z_TYPE_P(new_sid)) {
+               case IS_STRING:
+               php_error_docref(NULL, E_NOTICE,
+                "Obsolete session data access detected. Possible "
+                "security incident, but alert could be false positive. "
+                "(Decendant session ID: %s)", Z_STRVAL_P(new_sid));
+               /* Fall through */
+               case IS_NULL:
+                   php_session_destroy(-1);
+                   /* Back to active state */
+                   PS(session_status) = php_session_active;
+                   goto retry;
+                   break;
+               default:
+                   /* Should not happen */
+                   php_error_docref(NULL, E_ERROR,
+                        "Malformed NEW_SID: %d", Z_TYPE_P(new_sid));
+                   break;
+           }
+       } else if (Z_LVAL_P(updated) + PS(ttl) < now) {
+           /* Check newly created session TTL is reached */
+           php_session_destroy(-1);
+           /* Back to active state */
+           PS(session_status) = php_session_active;
+           goto retry;
+       }
+
+       /* Check regenerate ID is required */
+       if (PS(regenerate_id) > 0 && Z_LVAL_P(created) + PS(regenerate_id) < now) {
+           php_session_regenerate_id(0);
+           return;
+       }
+
+       if (!new_sid) {
+           /* Update outstanding session timestamps */
+           updated = zend_hash_str_find(Z_ARRVAL(PS(internal_data)),
+           PSDK_UPDATED, sizeof(PSDK_UPDATED)-1);
+           if (Z_LVAL_P(updated) + PS(ttl_update)  < now) {
+               php_session_set_timestamps(0);
+           }
+       } else {
+           /* Send new SID again if needed */
+           php_session_send_new_sid(new_sid);
+       }
+   } else {
+       /* Newly created session */
+       php_session_set_timestamps(1);
+   }
+
+User will not see $_SESSION['__PHP_SESSION__'] array as it is
+removed/added upon session data serialization internally by session
+module. User may get $_SESSION['__PHP_SESSION__'] contents via
+session_info() function.
+
+When session_regenerate_id()/session_destroy() is called, session module
+keeps old session up to ini_get('session.ttl_destroy').
+
+Users may add $_SESSION['__PHP_SESSION__']. When this is happened,
+session module raises E_WARNING and replace with the session internal
+data.
+
+Why session.ttl_destroy default is 300 seconds and configurable
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Session data may be lost when network connection is unstable. For
+example, when user enter elevator or subway, connection can be lost in a
+way that session data is lost. 300 seconds would be enough for most
+elevators. However, it may not be enough for subways. PHP developer may
+require longer TTL for better stability.
+
+Some PHP developers may want to be more stricter/shorter TTL even if it
+could result in lost session on occasions. They may set 30 seconds TTL
+which would be long enough for stable connection in most cases.
+
+Why session.regenerate_id default is 18 hours
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Shorter is better for stolen session abuse mitigation. However, many
+apps rely on "fixed session ID". Therefore, the default is set to rather
+long period. 18 hours is probably good enough for daily use.
+
+OWASP Mobile Top 10 recommends,
+
+   Good timeout periods vary widely according to the sensitivity of the
+   app, one's own risk profile, etc., but some good guidelines are:
+   15 minutes for high security applications
+   30 minutes for medium security applications
+   1 hour for low security applications
+
+https://www.owasp.org/index.php/Mobile_Top_10_2014-M9#Lack_of_Adequate_Timeout_Protection
+
+Why this is more secure than now
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Currently, users must call session_regenerate_id(FALSE) to have
+relatively stable session. Therefore, old session data is valid as long
+as it is accessed even if it should be discarded as invalid session.
+Attackers can take advantage of this behavior to keep stolen session
+forever, disabling GC by periodic access to stolen session.
+
+Since current session depends on probability based GC, low traffic site
+may keep obsolete session data for long period. This behavior helps
+attackers also.
+
+$_SESSION['*PHP_SESSION*'] data definition
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+-  $_SESSION['__PHP_SESSION__']['CREATED'] : Session data creation time.
+   Used for automatic session ID regeneration.
+-  $_SESSION['__PHP_SESSION__']['UPDATED'] : Update time. UNIX time.
+   Used for TTL management.
+-  $_SESSION['__PHP_SESSION__']['NEW_SID'] : New session ID generated by
+   session_regenerate_id(). If this is set, it means this session is
+   obsolete. New session ID string is set for regenerate ID. NULL is set
+   for destroyed.
+-  $_SESSION['__PHP_SESSION__']['NEW_SID_SENT'] : Set if NEW_SID is
+   resent to client. Used to prevent browser cookie storage race
+   condition. UNIX time.
+-  $_SESSION['__PHP_SESSION__']['SIDS'] : Stores previously used session
+   IDs up to 8 IDs. Number of stored old session IDs are defined by
+   session.num_sids INI.
+
+Change session_destroy()
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Accept bool parameter for session data removal.
+
+.. code:: php
+
+   bool session_destroy([bool $immediate_removal=FALSE]) 
+
+Add session_info()
+~~~~~~~~~~~~~~~~~~
+
+Returns session internal data array for session management.
+
+.. code:: php
+
+   array session_info(void) 
+
+Example return value.
+
+::
+
+   array(3) {
+     ["CREATED"]=>
+     int(%d)
+     ["UPDATED"]=>
+     int(%d)
+     ["SIDS"]=>
+     array(9) {
+       [2]=>
+       string(32) "%s"
+       [3]=>
+       string(32) "%s"
+       [4]=>
+       string(32) "%s"
+       [5]=>
+       string(32) "%s"
+       [6]=>
+       string(32) "%s"
+       [7]=>
+       string(32) "%s"
+       [8]=>
+       string(32) "%s"
+       [9]=>
+       string(32) "%s"
+       [10]=>
+       string(32) "%s"
+     }
+   }
+
+Add session_gc()
+~~~~~~~~~~~~~~~~
+
+Probability based expiration for obsolete sessions is no longer required
+with TTL time stamp. However, garbage will be left. Therefore, there
+should be GC API for cron task for instance.
+
+.. code:: php
+
+   int session_gc(void) // Returns number of deleted session data
+
+.. _add-session_info-1:
+
+Add session_info()
+~~~~~~~~~~~~~~~~~~
+
+Session ID may be used for security purposes such as CSRF protection,
+`input validation <secure_serialization>`__, etc. When session ID is
+regenerated, these protections may not work. This function returns array
+of session IDs where smallest numeric key is the oldest and stores up to
+8 IDs. Number of stored SIDs are configurable by session.num_sids INI.
+
+.. code:: php
+
+   array session_info(void) // Returns session internal data array 
+
+Add session.ttl
+~~~~~~~~~~~~~~~
+
+Even though session.gc_maxlifetime could be used for TLL, it is no
+longer proper INI for session expiration control. There should be proper
+INI for TTL value. session.gc_maxlifetime is there for systems that
+cannot perform periodic GC by session_gc() function.
+
+Backward Incompatible Changes
+-----------------------------
+
+-  If user script has \__PHP_SESSION_\_ key in $_SESSION, it may break
+   application.
+-  Raised errors for stricter session management may break application.
+-  Direct reading/decoding session data will see the \__PHP_SESSION_\_
+   data. There are 3rd party libraries that read/write PHP encoded
+   session data. New key may break apps use these libraries.
+-  Applications/Framework's tests may be broken by logic/data change.
+-  If old/new PHP is mixed, old PHP will see new PHP's internal data
+   structure.
+-  Although it is not recommended, user may rely on fixed session ID for
+   CSRF protections. Automatic session ID regeneration breaks these
+   applications. NOTE: Automatic session ID regeneration may be
+   disabled. (session.regenerate_id=0)
+-  JavaScript accesses session cookie may be broken. To enable access,
+   session.cookie_httponly=0.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.1
+
+SAPIs Impacted
+--------------
+
+-  None
+
+Impact to Existing Extensions
+-----------------------------
+
+-  Session
+-  Modules have session save handlers, session serialize handlers.
+
+New Constants
+-------------
+
+-  None
+
+php.ini Defaults
+----------------
+
+If there are any php.ini settings then list:
+
+-  hardcoded default values
+-  php.ini-development values
+-  php.ini-production values
+
+New
+
+-  "session.ttl = 1800" for all. (1800 seconds. Replaces
+   session.gc_maxlifetime. INI_ALL)
+-  "session.ttl_update = 300" for all. (300 seconds. TTL update
+   frequency. If TTL is updated for every request, lazy_write won't
+   work. INI_ALL)
+-  "session.ttl_destroy = 300" for all. (300 seconds. TTL value for
+   removing obsolete session. INI_ALL)
+-  "session.regenerate_id = 64800" for all. (64800 seconds (18 hours).
+   Time to automatic session ID regeneration. 0 for disable it. INI_ALL)
+
+Existing
+
+-  "session.gc_divisor = 5000" for all. Currently, 100 hardcoded, 1000
+   for development/production. Changed since less frequent GC is
+   required with new session management.
+-  "session.gc_maxlifetime = 3600" for all. Currently 1440. This value
+   should be larger than "session.ttl".
+-  "session.use_strict_mode = 1" for all. Currently 0. Initializing
+   session by uninitialized session ID allows attackers to abuse.
+-  "session.hash_function = 1" for all. Compiled default is 0 currently.
+   INIs' are 1.
+-  "session.hash_bits_per_characters = 5" for all. Compiled default is 4
+   currently. INIs' are 5.
+-  "session.cookie_httponly = 1" for all. Currently 0 for all.
+
+Open Issues
+-----------
+
+Open issues are supposed to be addressed before vote. However, a issue
+cannot be solved due to lack of a feature in server and client.
+
+This RFC resolves many race conditions in session management, it is
+important to note unresolved race condition. For example, this RFC does
+not resolve a race condition perfectly when session ID sent from server,
+but client didn't get it. This RFC only sends new session ID only once
+if this happened. It is possible that client misses second session ID
+sent.
+
+Such case may cause inconsistent session state because client will
+update old session until it gets new session ID.
+
+Currently there is no feasible way that synchronizes server and client
+data. To fix this issue, both server and client must have
+synchronization mechanism like distributed transaction. i.e. Reliable
+lock/transaction mechanism for both server and client. Without it, PHP
+has to rely on "eventually consistent" session management and this RFC
+does it as much as possible.
+
+Unaffected PHP Functionality
+----------------------------
+
+Other than session management, there is no affected functionality.
+
+Future Scope
+------------
+
+Fully automatic/site wide CSRF protection may be introduced with
+$_SESSION['__PHP_SESSION__'] and rewrite var feature.
+
+Vote
+----
+
+Requires 2/3 vote is required. Current RFC process does not require 2/3
+vote to pass. If there are solid and reasonable oppositions, it should
+be take into consideration to improve RFC/implementation. Please
+disclose the reason why if you oppose this RFC.
+
+Vote starts 2016-03-09-09:00(UTC) and ends 2016-03-23-09:00(UTC)
+
+Question: Precise Session Data Management
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+-  https://github.com/php/php-src/pull/1734
+
+References
+----------
+
+-  http://us3.php.net/session_regenerate_id
+-  https://bugs.php.net/bug.php?id=68063 (Bug report)
+-  https://bugs.php.net/bug.php?id=69127 (Bug report)
+-  https://bugs.php.net/bug.php?id=70584 (Bug report)
+-  https://bugs.php.net/bug.php?id=65746 (FR/Bug report)
+-  https://bugs.php.net/bug.php?id=11100 (FR)
+-  https://wiki.php.net/rfc/session-lock-ini#proposal_4_-_lazy_destroy
+   (Previous attempt)
+-  https://wiki.php.net/rfc/secure_serialization
+
+ChangeLog
+---------
+
+-  2016/01/31 - Add note for session.lazy_write.
+-  2016/01/29 - Use actual C code for logic.
+-  2016/01/25 - Remove TTL and TTL_UPDATE from *PHP_SESSION*.
+-  2016/01/23 - Remove session_ids() in favor of session_info()
+-  2016/01/22 - Added PR. Modified RFC according to PR.
+-  2016/01/14 - Added session storage race condition.
+-  2015/12/30 - Added session_ids() function.
+-  2015/12/24 - Include automatic session ID regeneration.
+-  2015/12/24 - Added TL;DR; section.
+-  2015/12/23 - Update RFC to use <nowiki>$_SESSION['*PHP_SESSION*']
+   array.
+-  2015/12/18 - Update RFC to use
+   <nowiki>$_SESSION['*SESSION_INTERNAL*'] array.
+-  2015/03/21 - Added new session ID handling.
+-  2015/03/20 - Change INI directive name.
+-  2014/03/19 - Add exception option as Stas suggested.
+-  2014/03/18 - Change RFC to propose time stamping.
+-  2013/10/30 - Added details and message option.
+-  2013/10/29 - Created RFC
+
+Additional Metadata
+-------------------
+
+:Date Created: 2013-10-30
+:Date Updated: 2016-01-29
+:First Published At: http://wiki.php.net/rfc/session_regenerate_id
+:Original Authors: Yasuo Ohgaki yohgaki@php.net
+:Renamed: https://wiki.php.net/rfc/precise_session_management
+:Slug: precise_session_management
+:Wiki URL: https://wiki.php.net/rfc/precise_session_management

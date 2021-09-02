@@ -1,0 +1,521 @@
+Class Friendship
+================
+
+:PHP-RFC: 0581
+:Title: Class Friendship
+:Author: Dustin Wheeler <mdwheele@ncsu.edu>
+:Status: Declined
+:Type: Unknown
+:Created: 2017-09-21
+:Version: 1.0.0
+
+Introduction
+------------
+
+Class Friendship allows a class to be better encapsulated by granting
+per-class access to protected members. Class Friendship is an explicit
+and concise expression of tight-coupling between collaborators that
+separates concerns delegated to a friended class for purposes of better
+encapsulation of behaviour. This affords developers an opportunity to
+better-model objects as behavioural "tell don't ask" units while
+explicating concerns like presentation through friendship. Class
+Friendship is a valuable expression for object modeling when used
+properly. It also has value in white-box testing as a tactical
+refactoring tool when approaching legacy applications.
+
+A common use-case for friendship here is separating presentation
+concerns from what would otherwise be a "tell don't ask" behavioral unit
+or write model. This can be applied in a variety of scenarios. Without
+this feature, developers are left with a trade-off of marking internal
+members public to make them available and sacrificing design
+opportunities towards the future. Another common occurrence is the
+addition of getters that simply proxy internal state and grow the public
+API of a unit by necessity. To be sure, this feature is not merely about
+pulling off "access to protected class members", but about modeling a
+semantic relationship between two collaborators. In fact, access to
+private and protected class members is already possible through closure
+scope "juggling" or use of ``debug_backtrace``, which can be difficult
+to reason-about. Both of these are included in references below. While
+it is technically possible to execute friend-like features in user-land,
+it would be preferable to concisely represent the relationship with a
+known and well-documented concept supported by the language.
+
+The purpose of the feature should not be conflated or confused with the
+goals of something like package-private classes or namespace visibility,
+in general. I feel those features apply more closely to the types of
+behaviors user-land sees in Symfony (and other framework) packages that
+mark members as ``@internal`` but are forced to make them public to
+share access between internal data structures. I don't necessarily feel
+that class friendship is the "Right Answer TM" in this case, but I think
+that the dance package developers currently have to do to express "don't
+use this property, we use this internally to help you" is worth
+improving.
+
+Proposal
+--------
+
+Support for class friendship is added through a new keyword, ``friend``.
+It allows per-class access to protected members as follows:
+
+Basic Usage
+~~~~~~~~~~~
+
+A subject class may declare another class a friend through the use of a
+new ``friend`` keyword similar to how Trait syntax works. This enables
+the named friend class access to protected members of the subject. There
+are other properties of Class Friendship, as implemented in C++. These
+properties are described below.
+
+C++ implements Class Friendship such that friends have access to both
+private and protected members. `In discussing this implementation
+detail <https://marc.info/?l=php-internals&m=144972388219786&w=2>`__,
+there was concern that allowing unfettered access to all members risks
+exposing intentionally hidden implementation details local to a given
+unit whereby a developer absolutely did not want the given property
+accessible by any means other than the subject class. This RFC suggests
+that friend classes in PHP only have access to protected and higher
+members.
+
+Below, a class ``Person`` declares ``HumanResourceReport`` as a friend
+for the purposes of separating presentation concerns:
+
+.. code:: php
+
+   class Person
+   {
+       friend HumanResourceReport;
+       
+       protected $id;
+       protected $firstName;
+       protected $lastName;
+
+       public function __construct($id, $firstName, $lastName)
+       {
+           $this->id = $id;
+           $this->firstName = $firstName;
+           $this->lastName = $lastName;
+       }
+
+       public function makeReport()
+       {
+           return new HumanResourceReport($this);
+       }
+   }
+
+.. code:: php
+
+   class HumanResourceReport
+   {
+       private $person;
+       
+       public function __construct(Person $person)
+       {
+           $this->person = $person;
+       }
+
+       public function getFullName()
+       {
+           // HumanResourceReport would not have access to protected 
+           // members of Person if not explicitly listed as a friend.
+           return $this->person->firstName . ' ' . $this->person->lastName;
+       }
+       
+       public function getReportIdentifier()
+       {
+           return "HR_REPORT_ID_{$this->person->id}";
+       }
+   }
+
+.. code:: php
+
+   $person = new Person(Uuid::uuid4(), 'Alice', 'Wonderland');
+   $report = $person->makeReport();
+
+   var_dump($report->getFullName()); // string(16) "Alice Wonderland"
+   var_dump($report->getReportIdentifier()); // string(49) "HR_REPORT_ID_3F2504E0-4F89-41D3-9A0C-0305E82C3301"
+
+Class friendship can also be used to implement white-box
+(characterization) tests as part of a refactoring project for legacy
+applications. Consider the following class responsible for executing a
+Fibonacci sequence:
+
+.. code:: php
+
+   class Fibonacci
+   {
+       friend FibonacciTest;
+
+       protected $previous;
+       protected $current;
+       
+       public function __construct()
+       {
+           $this->previous = 0;
+           $this->current = 0;
+       }
+       
+       public function next()
+       {
+           $current = $this->current;
+           $next = $this->previous + $this->current;
+           
+           if ($next == 0) { 
+               $next = 1; 
+           }
+
+           $this->previous = $this->current;
+           $this->current = $next;
+           
+           return $current;
+       }
+   }
+
+.. code:: php
+
+   class FibonacciTest extends PHPUnit_Framework_TestSuite
+   {
+       public function testAssignmentAlgoForStateIsCorrect()
+       {
+           $fibo = new Fibonacci();
+           
+           $this->assertEquals(0, $fibo->previous);
+           $this->assertEquals(0, $fibo->current);
+           
+           $n0 = $fibo->next();
+           
+           $this->assertEquals(0, $n0);
+           $this->assertEquals(0, $fibo->previous);
+           $this->assertEquals(1, $fibo->current);
+           
+           // ... and so on ...
+       }
+   }
+
+Characterization Tests are a form of white-box test useful for
+characterizing the **current actual** behaviour of a unit given
+knowledge of that unit's internals. They are usually a tactical measure
+used to verify that modifications made to a system to not have
+unintended or undesirable changes in **how** the system currently works.
+These tests are useful to initiate a refactoring loop. Friend
+designations are also a good marker for follow-up work to improve units.
+This may possibly eliminate the need for white-box tests after improving
+the behavioural API of the system under test.
+
+Currently, in many examples, we have to either change visibility of
+properties that only exist for implementation, provide meaningless
+getters to these properties (thus polluting the public API of the object
+and risking abuse by other objects) or navigate the Reflection API or
+Proxy implementations. We really want to declare a limited set of
+collaborators privileged access to these properties for a single purpose
+in the use-case for these types of tests.
+
+Other Properties
+~~~~~~~~~~~~~~~~
+
+There are several rules of class friendship that clarify how the feature
+works with regard to direction, transitivity and inheritance.
+
+Friendships are not symmetric
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If class ``A`` is a friend of class ``B``, class ``B`` is **NOT**
+automatically a friend of class ``A``.
+
+.. code:: php
+
+   class A
+   {   
+       protected $property = 'foo';
+       
+       public function touch(B $instance)
+       {
+           echo $instance->property;
+       }
+   }
+
+   class B
+   {
+       friend A;
+       
+       protected $property = 'bar';
+       
+       public function touch(A $instance)
+       {
+           echo $instance->property;
+       }
+   }
+
+   $a = new A();
+   $b = new B();
+
+   $b->touch($a); // Fatal error: Uncaught Error: Cannot access protected property A::$property
+   $a->touch($b); // string(3) "bar"
+
+Friendships are not transitive
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If class ``A`` is a friend of class ``B``, and class ``B`` is a friend
+of class ``C``, class ``A`` is not automatically a friend of class ``C``
+and vice-versa.
+
+.. code:: php
+
+   class A
+   {       
+       public function touch(C $instance)
+       {
+           echo $instance->property;
+       }
+   }
+
+   class B
+   {   
+       friend A;
+   }
+
+   class C
+   {
+       friend B;
+       
+       protected $property = 'foo';
+   }
+
+   $a = new A();
+   $c = new C();
+
+   $a->touch($c); // Fatal error: Uncaught Error: Cannot access protected property C::$property
+
+Friendships are not inherited
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A friend of class ``Base`` is not automatically a friend of class
+``Derived`` and vice versa; equally if ``Base`` is a friend of another
+class, ``Derived`` is not automatically a friend and vice versa.
+
+.. code:: php
+
+   class Base
+   {
+       friend Friendly;
+   }
+
+.. code:: php
+
+   class Derived extends Base
+   {
+       protected $property = 'foo';
+   }
+
+.. code:: php
+
+   class Friendly
+   {
+       public function touch(Derived $instance)
+       {
+           echo $instance->property;
+       }
+   }
+
+.. code:: php
+
+   $derived = new Derived();
+   $friendly = new Friendly();
+
+   $friendly->touch($derived); // Fatal error: Uncaught Error: Cannot access protected property Derived::$property
+
+Access due to friendship is inherited
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A friend of ``Derived`` can access the protected members of ``Derived``
+that were inherited from ``Base``. Note, however, that a friend of
+``Derived`` only has access to members inherited from ``Base`` to which
+``Derived`` has access, itself, (e.g. if ``Derived`` inherits from
+``Base``, ``Derived`` only has access to the protected members inherited
+from ``Base``, not private members, so neither does a friend.)
+
+.. code:: php
+
+   class Base
+   {
+       private $secret = 'to everyone but Base';
+       protected $accessible = 'to child classes of Base';
+       
+       protected function touch()
+       {
+           echo $this->secret . PHP_EOL;
+       }
+   }
+
+.. code:: php
+
+   class Derived extends Base
+   {
+       friend Friendly;
+
+       protected $someProperty = 'that will be accessed via normal Friend functionality';
+   }
+
+.. code:: php
+
+   class Friendly
+   {
+       public function touch(Derived $instance)
+       {
+           var_dump($instance->someProperty); // string(%d) "that will be accessed ... functionality"
+           
+           var_dump($instance->accessible);   // string(%d) "to child classes of Base"
+                                             // While Friendly is not a friend of Base, it can still access this 
+                                             // property because it is accessible to Derived through protected
+                                             // property.                                       
+                                                                          
+           var_dump($instance->secret);       // Notice: Undefined property: Derived::$secret ...
+       }
+   }
+
+.. code:: php
+
+   $derived = new Derived();
+   $friendly = new Friendly
+
+   $friendly->touch($derived);
+
+Errors
+~~~~~~
+
+In all cases above, error messages received are no different than if an
+object attempted to read or write private or protected members of a
+class it did not have access to. That is to say, the error message will
+not hint members / rules of class friendship (e.g. "You don't have
+access to this property because friendship isn't symmetric.")
+
+Additional Thoughts
+~~~~~~~~~~~~~~~~~~~
+
+I have purposely kept this RFC fairly slim for a number of reasons.
+First and foremost, I want to make it clear that I do **not** see this
+feature in competition with any other RFC or suggestion for
+limited-visibility collaborators. Rather, I see it as a feature used in
+concert with something like namespace visibility or package-privacy. I
+feel that class friendship is about object modeling and making explicit
+privileged relationships between two or more classes. It is a form of
+tighter coupling to achieve better encapsulation of behaviour.
+
+Secondly, the RFC is purposefully (yet usefully) slim to "test the
+waters" on such a feature for inclusion in PHP. I believe class
+friendship scratches a considerable itch for the testing and object
+modeling communities within PHP. This RFC fulfills an 80% use-case
+(80/20) for the spirit of class friendship and paves the way for further
+implementation of:
+
+-  Friendship to global functions
+-  Friendship to class methods
+-  Friendship to namespace(s), possibly
+
+While namespace friendship might seem like a good idea, it is probably
+more in the domain of package-privacy or namespace visibility and begins
+to leave what many consider the spirit or intent of class friendship.
+There are uses where this is not the case, which is why I have included
+it.
+
+Proposed PHP Version(s)
+-----------------------
+
+I had intended to target the next minor version of PHP with this change.
+Since 7.3 is closing in on feature freeze and whether or not 7.4 will
+happen before 8.0 is currently under discussion, this RFC's target
+depends on outcome of discussion. If there is to be a PHP 7.4, it will
+go there. Otherwise, it will wait until PHP 8.
+
+RFC Impact
+----------
+
+To Opcache
+~~~~~~~~~~
+
+This is an open issue pending code review. I am unfamiliar-enough with
+Opcache implementation to be able to appropriately assess impact.
+
+Future Scope
+------------
+
+While this RFC specifies friendship between classes, there is
+opportunity to extend this implementation and syntax to include
+progressive enhancements. Snippets below are hypothetical
+implementations, but have not been discussed and are not tied to this
+RFC. I on include them as examples of further possible work.
+
+-  **Friendship to global functions**
+   A class may declare a global function as friend. This might be used
+   if someone wanted to expose a procedural interface to an existing
+   object model or begin to refactor a procedural model to become a
+   façade over a new object model. Modeling best-practice aside, it
+   functions much like standard class friendship.
+-  **Friendship to class methods**
+   Friendship to class methods is a narrower expression of standard
+   class friendship. Instead of declaring the entire class a friend, we
+   declare that a method from a friended class can access the subject's
+   protected properties.
+-  **Friendship to namespace(s)**
+   A class might declare an entire namespace as friend. In this way, any
+   class that is part of that namespace would be friended.
+
+Proposed Voting Choices
+-----------------------
+
+As this RFC adds syntax to the language, a 2/3 majority is required.
+(see `voting <voting>`__)
+
+Voting starts on 2018-07-06 21:00 UTC and closes on 2018-07-13 21:00
+UTC.
+
+Question: Support Class Friendship?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+I have implemented the RFC as described with tests to verify all usage
+examples above.
+
+https://github.com/php/php-src/pull/3347
+
+As this is my first contribution to PHP, it is my opinion that my
+request should be placed under higher scrutiny and I am completely ready
+and willing to accept all feedback to improve implementation.
+
+References
+----------
+
+#. `Original Mailing List
+   Discussion <https://marc.info/?l=php-internals&m=144954699701305&w=2>`__
+#. https://bugs.php.net/bug.php?id=34044
+#. http://stackoverflow.com/questions/317835/php-equivalent-of-friend-or-internal
+#. https://marc.info/?l=php-internals&m=144639394529142
+#. http://ocramius.github.io/blog/accessing-private-php-class-members-without-reflection/
+#. http://www.stroustrup.com/hopl2.pdf
+#. http://tekwire.net/joomla/projects/ideas/php-friend
+
+Changelog
+---------
+
+-  v0.1 - Created
+-  v0.2 - Copy-editing. Clarifications. Add more code examples.
+-  v0.2.1 - Fix copy+paste error from ReflectionClass documentation
+   regarding trait methods.
+-  v0.2.2 - Remove voting choice on implementation detail. Remove
+   example of combined future scope syntax. Correct lacking clarity that
+   friendship applies to all protected members, not just properties.
+-  v1.0.0 - Final draft of RFC before re-opening discussion
+
+Additional Metadata
+-------------------
+
+:Original Authors: Dustin Wheeler, mdwheele@ncsu.edu
+:Slug: friend-classes
+:Wiki URL: https://wiki.php.net/rfc/friend-classes

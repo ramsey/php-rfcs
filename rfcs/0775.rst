@@ -1,0 +1,335 @@
+Dump Results Of Expressions In `php -a`
+=======================================
+
+:PHP-RFC: 0775
+:Title: Dump Results Of Expressions In `php -a`
+:Author: Tyson Andre <tandre@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2020-12-19
+:Version: 0.2
+
+Introduction
+------------
+
+Many REPLs (Read-Eval-Print Loops) for other programming languages that
+I'm familiar with print a (possibly truncated) representation of the
+result of expressions, but PHP doesn't. It would be useful to allow
+users to extend the functionality of the default interactive php shell
+(``php -a``), possibly with ``auto_prepend_file`` or through use of
+command wrappers/aliases, or after loading the shell. Prior to this RFC,
+there was no way to extend the interactive php shell in this way. (I've
+seen https://github.com/bobthecow/psysh mentioned as an alternative for
+``php -a`` while investigating this, but that's a shell written from
+scratch, and doesn't have some functionality from ``php -a`` such as
+tolerance of fatal errors)
+
+Proposal
+--------
+
+By default, in ``php -a``, dump the results of non-null expressions
+using ``var_dump``/``var_export()``. Additionally, add a new function
+``readline_interactive_shell_result_function`` to the ``readline`` PHP
+module. This function only affects interactive shells - it can be used
+to set or clear a closure when
+``extension_loaded('readline') === true``, but that closure would only
+be called in interactive shells (i.e. ``php -a``).
+
+This will dump the results of expressions every time a statement
+containing a single expression such as ``2+2;`` or
+``$x = call_function();`` is evaluated (but not non-expressions such as
+``class X{}``, statement blocks such as ``{ $x = 1; }``, or combinations
+of expressions such as ``$x = 1; $y = $x*2;``.
+
+An example of the behavior of the default expression dumper is below:
+
+.. code:: php
+
+   $ php -a
+   Interactive shell
+
+   php > 1+1;
+   => 2
+   php > 0.5 * 2;
+   => 1.0
+   php > namespace\MyClass::class;
+   => 'MyClass'
+   php > fn()=>true;
+   => object(Closure)#1 (0) {
+   }
+   php > $x = ["foo", "bar"];
+   => array(2) {
+     [0]=>
+     string(3) "foo"
+     [1]=>
+     string(3) "bar"
+   }
+   php > asort($x);
+   => true
+   php > $x;
+   => array(2) {
+     [1]=>
+     string(3) "bar"
+     [0]=>
+     string(3) "foo"
+   }
+   php > json_encode($x);
+   => '{"1":"bar","0":"foo"}'
+   php > unset($x);
+   php > function do_something() { echo "in do_something()\n"; }
+   php > do_something();
+   in do_something()
+   php > json_decode('{"key": "value"}');
+   => object(stdClass)#1 (1) {
+     ["key"]=>
+     string(5) "value"
+   }
+   php > throw new RuntimeException("test");
+
+   Warning: Uncaught RuntimeException: test in php shell code:1
+   Stack trace:
+   #0 {main}
+     thrown in php shell code on line 1
+   php > printf("newline is automatically appended by shell");
+   newline is automatically appended by shell
+   => 42
+   php > printf("newline not automatically appended by shell\n");
+   newline not automatically appended by shell
+   => 44
+   php > { print("test\n"); } // statement blocks can be used to avoid dumping expression results
+   test
+   php >
+
+Using the function ``readline_interactive_shell_result_function()``,
+users or applications can override the default expression dumper, or
+remove it entirely.
+
+.. code:: php
+
+   $ php -a
+   Interactive shell
+
+   php > readline_interactive_shell_result_function(
+   php (     function (string $code, $result) {
+   php (         echo "Saw " . trim($code) . "\n";
+   php (         echo json_encode($result);
+   php (     });
+   Saw readline_interactive_shell_result_function(
+        function (string $code, $result) {
+            echo "Saw " . trim($code) . "\n";
+            echo json_encode($result);
+        });
+   true
+   php > 2+2;
+   Saw 2+2;
+   4
+   php > readline_interactive_shell_result_function(null);  // useful if output would be extremely long
+   php > 2+2;
+   php > 
+
+Real implementations may be much more complex, and make use of parsers
+such as https://github.com/nikic/PHP-Parser or
+https://github.com/nikic/php-ast to check if the expression in question
+is an assignment, call to print(), etc.
+
+This has the following signature:
+
+.. code:: php
+
+   /**
+    * When $callback is a callback, replaces the old callback used to dump expression results.
+    * When $callback is null, removes the callback used to dump expression results.
+    *
+    * Currently, this always returns true, but future changes to the implementation
+    * may make it return false.
+    */
+   function readline_interactive_shell_result_function(?callable $callback): bool;
+
+The default implementation added as part of this RFC is effectively
+identical to the below implementation, but written in C. It can be
+replaced with a userland implementation or disabled at any time, even in
+`auto_prepend_file <https://www.php.net/manual/en/ini.core.php#ini.auto-prepend-file>`__.
+(Because the default implementation is written in C, it will work even
+if the ini setting ``disable_functions`` includes var_dump and
+var_export.)
+
+.. code:: php
+
+   readline_interactive_shell_result_function(
+       function(string $code, $result) {
+           if (!isset($result)) {
+               return;
+           }
+           if (is_scalar($result)) {
+               echo "=> " . var_export($result, true) . "\n";
+           } else {
+               echo "=> "; var_dump($result);
+           }});
+
+A new system ini boolean setting
+``cli.enable_interactive_shell_result_function`` is added as part of
+this RFC, defaulting to enabled. It can be disabled to prevent
+expression results from being dumped at all (by the internal
+implementation or by overrides), e.g. if the closures have bugs, are
+excessivly verbose, or have unpredictable performance.
+
+Backward Incompatible Changes
+-----------------------------
+
+Only interactive sessions (``php -a``) are affected, by a difference in
+the output sent to stdout. The dumping of expression results can be
+disabled entirely with the ini setting
+``cli.enable_interactive_shell_result_function = Off``, or temporarily
+by calling ``readline_interactive_shell_result_function(null)``
+
+In interactive sessions, this will start calling
+`\__debugInfo() <https://www.php.net/manual/en/language.oop5.magic.php#object.debuginfo>`__
+if it exists due to calling ``var_dump()`` on objects. Implementations
+of ``__debugInfo()`` may throw or have other side effects after the
+expression is evaluated.
+
+Proposed PHP Version(s)
+-----------------------
+
+8.1
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+This functionality is available in interactive CLI sessions. Other SAPIs
+are unaffected.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+If there are any php.ini settings then list:
+
+-  hardcoded default values:
+   ``cli.enable_interactive_shell_result_function = On``
+-  php.ini-development values:
+   ``cli.enable_interactive_shell_result_function = On`` (or omitted,
+   cli.pager and cli.prompt currently exist but not documented in those
+   files)
+-  php.ini-production values:
+   ``cli.enable_interactive_shell_result_function = On``
+
+Future Scope
+------------
+
+From https://externals.io/message/111073#111073     Miscellaneous thoughts on implementation details:
+
+    -  Bundling an actual parser (e.g.
+    https://github.com/nikic/PHP-Parser)    would help in properly
+    analyzing ``Foo::$var-><TAB>``
+
+    by being less reliant on heuristics (e.g. checking if the token
+    ``$var`` was a variable or a property, making it easier to collect
+    local variables, etc).
+
+    Is packaging a parser practical for a ``phpi`` binary (e.g. for
+    package managers, maintainers of php, other reasons)?
+
+    -  A parser may fail for code using new token types until the parser
+       gets updated to handle the new token types. This stops being a   
+    concern after feature freezes.    Looping over ``@token_get_all()``
+    and bailing out on an unknown token    type may help with that. - 
+    How would crash/bug fixes of phpi or the parser be handled in patch 
+      releases of php if this was released with php? -  Automatically
+    rewriting the code to namespace the parser and its    dependencies
+    with ``\PHP\Internal\BundledPhpParser`` would let    ``phpi`` be
+    used with projects that depend on a different php-parser    version.
+       (clarifications may be necessary to indicate to end users that
+    the    bundled parser copy won't get updates or support outside of
+    php minor    releases, should not be used by libraries/applications
+    and that it    won't support newer php syntax, and possibly other
+    things)
+
+Supporting rendering the last expression in a list of statements
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This was left out to simplify the implementation, but is probably doable
+by rewriting the C AST before evaluating the snippet for safe node
+kinds.
+
+-  i.e. change ``foo(); bar();`` to ``foo(); return (bar());``
+
+Rendering a result limit
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+https://externals.io/message/112934#113039 was brought up after the
+start of the vote. While some REPLs don't limit results, others do, and
+it's useful to have for extremely large objects. The setting
+``cli.pager`` can be used to limit results, but is disabled by default.
+
+    My main concern in this iteration of the RFC is: what happens with
+    big/deeply nested objects? They tend to spew tons of lines if
+    var_dump()'ed. Do we have reasonable depth/output limitations in
+    default dumping mode?
+
+    I'm often enough using php -a to do some quick ad-hoc processing
+    (example, read a big json file, and then access a value;
+    instantiating a mediawiki bot framework and calling replace on it;
+    ...).
+
+    It's really cool to have any interactive feedback at all, but
+    please, at least by default, limit the output. (An example is the JS
+    REPL in browser console - it shows you a minimal preview of the
+    object, and then you can expand with your mouse. Obviously with a
+    pure cli application, this needs different - intuitive -
+    navigation.)
+
+    As it currently stands, this makes ``php -a`` unusable in any but
+    the simplest cases, without just disabling the whole feature.
+
+    I like the whole feature, but the missing output limitation (I have
+    yet enough nightmares from var_dump()'ing the wrong object filling
+    my shell with tons of irrelevant information… I don't need that
+    potentially happening on every single evaluated expression)
+
+    Thus I'm voting no, for now.
+
+Vote
+----
+
+Voting starts on 2021-01-19 and ended 2021-02-02
+
+Yes/No, requiring 2/3 majority
+
+Question: Dump results of expressions in \`php -a\` as described in this RFC
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+References
+----------
+
+-  https://externals.io/message/112568 "[RFC] Configurable callback to
+   dump results of expressions in \`php -a`"
+-  https://externals.io/message/111073 "Improving the usability of PHP's
+   interactive shell? (completions, displaying expression results,
+   custom syntax)"
+-  https://wiki.php.net/rfc/readline_interactive_shell_result_function_straw_poll
+   "Straw poll: Interest in configurable callback to dump results of
+   expressions in ``php -a``"
+
+Changelog
+---------
+
+0.2: Dump non-null expression results by default with
+var_dump()/var_export() 0.3: Document the default implementation used in
+the implementation
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5962/files
+:Original Authors: Tyson Andre, tandre@php.net
+:Slug: readline_interactive_shell_result_function
+:Wiki URL: https://wiki.php.net/rfc/readline_interactive_shell_result_function

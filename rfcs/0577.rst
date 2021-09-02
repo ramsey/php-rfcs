@@ -1,0 +1,251 @@
+Fiber
+=====
+
+:PHP-RFC: 0577
+:Title: Fiber
+:Author: Haitao Lv <i@lvht.net>, Dmitry Stogov <dmitry@zend.com>, Martin Schröder <m.schroeder2007@googlemail.com>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2017-09-13
+:Version: 0.1
+
+Introduction
+------------
+
+Fibers are primitives for implementing light weight cooperative
+concurrency in PHP. Basically they are a means of creating Closure that
+can be paused and resumed. The scheduling of fiber must be done by the
+programmer and not the VM.
+
+As opposed to Generator (a stackless light weight concurrency
+implementation), each fiber comes with a stack. This enables the fiber
+to be paused from deeply nested function calls within the fiber block.
+
+When a fiber is created it will not run automatically. Rather it must be
+explicitly asked to run using the Fiber::resume method. The code running
+inside the fiber can give up control by calling Fiber::yield in which
+case it yields control back to caller (the caller of the Fiber::resume).
+
+Proposal
+--------
+
+Why not make it as a Extension?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Fiber is a major language feature, that allows significant benefits for
+asynchronous frameworks. Providing it as an optional extension, just
+doesn't make sense.
+
+Implementation
+~~~~~~~~~~~~~~
+
+Proposed API
+^^^^^^^^^^^^
+
+.. code:: php
+
+   final class Fiber {
+     public const STATUS_SUSPENDED = 1;
+     public const STATUS_RUNNING   = 2;
+     public const STATUS_FINISHED  = 3;
+     public const STATUS_DEAD      = 4;
+
+     /**
+      * @param callable $callable any php callable to be paused
+      * @param int $stack_size fiber stack init size
+      */
+     public function __construct(callable $callable = null, int stack_size = null) {}
+
+     /**
+      * pause the current fiber and ~return~ the $arg1
+      * as the Fiber::resume's return value.
+      */
+     public static function yield($arg1) {}
+     
+     /**
+      * Start or resume a fiber.
+      * 
+      * If the fiber is not started, call resume will init
+      * the $callable with all args.
+      *
+      * If the fiber is paused, call resume will send the first arg
+      * as the last Fiber::yield's return value.
+      */
+     public function resume($arg1...) {}
+     
+     /**
+      * Throw an exception into the fiber.
+      * 
+      * You code can use try/catch to process error in the
+      * top level function call. Some framework make heavy
+      * usage of this feature.
+      */
+     public function throw(Throwable $e) {}
+   }
+
+Usage Demo
+^^^^^^^^^^
+
+.. code:: php
+
+   function sub1()
+   {
+       return Fiber::yield(1);
+   }
+   $fiber = new Fiber(function ($a, $b) {
+       $c = Fiber::yield($a + $b);
+
+       $d = sub1();
+       return $d.$c;
+   });
+
+   echo $fiber->resume(1, 2);     // echo 3
+   echo $fiber->resume("world");  // echo 1
+   echo $fiber->resume("hello "); // echo "hello world"
+
+Implementation Detail
+^^^^^^^^^^^^^^^^^^^^^
+
+In our simple implementation, we only backup/restore the **zend stack**.
+We **cannot** pause a Fiber during internal function call like
+\`array_map`.
+
+Backward Incompatible Changes
+-----------------------------
+
+"Fiber" are now globally defined classes, which might collide with user
+defined classes of the same name in the global namespace. However, the
+risk of the introduction of them is considered to be very low, since the
+global namespace should not be used by PHP users.
+
+Proposed PHP Version(s)
+-----------------------
+
+7.3
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+None
+
+To Opcache
+~~~~~~~~~~
+
+None
+
+New Constants
+~~~~~~~~~~~~~
+
+None
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+- fiber.stack_size default stack size for A fiber
+
+Open Issues
+-----------
+
+    Why not support backup/restore the c stack?
+Martin Schröder is working on this at
+https://github.com/fiberphp/fiber-ext/pull/30.
+
+And here is the comparison.
+
++----------------------+----------------------+----------------------+
+| Property             | Stackless Fiber      | Native Fiber         |
++======================+======================+======================+
+| 1 Minimum Memory     | VM stack only (4 KB) | VM & C stack (4 KB + |
+| Usage                |                      | 4 KB)                |
++----------------------+----------------------+----------------------+
+| 2 Supported          | any platform         | x86 at this time     |
+| Architecturs         |                      |                      |
++----------------------+----------------------+----------------------+
+| 3 Yield in Internal  | unsupported          | supported            |
+| Function             |                      |                      |
++----------------------+----------------------+----------------------+
+| 4 Yield in Iterator  | unsupported          | supported            |
++----------------------+----------------------+----------------------+
+
+Stackless fiber use less memory and are not platform-dependend (1 & 2)
+which makes them very portable and efficient. They do however lack
+support for anything that involves internal function calls (3) including
+opcode handlers (4, e.g. foreach loop).
+
+Native fibers are very platform-dependend (2) and use more memory
+because they do need to allocate a C call stack (1). While memory
+allocation will be done using mmap() it will still reserve virtual
+memory (can be problematic for a large number of fibers on 32 bit
+systems due to limited virtual memory addressing). The big advantage is
+that all kinds of internal function call (3 & 4) are supported without
+any changes to the existing codebase.
+
+    Why not introduce helper like **Fiber::alive(),Fiber::running()**?
+
+And as a language feature, Fiber should only offer the essential API.
+User can implement these methods in user land code easily.
+
+    Why not introduce a dedicate method other than **Fiber::resume()**
+    for Fiber initialization?
+
+Both Ruby's Fiber and Lua's coroutine using the same **resume()** API to
+**init** and **resume** their coroutine.
+
+Unaffected PHP Functionality
+----------------------------
+
+None
+
+Future Scope
+------------
+
+Syntax like async/await can be implemented in the future, but it's out
+of the scope of this RFC.
+
+Patches and Tests
+-----------------
+
+-  https://github.com/php/php-src/pull/3203
+-  https://github.com/php/php-src/pull/2723
+-  https://github.com/php/php-src/pull/2733
+-  https://github.com/php/php-src/pull/2886
+-  https://github.com/php/php-src/pull/2902
+
+.. _implementation-1:
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+References
+----------
+
+-  `Revisiting
+   Coroutines <http://www.inf.puc-rio.br/~roberto/docs/MCC15-04.pdf>`__
+-  `Ruby Fiber <https://ruby-doc.org/core-2.4.1/Fiber.html>`__
+-  `Lua Coroutine <https://www.lua.org/pil/9.1.html>`__
+
+Rejected Features
+-----------------
+
+Additional Metadata
+-------------------
+
+:Original Authors: Haitao Lv i@lvht.net, Dmitry Stogov dmitry@zend.com, Martin Schröder m.schroeder2007@googlemail.com
+:Original Status: Under Discussion
+:Slug: fiber
+:Wiki URL: https://wiki.php.net/rfc/fiber

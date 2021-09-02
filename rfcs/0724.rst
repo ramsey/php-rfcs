@@ -1,0 +1,271 @@
+Scalar Extensions RFC
+=====================
+
+:PHP-RFC: 0724
+:Title: Scalar Extensions RFC
+:Author: Ilija Tovilo <tovilo.ilija@gmail.com>
+:Status: Draft
+:Type: Standards Track
+:Created: 2020-05-07
+:PHP-Version: 8.0
+:Version: 1.0
+
+Proposal
+--------
+
+This RFC is based on the `scalar objects
+extension <https://github.com/nikic/scalar_objects>`__.
+
+Scalar extensions allow extending scalar types with methods. The
+motivation for this RFC is readability and the opportunity for a cleaner
+standard library.
+
+.. code:: php
+
+   use extension string StringExtension;
+   use extension array ArrayExtension;
+
+   class StringExtension {
+       public static function split($self, $separator) {
+           return explode($separator, $self);
+       }
+   }
+
+   class ArrayExtension {
+       public static function map($self, $callable) {
+           return array_map($callable, $self);
+       }
+
+       public static function join($self, $separator) {
+           return implode($separator, $self);
+       }
+   }
+
+   $x = '1, 2, 3, 4'
+       ->split(', ')
+       ->map(fn($y) => $y * 2)
+       ->join(', ');
+
+   // $x = '2, 4, 6, 8'
+
+Readability
+-----------
+
+Reading flow
+~~~~~~~~~~~~
+
+Currently libraries provides functions that operate on scalar values.
+Examples are ``array_map``, ``explode``, ``preg_match``, etc. When you
+start nesting these function calls the code can become very unreadable,
+especially when the functions accept multiple parameters. Compare the
+following two code snippets.
+
+.. code:: php
+
+   $x = range(1, 10)
+       ->filter(fn($y) => $y % 2 === 0)
+       ->map(fn($y) => $y * 2);
+
+   // vs
+
+   $x = array_map(
+       fn($y) => $y * 2,
+       array_filter(
+           range(1, 10),
+           fn($x) => $x % 2 === 0
+       )
+   );
+
+Nested function calls have to be read from the inside out. Chaining the
+methods can be read from left to right / top to bottom.
+
+Needle/haystack
+~~~~~~~~~~~~~~~
+
+Chaining methods also automatically solves the needle/haystack problem.
+
+.. code:: php
+
+   // Which one is the needle again?
+   str_contains('foo', 'f');
+   strpos('foo', 'f');
+
+   // Ah, much more obvious
+   'foo'->contains('f');
+   'foo'->indexOf('f');
+
+Function prefix
+~~~~~~~~~~~~~~~
+
+Function names are usually prefixed by the scalar type (``string_``,
+``str``, ``array_``, etc.) to make them unique. Scalar extensions make
+prefixes unnecessary as the extension is restricted to a given type.
+
+.. code:: php
+
+   // No need to array_/string_ prefix, it's clear from the operand type
+   ['foo']->contains('foo');
+   'foo'->contains('f');
+
+Scoping
+-------
+
+``use extension`` is only applied to the current file. This will allow
+seamless integration of libraries that might be using different scalar
+extensions. ``use extension`` is only valid at the top of the file.
+
+.. code:: php
+
+   // file1.php
+   use extension string FooStringExtension;
+   'foo'->foo();
+   'foo'->bar(); // Not valid here
+
+   // file2.php
+   use extension string BarStringExtension;
+   'bar'->bar();
+   'bar'->foo(); // Not valid here
+
+Multiple handlers
+-----------------
+
+You can register multiple handlers per type. They will be tried in
+sequence until a method with the given name is found.
+
+.. code:: php
+
+   use extension string FooStringExtension;
+   use extension string BarStringExtension;
+
+   class FooStringExtension {
+       public function foo($self) {}
+       public function both($self) {}
+   }
+
+   class BarStringExtension {
+       public function bar($self) {}
+       public function both($self) {}
+   }
+
+   'foo'->foo(); // Ok
+   'bar'->bar(); // Ok
+   'both'->both(); // FooStringExtension::both called
+   'baz'->baz(); // Error: Call to undefined method string::baz()
+
+callStatic
+----------
+
+The handlers ``__callStatic`` method will be called if it is
+implemented.
+
+.. code:: php
+
+   use extension string FooStringExtension;
+
+   class DynamicStringExtension {
+       public function foo($self) {}
+
+       public function __callStatic($self) {}
+   }
+
+   'foo'->foo(); // DynamicStringExtension::foo called
+   'bar'->bar(); // DynamicStringExtension::__callStatic called
+
+By value/reference
+------------------
+
+Scalars are normally passed by value. The same goes for scalar
+extensions. Modifying ``$self`` in a scalar extension does not modify
+the original value. To actually modify the original value you need to
+pass ``$self`` by reference using ``&``.
+
+.. code:: php
+
+   use extension array ArrayExtension;
+
+   class ArrayExtension {
+       public static function append($self, $value) {
+           $self[] = $value;
+       }
+
+       public static function appendByRef(&$self, $value) {
+           $self[] = $value;
+       }
+   }
+
+   $x = [];
+   $x->append('foo');
+   // $x is still empty
+   $x->appendByRef('foo');
+   // Now $x is ['foo']
+
+Autoloading
+-----------
+
+The autoloading of the extension class is only triggered when a method
+is called on a value of the given type.
+
+.. code:: php
+
+   use extension array ArrayExtension;
+   // ArrayExtension is registered as an extension but not loaded
+
+   $x = [];
+   $x->anything();
+   // Only now does PHP look for a class named ArrayExtension
+
+Performance overhead
+--------------------
+
+There is no performance overhead to existing method calls. Scalar
+extensions are only triggered if the value is a scalar.
+
+Future scope
+------------
+
+Standard library
+~~~~~~~~~~~~~~~~
+
+This RFC provides a big opportunity to provide a better standard library
+for scalar types. Designing and implementing a standard library is a
+large undertaking and out of scope for a single proposal. It’s important
+we don’t rush it as we’ll have to live with this API for a long time.
+Each component should be introduced in a separate RFC.
+
+This RFC does not provide a standard library. But it’s an invite for
+other proposals to add build the standard library bit by bit.
+
+**All examples in this RFC are only examples.**
+
+Extensions for other types
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+We might want to allow extending other types like classes and interfaces
+in the future.
+
+.. code:: php
+
+   use Acme\Foo;
+   use extension Foo FooExtension;
+
+   class FooExtension {
+       function bar($self) {}
+   }
+
+   $foo = new Foo();
+   $foo->bar();
+
+Backward Incompatible Changes
+-----------------------------
+
+There are no backward incompatible changes in this RFC.
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5535
+:Original Authors: Ilija Tovilo, tovilo.ilija@gmail.com
+:Original PHP Version: PHP 8.0
+:Original Status: Under discussion
+:Slug: scalar_extensions
+:Wiki URL: https://wiki.php.net/rfc/scalar_extensions

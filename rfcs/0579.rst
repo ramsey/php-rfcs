@@ -1,0 +1,349 @@
+Flexible Heredoc And Nowdoc Syntaxes
+====================================
+
+:PHP-RFC: 0579
+:Title: Flexible Heredoc And Nowdoc Syntaxes
+:Author: Thomas Punt <tpunt@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2017-09-16
+:PHP-Version: 7.3
+:Version: 0.9
+
+Introduction
+------------
+
+The heredoc and nowdoc syntaxes have very rigid requirements. This has
+caused them to be, in-part, eschewed by developers because their usage
+in code can look ugly and harm readability. This proposal therefore puts
+forth two changes to the current heredoc and nowdoc syntaxes:
+
+#. To enable for the closing marker to be indented, and
+#. To remove the new line requirement after the closing marker
+
+Proposal
+--------
+
+Closing Marker Indentation
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The indentation of the closing marker will change code from:
+
+.. code:: php
+
+   <?php
+   class foo {
+       public $bar = <<<EOT
+   bar
+   EOT;
+   }
+
+To:
+
+.. code:: php
+
+   <?php
+   class foo {
+       public $bar = <<<EOT
+       bar
+       EOT;
+   }
+
+The indentation of the closing marker dictates the amount of whitespace
+to strip from each line within the heredoc/nowdoc. So let's demonstrate
+these semantics with a few examples:
+
+.. code:: php
+
+   // no indentation
+   echo <<<END
+         a
+        b
+       c
+   END;
+   /*
+         a
+        b
+       c
+   */
+
+   // 4 spaces of indentation
+   echo <<<END
+         a
+        b
+       c
+       END;
+   /*
+     a
+    b
+   c
+   */
+
+If the closing marker is indented further than any lines of the body,
+then a ``ParseError`` will be thrown:
+
+.. code:: php
+
+
+   echo <<<END
+     a
+    b
+   c
+    END;
+
+   // Parse error: Invalid body indentation level (expecting an indentation at least 5) in %s on line %d
+
+Tabs are supported as well, however, tabs and spaces **must not** be
+intermixed regarding the indentation of the closing marker and the
+indentation of the body (up to the closing marker). In any of these
+cases, a ``ParseError`` will be thrown:
+
+.. code:: php
+
+   // different indentation for body (spaces) ending marker (tabs)
+   {
+       echo <<<END
+        a
+           END;
+   }
+
+   // mixing spaces and tabs in body
+   {
+       echo <<<END
+           a
+        END;
+   }
+
+   // mixing spaces and tabs in ending marker
+   {
+       echo <<<END
+             a
+            END;
+   }
+
+These whitespace constraints have been included because mixing tabs and
+spaces for indentation is harmful to legibility.
+
+Ultimately, the purpose of stripping leading whitespace is to allow for
+the body of the heredoc and nowdoc to be indented to the same level as
+the surrounding code, without causing unnecessary (and perhaps
+undesirable) whitespace to prepend each line of the body text. Without
+this, developers may choose to de-indent the body text to prevent
+leading whitespace, which leads us back to the current situation of
+having indentation levels of code ruined by these syntaxes.
+
+Closing Marker New Line
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Currently, in order to terminate a heredoc or nowdoc, a new line
+**must** be used after the closing marker. Removing this requirement
+will change code from:
+
+.. code:: php
+
+   stringManipulator(<<<END
+      a
+     b
+    c
+   END
+   );
+
+   $values = [<<<END
+   a
+   b
+   c
+   END
+   , 'd e f'];
+
+To:
+
+.. code:: php
+
+   stringManipulator(<<<END
+      a
+     b
+    c
+   END);
+
+   $values = [<<<END
+   a
+   b
+   c
+   END, 'd e f'];
+
+This change was actually brought up in a previous RFC (`PHP RFC:
+Loosening heredoc/nowdoc scanner </rfc/heredoc-scanner-loosening>`__).
+One of the big gotchas that it mentioned, however, was that if the
+ending marker was found at the start of a line, then regardless of
+whether it was a part of another word, it would still be considered as
+the ending marker. For example, the following would not work (due to
+``ENDING`` containing ``END``):
+
+.. code:: php
+
+   $values = [<<<END
+   a
+   b
+   ENDING
+   END, 'd e f'];
+   /*
+   Parse error: syntax error, unexpected 'ING' (T_STRING), expecting ']' in %s on line %d
+   */
+
+The implementation I am proposing avoids this problem by checking to see
+if a continuation of the found marker exists, and if so, then if it
+forms a valid identifier. This means that the terminating marker string
+will only be considered as such if it is matched exactly as a
+standalone, valid symbol (that is also found at the start of the line).
+This enables for the above snippet to now work.
+
+Examples such as the following will still not work, however:
+
+.. code:: php
+
+   $values = [<<<END
+   a
+   b
+   END ING
+   END, 'd e f'];
+   /*
+   Parse error: syntax error, unexpected 'ING' (T_STRING), expecting ']' in %s on line %d
+   */
+
+   echo <<<END
+   END{$var}
+   END;
+   /*
+   Parse error: syntax error, unexpected '$var' (T_VARIABLE) in %s on line %d
+   */
+
+There is not a great deal that can be done about this. So the simple
+rule is: **do not choose a marker that appears in the body of the text**
+(though it would specifically have to occur at the start of a line in
+the text to cause problems).
+
+Backward Incompatible Changes
+-----------------------------
+
+The rigidity of the syntaxes are solely to minimise the chance of
+collisions between the enclosing marker and the text within the
+heredoc/nowdoc. But this has come at a cost of usability and readability
+of the feature. By making the syntaxes for heredoc and nowdoc more
+flexible, collisions that do occur will now cause errors if (and only
+if) the following conditions are met:
+
+-  the colliding marker begins at the start of a line in the text
+-  the colliding marker can be seen as standalone, valid symbol name
+
+The changes proposed by this RFC therefore come down to whether you
+believe developers are responsible enough to choose non-colliding
+markers. I firmly believe that since we give developers the power to
+choose their own markers, then they should be responsible enough to
+choose markers that do not collide with the inner multiline text.
+
+So to quickly reiterate, the changes proposed by this RFC will enable
+for code such as the following:
+
+.. code:: php
+
+   function something()
+   {
+       stringManipulator(<<<END
+      a
+     b
+    c
+   END
+   );
+   }
+
+To look like the following instead:
+
+.. code:: php
+
+   function something()
+   {
+       stringManipulator(<<<END
+          a
+         b
+        c
+       END);
+   }
+
+Proposed PHP Version(s)
+-----------------------
+
+The next PHP 7.x version (or 8.0, whichever comes next)
+
+RFC Impact
+----------
+
+No impact on SAPIs or extensions (that I know of).
+
+Proposed Voting Choices
+-----------------------
+
+There will be two votes, both requiring a 2/3 majority. The first will
+be regarding whether the closing marker can be indented. The second will
+be whether the closing marker should remove the new line requirement.
+These votes are orthogonal to one-another (if one fails and the other
+passes, then the other still passes).
+
+Voting starts on 2017.11.01 and ends on 2017.11.15.
+
+Question: Allow for the closing marker to be indented and for the leading whitespace to be stripped?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+''''
+
+Question: Remove the trailing new line requirement from the closing marker?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+Initial implementation:
+https://github.com/php/php-src/compare/master...tpunt:heredoc-nowdoc-indentation
+
+Language specification: will be updated if the RFC is accepted.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+References
+----------
+
+Links to external references, discussions or RFCs
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Thomas Punt, tpunt@php.net
+:Original Status: Implemented (in PHP 7.3)
+:Slug: flexible_heredoc_nowdoc_syntaxes
+:Wiki URL: https://wiki.php.net/rfc/flexible_heredoc_nowdoc_syntaxes

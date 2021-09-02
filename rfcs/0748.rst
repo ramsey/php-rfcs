@@ -1,0 +1,372 @@
+Function Autoloading
+====================
+
+:PHP-RFC: 0748
+:Title: Function Autoloading
+:Author: Danack, based on work Anthony Ferrara
+:Status: Draft
+:Type: Unknown
+:Created: 2020-07-01
+:Version: 1.0
+
+Introduction
+------------
+
+This RFC proposes a new unified autoloading mechanism to allow
+autoloading of class types (which includes classes, interfaces and
+traits) and functions. Currently only class type autoloading is possible
+in PHP.
+
+Example
+-------
+
+This example shows a separate autoloader being registered for classes,
+
+.. code:: php
+
+   <?php
+
+   function classTypeAutoloader($name, $type)
+   {
+       if ($type !== AUTOLOAD_CLASS) {
+           return;
+       }
+       if ($name !== 'foo') {
+           return;
+       }
+
+       // Being able to define classes inside a function
+       // already exists in PHP and is convenient for an example 
+       class foo
+       {
+           public function __construct()
+           {
+               echo "class was created";
+           } 
+       }
+   }
+
+   function functionAutoloader($name, $type)
+   {
+       if ($type !== AUTOLOAD_FUNCTION) {
+           return;
+       }
+       if ($name !== 'foo') {
+           return;
+       }
+       function foo() {
+           echo "foo was called";
+       }
+   }
+
+
+   autoload_register('classTypeAutoloader', AUTOLOAD_CLASS);
+
+   autoload_register('functionAutoloader', AUTOLOAD_FUNCTION);
+
+   // As is currently possible, trigger class autoload 
+   new Foo();
+   //output: class was created
+
+   // The triggers the capability to autoload a function 
+   foo();
+   // output: function was autoloaded and called
+
+Implementation details
+----------------------
+
+Constants
+~~~~~~~~~
+
+This proposal registers the following constants:
+
+-  AUTOLOAD_CLASS => 1
+-  AUTOLOAD_FUNCTION => 2
+
+The \`AUTOLOAD_CLASS\` is used for registering autoloaders for all the
+different types, which will be classes, interfaces and traits.
+
+The \`AUTOLOAD_FUNCTION\` is used for registering autoloading for
+functions.
+
+Userland Functions
+~~~~~~~~~~~~~~~~~~
+
+This proposal adds the following functions:
+
+bool autoload_register(callable $callback, int $type, bool $prepend)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+bool autoload_unregister(callable $callback, int $type)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This function behaves similar to the current *spl_autoload_unregister*
+function, and unregisters a callback that was previously registered.
+Note that if you registered the same callback for multiple types, this
+will unregister all of them unless the *$type* argument is specified.
+
+array autoload_list(int $type)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This function will return a list of all registered autoloaders for a
+specific type.
+
+function_exists()
+^^^^^^^^^^^^^^^^^
+
+A new optional boolean argument is added to \`function_exists()\` to
+match the behavior of \`class_exists()\` when it comes to autoloading
+functions.
+
+Behavior
+~~~~~~~~
+
+Registering autoloaders with the new API will allow callbacks to be
+fired on class and function missing errors.
+
+Single Type Behavior
+~~~~~~~~~~~~~~~~~~~~
+
+By passing a single constant to the register function, the callback will
+only be called for types that match (the \`$type\` parameter is still
+set, but will never vary).
+
+.. code:: php
+
+   <?php
+   autoload_register(function($name, $type) {
+       var_dump($name, $type);
+       eval("function $name(){}");
+       // We don't need a switch, since we only register for functions.
+   }, AUTOLOAD_FUNCTION);
+   foo(); // string(3) "foo" int(2)
+   new foo(); // FATAL_ERROR as no autoloader is registered
+   ?>
+
+Multiple Type Behavior
+~~~~~~~~~~~~~~~~~~~~~~
+
+By passing a bitwise-or'd constant to the register function, the
+callback will only be called for types that match).
+
+.. code:: php
+
+   <?php
+   autoload_register(function($name, $type) {
+       var_dump($name, $type);
+       switch ($type) {
+           case AUTOLOAD_FUNCTION:
+               eval("function $name(){}");
+               break;
+           case AUTOLOAD_CLASS:
+               $code = <<< CODE
+               class $name
+                   {
+                       public function __construct()
+                       {
+                           echo "class $name was created";
+                       } 
+                   }
+   CODE;
+               eval($code);
+               break;
+       }
+   }, AUTOLOAD_FUNCTION | AUTOLOAD_CLASS);
+   foo(); // string(3) "foo" int(2)
+   new foo();
+   ?>
+
+Userland Backwards Compatibility
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+SPL
+^^^
+
+This RFC proposes to strip the current *spl_autoload_register*
+functionality, and make *spl_autoload_\** simple proxies for registering
+core autoloaders. They will function exactly as they do now, but under
+the hood they will be using the new interface.
+
+This means that calls to *spl_autoload_functions()* will include any
+autoloader (which indicates support for //AUTOLOAD_CLASS //) registered
+through *autoload_register()*. However, all autoloaders registered via
+*spl_autoload_register* will set the *pass_type* flag to *0*, meaning
+that only a single argument will be passed to the callback. This is for
+compatiblity.
+
+C API Backwards Compatibility
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _spl-1:
+
+SPL
+^^^
+
+The autoload related SPL globals have been removed, due to the
+implementation being centralized.
+
+Backward Incompatible Changes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Userland
+^^^^^^^^
+
+There should be no user-land BC changes.
+
+PECL
+~~~~
+
+EG(autoload_func)
+^^^^^^^^^^^^^^^^^
+
+PECL extensions which rely on the *EG(autoload_func)* global variable
+will break (due to refactor).
+
+A quick scan of LXR shows that only the
+[optimizer](http://lxr.php.net/xref/PECL/optimizer/optimize.c#4660)
+extension would change.
+
+autoload_func_info
+^^^^^^^^^^^^^^^^^^
+
+PECL extensions which reply on the SPL type *autoload_func_info* will
+break (due to refactor).
+
+A quick scan of LXR shows that no extensions use this.
+
+SPL_G(autoload_functions)
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+PECL extensions which rely on the SPL globals will break (due to
+refactor).
+
+A quick scan of LXR shows that no extensions use this.
+
+Proposed PHP Version(s)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+PHP 8.0
+
+SAPIs Impacted
+~~~~~~~~~~~~~~
+
+None.
+
+Impact to Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+See Backward Incompatible Changes
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+None.
+
+Open Issues
+~~~~~~~~~~~
+
+None yet.
+
+Future Scope
+~~~~~~~~~~~~
+
+A previous version of this RFC included support for autoloading
+constants and streams. These have been excluded from this RFC for the
+following reasons.
+
+Constant autoloading
+^^^^^^^^^^^^^^^^^^^^
+
+Although it would be possible to add constant autoloading, the position
+of this RFC is that being unable to directly reference `functions by
+name <https://github.com/Danack/RfcCodex/blob/master/referencing_functions.md>`__
+is a more important problem to address.
+
+If we added constant autoloading now, that would have a very high chance
+of limiting the choices surrounding being able to reference functions.
+Because of that, this RFC does not include constant autoloading.
+
+Stream autoloading
+^^^^^^^^^^^^^^^^^^
+
+Stream autoloading is excluded from this RFC to reduce the size of the
+RFC. It would be possible to add it in a later version.
+
+Other types
+^^^^^^^^^^^
+
+At some point PHP may support types other than classes as parameter,
+return or property types. For example perhaps enums:
+
+.. code:: php
+
+   enum Compass {
+     North, South, East, West 
+   }
+
+   function foo(Compass $direction) { ... }
+
+   foo(Compass::East);
+
+Or typed callables:
+
+.. code:: php
+
+   type logger = callable(string $message): void;
+
+   // Use that type 
+   function uses_logger(logger $fn) {...}
+
+It should be possible to add to autoloading.
+
+As PHP cannot determine what type a parameter, return or property type
+will be before it is loaded, the loading of those types will need to go
+through the same mechanism that is used for class autoloading.
+
+At that point it would make sense to either rename \`AUTOLOAD_CLASS\` to
+be \`AUTOLOAD_TYPE\` or more likely, add a new constant with the same
+value, leaving \`AUTOLOAD_CLASS\` as legacy.
+
+.. code:: php
+
+   autoload_register('callableTypeAutoloader', AUTOLOAD_TYPE);
+
+   function callableTypeAutoloader($name, $type)
+   {
+       if ($type !== AUTOLOAD_CLASS) {
+           return;
+       }
+       if ($name !== 'logger') {
+           return;
+       }
+
+       type logger = callable(string $message): void;
+   }
+
+Patches and Tests
+~~~~~~~~~~~~~~~~~
+
+A patch will be created before voting.
+
+Vote
+~~~~
+
+Accept the RFC yes/no.
+
+References
+~~~~~~~~~~
+
+-  Importing namespaces:
+   http://php.net/manual/en/language.namespaces.importing.php
+-  SPL Autoloading: http://php.net/manual/en/language.oop5.autoload.php
+-  Previous RFC for function autoloading:
+   https://wiki.php.net/rfc/function_autoloading
+-  Previous pull-request:
+   https://github.com/ircmaxell/php-src/tree/function-autoloading-7
+
+Additional Metadata
+-------------------
+
+:Original Authors: Danack, based on work Anthony Ferrara
+:Slug: function_autoloading_v2
+:Wiki URL: https://wiki.php.net/rfc/function_autoloading_v2

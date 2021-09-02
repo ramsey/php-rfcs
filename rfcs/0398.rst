@@ -1,0 +1,444 @@
+Short Closures
+==============
+
+:PHP-RFC: 0398
+:Title: Short Closures
+:Author: Bob Weinand <bobwei9@hotmail.com>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2015-05-01
+:Version: 0.2
+
+Introduction
+------------
+
+Anonymous functions, also known as closures, allow the creation of
+functions which have no specified name. They are most useful as the
+value of callback parameters, but they have many other uses.
+
+The current implementation of anonymous functions in PHP is quite
+verbose compared to other languages. That makes using anonymous
+functions be more difficult than it could be, as there is both more to
+type, and more importantly the current implementation makes it hard to
+read (and so maintain) code that uses anonymous functions.
+
+A better syntax encourages functional code and partial applications (see
+the examples), which are a powerful tools people writing PHP code should
+be able to use as easily as they can be used elsewhere.
+
+Proposal
+--------
+
+This RFC proposes the introduction of the ~> operator to allow shorthand
+creation of anonymous functions to reduce the amount of 'boilerplate'
+needed to use them.
+
+Current code:
+
+.. code:: php
+
+   function ($x) {
+       return $x * 2;
+   }
+
+would be equivalent to the new syntax:
+
+.. code:: php
+
+   $x ~> $x * 2
+
+Anonymous functions defined in this way will automatically ``use ()``
+all of the (compiled) variables in the Closure body. See the 'Variable
+binding' section for more details.
+
+Syntax
+~~~~~~
+
+The syntax used to define a short hand anonymous function would be:
+
+-  Parameters. When the function has a single parameter the surrounding
+   parentheses (aka round brackets) may be omitted. For functions with
+   multiple parameters the parentheses are required.
+-  The new short closure operator ~>
+-  The body of the anonymous function. When the body of the function is
+   a single expression the surrounding curly brackets and return keyword
+   may be omitted. When the body of the function is not a single
+   expression, the braces (and eventual return statement) are required.
+
+I.e. all of the following would be equivalent:
+
+.. code:: php
+
+   $x ~> $x * 2
+   $x ~> { return $x * 2;}
+   ($x) ~> $x * 2
+   ($x) ~> { return $x * 2; }
+
+Omitting the parentheses when the function has multiple parameters will
+result in a parse error:
+
+.. code:: php
+
+   $x, $y ~> {$x + $y}  // Unexpected ','
+   ($x, $y) ~> $x + $y // correct
+
+Using the return keyword when braces have been omitted, will similarly
+give a parse error:
+
+.. code:: php
+
+   ($x, $y) ~> return $x + $y; // Unexpected T_RETURN
+   ($x, $y) ~> { return $x + $y; } // correct
+
+In case of no parameters, an empty parenthesis pair is needed.
+
+.. code:: php
+
+   ~> 2 * 3; // Unexpected T_TILDED_ARROW
+   () ~> 2 * 3; // correct, will return 6 when called
+
+Concrete syntax is (~> is right associative with lowest possible
+precedence):
+
+::
+
+     ( parameter_list ) ~> expression
+   | ( parameter_list ) ~> { statements }
+   /* return by reference */
+   | &( parameter_list ) ~> expression
+   | &( parameter_list ) ~> { statements }
+   /* shorthand form for just one parameter */
+   | $variable ~> expression
+   | $variable ~> { statements }
+
+When a bare expression is used as second parameter, its result will be
+the return value of the Closure.
+
+Also, parameter_list does *not* include default values nor type hints.
+See also the 'Type Hints and Return Types' section at the bottom.
+
+*Discussion Point: the { statements } syntax* This RFC stance is that
+chained short Closures followed by a full Closure would look quite
+weird:
+``$foo ~> $bar ~> function ($baz) use ($foo, $bar) { /* ... */ }``.
+Instead of a nicer ``$foo ~> $bar ~> $baz ~> { /* ... */ }``. Which is
+why they are supported. That syntax is **not** an invitation to randomly
+abuse it and use it in totally inappropriate places.
+
+*Discussion Point: single parameter* While it might appear not
+consistent, with any other number of parameters, a lot of languages
+having extra short Closures allow this. Also, Closures with just one
+parameter are relatively common, so this RFC author thinks it is worth
+supporting that.
+
+Variable binding
+~~~~~~~~~~~~~~~~
+
+The position of this RFC is that the shorthand syntax is to allow
+anonymous functions to be used as easily as possible. Therefore, rather
+than requiring individual variables be bound to the closure through the
+``use ($x)`` syntax, instead all variables used in the body of the
+anonymous function will automatically be bound to the anonymous function
+closure from the defining scope.
+
+The variable binding is always **by value**. There are no implicit
+references. If these are needed, the current syntax with ``use ()`` can
+be used.
+
+For example:
+
+.. code:: php
+
+   $a = 1;
+   function foo(array $input, $b) {
+       $c = rand(0, 4);
+
+       return array_map($x ~> ($x * 2) + $b + $c, $input);
+   }
+
+Variables $b and $c would be bound automatically to the anonymous
+function, and so be usable inside it. Variable $a is not in the scope of
+the function, and so is not bound, and so cannot be used inside the
+closure. e.g. this code will give an error:
+
+.. code:: php
+
+   $a = 1;
+   function foo(array $input, $b) {
+       // Notice: Undefined variable: a in %s on line %d
+       return array_map($x ~> ($x * 2) + $b + $a, $input);
+   }
+
+If a user wants to avoid binding all variables automatically they can
+use the current syntax to define the anonymous function.
+
+Examples
+--------
+
+These examples cover some simple operations and show how the short-hand
+syntax is easier to read compared to the existing long-hand syntax.
+
+Array sort with user function
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sort ``$array`` which contains objects which have a property named
+``val``.
+
+Current syntax:
+
+.. code:: php
+
+   usort($array, 
+       function($a, $b) {
+           return $a->val <=> $b->val; 
+       }
+   );
+
+New syntax:
+
+.. code:: php
+
+   usort($array, ($a, $b) ~> $a->val <=> $b->val);
+
+Extracting data from an array and summing it
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Current syntax:
+
+.. code:: php
+
+   function sumEventScores($events, $scores) {
+       $types = array_map(
+           function($event) {
+               return $event['type'];
+           },
+           $events
+       );
+
+       return array_reduce(
+           $types,
+           function($sum, $type) use ($scores) {
+               return $sum + $scores[$type];
+           }
+       );
+   }
+
+New syntax:
+
+.. code:: php
+
+   function sumEventScores($events, $scores) {
+       $types = array_map($event ~> $event['type'], $events);
+       return array_reduce($types, ($sum, $type) ~> $sum + $scores[$type]);
+   }
+
+The calling code for this function would be:
+
+.. code:: php
+
+   $events = array(
+       array(
+           'type' =>'CreateEvent',
+           'date' => '2015-05-01T16:19:33+00:00'
+       ),
+       array(
+           'type' =>'PushEvent',
+           'date' => '2015-05-01T16:19:54+00:00'
+       ),
+       //...
+   );
+
+   $scores = [
+       'PushEvent'          => 5,
+       'CreateEvent'        => 4,
+       'IssuesEvent'        => 3,
+       'CommitCommentEvent' => 2
+   ];
+
+   sumEventScores($events, $scores);
+
+Lazy evaluation
+~~~~~~~~~~~~~~~
+
+It may be necessary to have code only evaluated under specific
+conditions, like debugging code:
+
+.. code:: php
+
+   function runDebug(callable $func) {
+       /* only run under debug situations, but don't let it interrupt program flow, just log it */
+       if (DEBUG) {
+           try {
+               $func();
+           } catch (Exception $e) { /*... */ }
+       }
+   }
+
+   $myFile = "/etc/passwd";
+
+   /* Old code */
+   runDebug(function() use ($myFile) { /* yeah, we have to use use ($myFile) here, which isn't really helpful in this context */ 
+       if (!file_exists($myFile)) {
+           throw new Exception("File $myFile does not exist...");
+       }
+   });
+
+   /* New code */
+   runDebug(() ~> {
+       if (!file_exists($myFile)) {
+           throw new Exception("File $myFile does not exist...");
+       }
+   });
+
+   /* still continue here, unlike an assert which would unwind the stack frame here ... */
+
+Partial application
+~~~~~~~~~~~~~~~~~~~
+
+The shorthand syntax makes it easier to write functional code like a
+reducer by using the ability of shorthand anonymous functions to be
+chained together easily.
+
+Current syntax:
+
+.. code:: php
+
+   function reduce(callable $fn) {
+       return function($initial) use ($fn) {
+           return function($input) use ($fn, $initial) {
+               $accumulator = $initial;
+               foreach ($input as $value) {
+                   $accumulator = $fn($accumulator, $value);
+               }
+               return $accumulator;
+           };
+       };
+   }
+
+New syntax:
+
+.. code:: php
+
+   function reduce(callable $fn) {
+       return $initial ~> $input ~> {
+           $accumulator = $initial;
+           foreach ($input as $value) {
+               $accumulator = $fn($accumulator, $value);
+           }
+           return $accumulator;
+       };
+   }
+
+Symbol choice
+-------------
+
+The symbol ``~>`` was chosen as it is a mnemonic device to help
+programmers understand that the variable is being brought to a function.
+It is also unambiguous as it has not been used elsewhere in PHP.
+
+Currently Hack has implemented shorthand anonymous functions using the
+``==>`` symbol to define them. The position of this RFC is that the
+``==>`` symbol is too similar to the ``=>`` (double arrow) sign, and
+would cause confusion. Either through people thinking it has something
+to do with key-value pairs, or through a simple typo could produce valid
+but incorrect code. e.g.
+
+This returns an array containing an anonymous function:
+
+.. code:: php
+
+   return [$x ==> $x * 2];
+
+This returns an array if $x is already a defined variable.
+
+.. code:: php
+
+   return [$x => $x * 2];
+
+Additionally, I was asked to not reuse the ``==>`` syntax
+(http://chat.stackoverflow.com/transcript/message/25421648#25421648) as
+Hack is already using it. Hence ``~>`` looks like a great alternative.
+
+Also, Hack has some possibilities of typing here, which do not work with
+PHP, due to technical reasons. Regarding forward compatibility, we might
+have to choose another syntax than Hack here to resolve these issues.
+It'd end up being the same operator, with a very similar syntax,
+potentially confusing. Furthermore using the same syntax than Hack here
+might lead users to expect types working here and getting really
+confused.
+
+Backward Incompatible Changes
+-----------------------------
+
+This RFC doesn't affect backwards compatibility.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 7.x; actually 7.1.
+
+Future Scope
+------------
+
+Other uses for ~> operator
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC is solely for using the shorthand anonymous functions as
+closures. It does not cover any other usage of the shorthand function
+definition such as:
+
+.. code:: php
+
+   class Foo {
+       private $bar:
+
+       getBar() ~> $this->bar;
+       setBar($bar) ~> $this->bar = $bar;
+   }
+
+Which is outside the scope of this RFC.
+
+Type Hints and Return Types
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC does *not* include type hints nor return types.
+
+Type Hints are not added due to technical problems in parser and the RFC
+author is not sure about whether they should be really added. If anyone
+achieves to solve these technical issues, he should feel free to do that
+in a future RFC for further discussion. And as introducing half a
+typesystem would be inconsistent, the RFC proposes to not include return
+types either.
+
+As an alternative, the current syntax for defining Closures still can be
+used here.
+
+Vote
+----
+
+This RFC is a language change and as such needs a 2/3 majority.
+
+Voting opened September 22th, 2015 and will remain open until October
+2nd, 2015.
+
+Question: Short Closures
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patch
+-----
+
+Pull request is at https://github.com/php/php-src/pull/1254
+
+Additional Metadata
+-------------------
+
+:Original Authors: Bob Weinand, bobwei9@hotmail.com
+:Original Status: Declined / Withdrawn in favor of http://wiki.php.net/rfc/arrow_functions
+:Slug: short_closures
+:Wiki URL: https://wiki.php.net/rfc/short_closures

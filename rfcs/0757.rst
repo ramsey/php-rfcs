@@ -1,0 +1,480 @@
+PHP\iterable\any() And All() On Iterables
+=========================================
+
+:PHP-RFC: 0757
+:Title: PHP\iterable\any() And All() On Iterables
+:Author: Tyson Andre <tandre@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2020-08-30
+:Version: 0.6
+
+Introduction
+------------
+
+The primitives ``any()`` and ``all()`` are a common part of many
+programming languages and help in avoiding verbosity or unnecessary
+abstractions.
+
+#. Haskell:
+   https://hackage.haskell.org/package/base-4.14.0.0/docs/Prelude.html#v:any
+#. JavaScript:
+   https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/some
+#. Python: https://docs.python.org/3/library/functions.html#all
+#. Ruby: https://apidock.com/ruby/Enumerable/any%3F
+#. Java 8(Stream):
+   https://docs.oracle.com/javase/8/docs/api/java/util/stream/Stream.html#allMatch-java.util.function.Predicate-
+#. C++: https://www.cplusplus.com/reference/algorithm/any_of/
+
+For example, the following code could be shortened significantly:
+
+.. code:: php
+
+   // The old version
+   $satisifies_predicate = false;
+   foreach ($item_list as $item) {
+       // Performs DB operations or external service requests, stops on first match by design.
+       if (API::satisfiesCondition($item)) {
+           $satisfies_predicate = true;
+           break;
+       }
+   }
+   if (!$satisfies_predicate) {
+       throw new APIException("No matches found");
+   }
+   // more code....
+
+.. code:: php
+
+   // The new version is much shorter, readable, and easier to review,
+   // without creating temporary variables or helper functions that are used in only one place.
+
+   // Performs DB operations or external service requests, stops on first match by design.
+   if (!\PHP\iterable\any($item_list, fn($item) => API::satisfiesCondition($item))) {
+       throw new APIException("No matches found");
+   }
+
+Proposal
+--------
+
+Add the functions
+``PHP\iterable\any(iterable $input, ?callable $callback = null): bool``
+and ``all(...)`` to PHP's standard library's function set. (The
+namespace ``PHP\iterable`` was preferred in `a straw poll that was
+previously sent
+out </rfc/any_all_on_iterable_straw_poll_namespace#vote>`__)
+
+**The implementation is equivalent to the following polyfill:**
+
+.. code:: php
+
+   namespace PHP\iterable;
+
+   /**
+    * Determines whether any element of the iterable satisfies the predicate.
+    *
+    *
+    * If the value returned by the callback is truthy
+    * (e.g. true, non-zero number, non-empty array, truthy object, etc.),
+    * this is treated as satisfying the predicate.
+    *
+    * @param iterable $input
+    * @param null|callable(mixed):mixed $callback
+    */
+   function any(iterable $input, ?callable $callback = null): bool {
+       foreach ($input as $v) {
+           if ($callback !== null ? $callback($v) : $v) {
+               return true;
+           }
+       }
+       return false;
+   }
+
+.. code:: php
+
+   /**
+    * Determines whether all elements of the iterable satisfy the predicate.
+    *
+    * If the value returned by the callback is truthy
+    * (e.g. true, non-zero number, non-empty array, truthy object, etc.),
+    * this is treated as satisfying the predicate.
+    *
+    * @param iterable $input
+    * @param null|callable(mixed):mixed $callback
+    */
+   function all(iterable $input, ?callable $callback = null): bool {
+       foreach ($input as $v) {
+           if (!($callback !== null ? $callback($v) : $v)) {
+               return false;
+           }
+       }
+       return true;
+   }
+
+This proposal recommends adding ``PHP\iterable\any()`` and
+``PHP\iterable\all()`` to the standard library instead of a PECL or
+composer library for the following reasons
+
+#. New contributors to projects wouldn't know about ``any()`` and
+   ``all()`` if those functions were reimplemented in various composer
+   libraries or util.php files with different semantics/names and only
+   occasionally used.
+#. If this was provided only in userland, there'd be low adoption and
+   code such as the above example (API::somePredicate()) would remain
+   common.
+#. If the standard library provided it, then polyfills for newer php
+   functionality could adopt this as well, making cleaner code easier to
+   write.
+
+Implementation Details
+~~~~~~~~~~~~~~~~~~~~~~
+
+When ``any()`` or ``all()`` are called with an iterable and a predicate,
+it internally checks if the value returned by the predicate is truthy
+(e.g. true, non-zero numbers, non-empty arrays, truthy objects, etc.)
+
+When ``any()`` or ``all()`` are called with only an iterable, it is
+equivalent to checking if any/all of the arguments are truthy. This is
+equivalent to calling ``any()``/``all()`` with ``fn ($x) => $x``, which
+is equivalent to calling it with ``fn($x) => (bool)$x``.
+
+.. code:: php
+
+   php > var_export(PHP\iterable\any([false]));
+   false
+   php > var_export(PHP\iterable\any([true]));
+   true
+   php > var_export(PHP\iterable\any([0]));
+   false
+   php > var_export(PHP\iterable\any([1]));
+   true
+   php > var_export(PHP\iterable\any([0], fn($x) => $x));
+   false
+   php > var_export(PHP\iterable\any([1], fn($x) => $x));
+   true
+
+   php > var_export(PHP\iterable\all([true, true, true], fn($x) => $x));
+   true
+   php > var_export(PHP\iterable\all([1, 2, 3], fn($x) => $x));
+   true
+   php > var_export(PHP\iterable\all([true, true, false], fn($x) => $x));
+   false
+   php > var_export(PHP\iterable\all([1, 2, 0], fn($x) => $x));
+   false
+   php > var_export(PHP\iterable\all([1, 2, 0]);
+   false
+
+Secondary Vote: any()/all() or any_value()/all_values()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A secondary vote will be held on whether to name this
+``any()``/``all()`` or ``any_value()``/``all_values()``
+
+PHP is unique in that the primitive array-like type ``array`` type is
+also a dictionary, making the keys often significant (strings, numeric
+identifiers, etc). Existing function names vary in whether the fact that
+they only act on values is explicitly included in the name.
+
+Many other programming languages have gone with a short name for the
+default of checking if a value is in a collection.
+
+    The primitives ``any()`` and ``all()`` are a common part of many
+    programming languages and help in avoiding verbosity or unnecessary
+    abstractions.
+
+    #. Haskell:   
+    https://hackage.haskell.org/package/base-4.14.0.0/docs/Prelude.html#v:any
+    #. JavaScript:   
+    https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/some
+    #. Python: https://docs.python.org/3/library/functions.html#all #.
+    Ruby: https://apidock.com/ruby/Enumerable/any%3F #. Java 8(Stream): 
+     
+    https://docs.oracle.com/javase/8/docs/api/java/util/stream/Stream.html#allMatch-java.util.function.Predicate-
+    #. C++: https://www.cplusplus.com/reference/algorithm/any_of/
+
+Benefits of a shorter name:
+
+#. Conciseness for the most common use case of checking whether a
+   predicate is true for any/all values of an iterable array/object.
+#. Consistency with some other functions such as ``array_reduce()``,
+   ``array_unique()``, ``in_array()``, ``next()`` that use values for
+   their underlying implementation (i.e. not being named
+   ``array_reduce_values()``, ``next_value()``, etc.)
+#. Potential to use $flags to extend this to support less common use
+   cases like ``ARRAY_FILTER_USE_KEY``/``ARRAY_FILTER_USE_BOTH`` without
+   adding more global functions
+
+Benefits of a longer name:
+
+#. A longer name would be more descriptive and make it easier to
+   understand what code is doing.
+#. This makes it likely that in the future for iterable functionality,
+   PHP will add multiple functions such as ``any_key()``/(``any_entry``
+   or ``any_key_value``) instead of using $flags (which will be simpler
+   to statically analyze or infer types for - in rare cases the argument
+   $flags passed to ``array_filter($values, $callback, $flags)`` is an
+   unknown dynamic value).
+   Adding a constant such as ``flags: PHP\iterable\USE_KEY`` may make
+   the code longer.
+   Note that adding the name ``any()`` for values of iterables doesn't
+   prevent PHP from adding ``any_key()`` for checking keys of iterables
+   in the future, either (my personal preference would be to add
+   ``any_key()`` regardless of whether ``any()``/``any_value()`` was
+   added).
+
+Backward Incompatible Changes
+-----------------------------
+
+Any userland functions called ``PHP\iterable\any()`` and
+``PHP\iterable\all()`` in the global namespace without a
+``!function_exists()`` check would encounter duplicate function errors.
+Because the `PHP namespace is reserved for internal use by
+PHP <https://www.php.net/manual/en/language.namespaces.rationale.php>`__,
+this is unlikely.
+
+Proposed PHP Version(s)
+-----------------------
+
+8.1
+
+Future Scope
+------------
+
+Add int $flag = 0?
+~~~~~~~~~~~~~~~~~~
+
+Similar to array_filter, ``int $flag = 0`` could be used to control
+which parameters get passed to the predicate such as
+``ARRAY_FILTER_USE_BOTH`` and ``ARRAY_FILTER_USE_KEY``.
+
+Because there was discussion of whether the ability to pass keys was
+widely useful and multiple approaches that could be used to pass the
+iterable key, this functionality was left out of this RFC. See
+https://externals.io/message/111711#111721
+
+    I like this, but I do not like the flags. I don't think they're at
+    all useful. A lot of the other discussion in the thread seems to be
+    needlessly complicating it, too.
+
+    all() and any() only need return booleans. Their callbacks only need
+    return booleans. That's the point. first() makes sense to add, and
+    it would return the first value that matches.
+
+    For the callback itself, there is work to, hopefully, add partial
+    function application to 8.1. (No idea if it will be successful, but
+    the effort is in progress.) If so, the upshot is that turning an
+    arbitrary function into a single-parameter function becomes silly
+    easy, which means functions like this can just expect a single
+    parameter callback and be done with it. No need for extra-args or
+    flags or whatnot.
+
+    If you want to check the keys of an array, call ``array_keys()``
+    first and use that.
+
+    ``if (any(array_keys($foo), fn($k) => $k %2)) { ... }``
+
+    all(), any(), and first() all sound like good things to include, but
+    let's not over-complicate them. We can do better today than we could
+    in 1999...
+
+    --Larry Garfield
+
+Add first($iterable, $callback = null, $default = null): mixed as well?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+https://externals.io/message/111711#111732
+
+    If it took the default value as well it could return that (to
+    distinguish the absence of a result from null matching the
+    predicate). While it's useful in itself it also would enable you to
+    pass a marker object and check the identity of that to know if no
+    matches have been found:
+
+    .. code:: php
+
+    $none = new stdClass;    $element = first($collection, fn($elt) =>
+    ..., $none);    if ($element === $none) {        // nothing found   
+    }
+
+Calling it ``[iterable_]search_callback()`` or ``first_match[ing]()`` or
+``find()`` might help distinguish this from the
+``reset()``/``end()``/``next()``/``prev()`` family of global functions -
+there's more than one possible name.
+
+Discussion
+----------
+
+Alternative names
+~~~~~~~~~~~~~~~~~
+
+``any_value()`` or ``all_values()`` have been suggested as alternative
+names: https://github.com/php/php-src/pull/6053#issuecomment-684164832
+
+    I suggest slightly different signatures, assuming we stay
+    value-oriented:
+
+    .. code:: php
+
+    // ...omitted
+
+    // with named parameters    all_values(of: [1, 3, 5, 7], satisfy:
+    'is_odd');    any_value(of: [0, 2, 4, 6], satisfies: 'is_prime');
+
+    // without named parameters    all_values([1, 3, 5, 7], 'is_odd');  
+     any_value([0, 2, 4, 6], 'is_prime');
+
+    The naming clarifies what any and all are about--the values--and
+    leaves room for naming functions that are key or key/value oriented.
+
+``iter_any()`` or ``iterable_any()`` have also been suggested as
+alternative names.
+
+    The main thing I'm concerned about is that once we start extending
+    this area (I assume that any & all are not going to be the last
+    additions in this space) we will quickly run into function names
+    that are either too generic or outright collide. For example, what
+    if we want to add an iterator-based version of range()? Do we really
+    want to be forced to pull a Python and call it xrange()? That's
+    about as good as real_range()...
+
+    As such, I think it's important to prefix these somehow, though I
+    don't care strongly how. Could be iter_all() or iterable_all(). We
+    might even make it iterator_all() if we also adjust other existing
+    iterator_\* functions to accept iterables. I'd also be happy with
+    iter\all() or iterable\all(), but that gets us back into namespacing
+    discussions :)
+
+Because ``any()`` and ``all()`` are potentially commonly used functions
+in the same way as ``count(Countable|array)`` and always return
+booleans, I preferred a short name over longer names. This also allows
+potentially supporting ``int $flags = 0`` in the future, similar to what
+was done for ``array_filter()``.
+
+Initially, the proposal was to add this in the global scope as
+``iterable_all()`` and ``iterable_any()``.
+
+Add find_first() instead?
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    I was actually working on this sort of thing recently. Technically,
+    you can support all, any, and first by using a single function:
+
+    .. code:: php
+
+    function find_first(iterable $of, callable($value, $key): bool
+    $thatSatistifes): Iterator
+
+    It converts the ``$iterable`` into an ``Iterator``, then calls the
+    callback for each key/value pair until one returns true, and then
+    always returns the iterator at the current position.
+
+    This allows you to know both key and value when making a decision.
+    By returning an iterator the caller can get both key and value. By
+    returning an iterator it can handle both the empty case and not
+    found cases with ``$result->valid() === false``. By returning an
+    iterator it might be useful for processing the remainder of the list
+    somehow. I'm not sure that in practice it would be that friendly,
+    but it's worth pointing out for discussion at least.
+
+Vote
+----
+
+Add
+``PHP\iterable\any(iterable $input, ?callable $callback = null): bool``
+and
+``PHP\iterable\all(iterable $input, ?callable $callback = null): bool``
+(yes/no, requiring a 2/3 majority)
+
+Voting started on 2021-02-08 and ended on 2021-02-22.
+
+Question: Add PHP\iterable\any() and all() to PHP?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+| 
+| The following secondary vote will be used to decide between
+  ``any()``/``all()`` and ``any_value()``/``all_values()`` as the name
+  within the ``PHP\iterable`` namespace. See `the discussion section for
+  the benefits/drawbacks of those
+  names <#secondary_voteanyall_or_any_valueall_values>`__.
+
+Question: Names to use: any()/all() or any_value()/all_values()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  any()/all()
+-  any_value()/all_values()
+
+Straw Poll
+~~~~~~~~~~
+
+Question: Reasons for voting against this RFC
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-2:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Too small in scope
+-  Object to the choice of namespace
+-  Prefer the global namespace
+-  Confused about the implementation
+-  Prefer userland solutions
+-  Other
+-  Voted for this RFC
+
+References
+----------
+
+#. https://externals.io/message/111711 "Proposal: Adding functions
+   any(iterable $input, ?callable $cb = null, int $use_flags=0) and
+   all(...)"
+#. https://externals.io/message/103357 "[PATCH] Implementing
+   array_every() and array_any()"
+#. https://externals.io/message/111756 "[RFC] Global functions any() and
+   all() on iterables"
+#. `Straw poll: Naming for \*any() and \*all() on
+   iterables </rfc/any_all_on_iterable_straw_poll>`__
+#. `Straw poll: Using namespaces for \*any() and \*all() on
+   iterables </rfc/any_all_on_iterable_straw_poll_namespace>`__ (older
+   poll)
+#. `RFC: Namespaces in bundled PHP
+   extensions </rfc/namespaces_in_bundled_extensions>`__ (started after
+   voting closed)
+#. `Straw poll: Namespace to use for CachedIterable and iterable
+   functionality </rfc/cachediterable_straw_poll>`__ (newer poll)
+
+Rejected Features
+-----------------
+
+Adding flags like ```array_filter()`` <https://php.net/array_filter>`__
+was left out of this RFC due to debate over how often it would be used
+in practice and moved to future scope.
+
+Changelog
+---------
+
+-  0.3: Add more quotes
+-  0.4: Change name to ``PHP\iterable\all`` and ``PHP\iterable\any``,
+   add a secondary vote on ``any/all`` vs ``any_value()/all_values()``
+-  0.5: Add straw poll
+-  0.6: Add examples of how this works, add in missing return type,
+   clarify treatment of predicate $callback return type
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/6053
+:Original Authors: Tyson Andre, tandre@php.net
+:Slug: any_all_on_iterable
+:Wiki URL: https://wiki.php.net/rfc/any_all_on_iterable

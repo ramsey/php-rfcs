@@ -1,0 +1,378 @@
+EnumSet
+=======
+
+:PHP-RFC: 0802
+:Title: EnumSet
+:Author: Bob Weinand <bobwei9@hotmail.com>
+:Status: Draft
+:Type: Unknown
+:Created: 2021-03-14
+:Version: 0.9
+
+Introduction
+------------
+
+PHP needs first-class support for combined enum values.
+
+The current iteration of enums only allows for an unidimensional choice
+of enum values. It lacks the possibility to combine enums natively.
+
+Nowadays we usually are defining some integer constants with powers of
+two and using bit operations on them, whenever we need a set of flags.
+This, sadly, is neither type-safe nor trivial to see the complete set of
+accepted values nor easily debuggable (dump that and see something like
+``int(81926)``).
+
+While it certainly is possible to emulate aggregations of enum values
+with an array, this currently is neither ensuring type safety nor
+uniqueness nor trivial manipulation.
+
+This RFC is aiming at making enums usable as a well-typed, easy to
+manipulate and debuggable unique set of multiple well-defined finite
+choices.
+
+Proposal
+--------
+
+Introducing a new
+``class EnumSet<E implements UnitEnum> implements Traversable``.
+
+It is an immutable ordered collection of zero or more unique instances
+of its generic ``UnitEnum``.
+
+Overall Semantics
+~~~~~~~~~~~~~~~~~
+
+-  ``EnumSet`` overloads three operators: ``&``, ``|`` and ``~``.
+-  It is implemented as a generic class ``EnumSet<E>``.
+-  It also is parent class to all ``UnitEnum``.
+-  Its constructor creates an ``EnumSet<E>`` with all passed enum
+   values.
+-  Doing an (explicit) ``(array)`` cast on the ``EnumSet<E>`` instance
+   returns all contained values.
+-  Doing an (explicit) ``(bool)`` cast on the ``EnumSet<E>`` instance
+   returns ``true``, unless it is empty. Then it returns ``false``.
+-  The ``cases`` static method is promoted to ``EnumSet<E>``. It also
+   returns an ``EnumSet<E>`` containing all enum values instead of an
+   array.
+-  Two ``EnumSet`` instances are only weakly equal (``==``) if the
+   contents are the same. The order is ignored for equivalence checking.
+
+*Note:* All examples will assume the following enum:
+
+.. code:: php
+
+   enum Perm {
+     case Read;
+     case Write;
+     case Exec;
+   }
+
+Parent class to enums
+~~~~~~~~~~~~~~~~~~~~~
+
+The definition of any enum class which implements UnitEnum, thus not
+including possible future ADTs, will be changed to
+``final class MyEnum extends EnumSet<MyEnum> implements UnitEnum``.
+
+This allows an ``EnumSet`` consisting of a single value to be trivially
+identical to that value.
+
+Given this, we can:
+
+-  trivially pass a single enum value to a parameter expecting an
+   ``EnumSet``
+-  compare the result of a set operation on ``EnumSet`` to an enum value
+   without extra hops
+-  combine simple enum values together and have an ``EnumSet`` without
+   applying special semantics to the individual enum classes
+
+Constructor
+~~~~~~~~~~~
+
+The constructor allows to convert an array of enum values back to an
+``EnumSet``.
+
+The order of the values in the array is preserved. Later duplicate
+values are ignored. The keys of the array entries are ignored.
+
+The constructor signature is
+``public function __construct(array $enums = [])``.
+
+More precisely, the array must only consist of enum instances this
+``EnumSet`` can contain. I.e. if we had proper array generics, the first
+parameter would be ``array<E>``. Constructing an ``EnumSet<MyEnum>``
+with parameters not being an instance of ``MyEnum`` throws a
+``TypeError``.
+
+Using the constructor via ``new EnumSet<MyEnum>`` is the recommended way
+to get an empty ``EnumSet`` for a given enum class.
+
+Set operations
+~~~~~~~~~~~~~~
+
+There are three operators overloaded to allow for all necessary
+fundamental set operations: ``&``, ``|`` and ``~``.
+
+-  binary *or*: ``$enumSetA | $enumSetB``
+
+The new set will contain all elements contained in both operands. The
+order is determined by first concatenating both ``EnumSet`` instances,
+then removing later duplicates.
+
+.. code:: php
+
+   // every UnitEnum also extends EnumSet, thus we essentially combine two EnumSet instances with each representing a single value
+   $rx = Perm::Read | Perm::Exec;
+   $rw = Perm::Read | Perm::Write;
+
+   var_dump($rx | $rw); // Perm::Read | Perm::Exec | Perm::Write
+
+-  binary *and*: ``$enumSetA & $enumSetB``
+
+The new set will contain all elements contained in both operands in the
+order they are appearing in the first operand.
+
+.. code:: php
+
+   $rwx = Perm::Read | Perm::Exec | Perm::Write;
+
+   var_dump($rw & (Perm::Write | Perm::Exec)); // Perm::Exec | Perm::Write
+
+-  unary *inverse*: ``~$enumSet``
+
+The new set will contain all elements of the enum, with preserved order,
+except those present in its operand.
+
+.. code:: php
+
+   $rw = Perm::Read | Perm::Write;
+
+   var_dump(~$rw); // Perm::Exec;
+   var_dump(~Perm::Write); // Perm::Read | Perm::Exec
+
+Naturally, these behaviours also extend to the assign-ops ``|=`` and
+``&=``.
+
+Doing a binary operation on incompatible ``EnumSet`` instances will
+throw a ``TypeError``.
+
+Bool cast
+~~~~~~~~~
+
+It will be a common use case to check whether an ``EnumSet`` is empty,
+in particular when checking whether a specific enum value is contained
+in an ``EnumSet``. To make this check trivial, the ``EnumSet`` class can
+be cast to bool:
+
+-  ``false`` if empty
+-  ``true`` otherwise
+
+.. code:: php
+
+   $rw = Perm::Read | Perm::Write;
+
+   if ($rw & Perm::Read) {
+       echo "We can read!";
+   }
+
+Array cast, equivalence and Traversable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``EnumSet`` implements ``Traversable``. The order of iteration is
+deterministic and depends on the order values were added to the
+``EnumSet``.
+
+The keys of this iterator are continuous and starting at zero.
+
+``EnumSet`` instances can be cast to array like any other object. This
+is equivalent to applying ``iterator_to_array()`` here. This is not
+special or different to ``(array)`` casts of other objects.
+
+Conversely, ``EnumSet`` being so close to arrays in behavior, the weak
+comparison (``==``) semantics of ``EnumSet`` are also identical to those
+of arrays: Two ``EnumSet`` instances are weakly equal if the contents
+are the same, regardless of the ordering.
+
+.. code:: php
+
+   $rx = Perm::Read | Perm::Exec;
+   $array = [];
+   foreach ($rx as $key => $value) {
+       var_dump($key); // int(0), then int(1) 
+       var_dump($value); // Perm::Read, then Perm::Exec
+       $array[$key] = $value;
+   }
+   var_dump($array === (array) $rx); // bool(true)
+   var_dump(new EnumSet<Perm>((array) $rx) == $rx); // bool(true)
+   var_dump(Perm::Read | Perm::Exec == Perm::Exec | Perm::Read); // bool(true)
+
+cases method
+~~~~~~~~~~~~
+
+While ``~(new EnumSet<MyEnum>)`` is a valid way to retrieve the full set
+of enum values, there should be a proper way to do so.
+
+Luckily there already is a function returning all the enums: ``cases``.
+We just need to make it return ``EnumSet<E>`` instead.
+
+Its signature thus is ``public static function cases(): EnumSet<E>``.
+
+The order of the returned ``EnumSet`` will be the order of definition of
+the individual enum cases.
+
+The old behavior of getting an array from it is trivially restored by
+applying an array cast: ``(array) MyEnum::cases()``. This explicit
+casting should usually be unneeded as ``EnumSet`` anyway implements
+``Traversable`` for easy looping.
+
+Generic class
+~~~~~~~~~~~~~
+
+``EnumSet`` is implemented as a generic class, so that we can check
+against an ``EnumSet<E>`` type.
+
+It will internally be implemented as a monomorphized generic class. As
+this is the first implementation of a generic class, this entails some
+further semantics:
+
+-  ``new EnumSet`` is invalid and will throw an ``Error`` (as opposed to
+   ``new EnumSet<MyEnum>``)
+-  ``EnumSet<MyEnum> instanceof EnumSet`` is true
+
+::
+
+      * This also implies that there is a real (or virtual) parent class to the generic class having its types applied.
+      * This in particular means that both ''new ReflectionClass("EnumSet<MyEnum>")'' and ''new ReflectionClass("EnumSet")'' are valid.
+   * The ''new ReflectionClass("EnumSet")'' instance will use the broadest type possible (in accordance with LSP). Concretely the ''cases'' method will have a return type of ''EnumSet<UnitEnum>''.
+      * ''EnumSet<UnitEnum>'' is internally implemented as class alias of ''EnumSet''.
+
+The proposed implementation being monomorphized should not prevent us
+from switching to a truly generic implementation in future, the external
+behaviour of ``EnumSet`` is invariant to this.
+
+Examples
+--------
+
+More examples ...
+
+Serializing and unserializing file permissions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: php
+
+   enum FilePerm {
+       case OTHER_EXEC = 0001; case OTHER_WRITE = 0002; case OTHER_READ = 0004;
+       case GROUP_EXEC = 0010; case GROUP_WRITE = 0020; case GROUP_READ = 0040;
+       case OWNER_EXEC = 0100; case OWNER_WRITE = 0200; case OWNER_READ = 0400;
+       
+       static function toInt(EnumSet<FilePerm> $perms) : int {
+           $bits = 0;
+           foreach ($perms as $perm) {
+               $bits |= $perm->value;
+           }
+           return $bits;
+       }
+       
+       static function fromInt(int $bits) : EnumSet<FilePerm> {
+           $perms = new EnumSet<FilePerm>;
+           foreach (self::cases() as $perm) {
+               if ($perm->value & $bits) {
+                   $perms |= $perm;
+               }
+           }
+           return $perms;
+       }
+   }
+
+   $mode = stat($someFile)["mode"]; // e.g. 0644
+   $perms = FilePerm::fromInt($mode); // OTHER_READ | GROUP_READ | OWNER_WRITE | OWNER_READ
+
+   $perms &= FilePerm::OWNER_READ | FilePerm::OWNER_WRITE | FilePerm::OWNER_EXEC; // dismiss all but owner permissions
+
+   chmod($someFile, FilePerm::toInt($perms)); // saving 0600
+
+FAQ
+---
+
+How does it compare to current approaches?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In PHP we have a lot of functions which expect a ``$flags`` parameter.
+These usually are loosely defined constants, usually prefixed with a
+fixed string.
+
+Example: ``json_encode``. There are currently 15 flags, each a distinct
+integer being a power of two, prefixed with JSON_. If we designed this
+function on top of this RFC, we would have an enum with cases for every
+option, to be combined at will:
+
+.. code:: php
+
+   enum Json {
+      case FORCE_OBJECT;
+      case HEX_QUOT;
+      case THROW_ON_ERROR;
+      case ...
+   }
+   json_encode($json, Json::FORCE_OBJECT | Json::THROW_ON_ERROR)
+
+The usage on the json_encode method is similar to current usage, but now
+we have a self-contained enum of options which can be applied. Any bad
+option is easily seen in code and give a nice error message at runtime.
+
+Why internal?
+~~~~~~~~~~~~~
+
+It is easy to argue here that this can be done in userland.
+
+While certainly true, a lot of the ergonomics are lost:
+
+-  No trivial emptiness check (needs extra method)
+-  No trivial conversions between ``array`` and ``EnumSet``
+-  Operations require a method
+-  Boxing and unboxing is necessary (it would be impossible to pass an
+   enum value directly to a function expecting ``EnumSet``)
+-  Ugly class generation via eval() if we want proper typing of the
+   ``EnumSet``
+
+Overall there is so much more flexibility for the user in having enum
+set operations first class that it warrants an internal implementation.
+
+Backward Incompatible Changes
+-----------------------------
+
+This is no impact to backwards compatibility apart from allocating the
+``EnumSet`` class name.
+
+Proposed PHP Version(s)
+-----------------------
+
+To be included in PHP 8.1. (Later inclusion may have BC implications.)
+
+Proposed Voting Choices
+-----------------------
+
+Include ``EnumSet`` in PHP 8.1?
+
+-  Yes
+-  No
+
+The vote requires a 2/3 majority.
+
+Patches and Tests
+-----------------
+
+TBD.
+
+Implementation
+--------------
+
+TBD.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Bob Weinand, bobwei9@hotmail.com
+:Slug: enumset
+:Wiki URL: https://wiki.php.net/rfc/enumset

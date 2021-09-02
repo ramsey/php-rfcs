@@ -1,0 +1,241 @@
+Zend.exception_string_param_max_len: Configurable String Length In GetTraceAsString()
+=====================================================================================
+
+:PHP-RFC: 0745
+:Title: Zend.exception_string_param_max_len: Configurable String Length In GetTraceAsString()
+:Author: Tyson Andre <tandre@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2020-06-27
+:PHP-Version: 8.0
+:Version: 0.5
+
+Introduction
+------------
+
+Since 2003, ``Throwable->getTraceAsString()`` and
+``Throwable->__toString()`` have limited the length of string function
+arguments in stringified stack traces to 15 bytes (including lines such
+as ``#0 /path/to/file.php(line) function("012345678901234...")``). This
+is not enough space to render information such as paths, URLs, UUIDs,
+etc. if an end user wants to see it when debugging an issue or during
+local development.
+
+While 15 bytes may be a reasonable default for many use cases (e.g.
+allowing packing more stack frames on a screen or within a byte limit),
+it would be useful to be able to raise that default.
+
+This hardcoded limit affects various places where exceptions and errors
+are converted to strings, such as:
+
+#. ``echo $throwable;``
+#. ``log('something', $throwable->getTraceAsString());``
+#. Uncaught Throwables that crashed an application.
+
+Note that PHP 7.4 introduced the setting ``zend.exception_ignore_args``,
+which allowed removing argument information from exceptions completely
+(in ``getTrace()``, ``getTraceAsString()``, etc.). Setting
+``zend.exception_string_param_max_len=0`` still provides more
+information than completely disabling tracking args (you still know the
+argument is a string, and types of non-strings), which is why this RFC
+also allows decreasing the setting from the previous hardcoded value of
+15.
+
+-  Being able to set the minimum value to ``0`` may have the benefit of
+   avoiding accidentally exposing sensitive information in external
+   dependencies or legacy applications even if enabling
+   ``zend.exception_ignore_args`` didn't make sense for an application.
+   See
+   `throwable_string_param_max_len#Impact of raising string param length limit <throwable_string_param_max_len#Impact of raising string param length limit>`__
+   for examples of those issues.
+-  The name of ``zend.exception_string_param_max_len`` was chosen for
+   its similarity to ``zend.exception_ignore_args``.
+
+Proposal
+--------
+
+Add a new ini setting ``zend.exception_string_param_max_len`` that would
+allow changing the string byte limit to any value between 0 and 1000000,
+keeping the current default of 15 bytes. (Changeable by ``PHP_INI_ALL``)
+
+A maximum value is enforced to make it harder to accidentally run out of
+memory or disk space (e.g. if long strings occur multiple times in a
+stack trace). ``Throwable->getTrace()`` can be used if the full argument
+values are needed.
+
+Backward Incompatible Changes
+-----------------------------
+
+None
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 8.0
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+If the ini setting is not changed, there will be no impact.
+
+If the user decides to raise the string length limit, then stack traces
+will contain longer representations of string params. This may result in
+more data being logged when ``Throwable->__toString()`` or
+``Throwable->getTraceAsString()`` are used (e.g. full urls, full file
+paths, full file contents, etc). Stringified stack traces may also
+exceed what applications assumed the typical length would be (e.g. udp
+packet sizes when syslogging).
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+To keep backwards compatibility for reasons such as `Future scope: Raise
+the default
+value <throwable_string_param_max_len#Raise the default value>`__,
+php.ini-development remains at 15. Note that
+``zend.exception_ignore_args`` defaults to On in PHP 7.4+, so anything
+using php.ini-production would not be logging stack traces regardless of
+this setting.
+
+-  hardcoded default value: 15
+-  php.ini-development value: 15
+-  php.ini-production value: 0
+
+Open Issues
+-----------
+
+Make sure there are no open issues when the vote starts!
+
+Unaffected PHP Functionality
+----------------------------
+
+Other ways to inspect stack traces such as ``debug_print_backtrace()``
+and ``Throwable->getTrace()`` are not affected. They do not have string
+length limits.
+
+Future Scope
+------------
+
+Raise the default value
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Since 2003, disk space, screen sizes, etc. have increased significantly.
+However, stack traces have probably also gotten longer in some
+frameworks, and the maximum syslog length may be limited to only a few
+thousand bytes on some platforms.
+
+Application may be unexpectedly relying on the hardcoded limit of 15 to
+avoid logging sensitive information such as full urls, full paths, or
+full file contents.
+
+Vote
+----
+
+Add a new ini setting ``zend.exception_string_param_max_len`` as
+described in the RFC. (Yes/No, requiring 2/3 majority)
+
+Voting opened 2020-07-11 and closes 2020-07-25. A 2/3 majority is
+required.
+
+Question: Add a new ini setting zend.exception_string_param_max_len
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Poll
+~~~~
+
+Question: Informal poll: Interest in raising the default string parameter max length from 15 bytes in future RFCs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Changelog
+---------
+
+0.2: Add "Impact of raising string param length limit" section.
+
+0.3: Allow decreasing ini setting value to a minimum of 0 (previously
+15). Change the recommended value in php.ini-production to 0.
+
+0.4: Update external links, formatting.
+
+0.5: Rename from ``throwable_string_param_max_len`` to
+``zend.exception_string_param_max_len``. Add reference to RFC thread.
+Rename "Proposed Voting Choices" section to "Vote"
+
+References
+----------
+
+https://externals.io/message/110717 "Making the hardcoded string length
+limit of Throwable->getTraceAsString() configurable"
+
+https://externals.io/message/110744 "[RFC]
+throwable_string_param_max_len: Configurable string length in
+getTraceAsString()"
+
+Appendix
+--------
+
+Impact of raising string param length limit
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For example, code such as the following already had multiple issues such
+as exposing $appSecret and the potential for XSS from echoing
+$rawUserInput without html escaping (e.g. ``<script>...</script>``), and
+should be rewritten to stop doing that. If more than 15 bytes are
+output, the severity of that bug may be much higher (e.g. if
+``$appSecret`` was ``"-----BEGIN RSA PRIVATE KEY-----..."``, which was
+previously truncated to 15 bytes and would omit the private key itself).
+
+.. code:: php
+
+   function unsafeHTMLRenderingExample(string $rawUserInput, string $appSecret) {
+      echo "<h1>Heading</h1>\n";
+      try {
+          process($rawUserInput);
+      } catch (Exception $e) {
+          // The output will include both $rawUserInput and $appSecret.
+          // Previously, only 15 bytes would be displayed.
+          echo "This should not happen: $e\n";  
+      }
+   }
+
+Static analyzers may be able to detect potentially unsafe uses of
+``getTraceAsString()`` and ``__toString()``. Open-source projects in
+this area include the following:
+
+-  https://psalm.dev/docs/security_analysis/ (Partial checks added in
+   `this pr <https://github.com/vimeo/psalm/pull/3731>`__)
+-  https://gerrit.wikimedia.org/g/mediawiki/tools/phan/SecurityCheckPlugin/#mediawiki-security-check-plugin
+   (no checks at the time of writing)
+
+Because the default remains at 15 bytes, this RFC should not make unsafe
+code like this worse unless the ini setting is changed deliberately.
+
+A related ini setting is ``zend.exception_ignore_args``, which was added
+in PHP 7.4 to force the omission of arguments from stack traces
+collected for exceptions, to prohibit the output of sensitive
+information in stack traces. See
+http://github.com/php/php-src/commit/0819e6dc9b4788e5d44b64f8e606a56c969a1588
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5769
+:Original Authors: Tyson Andre, tandre@php.net
+:Slug: throwable_string_param_max_len
+:Wiki URL: https://wiki.php.net/rfc/throwable_string_param_max_len

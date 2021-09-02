@@ -1,0 +1,182 @@
+Mysqli Bind In Execute
+======================
+
+:PHP-RFC: 0790
+:Title: Mysqli Bind In Execute
+:Author: Kamil Tekiela <dharman@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2021-02-11
+:PHP-Version: 8.1
+:Version: 1.1
+
+Introduction
+------------
+
+PDO has always offered binding values to the prepared statement directly
+in the execute() call by providing an array with the values. The same
+functionality was never present in mysqli, and many users have been
+confused by that lack of seemingly easy functionality. (See `Bug
+#40891 <https://bugs.php.net/bug.php?id=40891>`__, `Bug
+#31096 <https://bugs.php.net/bug.php?id=31096>`__)
+
+Proposal
+--------
+
+I would like to propose adding a new optional argument to
+mysqli_stmt::execute() same as PDO does with PDOStatement::execute().
+The goal of this proposal is to simplify mysqli usage with a simple fix
+that does not require major refactoring.
+
+This proposal tries to address the following mysqli limitations:
+
+.. code:: PHP
+
+   // mysqli can only bind by reference and each variable needs to be passed as a separate argument. 
+   $id = 1;
+   $name = trim(' Dharman ');
+   $stmt = $mysqli->prepare('INSERT INTO users(id, name) VALUES(?,?)');
+   $stmt->bind_param('ss', $id, $name);
+   $stmt->execute();
+
+   // The following would fail and throw an error
+   $stmt = $mysqli->prepare('INSERT INTO users(id, name) VALUES(?,?)');
+   $stmt->bind_param('ss', 1, trim(' Dharman '));
+   $stmt->execute();
+
+   // Binding an array can be very confusing
+   $arr = [2,3,5,8,13];
+   $stmt = $mysqli->prepare('SELECT name FROM users WHERE id IN ('.str_repeat('?,', count($arr) - 1) . '?)');
+   $stmt->bind_param(str_repeat('s', count($arr)), ...$arr);
+   $stmt->execute();
+
+   // SOLUTION:  bind in execute 
+   // it is now possible to bind by value
+   $stmt = $mysqli->prepare('INSERT INTO users(id, name) VALUES(?,?)');
+   $stmt->execute([1, trim(' Dharman ')]);
+
+   // binding an array becomes less of a chore
+   $arr = [2,3,5,8,13];
+   $stmt = $mysqli->prepare('SELECT name FROM users WHERE id IN ('.str_repeat('?,', count($arr) - 1) . '?)');
+   $stmt->execute($arr);
+
+It also works in procedural style.
+
+.. code:: PHP
+
+   $stmt = mysqli_prepare($mysqli, 'INSERT INTO users(id, name) VALUES(?,?)');
+   // $stmt->execute([$id, trim(' Dharman ')]);
+   mysqli_stmt_execute($stmt, [$id, trim(' Dharman ')]);
+   // with the existing alias
+   mysqli_execute($stmt, [++$id, trim(' Dharman ')]);
+
+What about type specifications?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+MySQL can type juggle as easily as PHP. The safest way to bind
+parameters if you are not 100% certain of their type is to bind as a
+string. In many cases, this is the preferred simplest way. Type
+specifications should only be used in rare situations when the data
+should be passed to MySQL with a specific type. In reality, such
+situations are scarce and they depend on the SQL not on PHP data type.
+For these rare cases, we can continue using bind_param() with the right
+type specification.
+
+Difference between PDO and mysqli
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+While the idea came from PDO bind-in-execute implementation, the mysqli
+proposal differs in two small ways.
+
+#. Only list arrays are allowed. This is because mysqli doesn't have
+   support for named parameters like PDO does. If an associative array
+   is passed then a ValueError will be thrown. The implementation uses
+   `is_list </rfc/is_list>`__.
+#. Re-binding empty array throws an error in mysqli. PDO simply ignores
+   an empty array and continues to use previously bound values.
+
+libmysql support?
+^^^^^^^^^^^^^^^^^
+
+Unfortunately, I am limited to Windows programming and I have no way of
+developing the same for libmysql and testing it myself. In theory, it
+should be possible to add this for libmysql with slight adjustments, but
+support for libmysql is not actively maintained at the moment and there
+are more problems that would probably need to be addressed by whoever
+decides to maintain libmysql support.
+
+Backward Incompatible Changes
+-----------------------------
+
+Classes extending mysqli_stmt::execute() will be required to specify the
+additional parameter now.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 8.X (8.1)
+
+RFC Impact
+----------
+
+This RFC will have no impact on any existing functionality. We would
+only be adding a new optional parameter to an existing function.
+
+New Constants
+~~~~~~~~~~~~~
+
+None
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+None.
+
+Unaffected PHP Functionality
+----------------------------
+
+The traditional way of binding variables to placeholders in mysqli
+remains unchanged. However, it is not possible to mix both styles in the
+same prepared statement as both expect all parameters to be provided in
+a single method call.
+
+Future Scope
+------------
+
+None, but see related RFC
+`mysqli_execute_parameters </rfc/mysqli_execute_parameters>`__
+
+Proposed Voting Choices
+-----------------------
+
+Simple yes/no vote.
+
+Voting started on 2021-03-08 and ends on 2021-03-27
+
+Question: MySQLi bind-in-execute
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Implementation
+--------------
+
+`PR here <https://github.com/php/php-src/pull/6271>`__
+
+References
+----------
+
+https://externals.io/message/113149
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/6271
+:Original Authors: Kamil Tekiela, dharman@php.net
+:Original PHP Version: PHP 8.1
+:Slug: mysqli_bind_in_execute
+:Wiki URL: https://wiki.php.net/rfc/mysqli_bind_in_execute

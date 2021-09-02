@@ -1,0 +1,336 @@
+Nullable Types
+==============
+
+:PHP-RFC: 0272
+:Title: Nullable Types
+:Author: Dmitry Stogov <dmitry@zend.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2014-04-10
+:PHP-Version: 7.1
+:Version: 1.0
+
+Introduction
+------------
+
+It is common in many programming languages including PHP to allow a
+variable to be of some type or null. This null often indicates an error
+or lack of something to return. This can already be done using PHP's
+dynamic type system by omitting type declarations. It can also be done
+for parameters in PHP by using a default parameter of null. However,
+this does not work for return types which do not have a concept of a
+default value. This RFC proposes a unified way to add nullable types to
+both parameters and returns.
+
+Proposal
+--------
+
+This proposal adds a leading question mark symbol (``?``) to indicate
+that a type can also be ``null``. Nullable types can be formed from any
+currently permitted type. Nullable types are permitted anywhere type
+declarations are allowed but are subject to some inheritance rules which
+are outlined later in the RFC.
+
+Here are a few examples to demonstrate basic functionality:
+
+.. code:: php
+
+   function answer(): ?int  {
+       return null; //ok
+   }
+
+   function answer(): ?int  {
+       return 42; // ok
+   }
+
+   function answer(): ?int {
+       return new stdclass(); // error
+   }
+
+.. code:: php
+
+   function say(?string $msg) {
+       if ($msg) {
+           echo $msg;
+       }
+   }
+
+   say('hello'); // ok -- prints hello
+   say(null); // ok -- does not print
+   say(); // error -- missing parameter
+   say(new stdclass); //error -- bad type
+
+Return Types
+~~~~~~~~~~~~
+
+When subtyping a return type the nullability can be removed by a
+subclass, but it cannot be added:
+
+.. code:: php
+
+   interface Fooable {
+       function foo(): ?Fooable;
+   }
+   interface StrictFooable extends Fooable {
+       function foo(): Fooable; // valid
+   }
+
+.. code:: php
+
+   interface Fooable {
+       function foo(): Fooable;
+   }
+   interface LooseFooable extends Fooable {
+       function foo(): ?Fooable; // invalid
+   }
+
+Parameter Types
+~~~~~~~~~~~~~~~
+
+The nullable type cannot be removed in a sub-class; it can be added if
+not present in a super-class. This behavior is consistent with the
+Liskov substitution principle.
+
+.. code:: php
+
+   // Valid use: loosening the nullable marker in a parameter:
+   interface Fooable {
+       function foo(Fooable $f);
+   }
+   interface LooseFoo extends Fooable {
+       function foo(?Fooable $f);
+   }
+
+.. code:: php
+
+   // Invalid use: tightening the nullable marker in a parameter:
+   interface Fooable {
+       function foo(?Fooable $f);
+   }
+   interface StrictFoo extends Fooable {
+       function foo(Fooable $f);
+   }
+
+Default Values
+~~~~~~~~~~~~~~
+
+Differences from default values
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Parameters with a nullable type do not have a default value. If omitted
+the value does not default to ``null`` and will result in an error:
+
+.. code:: php
+
+   function f(?callable $p) {}
+   f(); // invalid; function f does not have a default
+
+Relationship with default values
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+PHP's existing semantics allow giving a ``null`` default value for a
+parameter to make it nullable and optional:
+
+.. code:: php
+
+   function foo_default(Bar $bar = null) {}
+
+   foo_default(new Bar); // valid
+   foo_default(null); // valid
+   foo_default(); // valid
+
+This existing behaviour is not changed by this RFC. The new nullable
+type feature offers a subset of the functionality of ``= null`` with
+both making a parameter nullable but only ``= null`` making a parameter
+optional and have a default value:
+
+.. code:: php
+
+   function foo_nullable(?Bar $bar) {}
+
+   foo_nullable(new Bar); // valid
+   foo_nullable(null); // valid
+   foo_nullable(); // INVALID!
+
+As ``= null`` offers a superset of ``?``'s functionality, it could be
+said that ``= null`` implies ``?``. However, it is perfectly legal to
+use both to make a parameter's nullability explicit:
+
+.. code:: php
+
+   function foo_both(?Bar $bar = null) {}
+
+   foo_both(new Bar); // valid
+   foo_both(null); // valid
+   foo_both(); // valid
+
+Because a parameter with ``= null`` is a superset of ``?``, you can use
+a parameter with a default value of null where a nullable type existed
+in the parent.
+
+.. code:: php
+
+   interface Contract {
+       function method(?Foo $foo): bool;
+   }
+
+   class Implementation implements Contract {
+       function method(?Foo $foo = null): bool {
+           return is_null($foo);
+       }
+   }
+
+The reverse is not true, however: you cannot use only a nullable type
+where a default value existed in the parent, because the parameter is no
+longer optional.
+
+PHP Version
+~~~~~~~~~~~
+
+This RFC targets PHP 7.1.
+
+Voting Choices
+~~~~~~~~~~~~~~
+
+The vote for this RFC is split into two votes. One vote will be for
+accepting the idea of explicitly nullable types with the short-hand
+syntax. The second vote determines whether to merge only nullable return
+types or to also merge nullable parameter types as well.
+
+Voting began Tuesday, May 10th, 2016 and will close on Friday, May 20th,
+2016.
+
+--------------
+
+Question: Accept explicitly nullable types? (2/3 affirmative required)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+--------------
+
+Question: Merge which features? (majority wins)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-2:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Both nullable parameter and return types
+-  Only nullable return types
+
+Patches and Tests
+~~~~~~~~~~~~~~~~~
+
+The pull request for this RFC is here:
+https://github.com/php/php-src/pull/1893.
+
+RFC Impact
+----------
+
+To Backward Compatibility
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There is a backwards compatibility break in certain cases. This was
+previously fixed as a bug but it was decided that because of the BC
+break that it would be pushed to this RFC. See `bug
+72119 <https://bugs.php.net/bug.php?id=72119>`__ for more info on the BC
+break.
+
+This BC break is to reject parameter covariance for nullable types:
+
+.. code:: php
+
+   interface Fooable {
+       function foo(?Fooable $f);
+   }
+   interface StrictFoo extends Fooable {
+       // Invalid; parent type allows null so subtype must also allow it
+       function foo(Fooable $f);
+   }
+
+However, it breaks this code:
+
+.. code:: php
+
+   interface Fooable {
+       function foo(array $f = null);
+   }
+   interface LooseFoo extends Fooable {
+       function foo(array $f = []);
+   }
+
+Such code should be modified to also allow null:
+
+.. code:: php
+
+   interface LooseFoo extends Fooable {
+       function foo(?array $f = []);
+   }
+
+Note that more handling is probably necessary to make the code robust,
+but this small change is sufficient for any previously working code to
+continue to work.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Only extensions that deal with the AST need to be updated. They should
+be aware of the ``ZEND_TYPE_NULLABLE`` attribute that gets set when a
+``?`` is present.
+
+To Union Types
+~~~~~~~~~~~~~~
+
+Nullable types are a special case of union types where there only two
+types in the union, one of which is always ``null``. If the
+`union_types </rfc/union_types>`__ RFC is accepted then ``?Foo`` will be
+exactly equivalent to ``Foo | Null``. The union types RFC will be
+responsible for intersecting decisions, such as whether ``?`` can be
+used in conjunction with other union types.
+
+Unaffected PHP Functionality
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC does not deprecate the default value syntax. While there is
+some overlap of features between it and this RFC, they serve different
+purposes. As such, the default value syntax will remain.
+
+Future Scope
+------------
+
+#. `Full union types </rfc/union_types>`__
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the `git
+   commit <http://git.php.net/?p=php-src.git;a=commitdiff;h=9662259cb93ff04be80766bdade39d2e827e0e16>`__
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+#. Discussion on `mailing
+   list <http://news.php.net/php.internals/92273>`__
+#. Background for multiple type enhancements:
+   http://news.php.net/php.internals/92252
+
+Additional Metadata
+-------------------
+
+:First Published At: https://wiki.php.net/rfc/nullable_typehints
+:Original Authors: Dmitry Stogov dmitry@zend.com
+:Original Status: Implemented (in PHP 7.1)
+:Slug: nullable_types
+:Wiki URL: https://wiki.php.net/rfc/nullable_types

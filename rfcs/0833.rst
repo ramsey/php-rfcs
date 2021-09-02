@@ -1,0 +1,300 @@
+Deprecate Dynamic Properties
+============================
+
+:PHP-RFC: 0833
+:Title: Deprecate Dynamic Properties
+:Author: Nikita Popov <nikic@php.net>
+:Status: Draft
+:Type: Standards Track
+:Created: 2021-08-23
+:PHP-Version: 8.2
+:Version: 1.0
+
+Introduction
+------------
+
+When writing to a property that has not been declared, PHP will silently
+create a dynamic property instead. In modern code, this is rarely done
+intentionally. This RFC proposes to deprecate and later remove the
+creation of dynamic properties. stdClass and \__get/__set are not
+affected by this change.
+
+.. code:: php
+
+   class User {
+       public $name;
+   }
+
+   $user = new User;
+
+   // Assigns declared property User::$name.
+   $user->name = "foo";
+
+   // Oops, a typo:
+   $user->nane = "foo";
+   // PHP <= 8.1: Silently creates dynamic $user->nane property.
+   // PHP    8.2: Raises deprecation warning, still creates dynamic property.
+   // PHP    9.0: Throws Error exception.
+
+"Dynamic property" here refers to a property that has not been declared
+in the class. It has no relation to the access style (e.g.
+``$user->{'na' . 'me'}`` is still an access to a declared property).
+
+Proposal
+--------
+
+The creation of dynamic properties on classes that don't inherit from
+``stdClass`` is deprecated in PHP 8.2 and becomes an Error exception in
+PHP 9.0. All used properties should be declared in the class
+declaration.
+
+.. code:: php
+
+   class Foo {}
+   $foo = new Foo;
+
+   // Deprecated: Creation of dynamic property Foo::$bar is deprecated
+   $foo->bar = 1;
+
+   // No deprecation warning: Dynamic property already exists.
+   $foo->bar = 2;
+
+Objects of type ``stdClass`` and inheriting classes continue to support
+dynamic properties.
+
+.. code:: php
+
+   $obj = (object) []; // = new stdClass;
+
+   // No deprecation warning
+   $obj->foo = 1;
+
+   class myStdClass extends stdClass {}
+   $obj2 = new myStdClass;
+
+   // No deprecation warning
+   $obj2->bar = 1;
+
+``stdClass`` objects are specifically intended to hold dynamic
+properties. ``extends stdClass`` is offered as a simple migration
+strategy for custom classes that are also specifically intended for use
+with dynamic properties.
+
+It should be noted that properties accessed through
+``__get()``/``__set()`` are not considered as "dynamic properties". The
+following example does not generate any deprecation warnings:
+
+.. code:: php
+
+   class ArrayLikeObject {
+       private array $data = [];
+       public function &__get($name) { return $this->data[$name]; }
+       public function __isset($name, $value) { return isset($this->data[$name]; }
+       public function __set($name, $value) { $this->data[$name] = $value; }
+       public function __unset($name) { unset($this->data[$name]; }
+   }
+
+   $obj = new ArrayLikeObject;
+
+   // Calls ArrayLikeObject::__set(), no deprecation warning.
+   $obj->foo = 1;
+
+Backward Incompatible Changes
+-----------------------------
+
+Removing support for dynamic properties constitutes a significant
+backwards compatibility break. While modern PHP code consistently
+declares used properties, this is not necessarily the case for legacy
+code. When encountered with a dynamic property deprecation warning,
+there are a number of things that can be done to avoid it.
+
+The simplest and most common would be to simply add the property
+declaration:
+
+.. code:: php
+
+   class Test {
+       public $value; // <-- Add property declaration.
+
+       public function __construct($value) {
+           $this->value = $value;
+       }
+   }
+
+For classes that intentionally don't have a fixed set of properties,
+it's possible to either implement magic ``__get()``/``__set()``, or to
+extend from the ``stdClass`` class, or from ``ArrayObject`` in
+``ARRAY_AS_PROPS`` mode.
+
+Using magic getters/setters provides the most control, but extending
+from ``stdClass`` will make dynamic property accesses more efficient by
+using optimized engine hooks. It will also match the current behavior
+most closely, for example with regard to the behavior of ``foreach`` or
+``property_exists()``.
+
+In some cases it is desirable to associate information with objects that
+you do not own. Previously, it was possible to add a dynamic property
+for this purpose. Instead, a ``WeakMap`` should be used to store the
+information in a non-intrusive way:
+
+.. code:: php
+
+   class Test {
+       private WeakMap $extraInfo;
+
+       public function addExtraInfo(object $obj) {
+           // Instead of:
+           $obj->extraInfo = ...;
+           // Use:
+           $this->extraInfo[$obj] = ...;
+       }
+   }
+
+In rare cases, dynamic properties are used for lazy initialization. For
+example Symfony's
+`Constraint::$groups <https://github.com/symfony/symfony/blob/6.0/src/Symfony/Component/Validator/Constraint.php>`__
+property is not declared and then dynamically created inside
+``__get()``. This use-case can be accommodated by declaring the
+property, but then unsetting it in the constructor:
+
+.. code:: php
+
+   abstract class Constraint {
+       public $groups;
+
+       public function __construct() {
+           unset($this->groups);
+       }
+
+       public function __get($name) {
+           // Will get called on first access, but once initialized.
+           $this->groups = ...;
+       }
+   }
+
+A declared property that has been unset remains a declared property, and
+will not result in a dynamic property when it is reinitialized.
+
+Discussion
+----------
+
+Alternative opt-in to dynamic properties
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC offers ``extends stdClass`` as a way to opt-in to the use of
+dynamic properties. Some people have suggested that we could use a magic
+marker interface (``implements SupportsDynamicProperties``), an
+attribute (``#[SupportsDynamicProperties]``) or a trait
+(``use DynamicProperties;``) instead.
+
+The reasoning behind the ``extends stdClass`` choice is that it works
+without any additional special support: We definitely need to allow
+dynamic properties on ``stdClass``, and following the Liskov
+substitution principle, child classes should inherit this behavior. As
+such, the ``extends stdClass`` escape hatch will work anyway, and the
+question is more whether we want to offer anything in addition to it.
+It's also worth noting that it does not require polyfilling on older PHP
+versions.
+
+Another way to view this is that ``stdClass`` could implement
+``__get()``/``__set()`` to provide its "dynamic properties" support, in
+which case these methods would naturally be inherited. Of course, it
+currently doesn't do so, but it probably should once dynamic property
+support is removed.
+
+Using an interface or attribute instead would require the engine to
+continue supporting dynamic properties on arbitrary classes long term,
+rather than simply inheriting the behavior from a single class that
+implements the functionality.
+
+A trait based on ``__get()``/``__set()`` could be provided, and would be
+usable in multiple-inheritance cases where extending from stdClass is
+not possible:
+
+.. code:: php
+
+   class DynamicProperties {
+       private array $dynamicProps = [];
+       public function &__get($name) { return $this->dynamicProps[$name]; }
+       public function __isset($name, $value) { return isset($this->dynamicProps[$name]; }
+       public function __set($name, $value) { $this->dynamicProps[$name] = $value; }
+       public function __unset($name) { unset($this->dynamicProps[$name]; }
+   }
+
+However, such a trait would not differ from simply implementing these
+methods in userland. Unlike ``extends stdClass``, it would not benefit
+from optimized internal hooks, and it would not be able to offer exactly
+the same functionality. A custom implementation does not take a
+significant amount of code, but has more control over what exactly it
+wants to support. For example, next to the above baseline
+implementation, a class might also want to implement ``__debugInfo()``
+and the ``Traversable`` interface.
+
+Opt-out of dynamic properties instead
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The `Locked classes RFC </rfc/locked-classes>`__ took an alternative
+approach to this problem space: Rather than deprecating/removing dynamic
+properties and providing an opt-in for specific classes, it instead
+allowed marking specific classes as ``locked`` in order to forbid
+creation of dynamic properties on them.
+
+I don't believe that this is the right strategy, because in contemporary
+code, classes being "locked" is the default state, while classes that
+require dynamic properties are a rare exception. Additionally, this
+requires that class owners (which may be 3rd party packages)
+consistently add the "locked" keyword to be effective.
+
+An alternative that has been discussed in the context of the `language
+evolution
+proposal <https://github.com/nikic/php-rfcs/blob/language-evolution/rfcs/0000-language-evolution.md#forbidding-dynamic-object-properties>`__
+is to instead disallow the use of dynamic properties in a file through a
+declare directive (whether that be a fine-grained option or an "edition"
+mechanism). This does not require the cooperation of 3rd-party
+libraries.
+
+However, based on the discussion on the language evolution proposal,
+this would only delay the time where disallowed dynamic properties
+become the default and only behavior, as there was a strong consensus
+that diverging language behavior should not be maintained indefinitely.
+Dynamic properties would ultimately still get deprecated and removed.
+
+Internal impact
+~~~~~~~~~~~~~~~
+
+Internal classes can already specify the
+``ZEND_ACC_NO_DYNAMIC_PROPERTIES`` flag to disable dynamic property
+creation. During the deprecation phase, this RFC is non-intrusive and
+only adds a ``ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`` flag to efficiently
+opt-out stdClass from the deprecation warning.
+
+Once dynamic properties are disallowed, some larger changes should be
+made. Support for dynamic properties should be dropped from the virtual
+machine and default object handlers. Instead ``stdClass`` should
+implement custom object handlers, possibly in conjunction with
+``__get()``/``__set()``, ``__debugInfo()`` and ``Traversable`` to
+present the right userland interface.
+
+Objects should no longer store a ``properties`` member, reducing the
+size of all objects by 8 bytes. The ``get_properties()`` object handler
+should be dropped. Instead code inspecting all object properties should
+loop over the ``properties_table`` and use ``properties_info_table`` to
+map property slots back to their metadata. For example, ``foreach`` over
+an object would no longer materialize the dynamic properties table
+(which remains after the loop and dramatically increases the object
+size) and instead efficiently iterate the property slots.
+
+Vote
+----
+
+Yes/No.
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/7390
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.2
+:Original Status: Under Discussion
+:Slug: deprecate_dynamic_properties
+:Wiki URL: https://wiki.php.net/rfc/deprecate_dynamic_properties

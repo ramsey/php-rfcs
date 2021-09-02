@@ -1,0 +1,160 @@
+Allow Throwing Exceptions From __toString()
+===========================================
+
+:PHP-RFC: 0652
+:Title: Allow Throwing Exceptions From __toString()
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2019-04-30
+:PHP-Version: 7.4
+:Version: 1.0
+
+Introduction
+------------
+
+Throwing exceptions from ``__toString()`` is currently forbidden and
+will result in a fatal error. This makes it dangerous to call arbitrary
+code inside ``__toString()`` and makes its use as a general API
+problematic. This RFC aims to remove this restriction.
+
+The rationale for the current behavior is that string conversions are
+performed in many places throughout the engine and standard library, and
+not all places are prepared to deal with exceptions "correctly", in the
+sense that the exception is handled as early as possible.
+
+This limitation is ultimately futile from a technical perspective,
+because exceptions during string conversion can still be triggered by an
+error handler that converts recoverable errors to exceptions:
+
+.. code:: php
+
+   set_error_handler(function() {
+       throw new Exception();
+   });
+
+   try {
+       (string) new stdClass;
+   } catch (Exception $e) {
+       echo "(string) threw an exception...\n";
+   }
+
+In fact, Symfony `uses this
+loophole <https://github.com/symfony/symfony/blob/1c110fa1f7e3e9f5daba73ad52d9f7e843a7b3ff/src/Symfony/Component/Debug/ErrorHandler.php#L457-L489>`__
+to work around the current limitation. Unfortunately this relies on the
+``$errcontext`` parameter, which is going away in PHP 8.
+
+Despite this, the sentiment in past discussions on this topic has been
+to not relax this restriction until we have performed a comprehensive
+audit of string conversions across the codebase. This has been done in
+the attached implementation `pull
+request <https://github.com/php/php-src/pull/3887>`__.
+
+Proposal
+--------
+
+Allow throwing exceptions from ``__toString()``, which will behave as
+usual. Do not trigger a fatal error anymore.
+
+Additionally convert the "could not be converted to string" and
+"__toString() must return a string value" recoverable fatal errors into
+proper ``Error`` exceptions, in line with the error policy established
+in PHP 7.
+
+Extension Guidelines
+--------------------
+
+Extension authors who would like to ensure that they handle exceptions
+from string conversions gracefully, should take the following guidelines
+into account:
+
+-  If ``zval_get_string()``, ``convert_to_string()`` and friends
+   generate an exception, they will still produce a string. This string
+   is guaranteed to be interned. This means that it is not necessary to
+   release it, but it possible to do so. You can pick whichever option
+   is more convenient in context.
+-  The result of the string conversion will be an empty string if an
+   object to string conversion failed, and "Array" if an array is
+   converted to string and the resulting notice is promoted to an
+   exception by an error handler. (This behavior is as before.)
+-  It is generally sufficient to check whether an exception has been
+   thrown using the usual ``if (EG(exception))`` check:
+
+.. code:: c
+
+   zend_string *str = zval_get_string(val);
+   if (EG(exception)) {
+       // Possibly free other resources here.
+       return;
+   }
+
+-  In addition to this, a number of helper APIs are provided that model
+   the conversion as a fallible operation:
+
+.. code:: c
+
+   // Like zval_get_string() but returns NULL on conversion failure.
+   zend_string *str = zval_try_get_string(val);
+   if (!str) {
+       // Possibly free other resources here.
+       return;
+   }
+   // Main code.
+   zend_string_release(str);
+
+
+   // Like zval_get_tmp_string() but returns NULL on conversion failure.
+   zend_string *tmp, *str = zval_try_get_tmp_string(val, &tmp);
+   if (!str) {
+       // Possibly free other resources here.
+       return;
+   }
+   // Main code.
+   zend_tmp_string_release(tmp);
+
+
+   // Like convert_to_string() but returns a boolean indicating conversion success/failure.
+   if (!try_convert_to_string(val)) {
+       // Possibly free other resources here.
+       return;
+   }
+   // Main code.
+
+-  ``try_convert_to_string()`` will not modify the original value in
+   case of conversion failure. For this reason it is safer to use it,
+   instead of ``convert_to_string()`` and an exception check.
+-  While checking every single string conversion certainly puts you on
+   the safe side, leaving out these checks will usually only result in
+   some unneeded computation and possibly redundant warnings. The main
+   thing you should watch out for are operations modifying persistent
+   structures such as databases.
+
+Backward Incompatible Changes
+-----------------------------
+
+The conversion from recoverable fatal errors to ``Error`` exceptions is
+technically BC breaking.
+
+Vote
+----
+
+Voting started 2019-05-22 and ends 2019-06-05.
+
+Question: Allow exceptions from \__toString() in PHP 7.4?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/3887
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 7.4
+:Original Status: Implemented (in PHP 7.4)
+:Slug: tostring_exceptions
+:Wiki URL: https://wiki.php.net/rfc/tostring_exceptions

@@ -1,0 +1,228 @@
+Default Constructors
+====================
+
+:PHP-RFC: 0329
+:Title: Default Constructors
+:Author: Stas Malyshev <stas@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2014-11-05
+:Version: 0.9
+
+Introduction
+------------
+
+This RFC proposes to introduce the concept of default constructors into
+PHP. The meaning of it is that whatever is the parent class, child class
+can always call parent::__construct() and this call will never fail. In
+fact, PHP, in some meaning, already has default constructors, as you can
+write $a = new Foo() even if class Foo does not define a constructor.
+However, that default "null" constructor which can be invoked with new
+can not be invoked directly via method call. This RFC proposes that the
+call to parent::__construct() will always work just as "new Foo" always
+works, regardless of ctor being defined.
+
+Proposal
+--------
+
+To change PHP Engine so that the call parent::__construct() always
+succeeds, even if no explicit constructor method is defined in the
+parent class.
+
+Motivation
+~~~~~~~~~~
+
+Consider the following code:
+
+.. code:: php
+
+   class Animal {
+       protected $what = "nothing";
+       function sound() {
+           echo get_class($this)." says {$this->what}"; 
+       }
+   }
+    
+   class Cow extends Animal {
+       protected $what = "moo";
+       protected $owner;
+       public function __construct($owner) {
+           $this->owner = $owner;
+           // parent::__construct(); (?)
+       }
+   }
+    
+   $a = new Cow("Old McDonald");
+   $a->sound();
+
+This code represents a simple class hierarchy. Now let us consider the
+line marked by (?). Of course we can not call the parent ctor there
+since we do not have one. But let’s say we refactored the base class and
+added the parent ctor which does some stuff:
+
+.. code:: php
+
+   class Animal {
+      protected $born;
+      public function __construct() {
+         $this->born = time();
+      }
+   }
+
+Seemingly, we didn’t do anything wrong here, right? But now our code is
+broken, since Cow::__construct does not call Animal::__construct. So we
+should go to every class extending Animal and fix them. The problem here
+we could not avoid this problem – unless we stick empty ctor into Animal
+when it doesn’t need it, we can not call it from Animal’s child classes.
+
+Moreover, many of the internal classes, when extended, require the
+extending class to call parent constructor. Some others, however, do not
+have the constructor defined. Thus, the user has to guess, research or
+experiment in order to determine if parent constructor should be called
+or not. It will be much easier to tell the user "always call the parent
+constructor".
+
+In fact, many languages like Java or C# provide default constructors,
+with Java going as far as insert the call to the default constructor
+into any constructor that does not call parent explicitly. In PHP, it
+may be a bit harder to do that, but at least we can go as far as
+ensuring if the user does that, it will never fail.
+
+Proposed solution
+~~~~~~~~~~~~~~~~~
+
+The call to the parent::__construct() will always succeed, provided the
+current class has any parent class, if the constructor there is not
+defined.
+
+The call to the parent constructor would be a regular function call,
+which means it will evaluate its arguments, if provided, and produce all
+other effects that the function call produces. However, the call would
+return immediately without having any other effects.
+
+Implementation
+--------------
+
+There can be two approaches to implementing this functionality:
+
+#. Creating \__construct method behind the scenes for all classes that
+   do not have one defined.
+#. Detecting call to parent::__construct and making it succeed even if
+   there is no underlying method defined.
+
+This RFC chooses the second approach, because the first one will result
+in much larger refactoring of the engine, due to the fact that right now
+class, interface and trait tables are handled in the same way, but ctor
+insertion needs to be performed only for classes, but not for others. So
+introducing it will require changing a lot of code everywhere we create
+classes or interfaces, to introduce the information needed to separate
+them.
+
+Also, it would change the actual method table, which will require either
+substantial changes to all reflection-related functions (to skip the
+implicitly defined methods or to change assumptions about what would and
+would not be defined) or possible BC breaks where the actual method set
+of the class is not what the class creator expects.
+
+Also, this can lead to more subtle BC breaks. Consider this code:
+
+.. code:: php
+
+   function bar() { echo "Hi!"; }
+
+   class Foo {}
+
+   $a = new Foo(bar());
+
+Right now, in PHP, the call to bar() is not executed since Foo's ctor
+does not exist. However, if we change it so that Foo's ctor always
+exists, the call to bar() would be executed. Granted, this code does not
+have the best style, but there might be some code in the field,
+especially after multiple refactoring rounds, and changing how it works
+still will be a break.
+
+The current implementation only changes how the parent::__construct()
+works (and only by enabling cases which did not work before) but does
+not change anything else, thus reducing the BC impact of the change.
+
+Also note that only "parent" calls are supported by this RFC, since this
+is the best practice (and in some languages, like Java, mandatory) to
+call the parent ctor. If instead the code does something else - like
+calling ctor from classes further up the hierarchy, etc. - the RFC does
+not change the existing behavior in that case.
+
+Other Methods
+-------------
+
+\__construct is not the only method with this usage pattern, \__destruct
+and \__clone have essentially the same issue. So it can be said that the
+same arguments outlines above apply to these methods too and
+consequently the same functionality should be implemented for these
+methods. Thus, this RFC includes the implementation of the same
+functionality for them too.
+
+Backward Incompatible Changes
+-----------------------------
+
+No backward incompatible changes, since it is highly improbable that
+somebody's code relies on being unable to call parent::__construct and
+producing a fatal error.
+
+Interactions with \__call
+=========================
+
+While using \__call to dispatch magic methods is not a good idea, the
+dispatch would work with this RFC the same way it worked before, without
+any changes.
+
+Proposed PHP Version(s)
+-----------------------
+
+This proposal is targeted for PHP 7.
+
+Patches and Tests
+-----------------
+
+https://github.com/php/php-src/pull/990
+
+Voting
+------
+
+Since this RFC changes the language semantics, the 2/3+1 vote majority
+is required for it to pass. The vote is a straight Yes/No vote.
+
+Question: Should PHP 7 have default constructor semantics as described in this proposal?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+The vote concludes on the end of the day, PST, January 24th.
+
+References
+----------
+
+Java:
+
+#. http://docs.oracle.com/javase/tutorial/java/javaOO/constructors.html
+#. http://docs.oracle.com/javase/tutorial/java/IandI/super.html
+#. http://stackoverflow.com/questions/11379115/do-you-call-super-finalize-within-a-subclass
+
+C#:
+
+#. http://www.dotnetperls.com/default-constructor
+
+Changelog
+---------
+
+\* 2014-11-05 Started the RFC
+
+Additional Metadata
+-------------------
+
+:Original Authors: Stas Malyshev, stas@php.net
+:Slug: default_ctor
+:Wiki URL: https://wiki.php.net/rfc/default_ctor

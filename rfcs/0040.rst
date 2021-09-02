@@ -1,0 +1,123 @@
+Upload Progress In Sessions
+===========================
+
+:PHP-RFC: 0040
+:Title: Upload Progress In Sessions
+:Author: Arnaud Le Blanc <arnaud.lb@gmail.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2008-09-08
+:PHP-Version: 5.4
+:Version: 1.0
+
+Introduction
+------------
+
+The file upload feature in PHP allows extensions to be called back on
+some events. A few extensions use this to implement some sort of upload
+progress feedback, but none of them are released with PHP, which makes
+this feature unusable in many environments.
+
+Upload progress in sessions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The patch allows the session extension to hook into the file upload
+feature in order to provide upload progress information through session
+variables. These informations can be retrieved by a script while the
+upload is still in progress, allowing to provide feedback to the user.
+
+Implementing this in the sessions extension makes this feature available
+to every one and makes the different storage backends available for this
+purpose.
+
+The feature comes with some ini settings, working just like APC's ones:
+
+-  session.upload_progress.enabled[=1] : Enables/disables the feature
+-  session.upload_progress.cleanup[=1] : Cleanup progress data from
+   session as soon as all post data has been read (recommended)
+-  session.upload_progress.prefix[=upload_progress_] : Progress data
+   will be stored in \_SESSION[session.upload_progress.prefix .
+   \_POST[session.upload_progress.name]]
+-  session.upload_progress.name[=PHP_SESSION_UPLOAD_PROGRESS] : If no
+   \_POST[session.upload_progress.name] is set, the feature will not be
+   enabled
+-  session.upload_progress.freq[=1%] : Update session data every
+   session.upload_progress.freq bytes uploaded. If the value is
+   postfixed with '%', it will be interpreted as a percentage of the
+   total post content length.
+-  session.upload_progress.min_freq[=1.0] : Minimum delay between
+   updates, in seconds
+
+When session.upload_progress.enabled is set to 1 and
+$_POST[session.upload_progress.name] is set and non-empty, upload
+informations are stored in $_SESSION[session.upload_progress.prefix .
+$_POST[session.upload_progress.name]]. Otherwise nothing will be done.
+
+The session.upload_progress.freq and session.upload_progress.min_freq
+settings control how often the session data is updated. freq can be
+given in bytes (e.g. 100) or in percentage (e.g. 1%) of the size of the
+POST content length. min_freq is given in seconds (e.g. 0.5) and is the
+minimum interval between two updates. With a reasonable amount for these
+two settings, the feature has mostly no overhead.
+
+The data stored in the session will looks like this:
+
+.. code:: php
+
+   $_SESSION["upload_progress_123"] = array(
+    "start_time" => 1234567890,   // The request time
+    "content_length" => 57343257, // POST content length
+    "bytes_processed" => 453489,  // Amount of bytes received and processed
+    "done" => false,              // true when the POST handler has finished, successfully or not
+    "files" => array(
+     0 => array(
+      "field_name" => "file1",       // Name of the <input/> field
+      // The following 3 elements equals those in $_FILES
+      "name" => "foo.avi",
+      "tmp_name" => "/tmp/phpxxxxxx",
+      "error" => 0,
+      "done" => true,                // True when the POST handler has finished handling this file
+      "start_time" => 1234567890,    // When this file has started to be processed
+      "bytes_processed" => 57343250, // Amount of bytes received and processed for this file
+     ),
+     // An other file, not finished uploading, in the same request
+     1 => array(
+      "field_name" => "file2",
+      "name" => "bar.avi",
+      "tmp_name" => NULL,
+      "error" => 0,
+      "done" => false,
+      "start_time" => 1234567899,
+      "bytes_processed" => 54554,
+     ),
+    )
+   );
+
+A simple form:
+
+.. code:: php
+
+   <form action="upload.php" method="POST" enctype="multipart/form-data">
+    <input type="hidden" name="<?php echo ini_get("session.upload_progress.name"); ?>" value="123" />
+    <input type="file" name="file1" />
+    <input type="file" name="file2" />
+    <input type="submit" />
+   </form>
+
+The current patch also allows to cancel an upload by setting the
+"cancel_upload" key to true in the progress data (e.g.
+$_SESSION["upload_progress_123"]["cancel_upload"] = true;).
+
+Doing so will cancel the currently uploading file and bypass all
+remaining data (POST variables, uploads, etc). An upload canceled this
+way will have "error" set to
+`UPLOAD_ERR_EXTENSION <http://www.php.net/manual/en/features.file-upload.errors.php>`__.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Arnaud Le Blanc arnaud.lb@gmail.com
+:Original Status: Implemented (trunk)
+:Patch: http://arnaud.lb.s3.amazonaws.com/session_upload_progress.patch
+:Slug: session_upload_progress
+:Wiki URL: https://wiki.php.net/rfc/session_upload_progress

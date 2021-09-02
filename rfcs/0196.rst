@@ -1,0 +1,164 @@
+Allow Non-scalar Keys In Foreach
+================================
+
+:PHP-RFC: 0196
+:Title: Allow Non-scalar Keys In Foreach
+:Author: Levi Morrison <levim@php.net>, Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2013-01-28
+:PHP-Version: 5.5
+:Version: 1.0
+
+Current situation
+-----------------
+
+The ``Iterator::key`` function can currently return a value of any type,
+but the handling code in ``foreach`` and several other places only
+allows integer and string keys to be used. This limitation makes some
+use-cases unnecessarily complicated. From the SPL two examples are
+``MultipleIterator`` and ``SplObjectStorage``.
+
+The ``MutlipleIterator`` allows you to traverse several ``Iterator``\ s
+at the same time. It's ``::current`` method returns an array of values
+and the ``::key`` method returns an array of keys. But due to the
+``foreach`` key type limitation the keys can not be directly fetched:
+
+.. code:: php
+
+   $it = new MultipleIterator;
+   $it->attachIterator($it1);
+   $it->attachIterator($it2);
+
+   // This is NOT possible
+   foreach ($it as $keys => $values) {
+       // ...
+   }
+
+   // Instead you have to use this
+   foreach ($it as $values) {
+       $keys = $it->keys();
+       
+       // ...
+   }
+
+``SplObjectStorage`` is a map/set implementation for object keys. Here
+the issue is circumvented by returning the keys as values and requiring
+a manual lookup on the values:
+
+.. code:: php
+
+   // NOT possible
+   foreach ($objectStore as $key => $value) {
+       // ...
+   }
+
+   // Instead you have to use
+   foreach ($objectStore as $key) {
+       $value = $objectStore[$key];
+       
+       // ...
+   }
+
+These are just two examples from core classes, but it obviously also
+applies in many other cases (and now that we have generators, it will
+probably become an even larger issue).
+
+Another key issue is that you can't really work around this generically.
+If you want to write code that is also compatible with ``Iterator``\ s
+that return array/object keys, you can no longer use the
+``foreach ($it as $k => $v)`` syntax. You are forced to use
+``foreach ($it as $v) { $k = $it->key(); ... }``, but this will
+obviously only with with ``Iterator``\ s and not with aggregates,
+``Traversable``\ s or normal arrays. In order to properly support all
+use cases you'd have to wrap everything in iterators (i.e. make
+extensive use of ``IteratorIterator`` and ``ArrayIterator``), which
+obviously is an option, but cumbersome to a degree that nobody does it.
+What this means is that iterators like ``MultipleIterator`` are to a
+large part excluded from use in iterator chaining/pipelines (which is
+probably the most important thing about using iterators).
+
+Suggested fix
+-------------
+
+This RFC proposes to lift the restriction and allow values of arbitrary
+types to be used as keys (in particularly allowing also arrays and
+objects) in iterators. (Note: This proposal does not suggest allowing
+those key types in arrays. This is only about ``Iterator``\ s.)
+
+In order to remove this restriction the internal
+```zend_object_iterator_funcs`` <http://lxr.php.net/xref/PHP_TRUNK/Zend/zend_iterators.h#31>`__
+API has to be changed:
+
+.. code:: c
+
+   // This entry:
+   int (*get_current_key)(zend_object_iterator *iter, char **str_key, uint *str_key_len, ulong *int_key TSRMLS_DC);
+   // Is replaced with this entry:
+   void (*get_current_key)(zend_object_iterator *iter, zval *key TSRMLS_DC);
+
+The handler has to write into the passed ``zval*`` using one of the
+``ZVAL_*`` macros.
+
+iterator_to_array()
+-------------------
+
+When using non-string/int keys ``iterator_to_array`` with the
+``$preserve_keys`` option will behave in the same way as PHP would when
+it does normal array key assignments, i.e. its behavior would be the
+same as the following PHP snippet:
+
+.. code:: php
+
+   function iterator_to_array($iter) {
+       foreach ($iter as $k => $v) {
+           $array[$k] = $v;
+       }
+       return $array;
+   }
+
+For array and object keys this would give an ``Illegal offset type``
+warning. For ``NULL`` the ``""`` key is used, doubles are truncated to
+the integral part, resources use their resource ID and issue a warning,
+booleans are cast to integers.
+
+In order to support this a new function is added in ``Zend/zend_API.h``
+(which more or less reimplements the internal inline function
+``zend_fetch_dimension_address_inner``):
+
+.. code:: c
+
+   /* The refcount of value is incremented by the function itself */
+   ZEND_API int array_set_zval_key(HashTable *ht, zval *key, zval *value);
+
+Patch
+-----
+
+The patch for this change can be found here:
+https://github.com/php/php-src/commit/fcc6611de9054327441786e52444b5f8eecdd525
+
+The change itself is rather small, but there are quite a few extensions
+that require minor adjustments to use the new API.
+
+Vote
+----
+
+Voting ends on March 6th. A 50% + 1 majority is required. This RFC
+targets PHP 5.5.
+
+Question: Remove type-restrictions on foreach keys?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Original Authors: Levi Morrison levim@php.net, Nikita Popov nikic@php.net
+:Original Status: Implemented in PHP 5.5 (`commit <https://github.com/php/php-src/commit/fcc6611de9054327441786e52444b5f8eecdd525>`__)
+:Slug: foreach-non-scalar-keys
+:Wiki URL: https://wiki.php.net/rfc/foreach-non-scalar-keys

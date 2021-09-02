@@ -1,0 +1,172 @@
+Consistent Type Errors For Internal Functions
+=============================================
+
+:PHP-RFC: 0630
+:Title: Consistent Type Errors For Internal Functions
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2019-02-05
+:PHP-Version: 8.0
+:Version: 1.0
+
+Introduction
+------------
+
+For user-defined functions, passing a parameter of illegal type results
+in a ``TypeError``. For internal functions, the behavior depends on
+multiple factors, but the default is to throw a warning and return null.
+This RFC proposes to consistently generate ``TypeError`` exceptions for
+all invalid parameter types, regardless of whether the function is
+user-defined or extension-defined.
+
+First, a detailed description of the current behavior is in order. For
+user functions parameters of invalid type always result in a
+``TypeError``, regardless of ``strict_types`` option:
+
+.. code:: php
+
+   function foo(int $bar) {}
+   foo("not an int");
+   // TypeError: Argument 1 passed to foo() must be of the type int, string given
+
+Of course, ``strict_types`` changes what values are considered
+compatible with a certain type, but it does not modify the error
+reporting mechanism. For internal functions, the baseline behavior is to
+throw a warning and return null instead:
+
+.. code:: php
+
+   var_dump(strlen(new stdClass));
+   // Warning: strlen() expects parameter 1 to be string, object given
+   // NULL
+
+The null return value is only a convention followed by most functions.
+There are also about 150 functions that will return false instead.
+However, if ``strict_types`` is enabled, a ``TypeError`` is generated
+instead, consistent with user-defined functions:
+
+.. code:: php
+
+   declare(strict_types=1);
+   var_dump(strlen(new stdClass));
+   // TypeError: strlen() expects parameter 1 to be string, object given
+
+Additionally, some functions opt-in to always generate a ``TypeError``,
+regardless of ``strict_types`` setting. This is the case for all
+constructors, because they do not have a meaningful way of returning a
+null value. Other functions, such as ``random_int``, or the entirety of
+the sodium extension, also opt-in to throwing. Newly introduced methods
+will often do so in order to consistently throw exceptions for all their
+error conditions.
+
+Finally, the manner in which the error is reported depends on which
+mechanism detected the violation. The above description applies to the
+``zend_parse_parameters``/``ZEND_PARSE_PARAMETERS`` APIs typically used
+by internal functions. However, functions can additionally specify
+argument information (which is made available through reflection). If
+the argument information specifies types, then violation of those will
+always result in a ``TypeError``.
+
+This can lead to peculiar situations where the error behavior will
+depend on which argument is invalid:
+
+.. code:: php
+
+   var_dump(DateTime::createFromFormat(new stdClass, "foobar"));
+   // Warning: DateTime::createFromFormat() expects parameter 1 to be string, object given
+   // bool(false)
+
+   var_dump(DateTime::createFromFormat("foobar", "foobar", new stdClass));
+   // TypeError: Argument 3 passed to DateTime::createFromFormat() must be an instance of DateTimeZone or null, instance of stdClass given
+
+In the former case the type mismatch is detected by
+zend_parse_parameters and results in a warning and false, in the latter
+case the type mismatch is detected by argument information and results
+in a ``TypeError``. All for the same function.
+
+Issues
+------
+
+The current situation results in a number of problems: From the above
+description one of those problems is that the error behavior varies
+based on many factors, and the only reliable way to find out how a
+particular argument of a particular function will behave is to actually
+try it. However, there are also two further issues beyond the
+inconsistency itself:
+
+First, the fact that zend_parse_parameters and types in argument
+information behave differently means that we cannot add typed argument
+information to existing functions, as it would change a warning into a
+``TypeError`` under some circumstances. Having typed argument
+information is valuable, because it is available through reflection, and
+because it is used by inheritance checks (if we don't specify types for
+methods, then child classes won't be able to do so either).
+
+We regularly have to decline pull requests that add argument type
+information, because it would constitute a BC break. If we change
+zend_parse_parameters to always generate a ``TypeError`` (and make one
+BC break at that point), we can freely add type information in the
+future.
+
+Second, in the absence of an exception, functions still need to return a
+value on failure. For parameter parsing errors, this will usually be
+null and sometimes false. Because many functions don't have a failure
+condition apart from invalid parameter types, this means that their
+return type needs to be expanded just for this case. For example the
+return type of ``strlen()`` right now would have to be ``?int`` rather
+than ``int``.
+
+This once again prevents us from annotating functions with reflectable
+return type information, as we do not want to encode this legacy
+behavior in the function signature.
+
+Proposal
+--------
+
+Make the internal parameter parsing APIs always generate a ``TypeError``
+if parameter parsing fails. It should be noted that this also includes
+``ArgumentCountError`` (a child of ``TypeError``) for cases where too
+few/many arguments were passed.
+
+Functions that manually handle parameters, because they have more
+complex requirements, should preferably also be switched to always
+generate ``TypeError``.
+
+Backward Incompatible Changes
+-----------------------------
+
+A ``TypeError`` will be thrown instead of a warning if incorrectly typed
+parameters are passed to a function, which is a backwards incompatible
+change.
+
+As a rare exception, this BC break will probably hit php-src harder than
+actual users of PHP: While it should be very unusual, even for legacy
+code, to call functions with completely invalid parameters, php-src
+contains many tests that check zpp failures for different functions, all
+of which will have to be updated or removed. Despite the recent
+variation test purge, there are still about 1500 such tests.
+
+Vote
+----
+
+Voting opened 2019-02-19 and closes 2019-03-05. A 2/3 majority is
+required to pass.
+
+Question: Make zpp failures always throw TypeError?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/3794
+:Original Authors: Nikita Popov nikic@php.net
+:Original Status: Implemented (in PHP 8.0)
+:Slug: consistent_type_errors
+:Wiki URL: https://wiki.php.net/rfc/consistent_type_errors

@@ -1,0 +1,380 @@
+Class Metadata
+==============
+
+:PHP-RFC: 0092
+:Title: Class Metadata
+:Author: Guilherme Blanco <guilhermeblanco@hotmail.com>, Pierrick Charron <pierrick@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2010-08-24
+:Version: 1.0
+
+Introduction
+------------
+
+Many languages currently support metadata information. This RFC exposes
+an idea about how can it be implemented in PHP, providing a powerful
+tool that many applications can take advantage of.
+
+Why do we need Class Metadata?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Frameworks in general rely on metadata information in order to correctly
+work. They can use it for many purposes:
+
+-  **phpUnit** Providing meta functionality for test cases, examples:
+   @dataProvider for test data iteration, @expectedException for
+   catching exceptions, etc.
+-  **Doctrine** For Object-Relational mapping, examples: @Entity,
+   @OneToOne, @Id, etc.
+-  **Zend Framework Server classes** Used to automate mappings for
+   XML-RPC, SOAP, etc.
+-  **TYPO3** for dependency injection and validation
+-  **Symfony2** for routing rules
+-  **Others** One clear thing that comes to my mind is Validation,
+   Functional Behavior injection (which could take advantage of
+   `Traits </rfc/Traits>`__), etc. Also, any Framework could take
+   advantage of it somehow.
+
+So, any meta mapping injection could be easily achieved via the
+implementation of a centralized Annotations support.
+
+The .NET framework uses Data Annotation:
+http://www.asp.net/mvc/tutorials/validation-with-the-data-annotation-validators-cs
+
+An advantage here is the .net framework will process some annotations
+and inject behavior into the compiled source code.
+
+It's important to note that annotations exist in java and .net but many
+strong use cases exist in these languages to provide hints to the
+compiler (@NotNull).
+
+These types of use cases (hints to the Zend lexer/parser or other PHP
+implementations) are not presented in this RFC.
+
+Common Misconceptions
+---------------------
+
+Metadata mapping is commonly referred an feature that cannot be used
+widely, so its implementation is useless. As pointed previously, there
+are many use cases for this support.
+
+Though useful, the good and bad use cases of annotations are heavily
+debated (religiously):
+
+http://willcode4beer.com/design.jsp?set=annotations_gotchas_best_practices
+
+http://www.softwarereality.com/programming/annotations.jsp
+
+Proposal
+--------
+
+First thing to be decided would be the tokens to be used for categorize
+an Annotation.
+
+-  Java uses
+   `Annotations <http://en.wikipedia.org/wiki/Java_annotation>`__
+-  C# uses `Attributes <http://en.wikipedia.org/wiki/.NET_metadata>`__
+
+When using meta mapping, less characters is preferred to speed up its
+construction.
+
+PHP Annotation could be simplified into this EBNF (Extended Backus-Naur
+Form):
+
+::
+
+   Annotations     ::= Annotation {Annotation}*
+   Annotation      ::= "<" AnnotationName ["(" [Values] ")"] ">"
+   AnnotationName  ::=  QualifiedName | SimpleName
+   QualifiedName   ::= {"\"}* NameSpacePart "\" {NameSpacePart "\"}* SimpleName
+   NameSpacePart   ::= identifier
+   SimpleName      ::= identifier
+   Alias           ::= identifier
+   Values          ::= Value {"," Value}*
+   Value           ::= integer | string | float | boolean | Array | Annotation
+   Array           ::= "array(" ArrayEntry {"," ArrayEntry}* ")"
+   ArrayEntry      ::= Value | KeyValuePair
+   KeyValuePair    ::= Key "=>" Value
+   Key             ::= string | integer
+
+With integer, string, float, boolean, float and identifier being the
+terminals. Identifier: [a-zA-Z_][a-zA-Z0-9_]\*
+
+The start/end tokens are not closed, they can be changed if anyone
+desires. Currently the chosen ones are: "<" for start token and ">" for
+end. Here is an example of PHP Annotations:
+
+::
+
+   <Entity("users")>
+   class User
+   {
+       <Column("integer")>
+       <Id>
+       <GeneratedValue("AUTO")>
+       protected $id;
+
+       // ...
+
+       <ManyToMany("Phonenumber")>
+       protected $Phonenumbers;
+   }
+
+One point to notice is that nested Annotations are allowed. This is an
+important feature against key=>value pair of what docblock
+implementations currently define. Here is a simple sample of usage:
+
+.. code:: php
+
+   <Simple(<Example>)>
+   class User {
+       // ...
+   }
+
+The support is all done through the inclusion of a new class:
+ReflectionAnnotation.
+
+How to define Annotations
+-------------------------
+
+Annotations can be defined on classes, methods, properties, functions or
+function parameters. ReflectionAnnotation is an interface that must be
+implemented in order to accept an Annotation definition. Once this class
+is extended, the subclass is ready to be used as an Annotation:
+
+.. code:: php
+
+   class Foo implements \ReflectionAnnotation {
+       public $value;
+
+       public function __construct($value)
+       {
+           $this->value = $value;
+       }
+   }
+
+   <Foo(array(true))>
+   class Bar { /* ... */ }
+
+To have access to an Annotation instance, it is done through Reflection
+API.
+
+.. code:: php
+
+   $reflClass = new \ReflectionClass('Bar');
+   $reflAnnot = $reflClass->getAnnotation('Foo');
+
+   echo $foo->value; // array(true)
+
+To expand Annotations support, it is allowed to define other properties.
+By doing it, you can define Annotations and automatically defining
+values to constructor.
+
+.. code:: php
+
+   namespace App\Annotation;
+
+   class Link implements \ReflectionAnnotation {
+       public $url;
+       public $target;
+       
+       public function __construct($url, $target = null)
+       {
+           $this->url = $url;
+           $this->target = $target;
+       }
+   }
+
+   namespace App;
+
+   <Annotation\Link("http://www.php.net", "_blank")>
+   class PHPWebsite {
+       // ...
+   }
+
+Please notice that Annotations can also take advantage of "use" and
+"namespace" definitions. Example:
+
+.. code:: php
+
+   namespace Foo\Bar;
+
+   <Exception("I should not do this")>
+   <\Exception("And also this one is ugly")>
+   class Playground {
+       // ...
+   }
+
+   // Exception points to \Foo\Bar\Exception
+   // \Exception points to \Exception
+
+How to retrieve Annotation information
+--------------------------------------
+
+Annotations are only useful if defined information can be retrieved
+somehow. Example:
+
+.. code:: php
+
+   class Author implements \ReflectionAnnotation {
+       public $name;
+       
+       public function __construct($name) { $this->name = $name; }
+   }
+
+   <Author("Pierrick Charron")>
+   class MyTest {
+       <Author("Guilherme Blanco")>
+       public function __toString()
+       {
+           // ...
+       }
+   }
+
+   class ExtendedTest extends MyTest {}
+
+When you attempt to retrieve the defined information for classes A and
+B, you get:
+
+.. code:: php
+
+   $reflClassA = new \ReflectionClass('MyTest');
+   var_dump($reflClassA->getAnnotations());
+   /*
+   array(1) {
+     ["Author"]=>
+     object(Author)#%d (1) {
+       ["name"]=> string (16) "Pierrick Charron"
+     }
+   }
+   */
+
+   $reflMethodToString = $reflClassA->getMethod('__toString');
+   var_dump($reflMethodToString->getAnnotations());
+   /*
+   array(1) {
+     ["Author"]=>
+     object(Author)#%d (1) {
+       ["name"]=> string (16) "Guilherme Blanco"
+     }
+   }
+   */
+
+   $reflClassB = new \ReflectionClass('ExtendedTest');
+   var_dump($reflClassB->getAnnotations());
+   /*
+   array(0) {
+   }
+   */
+
+Please notice that multiple instantiation of same Annotation is left
+intentionally for discussion. It could be supported. Also, the
+inheritance of Annotations is left for discussion too. This can be done
+by 2 different approaches:
+
+-  Using an Annotation at the top of ReflectionAnnotation definition.
+   This was it was working on first patch.
+-  Using a different interface to be implemented. This was another
+   approach that we considered, but left for discussion.
+
+Another available method is to retrieve an specific Annotation:
+\`getAnnotation($name)`, which may return the matched Annotation or null
+if not found.
+
+At the level of a single code element (property, class, method...),
+you'll always get one single instance of a given annotation. This means
+that if you call getAnnotation multiple times on the same element,
+you'll always get the same instance.
+
+Basically, these are the extended methods in Reflection API, written in
+raw PHP:
+
+.. code:: php
+
+   interface ReflectionAnnotation {
+   }
+
+   class ReflectionFunction {
+       // ...
+
+       public function getAnnotations();
+       public function getAnnotation($name);
+       public function hasAnnotation($name);
+   }
+
+   class ReflectionClass {
+       // ...
+
+       public function getAnnotations();
+       public function getAnnotation($name);
+       public function hasAnnotation($name);
+   }
+
+   class ReflectionProperty {
+       // ...
+
+       public function getAnnotations();
+       public function getAnnotation($name);
+       public function hasAnnotation($name);
+   }
+
+   class ReflectionMethod {
+       // ...
+
+       public function getAnnotations();
+       public function getAnnotation($name);
+       public function hasAnnotation($name);
+   }
+
+   class ReflectionParameter {
+       // ...
+
+       public function getAnnotations();
+       public function getAnnotation($name);
+       public function hasAnnotation($name);
+   }
+
+BC breaks
+---------
+
+::
+
+    * Creates one additional classes named "ReflectionAnnotation" that may break existing code.
+    * None otherwise (no new keywords)
+
+To be discussed
+---------------
+
+-  Possible usage of "annotation" as keyword instead of an abstract
+   class.
+-  Tokens for start/end. Currently it's "<" and ">".
+-  Nested Annotation declaration: <Foo(<Bar>)> or <Foo(new Bar)> (this
+   changes the EBNF if any change is agreed). Currently the supported
+   one is: <Foo(<Bar>)>
+-  Multiple instantiations of Annotation classes on a same block.
+-  Inheritance of classes/properties/method and Annotations
+   declarations.
+
+Patch
+-----
+
+Patch : http://www.adoy.net/php/Annotations-v3.diff
+
+Tests : http://www.adoy.net/php/Annotations-v3-tests.diff
+
+Changelog
+---------
+
+-  2010-05-26 guilhermeblanco Initial RFC creation.
+-  2010-08-24 guilhermeblanco Updated for a real doable support
+-  2010-08-24 pierrick Add the patch
+-  2011-05-09 guilhermeblanco Updated patch with recent compatibility.
+   Previous patch removed. New one should be added shortly.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Guilherme Blanco guilhermeblanco@hotmail.com, Pierrick Charron pierrick@php.net
+:Slug: annotations
+:Wiki URL: https://wiki.php.net/rfc/annotations

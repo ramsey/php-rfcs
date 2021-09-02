@@ -1,0 +1,295 @@
+Range Checks For External And Internal APIs In 64-bit Builds
+============================================================
+
+:PHP-RFC: 0412
+:Title: Range Checks For External And Internal APIs In 64-bit Builds
+:Author: Anatol Belski <ab@php.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2015-08-24
+:Version: 0.9
+
+Introduction
+------------
+
+PHP binds many external libraries with the core extensions. Several
+libraries like libxml2, openssl, etc. require exact int data types with
+their signatures. Built for 64-bit for several platforms like LLP64 or
+LP64, the int data type is still 32-bit. This means, the user land input
+might overflow the ranges foreseen in those external libraries
+signatures, which can lead to any possible negative impacts from
+functionality to security.
+
+Other aspects of the mentioned issue are internal PHP functions not
+requiring 64-bit functionality so behaving same way on 64-bit when
+having possibly non 64-bit argument types in signatures. Yet another
+impact might be also comparison of variables with 64- and 32-bit, signed
+and unsigned types.
+
+Proposal
+--------
+
+It is suggested to implement additional formats for ZPP, that are
+explicitly require
+
+-  strings with 32-bit length (both signed and unsigned)
+-  32-bit integers (both signed and unsigned)
+
+on affected platforms only. In addition, it is suggested to implement a
+set of macros for range checks and comparison.
+
+The mentioned implementations won't affect places where no range
+overflows can happen. The checks functionality will be excluded
+automatically at the compile time on the platform/build combinations
+where it does not make sense. For example on the platforms like ILP64
+these checks make no sense.
+
+All the extensions linking to the libraries or places using internal
+functions of the mentioned kind have to be adapted with the new ZPP and
+possibly macro handling.
+
+Proposed macros for 32-bit int checks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: c
+
+   #if SIZEOF_INT == SIZEOF_ZEND_LONG
+   # define ZEND_LONG_INT_OVFL(zl) (0)
+   # define ZEND_LONG_INT_UDFL(zl) (0)
+   #else
+   # define ZEND_LONG_INT_OVFL(zlong) ((zlong) > (zend_long)INT_MAX)
+   # define ZEND_LONG_INT_UDFL(zlong) ((zlong) < (zend_long)INT_MIN)
+   #endif
+
+   #if SIZEOF_INT == SIZEOF_ZEND_LONG
+   # define ZEND_LONG_UINT_OVFL(zl) (0)
+   #else
+   # define ZEND_LONG_UINT_OVFL(zlong) ((zlong) < 0 || (zlong) > (zend_long)UINT_MAX)
+   #endif
+
+   #define ZEND_SIZE_T_INT_OVFL(size) ((size) > (size_t)INT_MAX)
+
+   #if SIZEOF_INT == SIZEOF_SIZE_T
+   # define ZEND_SIZE_T_UINT_OVFL(size) (0)
+   #else
+   # define ZEND_SIZE_T_UINT_OVFL(size) ((size) > (size_t)UINT_MAX)
+   #endif
+
+Proposed additional macros to simplify signed/unsigned comparisons
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: c
+
+   #define ZEND_SIZE_T_GT_ZEND_LONG(size, zlong) ((zlong) < 0 || (size) > (size_t)(zlong))
+   #define ZEND_SIZE_T_GTE_ZEND_LONG(size, zlong) ((zlong) < 0 || (size) >= (size_t)(zlong))
+   #define ZEND_SIZE_T_LT_ZEND_LONG(size, zlong) ((zlong) >= 0 && (size) < (size_t)(zlong))
+   #define ZEND_SIZE_T_LTE_ZEND_LONG(size, zlong) ((zlong) >= 0 && (size) <= (size_t)(zlong))
+
+All the macros should be put into a dedicated header, so any extensions
+and improvements can follow up in the scope.
+
+Proposed ZPP changes
+~~~~~~~~~~~~~~~~~~~~
+
+Introducing new formats
+
+-  'q' - string with signed 32-bit length
+-  'r' - string with unsigned 32-bit length
+-  'i' - signed 32-bit integer
+-  'u' - unsigned 32-bit integer
+
+The behaviour of the options:
+
+-  if string length exceeds 32-bit range, ZPP should fail the usual way
+-  if the passed numeric option would overflow a 32-bit integer, ZPP
+   should fail the usual way
+
+With the usual way the behavior of ZPP is meant, that is expected at the
+concrete place. It could be an Error or another Throwable, or a warning.
+It might depend on other upcoming RFCs and has to be implemented
+accordingly.
+
+Example affected place
+~~~~~~~~~~~~~~~~~~~~~~
+
+Here is the real case from the current code base, the irrelevant
+declarations and code are removed. Consider the signature in the
+underlaying API http://xmlsoft.org/html/libxml-parser.html#xmlReadMemory
+
+The original piece of code
+
+.. code:: c
+
+   PHP_FUNCTION(simplexml_load_string)
+   {
+       char           *data;
+       size_t          data_len;
+       zend_long       options = 0;
+
+   .........................
+
+       if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|C!lsb", &data, &data_len, &ce, &options, &ns, &ns_len, &isprefix) == FAILURE) {
+           return;
+       }
+
+       docp = xmlReadMemory(data, data_len, NULL, NULL, options);
+
+   .........................
+
+   }
+
+The proposed way to fix it using ZPP. Note that 'q' is used for string
+input and 'i' is used for options.
+
+.. code:: c
+
+   PHP_FUNCTION(simplexml_load_string)
+   {
+       char           *data;
+       int            data_len;
+       int            options = 0;
+
+   .........................
+
+       if (zend_parse_parameters(ZEND_NUM_ARGS(), "q|C!isb", &data, &data_len, &ce, &options, &ns, &ns_len, &isprefix) == FAILURE) {
+           return;
+       }
+
+       docp = xmlReadMemory(data, data_len, NULL, NULL, options);
+
+   .........................
+
+   }
+
+The proposed way to fix it using the overflow check macro
+
+.. code:: c
+
+   PHP_FUNCTION(simplexml_load_string)
+   {
+       char           *data;
+       size_t          data_len;
+       zend_long       options = 0;
+
+   .........................
+
+       if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|C!lsb", &data, &data_len, &ce, &options, &ns, &ns_len, &isprefix) == FAILURE) {
+           return;
+       }
+
+       if (ZEND_LONG_INT_OVFL(options)) {
+             RETURN_FALSE;
+       }
+       if (ZEND_SIZE_T_INT_OVFL(data_len)) {
+            RETURN_FALSE;
+       }
+
+
+       docp = xmlReadMemory(data, data_len, NULL, NULL, options);
+
+   .........................
+
+   }
+
+Backward Incompatible Changes
+-----------------------------
+
+Several new warnings or harder error handling might be introduced with
+the new range checks. However this should only affect the edge cases
+where the errors are actually happen and are catched. The general
+behaviour has to comply with the behavior in the core.
+
+Proposed PHP Version(s)
+-----------------------
+
+7.1
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+No.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Only positive impact with more precise argument checks.
+
+To Opcache
+~~~~~~~~~~
+
+No. Opcache doesn't link to any of the external libraries to be handled
+by this RFC.
+
+New Constants
+~~~~~~~~~~~~~
+
+No.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+No.
+
+Open Issues
+-----------
+
+Make sure there are no open issues when the vote starts!
+
+Unaffected PHP Functionality
+----------------------------
+
+The current usage when no overflows happen is not affected. Only what is
+affected are the edge cases explained in the introduction.
+
+Future Scope
+------------
+
+Having this minimalistic start as a base, the topic of overflows in the
+mathematical operations can be entered. This topic is not handled by
+this RFC.
+
+Also, some good patterns for other cases can be added later by need.
+Like compare int vs size_t, or compare variables with different sizes.
+
+Proposed Voting Choices
+-----------------------
+
+yes/no.
+
+Patches and Tests
+-----------------
+
+The implementation of the base functionality is trivial and can be done
+if the proposed strategy is accepted. Many places in the core extensions
+related to libxml2, openssl, tidy, etc. are obvious and will be
+addressed already before merging.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+Links to external references, discussions or RFCs
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Anatol Belski, ab@php.net
+:Original Status: withdrawn
+:Slug: range_checks_for_64_bit
+:Wiki URL: https://wiki.php.net/rfc/range_checks_for_64_bit

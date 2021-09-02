@@ -1,0 +1,887 @@
+Fibers
+======
+
+:PHP-RFC: 0797
+:Title: Fibers
+:Author: Aaron Piotrowski <trowski@php.net>, Niklas Keller <kelunik@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2021-03-08
+:PHP-Version: 8.1
+:Version: 1.0
+
+Introduction
+------------
+
+For most of PHP’s history, people have written PHP code only as
+synchronous code. Execution of functions stops until a result is
+available to return from the function, including for I/O operations,
+which can be quite slow.
+
+More recently, there have been multiple projects that have allowed
+people to write asynchronous PHP code to allow for concurrent I/O
+operations. Asynchronous functions accept a callback or return a
+placeholder for a future value (such as a promise) to run code at a
+future time once the result is available. Execution continues without
+waiting for a result. Examples of these projects are
+`amphp <https://amphp.org/>`__, `ReactPHP <https://reactphp.org/>`__,
+and `Guzzle <https://guzzlephp.org/>`__.
+
+The problem this RFC seeks to address is a difficult one to explain, but
+can be referred to as the `“What color is your
+function?” <https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/>`__
+problem.
+
+A summary of the problem described in the linked article is:
+
+-  Asynchronous functions change the way the function must be called.
+-  Synchronous functions may not call an asynchronous function (though
+   asynchronous functions may call synchronous functions).
+-  Calling an asynchronous function requires the entire call stack to be
+   asynchronous
+
+For people who are familiar with using promises and/or await/yield to
+achieve writing asynchronous code, the problem can be expressed as:
+“Once one function returns a promise somewhere in your call stack, the
+entire call stack needs to return a promise because the result of the
+call cannot be known until the promise is resolved.”
+
+This RFC seeks to eliminate the distinction between synchronous and
+asynchronous functions by allowing functions to be interruptible without
+polluting the entire call stack. This would be achieved by:
+
+-  Adding support for
+   `Fibers <https://en.wikipedia.org/wiki/Fiber_(computer_science)>`__
+   to PHP.
+-  Adding a ``Fiber`` class and the corresponding reflection class
+   ``ReflectionFiber``.
+-  Adding exception classes ``FiberError`` and ``FiberExit`` to
+   represent errors.
+
+Fibers allow for transparent non-blocking I/O implementations of
+existing interfaces (such as PSR-7, Doctine ORM, etc.). This is because
+the placeholder (promise) object is eliminated. Functions instead can
+declare the I/O result type instead of a placeholder object which cannot
+specify a resolution type because PHP does not support generics.
+
+Fibers
+~~~~~~
+
+Fibers allow the creation of full-stack, interruptible functions that
+can be used to implement cooperative multitasking in PHP. These are also
+known as coroutines or green-threads.
+
+Fibers pause the entire execution stack, so the direct caller of the
+function does not need to change how it invokes the function.
+
+Execution may be interrupted anywhere in the call stack using
+``Fiber::suspend()`` (that is, the call to ``Fiber::suspend()`` may be
+in a deeply nested function or not even exist at all).
+
+Unlike stack-less Generators, each Fiber has its own call stack,
+allowing them to be paused within deeply nested function calls. A
+function declaring an interruption point (i.e., calling
+``Fiber::suspend()``) need not change its return type, unlike a function
+using ``yield`` which must return a ``Generator`` instance.
+
+Fibers can be suspended in *any* function call, including those called
+from within the PHP VM, such as functions provided to ``array_map`` or
+methods called by ``foreach`` on an ``Iterator`` object.
+
+Once suspended, execution of the fiber may be resumed with any value
+using ``Fiber->resume()`` or by throwing an exception into the fiber
+using ``Fiber->throw()``. The value is returned (or exception thrown)
+from ``Fiber::suspend()``.
+
+Proposal
+--------
+
+Fiber
+~~~~~
+
+A Fiber would be represented as class which would be defined in core PHP
+with the following signature:
+
+    Fiber::this() has been renamed to Fiber::getCurrent() during the PHP
+    8.1 alpha release phase.
+
+.. code:: php
+
+   final class Fiber
+   {
+       /**
+        * @param callable $callback Function to invoke when starting the fiber.
+        */
+       public function __construct(callable $callback) {}
+
+       /**
+        * Starts execution of the fiber. Returns when the fiber suspends or terminates.
+        *
+        * @param mixed ...$args Arguments passed to fiber function.
+        *
+        * @return mixed Value from the first suspension point or NULL if the fiber returns.
+        *
+        * @throw FiberError If the fiber has already been started.
+        * @throw Throwable If the fiber callable throws an uncaught exception.
+        */
+       public function start(mixed ...$args): mixed {}
+
+       /**
+        * Resumes the fiber, returning the given value from {@see Fiber::suspend()}.
+        * Returns when the fiber suspends or terminates.
+        *
+        * @param mixed $value
+        *
+        * @return mixed Value from the next suspension point or NULL if the fiber returns.
+        *
+        * @throw FiberError If the fiber has not started, is running, or has terminated.
+        * @throw Throwable If the fiber callable throws an uncaught exception.
+        */
+       public function resume(mixed $value = null): mixed {}
+
+       /**
+        * Throws the given exception into the fiber from {@see Fiber::suspend()}.
+        * Returns when the fiber suspends or terminates.
+        *
+        * @param Throwable $exception
+        *
+        * @return mixed Value from the next suspension point or NULL if the fiber returns.
+        *
+        * @throw FiberError If the fiber has not started, is running, or has terminated.
+        * @throw Throwable If the fiber callable throws an uncaught exception.
+        */
+       public function throw(Throwable $exception): mixed {}
+
+       /**
+        * @return bool True if the fiber has been started.
+        */
+       public function isStarted(): bool {}
+
+       /**
+        * @return bool True if the fiber is suspended.
+        */
+       public function isSuspended(): bool {}
+
+       /**
+        * @return bool True if the fiber is currently running.
+        */
+       public function isRunning(): bool {}
+
+       /**
+        * @return bool True if the fiber has completed execution (returned or threw).
+        */
+       public function isTerminated(): bool {}
+
+       /**
+        * @return mixed Return value of the fiber callback. NULL is returned if the fiber does not have a return statement.
+        *
+        * @throws FiberError If the fiber has not terminated or the fiber threw an exception.
+        */
+       public function getReturn(): mixed {}
+
+       /**
+        * @return self|null Returns the currently executing fiber instance or NULL if in {main}.
+        */
+       public static function this(): ?self {}
+
+       /**
+        * Suspend execution of the fiber. The fiber may be resumed with {@see Fiber::resume()} or {@see Fiber::throw()}.
+        *
+        * Cannot be called from {main}.
+        *
+        * @param mixed $value Value to return from {@see Fiber::resume()} or {@see Fiber::throw()}.
+        *
+        * @return mixed Value provided to {@see Fiber::resume()}.
+        *
+        * @throws FiberError Thrown if not within a fiber (i.e., if called from {main}).
+        * @throws Throwable Exception provided to {@see Fiber::throw()}.
+        */
+       public static function suspend(mixed $value = null): mixed {}
+   }
+
+A ``Fiber`` object is created using ``new Fiber(callable $callback)``
+with any callable. The callable need not call ``Fiber::suspend()``
+directly, it may be in a deeply nested call, far down the call stack (or
+perhaps never call ``Fiber::suspend()`` at all). The new ``Fiber`` may
+be started using ``Fiber->start(mixed ...$args)`` with a variadic
+argument list that is provided as arguments to the callable used when
+creating the ``Fiber``.
+
+``Fiber::suspend()`` suspends execution of the current fiber and returns
+execution to the call to ``Fiber->start()``, ``Fiber->resume()``, or
+``Fiber->throw()``. Consider ``Fiber::suspend()`` to be similar to a
+generator using ``yield``, which returns execution to the call that
+advanced the generator.
+
+A suspended fiber may be resumed in one of two ways:
+
+-  returning a value from ``Fiber::suspend()`` using ``Fiber->resume()``
+-  throwing an exception from ``Fiber::suspend()`` using
+   ``Fiber->throw()``
+
+``Fiber->getReturn()`` returns the value returned from a terminated
+fiber (``NULL`` is returned if the fiber did not return a value). This
+function will throw an instance of ``FiberError`` if the fiber has not
+completed execution or threw an exception.
+
+``Fiber::this()`` returns the currently executing ``Fiber`` instance or
+``NULL`` if called from ``{main}``. This allows a fiber to store a
+reference to itself elsewhere, such as within an event loop callback or
+an array of awaiting fibers.
+
+ReflectionFiber
+~~~~~~~~~~~~~~~
+
+``ReflectionFiber`` is used to inspect executing fibers. A
+``ReflectionFiber`` object can be created from any ``Fiber`` object,
+even if it has not been started or if it has terminated. This reflection
+class is similar to ``ReflectionGenerator``.
+
+.. code:: php
+
+   final class ReflectionFiber
+   {
+       /**
+        * @param Fiber $fiber Any Fiber object, including those that are not started or have
+        *                     terminated.
+        */
+       public function __construct(Fiber $fiber) {}
+
+       /**
+        * @return Fiber The reflected Fiber object.
+        */
+       public function getFiber(): Fiber {}
+
+       /**
+        * @return string Current file of fiber execution.
+        */
+       public function getExecutingFile(): string {}
+
+       /**
+        * @return int Current line of fiber execution.
+        */
+       public function getExecutingLine(): int {}
+
+       /**
+        * @param int $options Same flags as {@see debug_backtrace()}.
+        *
+        * @return array Fiber backtrace, similar to {@see debug_backtrace()}
+        *               and {@see ReflectionGenerator::getTrace()}.
+        */
+       public function getTrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT): array {}
+
+       /**
+        * @return bool True if the fiber has been started.
+        */
+       public function isStarted(): bool {}
+
+       /**
+        * @return bool True if the fiber is currently suspended.
+        */
+       public function isSuspended(): bool {}
+
+       /**
+        * @return bool True if the fiber is currently running.
+        */
+       public function isRunning(): bool {}
+
+       /**
+        * @return bool True if the fiber has completed execution (either returning or
+        *              throwing an exception), false otherwise.
+        */
+       public function isTerminated(): bool {}
+   }
+
+Unfinished Fibers
+^^^^^^^^^^^^^^^^^
+
+Fibers that are not finished (do not complete execution) are destroyed
+similarly to unfinished generators, executing any pending ``finally``
+blocks. ``Fiber::suspend()`` may not be invoked in a force-closed fiber,
+just as ``yield`` cannot be used in a force-closed generator. Fibers are
+destroyed when there are no references to the ``Fiber`` object.
+
+Fiber Stacks
+^^^^^^^^^^^^
+
+Each fiber is allocated a separate C stack and VM stack on the heap. The
+C stack is allocated using ``mmap`` if available, meaning physical
+memory is used only on demand (if it needs to be allocated to a stack
+value) on most platforms. Each fiber stack is allocated a maximum of 8M
+of memory by default, settable with an ini setting ``fiber.stack_size``.
+Note that this memory is used for the C stack and is not related to the
+memory available to PHP code. VM stacks for each fiber are allocated in
+a similar way to generators and use a similar amount of memory and CPU.
+VM stacks are able to grow dynamically, so only a single VM page (4K) is
+initially allocated.
+
+Backward Incompatible Changes
+-----------------------------
+
+Declares ``Fiber``, ``FiberError``, ``FiberExit``, and
+``ReflectionFiber`` in the root namespace. No other BC breaks.
+
+Future Scope
+------------
+
+The current implementation does not provide an internal API for fibers
+for PHP extensions. This RFC focuses on the user space fiber API. An
+internal fiber API will be added, collaborating with other internal
+developers and using feedback from PHP extension developers, including
+Swoole, so fibers can be created and controlled from PHP extensions. An
+extension may still optionally provide their own custom fiber
+implementation, but an internal API would allow the extension to use the
+fiber implementation provided by PHP.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 8.1
+
+Proposed Voting Choices
+-----------------------
+
+Merge implementation into core, 2/3 required.
+
+Patches and Tests
+-----------------
+
+Implementation and tests at
+`amphp/ext-fiber <https://github.com/amphp/ext-fiber>`__.
+
+`amphp v3 <https://github.com/amphp/amp/tree/v3>`__, a work-in-progress,
+uses ``ext-fiber``. Nearly all libraries under the GitHub organization
+`amphp <https://github.com/amphp>`__ have branches compatible with amphp
+v3. The branches are labeled as ``vX``, where ``X`` is the current
+version + 1 (for example, the ``v5`` branch of
+`amphp/http-client <https://github.com/amphp/http-client/tree/v5>`__).
+See the ``examples`` directories in various libraries for samples of PHP
+code using fibers.
+
+`React Fiber <https://github.com/trowski/react-fiber>`__ uses
+``ext-fiber`` and the current stable versions of ``react/event-loop``
+and ``react/promise`` to create coroutines and await any instance of
+``React\Promise\PromiseInterface`` until it is resolved.
+
+Examples
+--------
+
+This first simple example creates a fiber that immediately suspends with
+the string ``"fiber"``. This string is returned from the call to
+``$fiber->start()``. The fiber is then resumed with the string
+``"test"``, which is returned from the call to ``Fiber::suspend()``.
+
+.. code:: php
+
+   $fiber = new Fiber(function (): void {
+       $value = Fiber::suspend('fiber');
+       echo "Value used to resume fiber: ", $value, "\n";
+   });
+
+   $value = $fiber->start();
+
+   echo "Value from fiber suspending: ", $value, "\n";
+
+   $fiber->resume('test');
+
+This example will output the following:
+
+::
+
+   Value from fiber suspending: fiber
+   Value used to resume fiber: test
+
+--------------
+
+The next example defines a very simple event loop with the ability to
+poll a socket for incoming data, invoking a callback when data becomes
+available on the socket. This event loop can now be used to resume a
+fiber *only* when data becomes available on a socket, avoiding a
+blocking read.
+
+.. code:: php
+
+   class EventLoop
+   {
+       private string $nextId = 'a';
+       private array $deferCallbacks = [];
+       private array $read = [];
+       private array $streamCallbacks = [];
+
+       public function run(): void
+       {
+           while (!empty($this->deferCallbacks) || !empty($this->read)) {
+               $defers = $this->deferCallbacks;
+               $this->deferCallbacks = [];
+               foreach ($defers as $id => $defer) {
+                   $defer();
+               }
+
+               $this->select($this->read);
+           }
+       }
+
+       private function select(array $read): void
+       {
+           $timeout = empty($this->deferCallbacks) ? null : 0;
+           if (!stream_select($read, $write, $except, $timeout, $timeout)) {
+               return;
+           }
+
+           foreach ($read as $id => $resource) {
+               $callback = $this->streamCallbacks[$id];
+               unset($this->read[$id], $this->streamCallbacks[$id]);
+               $callback($resource);
+           }
+       }
+
+       public function defer(callable $callback): void
+       {
+           $id = $this->nextId++;
+           $this->deferCallbacks[$id] = $callback;
+       }
+
+       public function read($resource, callable $callback): void
+       {
+           $id = $this->nextId++;
+           $this->read[$id] = $resource;
+           $this->streamCallbacks[$id] = $callback;
+       }
+   }
+
+   [$read, $write] = stream_socket_pair(
+       stripos(PHP_OS, 'win') === 0 ? STREAM_PF_INET : STREAM_PF_UNIX,
+       STREAM_SOCK_STREAM,
+       STREAM_IPPROTO_IP
+   );
+
+   // Set streams to non-blocking mode.
+   stream_set_blocking($read, false);
+   stream_set_blocking($write, false);
+
+   $loop = new EventLoop;
+
+   // Read data in a separate fiber after checking if the stream is readable.
+   $fiber = new Fiber(function () use ($loop, $read): void {
+       echo "Waiting for data...\n";
+
+       $fiber = Fiber::this();
+       $loop->read($read, fn() => $fiber->resume());
+       Fiber::suspend();
+
+       $data = fread($read, 8192);
+
+       echo "Received data: ", $data, "\n";
+   });
+
+   // Start the fiber, which will suspend while waiting for a read event.
+   $fiber->start();
+
+   // Defer writing data to an event loop callback.
+   $loop->defer(fn() => fwrite($write, "Hello, world!"));
+
+   // Run the event loop.
+   $loop->run();
+
+This script will output the following:
+
+::
+
+   Waiting for data...
+   Received data: Hello, world!
+
+If this example were written in a similar order without fibers, the
+script would be unable to read from a socket before writing to it, as
+the call to ``fread()`` would block until data was available.
+
+Below is a chart illustrating execution flow between ``{main}`` and the
+fiber created by ``new Fiber()``. Execution flow switches between fibers
+as ``Fiber::suspend()`` and ``Fiber->resume()`` are called or when a
+fiber terminates.
+
+.. image:: https://wiki.php.net/_media/rfc/fiber-flow.png
+   :alt: Fiber execution flow
+   :align: center
+   :width: 800px
+
+--------------
+
+The next few examples use the async framework `amphp
+v3 <https://github.com/amphp/amp/tree/v3>`__ mentioned in `Patches and
+Tests <#patches_and_tests>`__ to demonstrate how fibers may be used by
+frameworks to create asynchronous code that is written like synchronous
+code.
+
+amphp v3 uses an `event loop
+interface <https://github.com/amphp/amp/blob/b0b9489a2cd25f33a8dafc05b3ad3594a5b66627/lib/Loop/Driver.php>`__
+together with a variety of functions and a placeholder object
+(``Promise``) to build on top of the underlying fiber API to create its
+own opinionated API to create green-threads (coroutines) to execute code
+concurrently. Users of amphp v3 do not use the Fiber API directly, the
+framework handles suspending and creating fibers as necessary, including
+adding the ability to await from ``{main}}``. Other frameworks may
+choose to approach creating green-threads and placeholders differently.
+
+The ``defer(callable $callback, mixed ...$args)`` function creates a new
+fiber that is executed when the current fiber suspends or terminates.
+``delay(int $milliseconds)`` suspends the current fiber until the given
+number of milliseconds has elasped.
+
+.. code:: php
+
+   use function Amp\defer;
+   use function Amp\delay;
+
+   // defer() creates a new fiber and starts it when the
+   // current fiber is suspended or terminated.
+   defer(function (): void {
+       delay(1500);
+       var_dump(1);
+   });
+
+   defer(function (): void {
+       delay(1000);
+       var_dump(2);
+   });
+
+   defer(function (): void {
+       delay(2000);
+       var_dump(3);
+   });
+
+   // Suspend the main context with delay().
+   delay(500);
+   var_dump(4);
+
+--------------
+
+The next example again uses amphp v3 to demonstrate how the event loop
+fiber continues executing while the main thread is "suspended". The
+``await(Promise $promise)`` function suspends a fiber until the given
+promise is resolved and the
+``async(callable $callback, mixed ...$args)`` function creates a new
+fiber, returning a promise that is resolved when the fiber completes,
+allowing multiple fibers to be executed concurrently.
+
+.. code:: php
+
+   use function Amp\async;
+   use function Amp\await;
+   use function Amp\defer;
+   use function Amp\delay;
+
+   // Note that the function declares int as a return type, not Promise or Generator,
+   // but executes as a coroutine.
+   function asyncTask(int $id): int {
+       // Nothing useful is done here, but rather acts as a substitute for async I/O.
+       delay(1000); // Suspends the fiber this function executes within for 1 second.
+       return $id;
+   }
+
+   $running = true;
+   defer(function () use (&$running): void {
+       // This loop is to show how this fiber is not blocked by other fibers.
+       while ($running) {
+           delay(100);
+           echo ".\n";
+       }
+   });
+
+   // Invoking asyncTask() returns an int after 1 second, but is executed concurrently.
+   $result = asyncTask(1); // Call a subroutine within this fiber, taking 1 second to return.
+   var_dump($result);
+
+   // Simultaneously runs two new fibers, await their resolution in the main fiber.
+   // await() suspends the fiber until the given promise (or array of promises here) are resolved.
+   $result = await([  // Executed simultaneously, only 1 second will elapse during this await.
+       async(fn() => asyncTask(2)), // async() creates a new fiber and returns a promise for the result.
+       async(fn() => asyncTask(3)),
+   ]);
+   var_dump($result); // Executed after 2 seconds.
+
+   $result = asyncTask(4); // Call takes 1 second to return.
+   var_dump($result);
+
+   // array_map() takes 2 seconds to execute as the two calls are not concurrent, but this shows
+   // that fibers are supported by internal callbacks.
+   $result = array_map(fn(int $value) => asyncTask($value), [5, 6]);
+   var_dump($result);
+
+   $running = false; // Stop the loop in the fiber created with defer() above.
+
+--------------
+
+Since fibers can be paused during calls within the PHP VM, fibers can
+also be used to create asynchronous iterators and generators. The
+example below uses amphp v3 to suspend a fiber within a generator,
+awaiting resolution of a ``Delayed``, a promise-like object that
+resolves itself with the second argument after the number of
+milliseconds given as the first argument. When iterating over the
+generator, the ``foreach`` loop will suspend while waiting for another
+value to be yielded from the generator.
+
+.. code:: php
+
+   use Amp\Delayed;
+   use function Amp\await;
+
+   function generator(): Generator {
+       yield await(new Delayed(500, 1));
+       yield await(new Delayed(1500, 2));
+       yield await(new Delayed(1000, 3));
+       yield await(new Delayed(2000, 4));
+       yield 5;
+       yield 6;
+       yield 7;
+       yield await(new Delayed(2000, 8));
+       yield 9;
+       yield await(new Delayed(1000, 10));
+   }
+
+   // Iterate over the generator as normal, but the loop will
+   // be suspended and resumed as needed.
+   foreach (generator() as $value) {
+       printf("Generator yielded %d\n", $value);
+   }
+
+   // Argument unpacking also can use a suspending generator.
+   var_dump(...generator());
+
+--------------
+
+The example below shows how `ReactPHP <https://github.com/reactphp>`__
+might use fibers to define an ``await()`` function that could be used to
+await promise resolution within a fiber using their ``PromiseInterface``
+and ``LoopInterface``.
+
+.. code:: php
+
+   use React\EventLoop\LoopInterface;
+   use React\Promise\PromiseInterface;
+
+   function await(PromiseInterface $promise, LoopInterface $loop): mixed
+   {
+       $fiber = Fiber::this();
+       if ($fiber === null) {
+           throw new Error('Promises can only be awaited within a fiber');
+       }
+
+       $promise->done(
+           fn(mixed $value) => $loop->futureTick(fn() => $fiber->resume($value)),
+           fn(Throwable $reason) => $loop->futureTick(fn() => $fiber->throw($reason))
+       );
+
+       return Fiber::suspend();
+   }
+
+A demonstration of integrating ReactPHP with fibers has been implemented
+in `trowski/react-fiber <https://github.com/trowski/react-fiber>`__ for
+the current stable versions of ``react/event-loop`` and
+``react/promise``.
+
+FAQ
+---
+
+Who is the target audience for this feature?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Fibers are an advanced feature that most users will not use directly.
+This feature is primarily targeted at library and framework authors to
+provide an event loop and an asynchronous programming API. Fibers allow
+integrating asynchronous code execution seamlessly into synchronous code
+at any point without the need to modify the application call stack or
+add boilerplate code.
+
+**The Fiber API is not expected to be used directly in application-level
+code. Fibers provide a basic, low-level flow-control API to create
+higher-level abstractions that are then used in application code.**
+
+``FFI`` is an example of a feature recently added to PHP that most users
+may not use directly, but can benefit from greatly within libraries they
+use.
+
+What about performance?
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Switching between fibers is lightweight, requiring changing the value of
+approximately 20 pointers, give or take, depending on platform.
+Switching execution context in the PHP VM is similar to Generators,
+again only requiring the swapping of a few pointers. Since fibers exist
+within a single process thread, switching between fibers is
+significantly more performant than switching between processes or
+threads.
+
+What platforms are supported?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Fibers are supported on nearly all modern CPU architectures, including
+x86, x86_64, 32- and 64-bit ARM, 32- and 64-bit PPC, MIPS, Windows
+(architecture independent, Windows provides a fiber API), and older
+Posix platforms with ucontext. Support for C stack switching using
+assembly code is provided by
+`Boost <https://github.com/boostorg/context/tree/develop/src/asm>`__,
+which has an `OSI-approved <https://opensource.org/licenses/BSL-1.0>`__
+`license <https://www.boost.org/LICENSE_1_0.txt>`__ that allows
+components to be distributed directly with PHP.
+
+``ext-fiber`` is actively tested on
+`Travis <https://travis-ci.com/github/amphp/ext-fiber/builds>`__ for
+Linux running on x86_64 and 64-bit ARM, on
+`AppVeyor <https://ci.appveyor.com/project/amphp/ext-fiber>`__ for
+Windows, and by the developers on macOS running on x86_64.
+
+How are execution stacks swapped?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Each fiber holds a pointer to a C stack and a VM stack
+(``zend_execute_data``). When entering a fiber, the current C stack is
+swapped and the ``EX(current_execute_data)`` pointer are swapped for
+those held by the fiber. The previous VM stack is backed up in memory
+where execution will resume when the entered fiber is suspended or
+completes. The previous VM stack is restored in
+``EX(current_execute_data)`` when the prior fiber is entered again,
+either by the other fiber suspending or completing.
+
+Functions such as ``debug_backtrace()`` and exception backtraces only
+include the trace of the current fiber. Previous fiber backtraces are
+not included currently, though this may be possible with some
+modification to the internal functions that generate these traces to
+also include the backtrace of the fibers that entered the current fiber.
+
+How does blocking code affect fibers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Blocking code (such as ``file_get_contents()``) will continue to block
+the entire process, even if other fibers exist. Code must be written to
+use asynchonous I/O, an event loop, and fibers to see a performance and
+concurrency benefit. As mentioned in the introduction, several libraries
+already exist for asynchronous I/O and can take advantage of fibers to
+integrate with synchronous code while expanding the potential for
+concurrency in an application.
+
+As fibers allow transparent use of asynchronous I/O, blocking
+implementations can be replaced by non-blocking implementations without
+affecting the entire call stack. If an internal event loop is available
+in the future, internal functions such as ``sleep()`` could be made
+non-blocking by default.
+
+How do various fibers access the same memory?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+All fibers exist within a single thread. Only a single fiber may execute
+at a time, so memory cannot be accessed or modified simultaneously by
+multiple fibers, unlike threads which may modify memory simultaneously.
+
+As fibers are suspended and resumed, execution of multiple fibers that
+access the same memory can be interleaved. Thus a running fiber may
+modify memory depended upon by another suspended fiber. There are
+various strategies to address this problem, including mutexes,
+semaphores, memory parcels, and channels. This RFC does not provide any
+such implementations as these can be implemented in user space code
+using the proposed fiber API.
+
+Why add this to PHP core?
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Adding this capability directly in PHP core makes it widely available on
+any host providing PHP. Often users are not able to determine what
+extensions may be available in a particular hosting environment, are
+unsure of how to install extensions, or do not want to install 3rd-party
+extensions. With fibers in PHP core, any library author may use the
+feature without concerns for portability.
+
+Extensions that profile code need to account for switching fibers when
+creating backtraces and calculating execution times. This needs to be
+provided as a core internal API so any profiler could support fibers.
+The internal API that would be provided is out of scope of this RFC as
+it would not affect user code.
+
+Why not add an event loop and async/await API to core?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This RFC proposes only the bare minimum required to allow user code to
+implement full-stack coroutines or green-threads in PHP. There are
+several frameworks that implement their own event loop API, promises,
+and other asynchronous APIs. These APIs vary greatly and are
+opinionated, designed for a particular purpose, and their particular
+needs may not be able to be covered by a core API that is designed by
+only a few individuals.
+
+It is the opinion of the authors of this RFC that it is best to provide
+the bare minimum in core and allow user code to implement other
+components as they desire. If the community moves toward a single event
+loop API or a need emerges for an event loop in PHP core, this can be
+done in a future RFC. Providing a core event loop without core
+functionality using it (such as streams, file access, etc.) would be
+misleading and confusing for users. Deferring such functionality to user
+frameworks and providing only a minimum API in core keeps expectations
+in check.
+
+This RFC does not preclude adding async/await and an event loop to core.
+
+How does this proposal differ from prior Fiber proposals?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The prior `Fiber RFC <https://wiki.php.net/rfc/fiber>`__ did not support
+context switching within internal calls (``array_map``,
+``preg_replace_callback``, etc.) or opcode handlers (``foreach``,
+``yield from``, etc.). This could result in a crash if a function using
+fibers was used in any user code called from C code or in extensions
+that override ``zend_execute_ex`` such as Xdebug.
+
+Are fibers compatible with extensions, including Xdebug?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Fibers do not change how the PHP VM executes PHP code and suspending is
+supported within the C stack, so fibers are compatible with PHP
+extensions that simply provide a bridge to a C API, including those
+using callbacks that may call ``Fiber::suspend()``.
+
+Some extensions hook into the PHP VM and therefore are of particular
+interest for compatibility.
+
+-  `Xdebug <https://xdebug.org>`__ is compatible as of a bugfix in
+   version 3.0.1. Breakpoints may be set within fibers and inspected as
+   usual within IDEs and debuggers such as PhpStorm. Code coverage works
+   as expected.
+-  `pcov <https://github.com/krakjoe/pcov>`__ generates code coverage as
+   expected, including code executed within separate fibers.
+-  `parallel <https://github.com/krakjoe/parallel>`__ is able to use
+   fibers within threads.
+
+As noted in `“Why add this to PHP core?” <#why_add_this_to_php_core>`__,
+extensions that profile code, create backtraces, provide execution
+times, etc. will need to be updated to account for switching between
+fibers to provide correct data.
+
+Vote
+----
+
+Voting started on 2021-03-08 and will run through 2021-03-22. 2/3
+required to accept.
+
+Question: Add Fibers to PHP?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+References
+----------
+
+-  `Boost C++
+   fibers <https://www.boost.org/doc/libs/1_67_0/libs/fiber/doc/html/index.html>`__
+-  `Ruby Fibers <https://ruby-doc.org/core-2.5.0/Fiber.html>`__
+-  `Lua Fibers <https://www.lua.org/pil/9.1.html>`__
+-  `Project Loom for
+   Java <https://cr.openjdk.java.net/~rpressler/loom/Loom-Proposal.html>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: Aaron Piotrowski trowski@php.net, Niklas Keller kelunik@php.net
+:Slug: fibers
+:Wiki URL: https://wiki.php.net/rfc/fibers

@@ -1,0 +1,345 @@
+Opcache Optimization Without Any Caching
+========================================
+
+:PHP-RFC: 0731
+:Title: Opcache Optimization Without Any Caching
+:Author: Tyson Andre <tandre@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2020-05-16
+:Version: 0.4
+
+Introduction
+------------
+
+Currently, it isn't possible to enable optimizations without enabling
+caching. They should be orthogonal features - it's already possible to
+cache without optimization passes by setting
+``opcache.optimization_level=0``.
+
+Without the feature being proposed, users would either have to enable
+shared memory caching, or ``opcache.file_cache_only``. Doing that has
+the following drawbacks:
+
+-  For ``opcache.file_cache_only``, users would be forced to manage the
+   file cache. The end users of an application using
+   ``opcache.file_cache_only`` may be unfamiliar with opcache.
+   (Enabling ``opcache.file_cache_only`` could lead to issues such as
+   running out of disk space, needing to clear stale entries, concerns
+   about opcode corruption not being fixed after restarting a process or
+   computer, etc)
+-  Each shared memory block used for caching (and each additional file
+   being cached) uses up RAM (Random-Access Memory) unnecessarily, when
+   individual PHP processes are known to be long-lived and don't have a
+   common memory address space. It's inefficient to cache opcodes in
+   situations where the cache would never be used.
+
+Proposal
+--------
+
+Make the opcode optimizer and JIT available without opcode caching,
+through a new setting ``opcache.allow_cache``.
+
+Use Cases
+~~~~~~~~~
+
+``opcache.allow_cache=0`` is useful when there isn't much available
+memory and/or there are multiple long-lived php scripts managed by
+something that is not a php script. Some example use cases are:
+
+-  ``supervisord`` managing hundreds of long-lived PHP CLI processes.
+-  Tools that run in the background in IDEs for end users of PHP.
+   (Especially if they are long-lived, large applications that don't use
+   ``pcntl_fork``)
+-  Long-lived CLI Web Servers where a single CLI process serves many
+   different requests (e.g. `ReactPHP's HTTP
+   Server <https://reactphp.org/http/>`__)
+
+| Even when barely any files are run, the virtual memory to track the
+  shared memory segment seems to add 2MB extra per **independent** php
+  process in "shared memory" segments, reducing the free RAM available
+  for other processes.
+| (starting a large number of php CLI scripts that ``sleep()`` in a
+  loop, ``free`` (Linux program to report free memory) reports that
+  ``shared`` (shared memory) increases by 2MB per process with the
+  default (``opcache.allow_cache=1``), but barely increases with
+  ``opcache.allow_cache=0``. This will vary on different systems, and
+  will use up more memory if many php files are loaded.
+
+``opcache.allow_cache=0`` is **not** intended for running web servers
+(e.g. ``apache``), where PHP would share a common memory address space
+(it would almost always be better to cache when optimizations are
+enabled).
+
+``opcache.allow_cache=0`` is also **not** intended for extremely
+short-lived CLI processes (Opcode optimization may be more
+time-consuming than the program being run, making ``opcache.file_cache``
+or ``opcache.enable_cli=0`` a better choice).
+
+Interactions with other opcache features
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``opcache.allow_cache=0`` takes precedence over ``opcache.file_cache``
+and ``opcache.file_cache_only``. Neither the shared memory cache nor the
+file cache will be used when ``opcache.allow_cache=0`` is used to
+disable opcode caching.
+
+It is an error to both set ``opcache.allow_cache=0`` and provide a
+script to preload (``opcache.preload``). ``auto_prepend_file`` can be
+used instead of ``opcache.preload`` if you want to run a script before
+your file without caching it.
+
+Opcache's opcode optimizations and JIT are unaffected.
+
+Backward Incompatible Changes
+-----------------------------
+
+None. Code that does not enable ``opcache.file_cache`` should not be
+affected.
+
+Proposed PHP Version(s)
+-----------------------
+
+8.0
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+The APIs those SAPIs use will be unaffected.
+
+Applications using the CLI, Development web server, embedded PHP, and so
+on will be able to take advantage of ``opcache.allow_cache=0`` if it was
+useful to optimize without caching.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Extensions that check if opcache is enabled may have to update their
+checks if they did so by checking if opcache **caching** settings are
+enabled.
+
+To Opcache
+~~~~~~~~~~
+
+The code changes to opcache's optimization and caching are minimal - the
+implementation of this RFC is effectively the same
+``opcache.file_cache_only`` without reading or writing files.
+
+``opcache_get_status()`` now includes the following new booleans
+
+-  ``optimizations_enabled``, which is true if any optimization passes
+   will get run.
+-  ``allow_cache``, which will be true if opcache caching (in shared
+   memory or the file cache) is enabled.
+
+``opcache_get_status()`` already had the undocumented field
+``opcache_enabled``. Looking at the implementation, it appears to be
+true when shared memory caching is successfully enabled, whether or not
+optimizations are enabled. Similarly to the existing behavior for
+``file_cache_only``, when ``opcache.allow_cache=0``, the field
+``opcache_enabled`` will be false.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+``opcache.allow_cache=1`` (caching is allowed) will be the hardcoded
+default and the default value in ``php.ini-development`` and
+``php.ini-production``.
+
+Discussion
+----------
+
+Move optimizer and JIT into core instead?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+On an unrelated PR, `Dmitry Stogov mentioned
+that <https://github.com/php/php-src/pull/5097#issuecomment-576421941>`__
+
+    Also, it would be great to move optimizer and JIT into core, to make
+    them available even without opcode caching.
+
+On the PR implementing ``opcache.allow_cache=0``, `Nikita Popov
+wrote <https://github.com/php/php-src/pull/5504#issuecomment-622295467>`__:
+
+    I like the idea of having optimization without caching, but the way
+    to go about this is definitely moving the optimizer into Zend and
+    making it available completely independently of the opcache
+    extension. This has been "planned" for a long time, but never
+    actually happened.
+
+-  I would prefer to have this than have no way to disable caching. When
+   an RFC/implementation for moving opcode caching into core is created,
+   the authors could re-evaluate whether ``opcache.allow_cache=0``
+   should continue to be used, and either continue using that setting
+   name, or deprecate it and emit a migration notice/warning on startup.
+-  I think that creating a new setting along the lines of
+   ``opcache.allow_cache=0`` would have a use case before and after such
+   a refactoring, providing the benefits I mentioned for the use cases
+   in this RFC. This would continue to be have a use case even if the
+   caching parts of ``opcache.so`` moved into PHP's core (e.g. if that
+   was done, and the caching module were loaded in php.ini as
+   zend_extension=\ ``opcache.so``, there'd still be a use case for a
+   configuration setting to override that default to disable caching for
+   running individual programs)
+   Users may strongly prefer for ``opcache.enable``,
+   ``opcache.enable_cli``, and ``opcache.optimization_level`` to
+   continue controlling whether optimizations are performed (so setting
+   the combination of ``opcache.enable=1``, ``opcache.enable_cli=1``,
+   and a setting such as ``opcache.allow_cache=0`` to optimize without
+   caching would still make sense even after optimizations were moved
+   into core.)
+-  If nobody's currently planning to work on moving the optimizer into
+   Zend (i.e. into PHP's core), then it may be several minor releases
+   before it's possible to have optimization without caching.
+-  There may be unforeseen objections to moving the optimizer into Zend
+   from creators/users of profiling tools, debuggers, code coverage
+   tools, alternative optimizers (if any exist), etc. Hopefully not, but
+   that'd depend on the proposed implementation details.
+-  There may be objections to any refactoring (increasing the size of a
+   minimal install, requiring changing php.ini settings, making it
+   harder for users to perform system-wide changes to add/remove opcache
+   or the JIT, etc). Hopefully not.
+
+Future Scope
+------------
+
+-  Normally, opcache optimizes a file based only on that one file's
+   contents (this makes it safe to read from cache even when loading a
+   different combination of files). When ``opcache.allow_cache=0`` is
+   used, it may be possible to use all of the class, function, constant,
+   etc. definitions parsed from previously parsed files (to eliminate
+   dead code, inline function calls, etc).
+   https://wiki.php.net/rfc/preload mentioned something similar in the
+   Future Scope.
+
+Vote
+----
+
+Voting started on May 30th and ends on June 13th
+
+Question: Add opcache.allow_cache ini setting to support opcode optimization without caching
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+If you voted no, why?
+~~~~~~~~~~~~~~~~~~~~~
+
+The
+`Discussion <https://wiki.php.net/rfc/opcache.no_cache#discussion>`__
+section mentioned alternative approaches to this RFC. This feedback is
+being gathered if it may be useful for other work on Opcache such as
+moving optimizations into PHP's core.
+
+#. I would only vote for optimizations without caching if Opcache's
+   opcode optimizations were moved into core first.
+#. I don't want any form of optimization without caching / I think
+   ``opcache.file_cache`` should be used instead
+#. I think different ini options/values should be used to do this
+#. Other
+
+Question: If you voted no on opcache.allow_cache, why?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  1
+-  2
+-  3
+-  4
+
+Also, would you be interested in moving opcode optimizations and the JIT
+out of the zend_extension opcache into PHP's core?
+
+Question: I would be interested in moving opcode optimizations into core
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-2:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Changelog
+---------
+
+0.2: Previously, the ini setting override to disable caching was
+``opcache.no_cache=1``. This was changed to ``opcache.allow_cache=0`` to
+avoid double negatives and to be consistent with naming of other ini
+settings such as ``allow_url_fopen`` and ``allow_url_include``.
+
+0.3: Fix documentation of changes to ``opcache_get_status()``
+
+0.4: Improve documentation of ini settings, add another example use
+case.
+
+Ideas on moving the optimizer into core instead
+-----------------------------------------------
+
+There are various ways the suggestion in
+`Discussion <https://wiki.php.net/rfc/opcache.no_cache#discussion>`__
+could be implemented. My ideas on a way that could be implemented are
+below (I'm not familiar enough with opcache to implement that or to be
+aware of any problems it would cause):
+
+-  Move the optimizer into core (e.g. move code related to opcode
+   optimizations from ``ext/opcache`` to a new folder
+   [STRIKEOUT:``ext/optimizer``] such as ``Zend/optimizer``). Keep all
+   of the functionality related to caching in the zend_extension Zend
+   Opcache (some build environments may not support or have a use case
+   for any forms of shared memory caching).
+-  Continue optimizing according to ``opcache.enable`` and
+   ``opcache.enable_cli`` when the opcode caching is enabled.
+   Add a new flag such as ``optimizer.always_optimize=1`` or
+   ``opcache.always_optimize=1`` which will ignore that and
+   unconditionally optimize using the optimization passes in
+   ``opcache.optimization_level``. This would ensure that existing use
+   cases work without modifying ``php.ini`` and won't suffer from high
+   startup time for short-lived processes which don't have opcodes
+   cached.
+-  Provide C function pointers to lock shared memory and acquire pointer
+   locations so that the JIT can emit executable code without
+   conflicting with other processes/threads, and make opcache override
+   those function pointers. I'm not sure how protecting memory with
+   opcache jit without the opcache extension managing shared memory
+   would work with threaded php and no shared cache, but should be
+   possible - I assume the JIT already works with
+   ``opcache.file_cache_only``. I'm also unfamiliar with how those
+   pointers/mutexes would get released if php crashed.
+-  Limit ``opcache.preload`` to only be used when the opcode caching
+   zend_extension is used.
+
+`Nikita Popov mentions
+that <https://externals.io/message/110502#110503>`__     To be clear, "move into core" means moving optimizations into Zend/
+    and making them part of the compilation process (optionally). They
+    shouldn't be in a separate ext/optimizer extension -- that would be
+    not much better than having them in ext/opcache :)
+
+References
+----------
+
+https://externals.io/message/109959 "opcache.no_cache prototype: Opcode
+optimization without caching"
+
+https://externals.io/message/110187 "[RFC] opcache.no_cache: Opcache
+optimization without any caching"
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5504
+:Original Authors: Tyson Andre tandre@php.net
+:Slug: opcache.no_cache
+:Wiki URL: https://wiki.php.net/rfc/opcache.no_cache

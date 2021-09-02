@@ -1,0 +1,314 @@
+Array_change_keys()
+===================
+
+:PHP-RFC: 0486
+:Title: Array_change_keys()
+:Author: Colin O'Dell <colinodell@gmail.com>, Jeremy Mikola <jmikola@gmail.com>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2016-05-29
+:Version: 0.1
+
+Introduction
+------------
+
+This RFC proposes a new core function to simplify the process of
+changing an array's keys ("re-keying").
+
+The Problem
+-----------
+
+PHP only has one existing function to change an array's keys:
+``array_change_key_case()``. Unfortunately this can only transform keys
+to upper- or lower-case.
+
+Because this function doesn't allow developers to specify their own
+custom logic to transform keys to something else, one must typically
+resort to using a ``foreach`` loop to build a new array:
+
+.. code:: php
+
+   <?php
+   $newArray = [];
+   foreach ($oldArray as $key => $value) {
+       $newKey = 'someValue'; // Whatever custom logic is needed
+       $newArray[$newKey] = $value;
+   }
+
+This approach requires 4 lines of code. Furthermore, this logic cannot
+be wrapped as a parameter to some other function.
+
+That latter issue can solved by composing several existing functions
+like so:
+
+.. code:: php
+
+   <?php
+   $newArray = array_combine(
+       array_map(
+           function ($key, $value) {
+               return 'someValue'; // Whatever custom logic is needed
+           },
+           array_keys($oldArray),
+           $oldArray
+       ),
+       $oldArray
+   );
+
+While this does work, it has some major drawbacks:
+
+-  The code is convoluted - its purpose is not immediately obvious.
+-  Requires at least 3 separate function calls, each of which returns a
+   new array.
+-  The input array is referenced 3 times.
+
+::
+
+       * If you want to re-key an iterator's results, you cannot do so inline - a temporary variable would be needed to convert the iterator to array first.
+
+Proposal
+--------
+
+This RFC proposes the creation of a new core function
+``array_change_keys()``:
+
+.. code:: php
+
+   $newArray = array_change_keys($originalArray, function ($key, $value) {
+       return 'someValue'; // Whatever custom logic is needed
+   });
+
+Function definition:
+
+.. code:: php
+
+   array array_change_keys(array $originalArray, callable $callback)
+
+This function takes two arguments:
+
+#. An ``array`` to re-key.
+#. A ``callable`` which returns a new key for each array element.
+
+(This parameter order is consistent with all other array functions
+except for ``array_map()``, which is a special case due to its variadic
+nature.)
+
+A new ``array`` will be returned from this function, containing the same
+values in the same order but with potentially different keys. Some
+values may not be included if an invalid or duplicate key is returned by
+the callback. This behavior is identical to ``array_flip()`` and is
+documented in the "Callback" subsections further below.
+
+Callback
+~~~~~~~~
+
+Two parameters will be passed to the ``callable`` for each element in
+the array:
+
+#. The element's original key (``string`` or ``int``)
+#. The element's original value (``mixed``)
+
+The callable must return a ``string`` or ``int`` to be used as the new
+key.
+
+Returning Invalid Types
+^^^^^^^^^^^^^^^^^^^^^^^
+
+The callable must return a valid key. Returning any type besides
+``string`` or ``int`` will result in the following warning:
+
+::
+
+   Warning: array_change_keys(): New key should be either a string or an integer
+
+Additionally, the current array item will not be added to the resulting
+array. PHP will still attempt to process all subsequent elements.
+
+This matches the behavior of calling ``array_flip`` on an array
+containing types other than ``string`` or ``int``.
+
+Returning Duplicate Keys
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+If the callable returns the same key for multiple values, the last
+occurrence "wins" and all prior values will be lost. For example:
+
+.. code:: php
+
+   <?php
+   var_dump(array_change_keys([1, 2, 3], function(){ return 'foo'; }));
+
+   // array(1) {
+   //   ["foo"]=>
+   //   int(3)
+   // }
+
+This behavior also matches ``array_flip()``.
+
+Function Name
+~~~~~~~~~~~~~
+
+PHP already has an ``array_change_key_case()`` function, so sharing a
+common root name (``array_change_key``) seems like a logical choice.
+
+Other functions which deal with multiple keys (like ``array_keys`` and
+``array_fill_keys``) are pluralized, so we're using that same convention
+here.
+
+Discussion
+----------
+
+This section will be updated with any additional pros/cons that arise
+during the discussion period.
+
+Pros
+~~~~
+
+Provides Common General-Purpose Functionality
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+PHP already has an ``array_change_key_case`` function, which is an
+incredibly specific implementation that isn't useful in the majority of
+cases where an array needs to be re-keyed. By providing a
+general-purpose function for a common problem we prevent the need for
+other ``array_change_key_*`` variants in the future.
+
+Usefulness
+^^^^^^^^^^
+
+Needing to re-key array is a common task for some PHP developers,
+especially those needing their array to work like a dictionary.
+
+Cleaner Code
+^^^^^^^^^^^^
+
+Using this function makes it immediately obvious to other developers
+that an array is being re-keyed.
+
+Matches Existing Behavior
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The "edge cases" mentioned above (returning invalid types or duplicate
+keys) matches existing behavior in PHP that developers already
+understand and expect. No new edge cases or quirks are being introduced
+with this RFC.
+
+Faster Execution Than array_combine()
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Re-keying an array with ``array_change_keys()`` is faster than the
+``array_combine`` approach:
+
+.. image:: /rfc/array_change_keys_bench1.png
+   :width: 600px
+
+.. image:: /rfc/array_change_keys_bench2.png
+   :width: 600px
+
+(Benchmarks generated with
+https://github.com/Ocramius/array_change_keys-benchmark)
+
+Works With Functional Code
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This function can be nested inside of other method calls for function
+composition. The same is not possible for the ``foreach`` approach
+(without requiring the creation of a separate method to encapsulate that
+functionality).
+
+Cons
+~~~~
+
+Slower Than foreach
+^^^^^^^^^^^^^^^^^^^
+
+As noted in the benchmarks above, the ``foreach`` loop approach is
+faster than ``array_change_keys`` in most (but not all) cases.
+
+Does Not Support Traversable
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Like the other ``array_`` functions, this one also doesn't support
+iterators, which may be seen as a step backwards.
+
+Easily Implemented In User Land
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This function can be implemented in user land using one of the
+alternative approaches shown above. There's a general feeling among some
+developers that "what can be implemented in userland shouldn't be in
+core".
+
+Backward Incompatible Changes
+-----------------------------
+
+None
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 7.x release
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+This RFC should not impact the SAPI's.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+No existing extensions are affected.
+
+To Opcache
+~~~~~~~~~~
+
+Unknown
+
+Open Issues
+-----------
+
+None
+
+Future Scope
+------------
+
+Other ``array_`` functions do not support certain features like using
+``__toString()`` for keys or supporting ``Traversable`` objects like
+iterators, so support for them is not being proposed here either. If
+such functionality is desired, a separate RFC could be created to add
+this functionality to all similar functions.
+
+Voting
+------
+
+Because this is not a language change, a 50%+1 vote will be required to
+add this new function.
+
+Patches and Tests
+-----------------
+
+A proposed implementation is provided with this RFC:
+https://github.com/php/php-src/pull/1925
+
+Several tests are also included.
+
+References
+----------
+
+Links to external references, discussions or RFCs
+
+Mailing list discussion:
+https://marc.info/?l=php-internals&m=146452769326964&w=2
+
+Reddit discussion:
+https://www.reddit.com/r/PHP/comments/4ll1hg/rfc_array_change_keys/
+
+Additional Metadata
+-------------------
+
+:Original Authors: Colin O'Dell colinodell@gmail.com, Jeremy Mikola jmikola@gmail.com
+:Slug: array_change_keys
+:Wiki URL: https://wiki.php.net/rfc/array_change_keys

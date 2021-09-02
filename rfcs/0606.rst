@@ -1,0 +1,801 @@
+User-defined Object Comparison
+==============================
+
+:PHP-RFC: 0606
+:Title: User-defined Object Comparison
+:Author: Rudi Theunissen <rtheunissen@php.net>
+:Status: Declined
+:Type: Standards Track
+:Created: 2018-06-26
+:PHP-Version: 7.3
+:Version: 1.6
+
+Background
+----------
+
+The discussion around user-defined comparison dates back to 2010 when
+the `Comparable RFC <https://wiki.php.net/rfc/comparable>`__ was
+introduced for the first time and later updated in 2015.
+
+Introduction
+------------
+
+This RFC builds on the motivation of previous discussions with a new
+proposal for the ability to override the `default
+behaviour <http://php.net/manual/en/language.oop5.object-comparison.php>`__
+of object comparison that was introduced in PHP 5.
+
+Support in other languages
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For reference, some major languages that also support user-defined
+comparison:
+
+-  Java has a
+   `Comparable <https://docs.oracle.com/javase/8/docs/api/java/lang/Comparable.html>`__
+   interface.
+-  Python 2 has a
+   `cmp <https://docs.python.org/2/reference/datamodel.html#object.__cmp__>`__
+   magic method.
+-  Python 3 removed *\__cmp_\_* in favour of `rich
+   comparison <https://docs.python.org/2/reference/datamodel.html#object.__lt__>`__
+   magic methods.
+-  Ruby has a
+   `Comparable <https://ruby-doc.org/core-2.4.0/Comparable.html>`__
+   module.
+-  .NET has an
+   `IComparable <https://msdn.microsoft.com/en-us/library/system.icomparable(v=vs.110).aspx>`__
+   interface.
+-  D has `opEquals and
+   opCmp <https://dlang.org/spec/operatoroverloading.html#eqcmp>`__
+   methods.
+
+The problem we are trying to solve
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Currently, objects are compared by recursively comparing their
+properties in the order that they are defined, which includes public,
+protected, and private properties. Object comparison does not
+differentiate between equality and ordering, so the same internal
+function is called for all comparison operators regardless of the
+context in which they are used.
+
+Comparing for equality uses the internal equivalent of ``==`` to compare
+each property, stopping at the first unequal property found. If two
+objects are not instances of the same class, equality is immediately
+**FALSE**.
+
+Comparing by natural ordering (``<``, ``>``, ``<=``, ``>=``, ``<=>``)
+stops and returns at the first unequal property found. If two objects
+are not instances of the same class, the comparison returns **1** when
+using ``<=>``, or **FALSE** otherwise. While this is not necessarily a
+problem that PHP developers encounter frequently, it is still a logical
+inconsistency, for example:
+
+.. code:: php
+
+   new stdClass() < new DateTime();    // false
+   new DateTime() < new stdClass();    // false
+
+   new stdClass() > new DateTime();    // false
+   new DateTime() > new stdClass();    // false
+
+   new stdClass() == new DateTime();   // false
+   new DateTime() == new stdClass();   // false
+
+   new stdClass() <=> new DateTime();  // 1
+   new DateTime() <=> new stdClass();  // 1
+
+There are some problems with the existing behaviour:
+
+-  **Changing the order of properties might change the relative ordering
+   of an object**, because the order in which properties are compared is
+   the order in which they are defined. This is not intuitive and may
+   lead to unintended behaviour that is very hard to trace. This
+   behaviour is `not
+   documented <http://php.net/manual/en/language.oop5.object-comparison.php>`__
+   for relative ordering, only equality.
+-  **There is no way to use strict comparison between properties**. The
+   internal compare function uses the equivalent of ``==`` to compare
+   properties, which was more appropriate in PHP 5 than it is now, since
+   PHP has become increasingly type-safe since PHP 7.
+-  **Recursively comparing all properties can be unnecessarily
+   expensive**. Some classes with many properties may have an identifier
+   or internal value that can be used to determine equality. There is
+   currently no way to leverage this, so the engine has to compare all
+   properties, some of which may also be objects.
+-  **Only extensions and internal classes can override comparison**,
+   which creates an inconsistency between extensions and what can be
+   achieved in PHP. This RFC would remove that inconsistency, providing
+   better support for extension polyfills and object interaction.
+
+Proposal
+--------
+
+This RFC introduces two new magic methods: **``__compareTo``** and
+**``__equals``**.
+
+These methods can be used to define equality and natural ordering of
+objects, which will override the default behaviour when compared to
+other values, including scalars. They are both optional and may be
+implemented without the other.
+
+.. code:: php
+
+   class Example
+   {
+       /**
+        * Returns: < 0 if $this is less than $other,
+        *          > 0 if $this is greater than $other,
+        *         == 0 if $this is equal to $other.
+        */
+       public function __compareTo($other): int
+       {
+           ...
+       }
+
+       /**
+        * @returns bool TRUE if $this is equal to $other, FALSE otherwise.
+        */
+       public function __equals($other): bool
+       {
+           ...
+       }
+   }
+
+**Note**: Typehints are optional.
+
+\__compareTo
+~~~~~~~~~~~~
+
+When an object is compared in a context that considers **natural
+ordering**, such as ``sort``, the *\__compareTo* method is called to
+determine the object's ordering relative to another value. Objects that
+do not implement *\__compareTo* will continue to use the existing rules.
+
+This method should return a value < 0 if smaller, 0 if equal, and > 0 if
+greater.
+
+A class may explicitly disallow ordering by throwing an exception in
+*\__compareTo*.
+
+An implementor of ``__compareTo`` should ensure that:
+
+-  ``$x->__compareTo($y)`` is inversely equivalent to
+   ``$y->__compareTo($x)``.
+-  ``$x->__compareTo($y)`` should throw an exception if
+   ``$y->__compareTo($x)`` does.
+-  ``$x->__compareTo($y)  > 0 && $y->__compareTo($z) > 0`` requires that
+   ``$x->__compareTo($z) > 0``.
+-  ``$x->__compareTo($y)  < 0 && $y->__compareTo($z) < 0`` requires that
+   ``$x->__compareTo($z) < 0``.
+-  ``$x->__compareTo($y) == 0 && $y->__compareTo($z) == 0`` requires
+   that ``$x->__compareTo($z) == 0``.
+
+While this might seem like a lot of responsibility and complexity, these
+requirements are easily met if the implementor applies the same logic
+sensibly and consistently.
+
+\__equals
+~~~~~~~~~
+
+When an object is compared in a context that considers **equality**,
+such as ``in_array``, the *\__equals* method is called to determine if
+the object is equal to another value. It should return **TRUE** if
+equal, or **FALSE** otherwise. Objects that do not implement *\__equals*
+will continue to use the existing rules, unless *\__compareTo* is
+defined, in which case equal ordering implies equal value. This aligns
+with the current rules, where ordering and equality are based on the
+same logic. This method is therefore only necessary when equal ordering
+does not imply equal value.
+
+An implementor of ``__equals`` should ensure that:
+
+-  ``$x->__equals($y)`` is equal to ``$y->__equals($x)``.
+-  ``$x->__equals($y)`` should throw an exception if
+   ``$y->__equals($x)`` does.
+-  ``$x->__equals($y) && $y->__equals($z)`` requires that
+   ``$x->__equals($z)`` be **TRUE**.
+
+Application in combination
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Using either or both of these methods covers three common use cases:
+
+#. I want to define equality, but I am not concerned with ordering.
+   (*\__equals* only).
+#. I want to define ordering, and equal ordering implies equal value.
+   (*\__compareTo* only).
+#. I want to define ordering, but equal ordering does not imply equal
+   value. (*\__compareTo* and *\__equals*).
+
+**Note:** Objects that only implement *\__compareTo* will be equal to
+any value for which *\__compareTo* returns a value equal to **0**,
+including ``NULL``. This is mostly consistent with existing behaviour:
+
+.. code:: php
+
+   new stdClass() == 1; // true, with a warning about integer conversion
+
+Order of Operations
+~~~~~~~~~~~~~~~~~~~
+
+============= ========================
+Expression    Attempted calling order
+============= ========================
+``$a < $b``,  ``$a->__compareTo($b)``,
+``$a > $b``,  ``$b->__compareTo($a)``
+``$a <= $b``, 
+``$a >= $b``, 
+``$a <=> $b`` 
+``$a == $b``, ``$a->__equals($b)``,
+``$a != $b``  ``$b->__equals($a)``,
+              ``$a->__compareTo($b)``,
+              ``$b->__compareTo($a)``
+============= ========================
+
+Changes to Operators
+~~~~~~~~~~~~~~~~~~~~
+
+These methods also overload operators:
+
++----------+----------------+----------------+------------------+
+| Operator | Primary        | Secondary      |                  |
++==========+================+================+==================+
+| ``<``    | *\__compareTo* |                | **TRUE** if      |
+|          |                |                | *\__compareTo*   |
+|          |                |                | returns < 0      |
++----------+----------------+----------------+------------------+
+| ``>``    | *\__compareTo* |                | **TRUE** if      |
+|          |                |                | *\__compareTo*   |
+|          |                |                | returns > 0      |
++----------+----------------+----------------+------------------+
+| ``<=``   | *\__compareTo* |                | **TRUE** if      |
+|          |                |                | *\__compareTo*   |
+|          |                |                | returns <= 0     |
++----------+----------------+----------------+------------------+
+| ``>=``   | *\__compareTo* |                | **TRUE** if      |
+|          |                |                | *\__compareTo*   |
+|          |                |                | returns >= 0     |
++----------+----------------+----------------+------------------+
+| ``==``   | *\__equals*    | *\__compareTo* | **TRUE** if      |
+|          |                |                | *\__equals* is   |
+|          |                |                | **not**          |
+|          |                |                | implemented and  |
+|          |                |                | *\__compareTo*   |
+|          |                |                | returns 0        |
++----------+----------------+----------------+------------------+
+| ``!=``   | *\__equals*    | *\__compareTo* | **TRUE** if      |
+|          |                |                | *\__equals* is   |
+|          |                |                | **not**          |
+|          |                |                | implemented and  |
+|          |                |                | *\__compareTo*   |
+|          |                |                | returns non-zero |
++----------+----------------+----------------+------------------+
+| ``===``  |                |                | No change        |
++----------+----------------+----------------+------------------+
+| ``!==``  |                |                | No change        |
++----------+----------------+----------------+------------------+
+
+Example Implementation
+~~~~~~~~~~~~~~~~~~~~~~
+
+Let's consider a simple *Fraction*, with a numerator and a denominator.
+For the sake of this example, fractions are not simplified and are equal
+if they have the same numerical value.
+
+.. code:: php
+
+   class Fraction 
+   {
+       private $num;
+       private $den;
+
+       public function __construct(int $num, int $den) 
+       {
+           $this->num = $den < 0 ? $num * -1 : $num;
+           $this->den = $den < 0 ? $den * -1 : $den; // Should guard against 0 here.
+       }
+
+       /**
+        * @return bool Whether this fraction is equal to $other.
+        */
+       public function __equals($other): bool 
+       {
+           if ($other instanceof Fraction) {
+               return $this->num * $other->den == $other->num * $this->den;
+           }
+
+           return is_numeric($other) && $this->num == $other * $this->den;
+       }
+
+       /**
+        * @return Natural ordering of this fraction relative to $other.
+        */
+       public function __compareTo($other): int 
+       {
+           if ($other instanceof Fraction) {
+               return $this->num * $other->den <=> $other->num * $this->den;
+           }
+
+           if (!is_numeric($other)) {
+               throw new DomainException(
+                   "Natural ordering relative to non-numeric values is not defined");
+           }
+
+           return $this->num <=> $other * $this->den;
+       }
+   }
+
+   $a = new Fraction(5,  2); // 2.5
+   $b = new Fraction(10, 4); // 2.5
+
+   var_dump($a == $b, $a < $b);
+
+   /**
+    * The current behaviour will output:
+    * 
+    * bool(false)
+    * bool(true)
+    *
+    * The implementation of this RFC would output:
+    *
+    * bool(true)
+    * bool(false)
+    */
+
+The output is different because the default behaviour will compare the
+object's properties without knowing that there's a relationship between
+the numerator and the denominator. The first instance has a numerator of
+5, so it will be less than the second, which has a numerator of 10. It
+will also therefore not be equal, even though both fractions represent
+the same numeric value.
+
+In this example, we support comparing for equality against any other
+object, regardless of type. This is because all objects can be compared
+for equality, ie. we can say that an apple does not equal an orange.
+However, we are throwing an exception if ordering is attempted against a
+non-numeric value, because the behaviour is undefined: should an apple
+come before or after an orange? ¯\_(ツ)_/¯
+
+We could also return ``0`` for undefined cases, which would be okay here
+because we are also defining equality. A return value of ``0`` would
+otherwise imply "equals", so implementations should either throw for
+undefined behaviour in ``__compareTo`` or return ``0`` alongside
+``__equals``.
+
+**This is not good practice though, and will not be recommended in the
+documentation**, because it may lead to definitions that are not
+commutative. For example, let's assume that a ``Fraction`` throws an
+exception for undefined natural ordering, and a ``Decimal`` returns
+``0``. ``$fraction < $decimal`` will throw an exception, but
+``$decimal > $fraction`` will be **FALSE**. In fact, returning ``0`` in
+``__compareTo`` for undefined natural ordering leads to all kinds of
+strange behaviour:
+
+.. code:: php
+
+   new Decimal('1.0')   < new Fraction(1, 1)   // false
+   new Decimal('1.0')   > new Fraction(1, 1)   // false
+   new Decimal('1.0')  == new Fraction(1, 1)   // false
+   new Decimal('1.0') <=> new Fraction(1, 1)   // 0
+
+The documentation will therefore suggest that a ``DomainException`` be
+thrown in ``__compareTo`` when natural ordering is not defined, and
+return **FALSE** in ``__equals`` for the same case. The example
+implementation of *Fraction* follows this suggestion.
+
+Use Cases
+---------
+
+It's safe to say that user-defined objects are not frequently compared
+in PHP today. This might be because the user can't control the
+behaviour, or because use cases are not common. Most objects won't
+concern themselves with comparability and won't implement these methods,
+but those that do will find a lot of value in the ability to control the
+behaviour.
+
+Cases that benefit from the ability to override comparison behaviour:
+
+-  Number types like decimals, fractions, big integers and fuzzy
+   precision types.
+-  Streams or resources where a buffer or connection should not be
+   considered.
+-  Strict sets that differentiate between ``"1"`` and ``1``.
+-  Active record entities where the entity's attributes are the only
+   relevant information.
+-  Classes that have relationships between properties to determine a
+   defining value.
+-  Classes that want to disallow comparison entirely to guard against
+   unintended behaviour.
+-  Where equal ordering does not imply equal value, eg.
+   ``Decimal(1.00) <=> true; // 0``.
+-  Where ordering isn't naturally ascending or lexicographical.
+
+Frequently Asked Questions
+--------------------------
+
+Why should PHP support this at a language level?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+There are a few user implementations out there, but there is no way for
+these to affect the internals of array functions and operators. The only
+way that we can dictate a standard of behaviour that affects internals
+is by implementing this at a language level.
+
+Why magic methods instead of interfaces?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This is not an easy decision to make because there are strong cases for
+both. So in order to make a good decision we have to consider *why*
+interfaces exist and what benefits they might have over magic methods
+**for this feature**.
+
+Interfaces are used for two main reasons: enforcing a contract, and
+`marking <https://en.wikipedia.org/wiki/Marker_interface_pattern>`__. We
+should use interfaces here if we want to enforce a specific signature
+for the comparison methods, but marking does not apply. This is because
+**all objects in PHP are already both comparable and equatable**.
+Marking a class as "Comparable" does not add any meaningful information
+because it would be comparable regardless. However, this might not
+always be the case: if PHP deprecates the default comparison behaviour
+in the future, this case falls through because not all objects are
+comparable anymore. There are other ways to determine whether a class is
+comparable or equatable, perhaps with a function like ``is_comparable``
+or an internal interface like ``Traversable``.
+
+We don't have interfaces for ``__get`` and ``__set`` because all objects
+already support property access. ``ArrayAccess`` is a necessary
+interface because not all objects support array syntax by default.
+Comparison is already supported by all objects.
+
+With this in mind, the only consideration remaining is whether we want
+to enforce method signatures for comparison methods. Because classes in
+PHP do not extend a root class, base classes have the freedom to
+typehint magic methods however they want (as long as they are public and
+non-static). This is useful because you can restrict comparison to a
+specific type to guard against unintended behaviour:
+
+.. code:: php
+
+   class Fraction
+   {
+     ...
+
+     /**
+      * This will fail when attempting to compare to anything other than a Fraction.
+      */
+     public function __equals(Fraction $other): bool
+     {
+         return $this->num * $other->den === $other->num * $this->den;
+     }
+   }
+
+Something that has come up in discussion is that "interfaces feel less
+magical" and that "PHP doesn't need more magic". It's not my intention
+to discredit those that share these opinions, but there would
+technically not be any less magic if we decided to use interfaces
+instead. There would still be the same effects on internal functions and
+operators. If instead of "magic methods" we thought of them as "default
+methods", it would be equivalent to PHP classes having a root class that
+has a default implementation of all the magic methods. From this
+perspective, all objects already implement both ``__equals`` and
+``__compareTo``, which is similar to Java because all classes
+automatically have an *equals* method.
+
+PHP already uses magic methods to change default internal behaviour, so
+using magic methods here would not be something entirely unexpected.
+Opting for magic methods also removes the possibility of existing
+classes unintentionally affecting comparability by already having an
+*equals* or *compareTo* method. Method names that start with "__" are
+reserved, so there is no risk of this if we use magic methods.
+
+Does equality imply equal ordering when ordering is not defined?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If a class does not implement ``__compareTo`` but ``__equals`` returns
+**TRUE**, should that be equivalent to ``__compareTo`` returning **0**?
+
+This comes down to whether we want to isolate equality and ordering,
+even though the convention is that equal value *should* imply equal
+ordering. It might not be intuitive to call ``__equals`` for ordering
+operations like ``>``, ``<`` etc. >>>
+
+\**No, equality does not automatically imply equal ordering. \**When
+comparing an object in a context that considers natural ordering, it
+should not consider equality when ordering isn't defined for that
+object.
+
+Consider ``$a <= $b``: what should happen when ``__equals`` returns
+**FALSE**? The only logical path would be to fall back to the default
+behaviour. The problem with this approach is that we are mixing
+contexts, and therefore responsibility. We should use either
+user-defined behaviour or default internal behaviour, not a mix of both.
+In this case, where ``__compareTo`` is not implemented, ``$a <= $b``
+should use **only** the default behaviour and not consider ``__equals``
+at all.
+
+Does equal ordering imply equality when equality is not defined?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If a class does not implement ``__equals`` but ``__compareTo`` returns
+**0**, should that be equivalent to ``__equals`` returning **TRUE**?
+
+The current behaviour of the internal
+`is_equal_function <https://github.com/php/php-src/blob/5eb1f92f31cafc48384f9096012f421b37f6d425/Zend/zend_operators.c#L2184>`__
+returns **TRUE** if the internal
+`compare_function <https://github.com/php/php-src/blob/5eb1f92f31cafc48384f9096012f421b37f6d425/Zend/zend_operators.c#L1933>`__
+returns 0. PHP therefore does not differentiate between ordering and
+equality.
+
+Currently, the only way to override comparison is by using the internal
+*compare* and *compare_objects* handlers, where the result is used for
+both equality and ordering.
+
+**Yes, equal ordering implies equal value, but only if equality is not
+defined**. This aligns with the existing behaviour of objects and
+extensions. It also makes ``__equals`` optional in cases where it might
+be redundant, for example:
+
+.. code:: php
+
+   class Fraction
+   {
+     ...
+
+     public function __compareTo(Fraction $other): int
+     {
+         return $this->num * $other->den <=> $other->num * $this->den;
+     }
+   }
+
+Are the methods restricted to instances of the same class?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+PHP's current definition of equality (when ``==`` is called on two
+objects) require that both objects be instances of the same class. Even
+if one class extends the other, ``==`` will be **FALSE** unless they are
+the exact same class.
+
+Only internal classes and extensions can currently override this
+behaviour. For example, GMP does not require the other value to be a GMP
+number, ie. ``gmp_init(42) == 42`` will be **TRUE**. This is because the
+*compare* object handler allows for an object to be compared to any
+other type.
+
+An advantage of restricting operands to the same class is that equality
+would be symmetrical and transitive by design, ie. ``$a == $b`` must
+mean that ``$b == $a``, and ``$a < $b && $b < $c`` must mean that
+``$a < $c``.
+
+This decision comes down to power and responsibility vs. restriction and
+consistency. We can enforce certain rules internally at the cost of
+flexibility, or we can put more trust in the user to give them more
+control.
+
+**No, the methods are not restricted to instances of the same class**.
+It is the implementor's responsibility to consider the definition of
+equality and ordering against other types. This also removes the
+inconsistency between internal and user-defined classes by providing a
+hook to the *compare* handler.
+
+What happens when you try to order a class that doesn't implement \__compareTo?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Ordering an object that doesn't implement ``__compareTo`` is most likely
+unintended, but we don't want to break existing code by failing hard
+when ordering is not defined. The only viable situation to fail for is
+when ``__equals`` is implemented but ``__compareTo`` is not.
+
+Ordering objects that don't implement ``__compareTo`` will use the
+existing rules and **will not be affected by this patch**.
+
+How does <=> behave when \__compareTo returns something other than -1, 0 and 1?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Currently, the internal *compare_function* assigns either -1, 0 or 1 to
+the result, which is why ``<=>`` always evaluates to one of those three.
+When a class implements ``__compareTo`` in such a way that it returns
+something else, should ``<=>`` still normalize to return only -1, 0, and
+1 based on the returned value?
+
+This is an interesting consideration because calling ``__compareTo``
+directly will return the raw value, but using the ``<=>`` operator will
+evaluate to the normalized value. This leads to a bigger discussion
+around operator overloading, which has been a contentuous issue in PHP
+for a long time.
+
+This comes down to whether we should overload the **operator**, or the
+**behaviour** of the operator. For example, is ``$a < $b`` shorthand for
+"is $a less than $b?" (and always evaluate to a boolean), or should
+``$a < $b`` not have any semantics and be allowed to evaluate to any
+type? Similarly, does ``<=>`` semantically mean "how should $a be
+ordered relative to $b" and always return -1, 0 or 1, or will we someday
+want to overload it without restriction?
+
+It's worth considering that some operations should be free to be
+overloaded without restriction. Operators like ``+``, ``-``, ``*``,
+``/``, ``|``, ``&``, etc have semantics that perform an action, rather
+than ask a question. For example, adding two lists together with ``+``,
+a set union with ``|``, or a matrix multiplication with ``*`` all make
+perfectly clear semantic sense and it should be easy to guess what the
+operation might do. Comparison operators are different because they are
+defined by the questions that they ask. If ``$a < $b`` has the potential
+to be a number or an object, it would make reading and understanding
+code a lot more difficult: ``<`` would not mean "less than", it would
+just be the left caret operator that means "less than" by default.
+
+This RFC is focused on overriding the **behaviour** behind the
+operators, not the operators themselves. It's providing the ability to
+define equality and relative natural ordering, while preserving the
+semantics of the operators. Operator overloading is an unavoidable
+side-effect of overriding the behaviour to which the operators are
+semantically attached to. It would otherwise be very confusing if a
+class implements ``__compareTo`` but doesn't honour it for comparison
+operators.
+
+Operator overloading in the future would introduce methods for each
+operator, such as ``__lt`` and ``__eq`` that will be invoked for the
+operators, but comparison and equality would still honour
+``__compareTo`` and ``__equals``. This is however entirely hypothetical
+but demonstrates that the intention here is not to overload the
+operators.
+
+**The behaviour of the operator is not equivalent to invoking the
+method**, so ``<=>`` will normalize the return value of ``__compareTo``
+to always be -1, 0 or 1. This is consistent with the current behaviour
+of ``<=>`` so that we do not break backward compatibility for cases that
+expect exactly -1, 0 or 1.
+
+What happens when \__compareTo returns a non-integer?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Non-integers will be converted to ``int``, except for ``float`` which
+will be normalized using the `sign
+function <https://en.wikipedia.org/wiki/Sign_function>`__.
+
+**NULL** and **FALSE** will be treated as **0**. This is potentially
+dangerous because they would both indicate "equal to". It will therefore
+be recommended in the documentation that users should specify ``int`` as
+the return type.
+
+Objects that can't be converted to an integer will raise a warning and
+be considered equal to **1**.
+
+For a case like $a < $b, is $b considered at all?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Yes. In this case, ``$a->__compareTo($b)`` will be attempted first, then
+``$b->__compareTo($a)``, and finally the default behaviour of $a.
+
+Is it possible for that $a < $b and $b < $a?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Yes, comparison isn't guaranteed to be symmetrical or transitive. It's
+up to the implementor to ensure that cases like these do not exist. The
+engine honours the implementor's logic and does not attempt to make any
+assertions. Enforcing symmetry and transitivity would require multiple
+comparisons and assertions per operation, or type restriction. This RFC
+opts for neither.
+
+What is the behaviour of "$a
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+$b" when $a implements \__compareTo and $b implements \__equals? ===
+
+Order of attempt:
+
+-  ``$a->__equals($b)``
+-  ``$b->__equals($a)``
+-  ``$a->__compareTo($b)``
+-  ``$b->__compareTo($a)``
+
+Because this is comparison in the context of equality, ``__equals``
+takes precedence over ``__compareTo`` even if that means using the
+secondary operand's implementation. If both $a and $b follow sensible
+logic (within their domain), ``$a->__compareTo($b)`` should return **0**
+anyway. An inconsistency here indicates a logic error in the
+implementation of either ``$a`` or ``$b``.
+
+Why did Python remove *cmp* in favour of "Rich Comparisons"?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This came up in discussion as something to consider. We should try to
+learn from the motivations behind decisions that changed direction in
+other programming languages so that we don't miss important concerns.
+
+This is a relevant case because Python had a
+`cmp <https://docs.python.org/2/reference/datamodel.html#object.__cmp__>`__
+magic method that is similar to the proposed ``__compareTo``, but it
+became apparent that allowing only three cases for the relative order of
+objects is too limiting. This led to the `introduction of "rich
+comparison"
+methods <https://www.python.org/dev/peps/pep-0207/#motivation>`__ in
+Python 2.1 on top of the existing ``__cmp__`` method. This allowed for
+classes to overload individual comparison operators without restriction
+so that projects like NumPy can achieve expressions like these:
+
+.. code:: python
+
+   list(np.array([1, 3, 5, 7]) < np.array([2, 1, 6, 6]))
+
+   # Outputs: [True, False, True, False]
+
+The ``__cmp__`` method was removed completely in Python 3 in favour of
+rich comparison. However, I've come across `a
+discussion <https://www.reddit.com/r/Python/comments/65m6c2/what_would_you_remove_from_python_today/dgbk3ur>`__
+between Python core contributors where they question this decision.
+That's not to say that the decision was a bad one, but it's clearly a
+difficult problem to solve *perfectly*. `PEP
+207 <https://www.python.org/dev/peps/pep-0207>`__ is a good read for
+more details about the rich comparison methods.
+
+**How does this apply to the RFC?**
+
+There is no perfect solution. Python decided on a direction that suited
+their needs and philosophy. I don't believe that PHP should blindly
+follow whatever other languages are doing, so we should consider what
+feels right for PHP.
+
+Backward Incompatible Changes
+-----------------------------
+
+None.
+
+Extensions
+~~~~~~~~~~
+
+Extensions that use the ``compare`` object handler may be affected by
+this patch because **NULL** values (not null pointers) are now passed to
+the handler. Previously, any object would automatically be considered
+greater than **NULL**.
+
+The result of the ``compare`` handler will now only be used if the
+handler returned SUCCESS. Returning FAILURE will fall through to the
+``compare_objects`` handler. Currently, an object comparison will stop
+at the ``compare`` handler if it is defined, regardless of success.
+
+Extensions will now have the option of implementing the *equals* handler
+if they want to separate ordering from equality.
+
+Effects on Existing Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Any functions that use the `internal comparison
+functions <https://github.com/php/php-src/blob/5eb1f92f31cafc48384f9096012f421b37f6d425/Zend/zend_operators.h#L64>`__
+will be affected, which includes array functions like ``sort``,
+``array_search`` and ``in_array``.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.3
+
+Implementation
+--------------
+
+See https://github.com/php/php-src/pull/3339
+
+Vote
+----
+
+Since this is a language change, a 2/3 majority is required. The vote
+ends 2018-07-16.
+
+Question: Support user-defined object comparison?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/3339
+:Original Authors: , Adam Harvey, aharvey@php.net
+:Original PHP Version: PHP 7.3
+:Slug: object-comparison
+:Wiki URL: https://wiki.php.net/rfc/object-comparison

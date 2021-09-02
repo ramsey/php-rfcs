@@ -1,0 +1,222 @@
+Comparable
+==========
+
+:PHP-RFC: 0094
+:Title: Comparable
+:Author: Adam Harvey <aharvey@php.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2010-09-30
+:Version: 7.0
+
+This RFC offers a Comparable interface which can be used to implement
+userspace comparison of objects to other values.
+
+Introduction
+------------
+
+Many other languages offer the ability to provide a method on a class
+which will be used when instances of that class are compared via
+comparison or equality operators. For example, Java provides the
+`Comparable <http://docs.oracle.com/javase/7/docs/api/java/lang/Comparable.html>`__
+interface, while Python provides the
+`cmp <http://docs.python.org/reference/datamodel.html#object.__cmp__>`__
+magic method.
+
+The need for this has only increased as time has gone past, and
+particularly with the recent implementation of the spaceship operator.
+
+Interface
+---------
+
+Given the inspiration that PHP has drawn from Java in other areas of
+object orientation, the chosen API mirrors that of Java, with the
+exception of the Java-specific generic functionality. Expressed as a PHP
+interface, it would look like this:
+
+.. code:: php
+
+   <?php
+   interface Comparable {
+       public function compareTo($other);
+   }
+   ?>
+
+This interface intentionally allows variables of any type to be passed
+to compareTo(): there are use cases where users may want to compare
+objects to non-object values, such as money and bigint types, where you
+may want to compare the object to a numeric value.
+
+Sample Code
+-----------
+
+A minimal class implementing this may look as follows:
+
+.. code:: php
+
+   <?php
+   class FuzzyException extends Exception {}
+
+   class Fuzzy implements Comparable {
+       const TOLERANCE = 0.0001;
+
+       public function __construct($value) {
+           $this->value = (float) $value;
+       }
+
+       public function compareTo($value) {
+           if (!$value instanceof Fuzzy) {
+               throw new FuzzyException('Can only compare to other Fuzzy values');
+           }
+
+           $diff = $this->value - $value->value;
+
+           if ($diff > self::TOLERANCE) {
+               return 1;
+           }
+           elseif ($diff < -self::TOLERANCE) {
+               return -1;
+           }
+
+           return 0;
+       }
+   }
+
+   $a = new Fuzzy(1.23);
+   $b = new Fuzzy(2.34);
+   $c = new Fuzzy(2.340000001);
+
+   var_dump($a > $b);      // prints bool(false)
+   var_dump($a <= $b);     // prints bool(true)
+   var_dump($c == $b);     // prints bool(true), since it's within the tolerance
+   var_dump($c == 'foo');  // throws a FuzzyException
+   ?>
+
+Implementation
+--------------
+
+The PR linked below implements the Comparable interface by providing a
+new standard object handler for the compare object handler which checks
+if the object implements Comparable, and if so, calls the compareTo()
+method.
+
+The only change to compare_function() is to ensure that the compare
+handler is called for the IS_NULL/IS_OBJECT pairs (which probably should
+have happened anyway), and to allow the compare_objects handler to be
+used if compare fails.
+
+FAQ
+---
+
+Is only $a checked for Comparable or also $b?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Both $a and $b are checked.
+
+How it is ensured that if $a < $b then $b > $a?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+That's up to the userspace developer to get right when they're
+implementing their compareTo method. I expect the manual would have a
+dire warning about the possible consequences of not making them
+equivalent.
+
+Would sorting work with it?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Yes.
+
+If both $a and $b are objects with different compare functions, how it is determined whose function is used? Note that operators like
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+are assumed to be commutative, and less/more operators are assumed to be
+commutative in pairs, like above. ===
+
+The left operand wins, so $a.
+
+What if the objects are not of the same class? What if one is of a subclass of the other? Is equality not symmetric?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Equality is symmetric to the extent that $a->compareTo($b) should return
+the inverse of $b->compareTo($a). Equality is not required to be
+symmetric in terms of both objects sharing the same compareTo() method,
+and comparisons across different class hierarchies are explicitly
+allowed.
+
+How does this interact with 'get' and 'cast_object'/'__tostring'?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The tests for whether the operands implement Comparable occur before any
+potential calls to get and cast_object.
+
+How does this interact with the compare_objects handler?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This will take precedence over a compare_objects handler. This is
+consistent with the current compare_function() implementation, which
+calls the compare handler first.
+
+In practice, I think it's unlikely that an internal class (or a class
+extending such an internal class) with a compare_objects handler would
+also implement Comparable.
+
+Concerns
+--------
+
+I'll attempt to summarise the key arguments against this below. Please
+feel free to edit this if you don't feel your position is accurately
+represented; I'm trying to be impartial, but obviously I also want to
+see this succeed.
+
+-  It's operator overloading; something PHP has historically avoided as
+   a design choice.
+-  Comparison of objects with non-objects may become confusing,
+   particularly if scalar casting is added to the mix.
+-  Comparison of objects with objects of a different class may be
+   confusing or ill-defined.
+-  Why we use interface instead of magic method. Comparable is not
+   reserved currently, but methods started with \_\_ are always
+   reserved.
+
+Alternative Approaches
+----------------------
+
+Traits
+^^^^^^
+
+Stas suggests the following as an alternative to overloading the
+operator:
+
+   As a side note, if we have traits we might instead think of having
+   Comparable trait or interface or both, which would declare having
+   compareTo() standard feature (as Java does) without messing with the
+   engine and overloading operators. Surely, it would be more verbose,
+   but that might be a good thing.
+
+Patches
+-------
+
+-  PR against master: https://github.com/php/php-src/pull/1097
+-  Obsolete v1.1 patch against 5.4:
+   http://www.adamharvey.name/patches/comparable-v2.diff.txt
+-  Obsolete v1.0 patch against 5.4:
+   http://www.adamharvey.name/patches/comparable.diff.txt
+
+Changelog
+---------
+
+-  2015-02-19: Reanimated RFC; developed new patch that uses the compare
+   handler instead of heavily changing compare_function().
+-  2010-10-01: Revised patch to remove SPL dependency; added a few
+   questions and answers from the mailing list and a list of concerns
+   raised.
+-  2010-09-30: Initial proposal.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Adam Harvey aharvey@php.net
+:Original Date: 2010-09-30, updated 2015-02-19
+:Original Status: Under Discussion
+:Slug: comparable
+:Wiki URL: https://wiki.php.net/rfc/comparable

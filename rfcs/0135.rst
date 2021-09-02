@@ -1,0 +1,339 @@
+Strict Sessions
+===============
+
+:PHP-RFC: 0135
+:Title: Strict Sessions
+:Author: Yasuo Ohgaki <yohgaki@ohgaki.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2011-12-02
+:PHP-Version: 5.5
+:Version: 1.1
+
+Introduction
+------------
+
+Session management safety is core of web application security. However,
+PHP's Session module is known to vulnerable to session adoption that
+enables session fixation for years.
+
+When cookie is used for session, current session module does not
+validate session ID and accepts uninitialized one. This happens due to
+nature of web browsers that overrides cookie if multiple cookies are set
+for a request. Use of session_regenerate_id() **CANNOT** prevent session
+adoption/fixation.
+
+There is user land solution that validates session data, but this method
+is not widely adopted. Even if the user land solution is adopted widely,
+there are risks that users do not use or users failed to implement it
+correctly.
+
+Therefore, implementing strict session in PHP core is required for
+better Web application security.
+
+Proposed Patch
+--------------
+
+https://gist.github.com/1379668
+
+This patch adds
+
+-  validate_sid() to ps_modules (Save handlers)
+-  session.use_strict_mode to php.ini (On by default, off for old
+   behavior)
+-  display that save handler supports strict session or not via
+   phpinfo() (So that user could know behavior)
+-  update PHP_SESSION_API version (So that save handler authors could
+   write portable code)
+-  warning error for session_id() when use_strice_mode=1
+
+Compatibility issues are
+
+-  save handlers that are currently working should also work with this
+   patch, except ps modules using PS_MOD_SID and PS_MOD_FUNCS_SID macro.
+   These ps modules should implement validate_sid(). Modules that are
+   using PS_MOD/PS_FUNCS are not affected, they just marked as
+   "adaptive" module. (e.g. pecl sqlite's ps module. You can see it via
+   phpinfo()) NOTE: PS_MOD_SID() and PS_MOD_FUNCS_SID() are already
+   defined, but it was the same as PS_MOD()/PS_MOD_FUNCS(). If old
+   ps_module that uses PS_MOD_SID()/PS_MOD_FUNCS_SID() does not compile,
+   implement validate_id().
+-  session ID string is checked so that chars are alphanumeric + ',','-'
+   when session.use_strict_mode=On. (mod_file.c checks session ID this
+   way w/o this patch to prevent
+
+problems. Using restrictive session ID string is better for other ps
+modules. IMHO)
+
+-  session read failure is not rescued to eliminate possible infinite
+   loops. Bundled ps modules were not using this at least.
+
+You will see some tests are failing since they depend on adaptive
+session. By looking into failing test results, you can see this patch is
+generating new session ID if it's not a already initialized session.
+I'll modify these tests (set session.use_strict_mode=Off) and add some
+tests for new feature (new validate_sid() function for user and
+use_class save handler) after commit.
+
+It removes session read failure retry code from php_session_initialize()
+. The retry code may cause infinite loop depending on save handler
+implementation. Some session save handlers may be using this to prevent
+adoption(?), but they should implement validate_sid() to prevent
+adoption from now on. With new code, there will never be infinite loops.
+Currently bundled save handlers are not using this feature.
+
+Extra feature to be added
+-------------------------
+
+This patch eliminates session adoption/fixation, but introduces targeted
+DoS attack. To disable DoS, deletion of possible offending cookies is
+needed.
+
+Deletion method
+
+-  When setting new session ID cookie, send empty cookies for all
+   possible path and domain.
+
+Limitation
+
+-  If attacker is able to put read only cookie data into browser, DoS is
+   still possible.
+-  Old browser sent all cookies to server, but recent browsers only send
+   outstanding cookie. Therefore, there is no way to detect if there are
+   malicious cookies or not.
+
+Compatibility and Limitation
+----------------------------
+
+Limitation
+~~~~~~~~~~
+
+This patch adds validate_id() function to ps_modules (session save
+handler) that can check if the session ID is already initialized one or
+not. Bundled ps_modules are now have validate function and will never
+accept uninitialized session ID regardless cookie based or URL rewriter.
+
+However, it is still possible users and ps_module writers may write
+improper save handlers, but it is user's responsibility that writes
+proper save handler that prevents session adoption.
+
+There are cases that PHP cannot set cookie for sessions. If this
+happens, targeted DoS is possible. DoS is much better than stolen
+session, so users should accept this risk.
+
+Compatibility
+~~~~~~~~~~~~~
+
+Strict Mode
+^^^^^^^^^^^
+
+At user land, there will be no compatibility issues by disabling
+session.use_strict_mode. (i.e. session.use_strict_mode=0)
+
+When strict mode is enabled, uninitialized session ID will be discarded.
+Therefore, applications that use adoptive session nature may not work.
+If malicious cookie that prevents new session ID is set, session module
+will keep trying to generate new session ID and session will not be
+usable.
+
+DoS Prevention
+^^^^^^^^^^^^^^
+
+session.safe_session_cookie=1 deletes possible malicious cookies that
+prevent new session ID. With this option, session modules send empty
+cookies for all possible domain and path.
+
+This option may cause problems. For instance, when a user is using
+default session settings (i.e. using PHPSESSID for session name), it may
+delete legitimate cookies set by other applications. For this reason,
+this setting will be off by default.
+
+Module Developers
+^^^^^^^^^^^^^^^^^
+
+There may be compatibility problem for internal session modules, if and
+only if it uses PS_MOD_SID()/PS_MOD_FUNCS_SID() for ps_module
+definition.
+
+Module writers may use PHP_SESSION_API version ID to write portable
+ps_modules. New ps_module writers MUST use
+PS_MODE_SID()/PS_MOD_FUCS_SID() to support strict session.
+
+Background
+----------
+
+Session is one of the most important feature to secure Web applications.
+However, current PHP session module is weak to session ID adoption, thus
+it is weak to session fixation.
+
+Current Solution
+~~~~~~~~~~~~~~~~
+
+Programmer can make adoptive session with user land code as follows.
+
+Login code fragment: Code that adds session ID as validation key.
+
+::
+
+   session_destory();
+   session_regenerate_id();
+   $_SESSION['valid_id'] = session_id();
+
+Validation code: Code other than login. Check if session is properly
+initilized.
+
+::
+
+   if ($_SESSION['valid_id'] !== session_id()) {
+     die('Invalid use of session ID');
+   }
+
+Alternatively, programmers may try to delete all possible cookies by
+sending empty session ID cookie.
+
+Users who are using "user" save handlers can use open function to
+validate session ID is initialized one. If not, user can use
+session_regenerate_id() to create new ID.
+
+Reason why the validation key is required
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Cookie that is used for session allows multiple cookies for a single
+request. When multiple cookies are set, browsers send multiple cookies
+WITHOUT domain and path information. Browser just send cookie header and
+there is no way to know which cookie is for which domain or path.
+
+In addtion, there are no standards for sending multiple cookies. For
+example, IE has different order preference for sending cookies than
+Chrome/Firefox.
+
+This behavior prevents use of session_regenerate_id()'s new cookie in
+some cases. PHP may use invalid session ID to initialize session.
+Session ID can be fixed (i.e. session fixation) without the validation
+code.
+
+Session fixation can be used to take over session and compromise Web
+application security.
+
+Example Cookie headers
+~~~~~~~~~~~~~~~~~~~~~~
+
+These are cases that adaptive session can be harmful. For all tests, all
+possible cookies for domain and path are set.
+
+IE8: http://www.test.co.jp/path1/path2/
+
+::
+
+   Cookie: C=%2Fwww%2Fdefault%2Fpublic; C=test.co.jp
+
+-  First cookie(C=%2Fwww%2Fdefault%2Fpublic) is cookie set without
+   domain and the default path '/'.
+-  Second cookie(C=test.co.jp) is cookie set with domain.
+-  In this case, PHP initialize $_COOKIE['C'] == 'test.co.jp'. Session
+   is also initialized with second cookie regardless of cookie set for
+   path.
+-  Cookies are set for all combinations with different values (domain
+   name and full path dir). (i.e. all domain and path)
+-  To make this happen, it seems order of setting cookies was
+   significant. Set path first, then domain.
+
+IE9: http://www.test.co.jp/path1/path2/
+
+::
+
+   Cookie: C=test.co.jp
+
+-  It seems MS decided just to send the outstanding cookie for domain
+   and path.
+-  It still harmful, since most PHP applications just sets path for
+   session cookie.
+
+IE9&Chrome: http://co.jp/path1/path2/
+
+::
+
+   Cookie: C=co.jp
+
+-  This is a test case for invalid domain. co.jp is ccTLD so browser
+   should not set cookie for it. However, browser seems set cookie if it
+   has IP.
+-  This is very handy if someone wants to steal him/her colleague
+   session. Just edit hosts and set long life cookie for the domain. It
+   will remain unless cookie is expired or explicitly deleted.
+
+Most obvious case is setting cookie for sub path and "/". Many
+applications sets cookie path according to application base directory.
+Setting cookie to "/" enables session fixation for many applications and
+installations.
+
+Acknowledgement
+---------------
+
+-  Original patch was written by Stefan Esser for PHP 5.1.
+   PS_MOD_SID()/PS_MOD_FUNCS_SID()/create_id() feature that has already
+   been implemented is part of Stefan's patch.
+-  Proposed patch was maintained and modified by Yasuo Ohgaki (I'm not
+   sure but Shuhosin supposed to have the identical patch)
+
+Related Discussions
+-------------------
+
+-  http://www.mail-archive.com/internals@lists.php.net/msg54147.html
+-  http://www.mail-archive.com/internals@lists.php.net/msg54761.html
+
+Implementation
+--------------
+
+-  https://github.com/php/php-src/commit/25e8fcc88fa20dc9d4c47184471003f43
+-  https://github.com/php/php-src/commit/82b0e8be99065b61b622df2
+
+Other
+-----
+
+CVE ID is assigned for this
+
+-  CVE-2011-4718
+
+CWE
+
+-  `CWE-384: Session
+   Fixation <http://cwe.mitre.org/data/definitions/384.html>`__
+
+CAPEC
+
+-  `CAPEC-61: Session
+   Fixation <http://capec.mitre.org/data/definitions/61.html>`__
+
+Bug ID is #60491
+
+-  https://bugs.php.net/bug.php?id=60491
+
+Changelog
+---------
+
+2011-11-23 - 0.1 - just dumping the info from the original mail.
+
+2011-11-24 - 0.2 - Correct "Reason why the validation key is required"
+description to be more accurate. Browser sends cookies, not cookie
+headers. Added example cookie headers to illustrate what's the problem.
+
+2011-11-29 - 0.3 - Add DoS prevention.
+
+2011-11-29 - 0.9 - Reorganize sections. Prepare for removing draft
+status.
+
+2011-11-30 - 1.0 - Remove draft status.
+
+2011-12-02 - 1.1 - Fix description for ps_module developers. Add
+session_id() warning.
+
+2011-12-10 - 1.1 - Added CVE-ID
+
+Additional Metadata
+-------------------
+
+:Original Authors: Yasuo Ohgaki yohgaki@ohgaki.net
+:Original Status: Applied to 5.5.2
+:Slug: strict_sessions
+:Wiki URL: https://wiki.php.net/rfc/strict_sessions

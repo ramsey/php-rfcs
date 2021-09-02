@@ -1,0 +1,359 @@
+Argon2 Password Hash
+====================
+
+:PHP-RFC: 0498
+:Title: Argon2 Password Hash
+:Author: Charles R. Portwood II <charlesportwoodii@erianna.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2016-07-10
+:PHP-Version: 7.2
+:Version: 0.8
+
+Introduction
+------------
+
+Argon2, the recommended password hashing algorithm by the Password
+Hashing Competition, is a modern algorithm for securely hashing
+passwords. Argon2 addresses several key downsides of existing algorithms
+in that it is designed for the highest memory filling rate, and
+effective use multiple computing units while still providing defense
+against tradeoff attacks. Unlike Bcrypt, which just takes a single cost
+factor, Argon2 is parameterized by three distinct factors:
+
+#. A memory cost that defines memory usage of the algorithm
+#. A time cost that defines the execution time of the algorithm and the
+   number of iterations
+#. And a parallelism factor, which defines the number of parallel
+   threads
+
+Argon2 comes in two distinct flavors, Argon2i and Argon2d. Argon2i which
+is optimized for password hashing and password based key derivation.
+Argon2d is faster and uses data-dependent memory access, making it
+highly resistant against GPU cracking attacks and suitable for
+applications with no threats from side-channel timing attacks (such as
+cryptocurrencies).
+
+Proposal
+--------
+
+The existing password_\* functions provided a forward compatible,
+simplified interface for hashing passwords. This RFC proposes the
+implementation of Argon2i (v1.3) within the password_\* functions for
+use as a secure alternative to Bcrypt.
+
+Proposed PHP Version(s)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Add Argon2i (v1.3) support in the next PHP 7.x (7.2) via
+--with-password-argon2.
+
+New Constants
+~~~~~~~~~~~~~
+
+This change introduces a new hashing algorithm constant
+
+.. code:: php
+
+   PASSWORD_ARGON2I
+
+Additionally, 3 new default constants are introduced which define the
+default cost factors used by the algorithm.
+
+.. code:: php
+
+   PASSWORD_ARGON2_DEFAULT_MEMORY_COST
+   PASSWORD_ARGON2_DEFAULT_TIME_COST
+   PASSWORD_ARGON2_DEFAULT_THREADS
+
+Cost Factors
+~~~~~~~~~~~~
+
+When using Argon2, a memory cost, time cost, and parallelism degree are
+required. Based upon a thorough examination of the specification, and
+review of existing Argon2 extensions for other languages, the following
+default cost factors are proposed.
+
+::
+
+   memory_cost = 1024 KiB
+   time_cost = 2
+   threads = 2
+
+All three values are integers. The memory cost represents the number of
+KiB that should be consumed during hashing. The default value is 1<<10,
+or 1024 KiB, or 1 MiB. The argon2 spec recommends setting the memory
+cost to a power of 2 when changing.
+
+The time cost represents the number of times the hash algorithm will be
+run. And the thread parameter indicates the number of CPU threads that
+will be used during hashing.
+
+Changes to password_hash()
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The password_hash() function is altered to accept either
+PASSWORD_ARGON2I as the algorithm, and accept the memory cost, time
+cost, and parallelism degree as options. When using Argon2. The
+following examples illustrate the new functionality.
+
+.. code:: php
+
+   // Argon2i with default cost factors
+   password_hash('password', PASSWORD_ARGON2I);
+
+   // Argon2i by name with custom cost factors
+   password_hash('password', PASSWORD_ARGON2I, ['memory_cost' => 1<<17, 'time_cost' => 4, 'threads' => 2]);
+
+The new options for the algorithm are listed as follows. Each option is
+optional, and will use the listed defaults if not set.
+
+.. code:: php
+
+   $options = [
+       'memory_cost' => PASSWORD_ARGON2_DEFAULT_MEMORY_COST,
+       'time_cost' => PASSWORD_ARGON2_DEFAULT_TIME_COST,
+       'threads' => PASSWORD_ARGON2_DEFAULT_THREADS
+   ];
+
+While deprecated within password_hash(), a 16 byte salt can also be
+provided. If not provided a 16 byte salt will be generated.
+
+Errors:
+
+#. E_WARNING: Memory cost is outside of allowed memory range
+#. E_WARNING: Time cost is outside of allowed time range
+#. E_WARNING: Invalid number of threads
+
+Changes to password_verify()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The password_verify() function is altered return true or false if an
+Argon2 hash is specified. There are no API level changes to this
+function.
+
+Changes to password_get_info()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The password_get_info() function is altered to accept Argon2 hashes, and
+to return information about a given Argon2 hash.
+
+.. code:: php
+
+   var_dump(password_get_info('$argon2i$v=19$m=65536,t=3,p=1$SWhIcG5MT21Pc01PbWdVZw$WagZELICsz7jlqOR2YzoEVTWb2oOX1tYdnhZYXxptbU'));
+
+   array(3) {
+     ["algo"]=>
+     int(3)
+     ["algoName"]=>
+     string(7) "argon2i"
+     ["options"]=>
+     array(3) {
+       ["memory_cost"]=>
+       int(65536)
+       ["time_cost"]=>
+       int(3)
+       ["threads"]=>
+       int(1)
+     }
+   }
+
+Changes to password_needs_rehash()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The password_needs_rehash() function is altered to accept Argon2 hashes.
+If any of the cost factors are changed for an Argon2 hash, this function
+will return true.
+
+.. code:: php
+
+   $hash = password_hash('password', PASSWORD_ARGON2I);
+   password_needs_rehash($hash, PASSWORD_ARGON2I); // false
+   password_needs_rehash($hash, PASSWORD_ARGON2I, ['memory_cost' => 1<<17]); // true
+
+Configure Flag
+~~~~~~~~~~~~~~
+
+Argon2 support is provided by passing --with-password-argon2[=DIR] to
+the configure script. A directory to the Argon2 build directory may be
+provided. If not provided, the library will search the OS for libargon2.
+If --with-password-argon2 is provided, configuration will fail if Argon2
+cannot be found.
+
+Windows deps should be updated to include a statically compile
+Argon2Ref.lib from the Argon2 reference library for proper linking.
+
+Backward Incompatible Changes
+-----------------------------
+
+None.
+
+Discussion Issues
+-----------------
+
+All issues in this section have been resolved. The primary discussion
+points and resolutions are outlined.
+
+[Resolved] Cost factors
+~~~~~~~~~~~~~~~~~~~~~~~
+
+This library initially proposed higher cost factors, but now proposes
+the following cost factors:
+
+::
+
+   memory_cost = 1 MiB
+   time_cost = 2
+   threads = 2
+
+Due to the variety of platforms PHP runs on, the cost factors are
+deliberately set low as to not accidentally exhaust system resources on
+shared or low resource systems when using the default cost parameters.
+Consequently, users should adjust the cost factors to match the system
+they're working on. The following list outlines hashing performance on
+various systems using these default cost values.
+
+#. Common Cloud Server 512 MB, 1 Core: 3-5 ms
+#. Common Cloud Server 2 GB, 2 Core, 1-3 ms
+#. 512 MB Raspberry Pi Zero: 75-85ms
+
+As Argon2 doesn't have any "bad" values, however consuming more
+resources is considered better than consuming less. Users are encouraged
+to adjust the cost factors for the platform they're developing for.
+
+[Resolved] m_cost, t_costs vs memory_cost, time_cost
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The reference material uses m_cost and t_cost. End users might find it
+easier to use memory_cost and time_cost. The cost variables have been
+changed to the latter to simplify cost selection for the end user.
+
+[Resolved] Providing default options
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Providing default options allows for ease of use, and encourages use.
+Not providing options encourages experimentation on your system, but
+discourages use from people unfamiliar with the algorithm.
+
+Default options must be provided to ensure compatibility with the
+password_\* functions.
+
+[Resolved] PASSWORD_ARGON2 or PASSWORD_ARGON2I
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The library exposes PASSWORD_ARGON2I, and PASSWORD_ARGON2 as an alias to
+PASSWORD_ARGON2I. As only Argon2i is made available, two constants is
+unnecessary.
+
+PASSWORD_ARGON2I is the only algorithm necessary for implementation
+purposes.
+
+[Resolved] Inclusion of Argon2d
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Argon2i is suitable for password hashing. While Argon2d has other uses,
+it is not suitable for password hashing. A recommendation is to remove
+Argon2d to keep the feature in line with the intent of password_hash
+being a simple hashing function.
+
+The password_\* functions should be strictly related to password hashing
+behaviors, and their scope should not extend to general hashing.
+Consequently this RFC now only proposes the implementation of Argon2i
+within password_*. Argon2d will not be implemented as it is not suitable
+for password hashing, despite how simple it would be to include it
+within the password_\* functions.
+
+[Resolved] Configure Flag
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A discussion on internals proposes --with-password-argon2 is more
+suitable than --with-argon2 as this is a sub-feature rather than a full
+feature implementation of the entire Argon2 library.
+
+--with-argon2 implies full inclusion of the Argon2 library. Since only
+Argon2i is implemented within password_*, the configure argument should
+reflect that.
+
+[Resolved] Inclusion on 7.4
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Per discussion on the internals mailing list during an initial vote,
+this RFC no longer proposes changes to PASSWORD_DEFAULT in 7.4.
+
+[Resolved] Availability of libargon2
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+libargon2 is not yet wildly available in package managers yet. Any
+implementation in PHP will require manual compilation of the library.
+Per the discussion on https://github.com/php/php-src/pull/1997, this
+feature will be optionally available via the --with-argon2 configure
+flag.
+
+If PHP is not compiled with --with-password-argon2, use of the features
+outlined in this RFC will not be available.
+
+Proposed Voting Choices
+-----------------------
+
+Vote YES to include Argon2 as an alternative to Bcrypt within the
+password_\* functions in 7.2. A 50%+1 majority should be sufficient.
+
+Voting will be open for 2 weeks.
+
+Question: argon2_password_hash_revote
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+A working patch against the latest version of the Argon2 reference
+library is available at: https://github.com/php/php-src/pull/1997
+
+Implementation
+--------------
+
+#. Merged in 7.2
+#. Commit:
+   https://github.com/php/php-src/commit/35a74b9e4a9b5812c0e3a5524e28ff7dec50f1dc
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+#. https://password-hashing.net/
+#. https://password-hashing.net/argon2-specs.pdf
+#. https://github.com/P-H-C/phc-winner-argon2
+#. https://paragonie.com/blog/2016/02/how-safely-store-password-in-2016
+#. https://github.com/technion/ruby-argon2
+#. https://github.com/tvdburgt/go-argon2
+#. https://github.com/charlesportwoodii/php-argon2-ext
+
+Changelog
+---------
+
+#. 2016-07-10: 0.1 Initial RFC draft
+#. 2016-07-10: 0.2 Adding pthread and linking issue
+#. 2016-07-11: 0.3 --with-argon2 flag added
+#. 2016-07-18: 0.3 Discussion opened
+#. 2016-08-01: 0.4 Voting opened
+#. 2016-08-01: 0.5 Voting closes due to issue with RFC, removing 7.4 and
+   adding new issues brought up during vote
+#. 2016-08-01: 0.6 Removing Argon2 from password_*, changing configure
+   flag to --with-password-argon2 for clarity of scope
+#. 2016-08-18: 0.7 Adding clarity on new cost factors
+#. 2016-08-24: 0.8 Voting re-opened
+#. 2016-09-08: 0.8 RFC accepted, voting closed
+
+Additional Metadata
+-------------------
+
+:Original Authors: Charles R. Portwood II charlesportwoodii@erianna.com
+:Original Status: Implemented (in PHP 7.2)
+:Slug: argon2_password_hash
+:Wiki URL: https://wiki.php.net/rfc/argon2_password_hash

@@ -1,0 +1,315 @@
+Nullable Casting
+================
+
+:PHP-RFC: 0640
+:Title: Nullable Casting
+:Author: David Rodrigues <david.proweb@gmail.com>, Guilliam Xavier <guilliam.xavier@gmail.com>
+:Status: Draft
+:Type: Standards Track
+:Created: 2019-03-17
+:Version: 0.2
+
+Introduction
+------------
+
+PHP supports expression casting to primitive type (like ``int``) by
+using "``(`` *type* ``)`` *expression*", but it currently doesn't allow
+to use a nullable type as introduced by PHP 7.1 (e.g. ``?int``).
+
+Due to the lack of support for nullable casting, it is necessary to
+write additional code to preserve a possible ``null`` value through the
+type conversion. This feature would also bring more consistency and
+completeness to the existing language.
+
+Motivating Example
+------------------
+
+In strict type-checking mode (``<?php declare(strict_types=1);``), given
+two functions like the following (disclaimer: dummy implementation):
+
+.. code:: php
+
+   function getInt(): int
+   {
+       return mt_rand();
+   }
+
+   function processString(string $s): void
+   {
+       printf("process a string of %d byte(s)\n", strlen($s));
+   }
+
+then the following call:
+
+.. code:: php
+
+   processString(getInt());
+
+will throw a ``TypeError`` ("Argument 1 passed to processString() must
+be of the type string, int given"), but here we can use a cast (``int``
+to ``string`` conversion is always safe):
+
+.. code:: php
+
+   processString((string) getInt());
+
+(which will print something like "process a string of 9 byte(s)").
+
+Now given two functions like the following (with *nullable* type
+declarations):
+
+.. code:: php
+
+   function getIntOrNull(): ?int
+   {
+       $r = mt_rand();
+       return $r % 2 === 0 ? $r : null;
+   }
+
+   function processStringOrNull(?string $s): void
+   {
+       if ($s === null) {
+           printf("process null\n");
+       } else {
+           printf("process a string of %d byte(s)\n", strlen($s));
+       }
+   }
+
+then the following call:
+
+.. code:: php
+
+   processStringOrNull(getIntOrNull());
+
+will sometimes work (print "process null") and sometimes throw a
+``TypeError`` ("Argument 1 passed to processStringOrNull() must be of
+the type string or null, int given"), so we would want to use a
+"*nullable* cast":
+
+.. code:: php
+
+   processStringOrNull((?string) getIntOrNull());
+
+but currently this syntax is not supported ("Parse error: syntax error,
+unexpected '?'") and we must resort to something more verbose (and
+error-prone) like:
+
+.. code:: php
+
+   processStringOrNull(($tmp = getIntOrNull()) === null ? null : (string) $tmp);
+   unset($tmp);
+
+or writing custom casting functions.
+
+(Note that in *weak* type-checking mode, there is never a ``TypeError``,
+the ``?int`` is automatically converted to ``?string``, correctly
+preserving a ``null`` value. But we can prefer strict typing, to catch
+unintended conversions.)
+
+settype()
+~~~~~~~~~
+
+When the desired type is not known before runtime, we cannot use a cast
+operator, but we can use the ``settype()`` function, for example:
+
+.. code:: php
+
+   function getIntOrNullAs(string $type)
+   {
+       $x = getIntOrNull();
+       settype($x, $type);
+       return $x;
+   }
+
+but currently ``$type`` cannot contain a nullable type like
+``"?string"`` ("Warning: settype(): Invalid type", ``$x`` not
+converted).
+
+Proposal
+--------
+
+The proposal is to add support of nullable types to the current casting
+feature. Basically, ``(int)`` is the "plain" int cast, and ``(?int)``
+will be a nullable int cast. Generally speaking, what changes is the
+possibility to use a leading question mark symbol (``?``) before the
+type of a cast, turning it into a nullable cast.
+
+The only difference of nullable casting compared to plain casting is
+that if the expression value is ``null``, it will be kept as ``null``
+instead of being forced to the destination plain type:
+
+=========================== ==== ===== ===== ====== ===== ======
+*type*:                     int  bool  float string array object
+=========================== ==== ===== ===== ====== ===== ======
+``(``\ *type*\ ``)``\ null  0    false 0.0   ""     []    {}
+``(?``\ *type*\ ``)``\ null null null  null  null   null  null
+=========================== ==== ===== ===== ====== ===== ======
+
+**Notes:**
+
+-  The ``(unset)`` cast will not be affected (see the "Unaffected PHP
+   Functionality" section).
+-  The PHP parser is not sensitive to spaces in e.g. "``( int )``" cast
+   and "``? int``" type declaration, so e.g. "``( ? int )``" will be
+   identical to "``(?int)``".
+-  The PHP parser does not distinguish between ``(integer)`` and
+   ``(int)`` casts, so ``(?integer)`` will be identical to ``(?int)``.
+   Likewise for ``(?boolean)`` vs ``(?bool)``, ``(?double)`` or
+   ``(?real)`` vs ``(?float)``, and ``(?binary)`` vs ``(?string)``.
+
+If the expression value is not ``null``, nullable casting will give the
+same result as plain casting: e.g. (?int)false will give 0, (?array)""
+will give [""].
+
+Additional proposal for settype()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Additionally, it was requested on the mailing list to consider adding
+support of nullable types to the ``settype()`` function, e.g.
+``settype($variable, "?int")``, which here would be the same as
+``$variable = (?int)$variable;`` and return ``true`` (but in general
+``"?int"`` could be a dynamic string).
+
+In short, for a currently valid ``$type`` argument to
+``settype($variable, $type)``, it would enable to use ``'?'.$type`` to
+preserve nullability.
+
+"?null"
+^^^^^^^
+
+In ``"?null"``, the "``?``" is redundant ("nullable null"), but it could
+happen in dynamic code, e.g. ``settype($x, '?' . gettype($y))`` when
+``$y`` is ``null``.
+
+Possible options:
+
+#. Allow it as equivalent to plain ``"null"`` silently.
+#. Allow it as equivalent to plain ``"null"`` but emit a specific
+   Notice.
+#. Disallow it and emit a specific Warning (like the existing "Cannot
+   convert to resource type").
+#. Disallow it and emit the existing generic Warning "Invalid type".
+
+For demonstration, the current patch uses option 2.
+
+Backward Incompatible Changes
+-----------------------------
+
+None.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 7.x (7.4 now).
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+:?: *Help needed*
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+:?: *Help needed*
+
+To Opcache
+~~~~~~~~~~
+
+:?: *Help needed*
+
+Unaffected PHP Functionality
+----------------------------
+
+-  The ``(unset)`` cast (always returning ``null``, deprecated in PHP
+   7.2 and to be removed in PHP 8.0) is not affected (i.e. the
+   "``(?unset)``" syntax is not proposed, and will continue to cause a
+   Parse error).
+-  The ``gettype()`` function is not affected.
+
+Proposed Voting Choices
+-----------------------
+
+(Each child vote result will be considered only if its parent vote
+passes.)
+
+-  **Accept nullable casting?**: Simple vote (Yes / No), requiring a 2/3
+   majority to pass.
+
+   -  **Additionally accept nullable settype()?**: Simple vote (Yes /
+      No), also requiring a 2/3 majority to pass.
+
+      -  **How to handle settype($x, "?null")?**: Multi-options vote
+         (Allow silently / Allow but Notice / Disallow with specific
+         Warning / Disallow with the generic Warning), the option with
+         more votes will win.
+
+(The voting period would be two weeks)
+
+Patches and Tests
+-----------------
+
+-  Working prototype: https://github.com/php/php-src/pull/3764
+
+Discussion
+----------
+
+"Not 100% needed"
+~~~~~~~~~~~~~~~~~
+
+Current alternatives:
+
+-  Use a test (ternary conditional operator or ``if`` statement),
+   possibly with a temporary variable
+-  Write (and [auto]load) custom casting functions
+-  Disable (i.e. do not enable) strict typing mode in the concerned file
+   *(not strictly equivalent, e.g. for ``"foo"`` to ``int``)*
+
+"A cast where you can't be sure of what you'll get back"
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+"I understand the use-case for when you want to pass something to a
+nullable parameter, but if you think about this cast in isolation, it
+hardly makes sense."
+
+"What about e.g. nullable_intval()?"
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+But we're missing "arrayval()" and "objectval()"... And we might use
+short closure ``fn($x) => (?int)$x``
+
+Fallible Casting
+~~~~~~~~~~~~~~~~
+
+One might expect to also have e.g. ``(?int)"foo"`` and ``(?int)""`` give
+``null`` rather than ``0``, ``(?string)[42]`` give ``null`` rather than
+``"Array"``... and to be able to use ``(?int)$value ?? $default``,
+``(?string)$_GET["input"] ?? ""``...
+
+Alternative syntax
+~~~~~~~~~~~~~~~~~~
+
+E.g. "``(null|int) $x``"
+
+References
+----------
+
+-  PHP Manual: `Type
+   Juggling <http://php.net/manual/en/language.types.type-juggling.php>`__,
+   `settype()
+   function <http://php.net/manual/en/function.settype.php>`__
+-  PHP RFC: `Scalar Type Declarations </rfc/scalar_type_hints_v5>`__,
+   `Nullable Types </rfc/nullable_types>`__
+-  Initial idea and discussion: https://externals.io/message/102997
+-  Annoucement and discussion: https://externals.io/message/105122
+
+Additional Metadata
+-------------------
+
+:Original Authors: David Rodrigues (david.proweb@gmail.com), Guilliam Xavier (guilliam.xavier@gmail.com)
+:Original Status: Under Discussion
+:Original Version: 0.2-draft
+:Slug: nullable-casting
+:Wiki URL: https://wiki.php.net/rfc/nullable-casting

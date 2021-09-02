@@ -1,0 +1,751 @@
+Adding Simple Password Hashing API
+==================================
+
+:PHP-RFC: 0165
+:Title: Adding Simple Password Hashing API
+:Author: Anthony Ferrara <ircmaxell@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2012-06-26
+:PHP-Version: 5.5
+:Version: 1.4
+
+Introduction
+------------
+
+This RFC describes a new API for simplified password hashing.
+
+Why Do We Need Password Hashing?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Password Hashing is a way to convert a user-supplied password into a
+one-way derived token for storage. By using the derived token, it makes
+it impossible to reverse the stored token and get the original password
+used by the user. This adds a layer of defense in case an attacker gets
+access to the database storing the password.
+
+Why Do We Need Strong Password Hashing?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+As it turns out, just hashing a password using *md5()* or even
+*sha512()* isn't good enough. Cryptographic hash functions (such as
+those supplied by *hash()*) are designed to be fast. This is good for
+cryptographic needs such as signing. But for password hashing, that's a
+problem since it allows an attacker to brute force a lot of passwords
+very quickly. Adding a salt makes it resistent to `rainbow
+tables <http://en.wikipedia.org/wiki/Rainbow_table>`__, but not
+resistent to brute forcing where that salt is known.
+
+By using either a `stretched
+algorithm <http://en.wikipedia.org/wiki/Key_stretching>`__ (Such as
+*PBKDF2*) or an algorithm designed to be slow (Such as *bcrypt*), a much
+better defense against brute forcing will be had.
+
+Why Do We Need A Simple API
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+As recent attacks have shown, strong password hashing is something that
+the vast majority of PHP developers don't understand, or don't think is
+worth the effort. The current core implementations of strong password
+hashing using *crypt()* are actually fairly difficult to work with. The
+error states are difficult to check for (returning *\*0* or *\*1* on
+error). The salt format is difficult to generate as it uses a custom
+base64 alphabet (*.* instead of *+* and no padded *=*). Additionally,
+salts are reasonably difficult to generate randomly (not too difficult,
+but requires a fair bit of code). Additionally, checking the return when
+validating a password can expose the application to `remote timing
+attacks <http://en.wikipedia.org/wiki/Timing_attack>`__.
+
+By providing a simple API that can be called, which takes care of all of
+those issues for you, hopefully more projects and developers will be
+able to use secure password hashing.
+
+Common Misconceptions
+---------------------
+
+Salts Need To Be True Random
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Salts exist for a single reason: To make it so that any time (CPU
+effort) spent cracking a single password hash cannot be amortized across
+multiple hashes. That means that attacking a single password hash will
+have no impact on the time it will take attacking another hash. Based on
+that reason, salts only need to be statistically globally unique. There
+is no requirement for them to be true random (as you would need for an
+encryption key). This means that */dev/urandom* is acceptable, while
+*mt_rand()* and *rand()* are not (except as fallbacks).
+
+Hash(password + salt) Is Fine
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+No, it's not. There's plenty of information out there to dispel this
+myth. See the references section for some details.
+
+Proposal and Patch
+------------------
+
+The proposal is to add a new set of password hashing APIs to the
+standard PHP library. These hashing APIs will initially be thin wrappers
+around *crypt()* to allow for automatic salt generation and better error
+checking. The APIs are designed such that they can easily be extended in
+the future as additional strong hashing algorithms are introduced into
+PHP's core (Such as *scrypt*).
+
+New Functions
+~~~~~~~~~~~~~
+
+-  *string password_hash(string $password, int $algo, array $options =
+   array())* - The function which creates new password hashes. The
+   second parameter *algo* indicates which algorithm should be used to
+   execute the hash. You can use the default constant if you want the
+   algorithm to automatically update itself to the strongest algorithm
+   available as PHP is upgraded. If called with two parameters, it will
+   auto-generate a salt. The *$options* array allows for passing in
+   algorithm specific options. In the case of *bcrypt*, two options are
+   supported: *salt* and *cost*. The *salt* parameter, if provided, will
+   be used in place of an auto-generated salt. The *cost* parameter is
+   passed to *crypt()* to control the amount of CPU time that should be
+   expended creating the hash (higher is more resistent to brute
+   forcing, lower is kinder on the servers. A balance should be
+   achieved).
+-  *bool password_verify($password, $hash)* - The function which
+   verifies an existing hash. This hash can be created via
+   *password_hash()*, or a normal *crypt()* hash. The only thing it
+   provides on top of *crypt()* is resistance to timing attacks by using
+   a constant-time comparison function.
+-  *bool password_needs_rehash(string $hash, int $algo, array $options =
+   array())* - This function checks to see if the supplied hash
+   implements the algorithm and options provided. If not, it is assumed
+   that the hash needs to be rehashed.
+-  *array password_get_info(string $hash)* - This function gets the
+   information used to generate a hash. The returned array has two keys,
+   algo and options.
+
+New Constants
+~~~~~~~~~~~~~
+
+Initially, several new constants are defined:
+
+-  *PASSWORD_BCRYPT = 1* - Create new password hashes using the
+   *CRYPT_BLOWFISH* algorithm
+-  *PASSWORD_DEFAULT = PASSWORD_BCRYPT* - The default algorithm to use
+   for hashing if no algorithm is provided. This can change in future
+   releases when a new, stronger hashing algorithm (such as *scrypt*) is
+   supported.
+
+Supported Algorithms
+~~~~~~~~~~~~~~~~~~~~
+
+\* *BCrypt* - The *CRYPT_BLOWFISH* algorithm. The strongest algorithm
+currently supported by PHP.
+
+Behavioral Semantics
+~~~~~~~~~~~~~~~~~~~~
+
+password_hash()
+^^^^^^^^^^^^^^^
+
+Errors:
+
+-  E_WARNING - When CRYPT is not included in core (was disabled
+   compile-time, or is listed in disabled_functions declaration)
+-  E_WARNING - When supplied an incorrect number of arguments.
+-  E_WARNING - When supplied a non-string first parameter (password)
+-  E_WARNING - If an algorithm is specified in the algo parameter that
+   is not supported
+-  E_WARNING - If a bcrypt cost parameter is outside of the range 4-31
+   (by ini or specified in the options array)
+-  E_WARNING - If a non-string salt option is provided
+-  E_WARNING - If a provided salt option is too short for the specified
+   algorithm
+
+If any error is raise, *false* is returned by the function.
+
+Normal Operation: With BCrypt, the output of *crypt()* is checked for
+error states (output < 13 characters). If there was an error in hashing,
+*false* is returned (this shouldn't happen due to the verification of
+the parameters, but it's there in case something fails). Otherwise, the
+output of *crypt()* is returned directly.
+
+It's important to note that the output of *crypt()* (and hence
+*password_hash()*) contains all the information that will be needed to
+verify the hash later. Therefore, if the default hashing algorithm
+changes, or the user changes their algorithm, old hashed passwords would
+still continue to function and will be validated properly.
+
+If we look at the output format of a hash:
+
+.. code:: php
+
+   <?php
+   var_dump(password_hash("rasmuslerdorf", PASSWORD_BCRYPT, array("cost" => 7, "salt" => "usesomesillystringfor")));
+   // string(60) "$2y$07$usesomesillystringfore2uDLvp1Ii2e./U9C8sBjqp8I90dH6hi"
+   ?>
+
+Note that *$2y$* indicates the algorithm to use (in this case, bcrypt).
+The *07$* indicates the cost parameter supplied. The
+*usesomesillystringfor* is the salt we provided. And the final part,
+*e2uDLvp1Ii2e./U9C8sBjqp8I90dH6hi* is the generated hash.
+
+So this final hash string consists of everything that *crypt()* or
+*password_verify()* will need to test the hash. Therefore, there is no
+need to store the salt separately, it's included in the generated hash.
+And there is no need to store the algorithm separately, as it is also
+stored in the generated hash.
+
+password_verify()
+^^^^^^^^^^^^^^^^^
+
+Errors:
+
+-  E_WARNING - When CRYPT is not included in core (was disabled
+   compile-time, or is listed in disabled_functions declaration)
+-  E_WARNING - When supplied incorrect number of parameters.
+
+On error, it will return false.
+
+Normal Operation:
+
+When passed a correct password and the generated hash from
+*password_hash()*, the function will return a boolean *true*. If there
+is any failure (hash is invalid, password is incorrect, hash is
+corrupted, etc), the function will return a boolean *false*.
+
+It's important to note that this function does not take any indication
+of the algorithm or salt. That's because both are included in the
+resulting *$hash* return value from *password_hash()*.
+
+password_get_info()
+^^^^^^^^^^^^^^^^^^^
+
+Errors:
+
+-  E_WARNING - When supplied an incorrect number or type of of
+   parameters.
+
+On error, it will return NULL
+
+Normal Operation:
+
+When passed in a valid hash created by a supported password_hash
+algorithm, this function will return an array of information about that
+hash. The first associative element, "algo" is the algorithm that was
+used to generate the hash (or *0* if not found). The second element is
+"options", which includes the used options by the hashing algorithm,
+with the exception of the salt used.
+
+password_needs_rehash()
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Errors:
+
+-  E_WARNING - When supplied an incorrect number or type of of
+   parameters.
+
+On error, it will return NULL
+
+Normal Operation:
+
+The supplied hash parameter is tested to see if the algorithm and
+options supplied match. Basically, this is similar to a wrapper over
+password_get_info() to validate if the supplied hash matches the
+configuration options passed in. This can be used to determine if a hash
+needs to be re-hashed after modifying the options (such as increasing
+bcrypt cost, changing algorithms, etc).
+
+.. code:: php
+
+   <?php
+   $password = "rasmuslerdorf";
+   $hash = password_hash($password, PASSWORD_BCRYPT, array("cost" => 7, "salt" => "usesomesillystringfor")));
+   if (password_verify($password, $hash)) {
+       if (password_needs_rehash($hash, PASSWORD_BCRYPT, array('cost' => 8))) {
+           update_password_in_db($password);
+       }
+       log_user_in();
+   } else {
+       error_wrong_password();
+   }
+   ?>
+
+It could be implemented in user-land by:
+
+.. code:: php
+
+   <?php
+   function password_needs_rehash($hash, $algo, array $options = array()) {
+       $info = password_get_info($hash);
+       $return = $algo != $info['algo'];
+       // Skip salt parameter if supplied to options
+       $return |= array() != array_diff_assoc($info['options'], $options);
+       return $return;
+   }
+   ?>
+
+Examples
+~~~~~~~~
+
+Basic Usage:
+^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   $password = "foo";
+   $hash = password_hash($password, PASSWORD_DEFAULT);
+   // Store Hash
+
+   if (password_verify($password, $hash)) {
+       // Password Is Correct
+   } else {
+       // Password Is Not Correct
+   }
+   ?>
+
+Specifying Algorithm:
+^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   $password = "foo";
+   $hash = password_hash($password, PASSWORD_BCRYPT);
+   // Store Hash
+
+   if (password_verify($password, $hash)) {
+       // Password Is Correct
+   } else {
+       // Password Is Not Correct
+   }
+   ?>
+
+Specifying Cost:
+^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   $password = "foo";
+   $hash = password_hash($password, PASSWORD_BCRYPT, array("cost" => 14);
+   // Store Hash
+
+   if (password_verify($password, $hash)) {
+       // Password Is Correct
+   } else {
+       // Password Is Not Correct
+   }
+   ?>
+
+Specifying Salt Manually:
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code:: php
+
+   <?php
+   $password = "foo";
+   $salt = mcrypt_create_iv(22, MCRYPT_DEV_URANDOM); 
+   $hash = password_hash($password, PASSWORD_BCRYPT, array("cost" => 14, "salt" => $salt);
+   // Store Hash
+
+   if (password_verify($password, $hash)) {
+       // Password Is Correct
+   } else {
+       // Password Is Not Correct
+   }
+   ?>
+
+Possible Future Implementation Details
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+-  INI setting for default algo - Presently, the default algorithm is
+   identified by a constant that can be updated only with a source-code
+   change. It may be worth while implementing an INI setting to allow
+   that to be chosen by the host. As the proposed implementation has
+   only a single algorithm, this may be a choice to be made in the
+   future.
+-  Future PHP major releases should update the default bcrypt cost
+   constant to increment it, providing default protection against
+   increasing hardware performance. This will allow the default values
+   for the function password_hash() to remain strong over time as
+   hardware advances.
+
+Updating PASSWORD_DEFAULT
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+I'd propose the following policy for updating the default hashing
+algorithm in future releases of PHP.
+
+-  Any new algorithm must be in core for at least 1 full release of PHP
+   prior to becoming default. So if scrypt is added in 5.5.5, it
+   wouldn't be eligible for default until 5.7 (since 5.6 would be the
+   full release). But if jcrypt (making it up) was added in 5.6.0, it
+   would also be eligible for default at 5.7.0.
+-  The default should only change on a full release (5.6.0, 6.0.0, etc)
+   and not on a revision release. The only exception to this is in an
+   emergency when a critical security flaw is found in the current
+   default.
+-  For a normal (non-emergency) change in default, an RFC shall be
+   issued for the update of the default algorithm, following normal RFC
+   rules.
+
+Removed Concepts
+~~~~~~~~~~~~~~~~
+
+-  An INI setting for the default bcrypt cost. This has been removed due
+   to popular opinion. The default bcrypt cost is now determined solely
+   by a C constant defined in ext/standard/php_password.h.
+
+Patch
+~~~~~
+
+Currently, the proposed patch is not yet complete. The basic
+functionality is there, but it needs some refactoring and testing prior
+to official proposal. The Work-In-Progress can be seen on the
+*hash_password* branch of `ircmaxell's
+fork <https://github.com/ircmaxell/php-src/blob/hash_password/>`__.
+
+The specific implementation is at
+`password.c <https://github.com/ircmaxell/php-src/blob/hash_password/ext/standard/password.c>`__
+
+PHP Implementation
+~~~~~~~~~~~~~~~~~~
+
+Additionally, a compatibility version in PHP is maintained at
+`Github <https://github.com/ircmaxell/password_compat>`__. This can be
+used in PHP versions 5.3 and 5.4 and for testing.
+
+Future Concerns
+---------------
+
+With the nature of cryptography, future compatibility is a significant
+concern. In order to be safe, this functionality would need to be able
+to adapt to changing requirements in the future. There are a few
+provisions that enable future compatibility in future versions of PHP:
+
+#. New algorithms can be added to the API. It's already designed to be
+   extended with new algorithms. The existance of the \`$algo\` and
+   \`$options\` parameters to \`password_hash()\` are designed to allow
+   arbitrary algorithms to be implemented in the future.
+#. The default algorithm is specified by a constant *PASSWORD_DEFAULT*.
+   As new and stronger algorithms are added, this constant can be
+   updated to point to the strongest at the time.
+#. The default cost parameter to BCRYPT is specified in the php.ini
+   file. This allows individual sites to tailor the cost of bcrypt for
+   their needs. Additionally, the default value (if not set in PHP.ini)
+   can be updated in the source from release to release to compensate
+   for faster hardware.
+#. If an implemented algorithm is ever grossly compromised (to the point
+   of uselessness), password_hash() can be changed to either reject
+   creation of new hashes for that algorithm, or raise warnings to
+   notify users about said problems... Additionally,
+   password_needs_rehash() can be changed to always return true for the
+   compromised algorithm.
+
+Discussion Points
+-----------------
+
+password_hash() Algo Argument as optional
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There has been some discussion around the second argument of
+password_hash() (The algorithm argument) and whether it should have a
+default value or not.
+
+Should Have A Default
+^^^^^^^^^^^^^^^^^^^^^
+
+The "should have a default setting" argument is that it makes the API
+easier to use. All you would need to do is *password_hash($password)* to
+safely hash a password. The default would be updated according to the
+"Updating PASSWORD_DEFAULT" guidelines above. The API would become
+*string password_hash(string $password, int $algo = PASSWORD_DEFAULT,
+array $options = array())*
+
+Should Not Have A Default
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+By not having a default value (and hence being a mandatory argument), it
+forces implementing developers to understand that the default argument
+can change over time. This has a few benefits in that developers need to
+recognize that storage requirements may change over time, that
+portability may be affected, etc.
+
+Current Position
+^^^^^^^^^^^^^^^^
+
+The current position of this RFC sides with the "should not have a
+default" argument. Therefore, the function has a required second
+argument.
+
+password_make_salt() Is Not Needed
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There has also been discussion around whether or not
+*password_make_salt()* should be exposed to user-land.
+
+It should not be exposed
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+The argument that it should not be exposed is that it's not really doing
+anything generic. It produces a random salt of the specified length.
+This can already be accomplished in user-land via combinations of
+functions such as *mcrypt_create_iv()* and *base64_encode()*. Therefore,
+its existence is not really necessary.
+
+It should be exposed
+^^^^^^^^^^^^^^^^^^^^
+
+The argument that it should be exposed is that it needs to be
+implemented in C because it is needed for password_hash(), so it should
+be exposed so that it can be used for other things in userland. One of
+these other uses is that the format for the string (a-zA-Z0-9./) is
+already correct for *crypt()*. Therefore, a single function call can
+create salts for the other crypt() algorithms. Whereas to safely create
+them now requires a combination of at least 3 function calls.
+
+.. _current-position-1:
+
+Current Position
+^^^^^^^^^^^^^^^^
+
+The current position of this RFC sides with the "should not be exposed"
+argument. The function has been removed from the proposal.
+
+password_needs_rehash() is not needed
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The function *password_needs_rehash()* can be implemented in user-land
+with the information returned by *password_get_info()*.
+
+Not Needed
+^^^^^^^^^^
+
+Since the function can be implemented in user-land, there is no need to
+implement it in core.
+
+Needed
+^^^^^^
+
+There are a few reasons to include it in core. It makes it significantly
+easier to implement as otherwise implementation specific changes would
+need to be made over time to ensure that new algorithms are correctly
+identified (with their options). It also provides the ability to always
+reject hashes made using a grossly compromised algorithm (letting
+password_verify work, but rejecting password_hash attempts)...
+
+.. _current-position-2:
+
+Current Position
+^^^^^^^^^^^^^^^^
+
+The current position of this RFC is that the function is needed, and is
+implemented.
+
+The Existence Of PASSWORD_DEFAULT
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There's been some discussion around the existence of the
+PASSWORD_DEFAULT constant.
+
+Should Have It
+^^^^^^^^^^^^^^
+
+The argument for the constant is that it provides the ability for code
+to take advantage of the most secure algorithm for the current release
+of PHP. This would change over time, but over a long term period of time
+(would only change every major release). Therefore, it would make it
+easier to implement code that would stay secure over a long period of
+time.
+
+Should Not Have It
+^^^^^^^^^^^^^^^^^^
+
+By not having the constant, developers would be forced to choose a
+specific algorithm at author time. This would allow them to understand
+the different algorithms available and make an intelligent choice.
+Additionally, it would prevent migration issues that could be caused by
+a changing algorithm (storage requirements, etc).
+
+.. _current-position-3:
+
+Current Position
+^^^^^^^^^^^^^^^^
+
+The current position of this RFC is that the benefits of the constant
+relating to long term security outweigh the bad parts for the average
+developer. Therefore, the constant exists.
+
+password_verify() Returns FALSE On Error
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There's been discussion about the return value on parameter parse
+errors.
+
+NULL
+^^^^
+
+The argument that password_verify should return *NULL* on a parameter
+parse error (invalid types, invalid numbers of types, etc) because
+that's the standard way PHP internal functions deal with parameter
+errors. For consistency it should also return *NULL*.
+
+FALSE
+^^^^^
+
+The argument is that password_verify should always return a strict
+boolean type. That way, a check of *if (false === password_verify(..))*
+would not accidentally return a false condition when the password was
+not verified. As such, it would become possible for password_verify() to
+return falsy, but non-false results when it did not successfully verify
+the password hash.
+
+.. _current-position-4:
+
+Current Position
+^^^^^^^^^^^^^^^^
+
+The current position is that the security context of the function
+justifies the break of consistency with other core functions. Therefore
+password_verify() currently only ever returns a boolean (never NULL).
+
+The API Does Not Support PEPPER
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A Pepper is similar to a salt, except that it's a unique site-wide value
+which is stored outside of the database.
+
+Should Have Pepper
+^^^^^^^^^^^^^^^^^^
+
+The "should have" pepper argument is that it provides an added level of
+defense in case a database with salts and hashes is leaked.
+
+Should Not Have Pepper
+^^^^^^^^^^^^^^^^^^^^^^
+
+There are a few reasons we should not use peppers:
+
+-  No standard cryptographic algorithm or function accepts a unique
+   "pepper" argument.
+-  There are no peer-reviewed standards or research papers that indicate
+   that using a pepper adds any significant value.
+-  Since the security value of the "pepper" is in its secrecy, it
+   becomes a cryptographic secret. PHP variables are not conducive to
+   holding secrets (in that they cannot be cleared or overwritten
+   directly).
+
+Additionally, the same benefit can be had by encrypting the hash using
+the secret "pepper" value prior to storage. In practice this will be the
+better alternative (although for most use-cases not necessary) because
+it uses standard algorithms with correct inputs for them.
+
+.. _current-position-5:
+
+Current Position
+^^^^^^^^^^^^^^^^
+
+This RFC takes the position that the core API should not directly use a
+pepper.
+
+References
+----------
+
+Recent Attacks
+~~~~~~~~~~~~~~
+
+-  `LinkedIn <http://mashable.com/2012/06/06/6-5-million-linkedin-passwords/>`__
+-  `LastFM <http://www.pcworld.com/article/257178/music_site_lastfm_joins_the_passwordleak_parade.html>`__
+-  `Hotmail <http://lifehacker.com/5374745/10000-hotmail-passwords-leaked-online>`__
+-  `Gawker
+   Media <http://lifehacker.com/5712785/faq-compromised-commenting-accounts-on-gawker-media>`__
+
+Hashing In General
+~~~~~~~~~~~~~~~~~~
+
+Blog Posts:
+
+-  `The Rainbow Table Is
+   Dead <http://blog.ircmaxell.com/2011/08/rainbow-table-is-dead.html>`__
+-  `GPU Acclerated
+   Hashing <http://blog.ircmaxell.com/2012/06/reply-use-cuda-accelerated-pbkdf2.html>`__
+-  `Speed
+   Hashing <http://www.codinghorror.com/blog/2012/04/speed-hashing.html>`__
+-  `How to safely store a
+   password <http://codahale.com/how-to-safely-store-a-password/>`__
+-  `Use BCrypt
+   Fool! <http://yorickpeterse.com/articles/use-bcrypt-fool>`__
+
+Stack Overflow Questions/Answers:
+
+-  `Fundamental Difference Between Hashing And
+   Encryption <http://stackoverflow.com/questions/4948322/fundamental-difference-between-hashing-and-encryption-algorithms/4948393#4948393>`__
+-  `Many Hash Iterations: Append Salt Every
+   Time? <http://stackoverflow.com/questions/3559437/many-hash-iterations-append-salt-every-time/3559497#3559497>`__
+-  `OpenSSL Digest vs Hash vs Hash_HMAC - Difference between salt -
+   hmac <http://stackoverflow.com/a/11195855/338665>`__
+-  `Secure Hash and Salt for PHP
+   Passwords <http://stackoverflow.com/questions/401656/secure-hash-and-salt-for-php-passwords>`__
+-  `Why do salts make dictionary attacks
+   impossible <http://stackoverflow.com/questions/3566504/why-do-salts-make-dictionary-attacks-impossible>`__
+-  `SHA512 vs Blowfish and
+   BCrypt <http://stackoverflow.com/q/1561174/338665>`__
+
+Timing Attacks
+~~~~~~~~~~~~~~
+
+-  `Exploiting Remote Timing
+   Attacks <http://rdist.root.org/2010/07/19/exploiting-remote-timing-attacks/>`__
+-  `Timing Independent Array
+   Comparison <http://rdist.root.org/2010/01/07/timing-independent-array-comparison/>`__
+-  `SSL Timing Attacks
+   (PDF) <http://crypto.stanford.edu/~dabo/papers/ssl-timing.pdf>`__
+-  `Nanosecond Scale Remote Timing Attacks on PHP
+   Applications <http://blog.astrumfutura.com/2010/10/nanosecond-scale-remote-timing-attacks-on-php-applications-time-to-take-them-seriously/>`__
+
+Strong Algorithms
+~~~~~~~~~~~~~~~~~
+
+-  `BCrypt <http://en.wikipedia.org/wiki/Bcrypt>`__
+-  `Crypt_BCrypt <http://www.openwall.com/crypt/>`__
+-  `PBKDF2 <http://en.wikipedia.org/wiki/PBKDF2>`__
+-  `SCrypt <http://www.tarsnap.com/scrypt.html>`__
+
+Vote
+----
+
+Question: Should the simplified password hashing API indicated here be included in master?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Changelog
+---------
+
+-  0.1 - Initial Draft
+-  0.2 - Add ini directive for bcrypt cost
+-  0.3 - Add section on future concerns
+-  0.4 - Add behavioral semantics for each function
+-  0.5 - Remove ini directive for bcrypt cost
+-  0.6 - Make *$algo* parameter to *password_hash()* no longer optional
+-  0.7 - Implement password_get_info() and password_needs_rehash()
+-  0.8 - Add discussion points section, change password_make_salt to
+   take flag for second parameter
+-  1.0 - Proposed
+-  1.1 - Add pepper discussion
+-  1.2 - Removed *password_make_salt()* function from proposal
+-  1.3 - Open Voting
+-  1.4 - Close Voting - Moving To Accepted
+-  1.5 - Implemented!
+-  1.5.1 - Fine tune wording of "Cryptographically Secure Salt
+   Requirement"
+
+Additional Metadata
+-------------------
+
+:Original Authors: Anthony Ferrara ircmaxell@php.net
+:Slug: password_hash
+:Wiki URL: https://wiki.php.net/rfc/password_hash

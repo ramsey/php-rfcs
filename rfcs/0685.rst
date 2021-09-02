@@ -1,0 +1,261 @@
+Object-based Token_get_all() Alternative
+========================================
+
+:PHP-RFC: 0685
+:Title: Object-based Token_get_all() Alternative
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2020-02-13
+:PHP-Version: 8.0
+:Version: 1.0
+
+Introduction
+------------
+
+The ``token_get_all()`` function currently returns tokens either as a
+single-character string, or an array with a token ID, token text and
+line number. This RFC proposes to add a token_get_all() alternative
+which returns an array of objects instead. This reduces memory usage and
+makes code operating on tokens more readable.
+
+   **Note:** PhpToken::getAll() has been renamed to PhpToken::tokenize()
+   prior to the PHP 8.0 release. The RFC text still refers to
+   PhpToken::getAll().
+
+Proposal
+--------
+
+A new ``PhpToken`` class is introduced with the following properties and
+methods:
+
+.. code:: php
+
+   class PhpToken {
+       /** One of the T_* constants, or an integer < 256 representing a single-char token. */
+       public int $id;
+       /** The textual content of the token. */
+       public string $text;
+       /** The starting line number (1-based) of the token. */
+       public int $line;
+       /** The starting position (0-based) in the tokenized string. */
+       public int $pos;
+       
+       /**
+        * Same as token_get_all(), but returning array of PhpToken.
+        * @return static[]
+        */
+       public static function getAll(string $code, int $flags = 0): array;
+       
+       final public function __construct(int $id, string $text, int $line = -1, int $pos = -1);
+
+       /** Get the name of the token. */
+       public function getTokenName(): ?string;
+       
+       /**
+        * Whether the token has the given ID, the given text,
+        * or has an ID/text part of the given array.
+        * 
+        * @param int|string|array $kind
+        */
+       public function is($kind): bool;
+
+       /** Whether this token would be ignored by the PHP parser. */
+       public function isIgnorable(): bool;
+   }
+
+The ``PhpToken::getAll()`` method is the replacement for
+``token_get_all()``, which returns an array of ``PhpToken`` objects
+instead of a mix of strings and arrays.
+
+It should be emphasized that **all** tokens are returned as objects,
+including single-char tokens. While this uses more memory than returning
+them as strings, experience has shown that the current string/array mix
+is very inconvenient to work with.
+
+Returning an array of objects has the following advantages over the
+current approach:
+
+-  The representation of tokens is uniform, it is not necessary to
+   continuously check whether an array or string token is being used.
+-  The using code is cleaner, because ``$token->text`` is easier to
+   understand than ``$token[1]`` and friends.
+-  The token stores the position in the file, so that consumers don't
+   have to compute and store it separately.
+
+Finally, the tokens take up significantly less memory, and are faster to
+construct as well. On a large file:
+
+::
+
+   Default:
+       Memory Usage: 14.0MiB
+       Time: 0.43s (for 100 tokenizations)
+   TOKEN_AS_OBJECT:
+       Memory Usage: 8.0MiB
+       Time: 0.32s (for 100 tokenizations)
+
+Extensibility
+~~~~~~~~~~~~~
+
+The ``PhpToken::getAll()`` method returns ``static[]``, as such it is
+possible to seamlessly extend the class:
+
+.. code:: php
+
+   class MyPhpToken extends PhpToken {
+       public function getLowerText() {
+           return strtolower($this->text);
+       }
+   }
+
+   $tokens = MyPhpToken::getAll($code);
+   var_dump($tokens[0] instanceof MyPhpToken); // true
+   $tokens[0]->getLowerText(); // works
+
+To guarantee a well-defined construction behavior, the ``PhpToken``
+constructor is final and cannot be overridden by child classes. This
+matches the extension approach of the ``SimpleXMLElement`` class.
+
+Additional methods
+~~~~~~~~~~~~~~~~~~
+
+The ``PhpToken`` class defines a few additional methods, which are
+defined in terms of the reference-implementations given below.
+
+.. code:: php
+
+   public function getTokenName(): ?string {
+       if ($this->id < 256) {
+           return chr($this->id);
+       } elseif ('UNKNOWN' !== $name = token_name($this->id)) {
+           return $name;
+       } else {
+           return null;
+       }
+   }
+
+``getTokenName()`` is mainly useful for debugging purposes. For
+single-char tokens with IDs below 256, it returns the extended ASCII
+character corresponding to the ID. For known tokens, it returns the same
+result as ``token_name()``. For unknown tokens, it returns null.
+
+It should be noted that tokens that are not known to PHP are commonly
+used, for example when emulating lexer behavior from future PHP
+versions. In this case custom token IDs are used, so they should be
+handled gracefully.
+
+.. code:: php
+
+   public function is($kind): bool {
+       if (is_array($kind)) {
+           foreach ($kind as $singleKind) {
+               if (is_string($singleKind)) {
+                   if ($this->text === $singleKind) {
+                       return true;
+                   }
+               } else if (is_int($singleKind)) {
+                   if ($this->id === $singleKind) {
+                       return true;
+                   }
+               } else {
+                   throw new TypeError("Kind array must have elements of type int or string");
+               }
+           }
+           return false;
+       } else if (is_string($kind)) {
+           return $this->text === $kind;
+       } else if (is_int($kind)) {
+           return $this->id === $kind,
+       } else {
+           throw new TypeError("Kind must be of type int, string or array");
+       }
+   }
+
+The ``is()`` method allows checking for certain tokens, while
+abstracting over whether it is a single-char token ``$token->is(';')``,
+a multi-char token ``$token->is(T_FUNCTION)``, or whether multiple
+tokens are allowed ``$token->is([T_CLASS, T_TRAIT, T_INTERFACE])``.
+
+While non-generic code can easily check the appropriate property, such
+as ``$token->text == ';'`` or ``$token->id == T_FUNCTION``, token stream
+implementations commonly need to be generic over different token kinds
+and need to support specification of multiple token kinds. For example:
+
+.. code:: php
+
+   // An example, NOT part of the PhpToken interface.
+   public function findRight($pos, $findTokenKind) {
+       $tokens = $this->tokens;
+       for ($count = \count($tokens); $pos < $count; $pos++) {
+           if ($tokens[$pos]->is($findTokenKind)) {
+               return $pos;
+           }
+       }
+       return -1;
+   }
+
+These kinds of search/skip/check APIs benefit from having an efficient
+native implementation of ``is()``.
+
+.. code:: php
+
+   public function isIgnorable(): bool {
+       return $this->is([
+           T_WHITESPACE,
+           T_COMMENT,
+           T_DOC_COMMENT,
+           T_OPEN_TAG,
+       ]);
+   }
+
+As a special case, it is very common that whitespace and comments need
+to be skipped during token processing. The ``isIgnorable()`` method
+determines whether a token is ignored by the PHP parser.
+
+Rejected Features
+-----------------
+
+Lazy token stream
+~~~~~~~~~~~~~~~~~
+
+``PhpToken::getAll()`` returns an array of tokens. It has been suggested
+that it could return an iterator instead. This would reduce memory usage
+if it is sufficient to inspect tokens one-by-one for a given use-case.
+
+This is not supported by the current proposal, because the current PHP
+lexer doesn't support this in an efficient manner. A full lexer state
+backup and restore would have to be performed for each token. Even if
+support for an iterator is added in the future, the ability to directly
+create an array should still be retained, as this will always be more
+efficient than going through an iterator (for the use-cases that do need
+a full token array).
+
+Backward Incompatible Changes
+-----------------------------
+
+There are no backwards compatibility breaks, apart from the new class
+name.
+
+Vote
+----
+
+Voting opened 2020-03-06 and closes 2020-03-20.
+
+Question: Add object-based token_get_all() alternative?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5176
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.0
+:Slug: token_as_object
+:Wiki URL: https://wiki.php.net/rfc/token_as_object

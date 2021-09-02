@@ -1,0 +1,269 @@
+Ext/intl::UConverter
+====================
+
+:PHP-RFC: 0181
+:Title: Ext/intl::UConverter
+:Author: Sara Golemon <pollita@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2012-10-29
+:PHP-Version: 5.5
+:Version: 1.0
+
+Exposes ICU's UConverter functions by adding a class to the ext/intl
+extension
+
+Vote
+----
+
+Question: Should the current UConverter implementation be merged
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Introduction
+------------
+
+The ext/intl extension only exposes some of ICU's powerful i18n
+functionality. This diff covers the the ucnv_\* family of function in
+ICU4C, exposing both a simple API: UConverter::transcode(), and a more
+robust class with greater flexibility.
+
+Specification of the Class
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+::
+
+   class UConverter {
+     /* UConverterCallbackReason */
+     const REASON_UNASSIGNED;
+     const REASON_ILLEGAL;
+     const REASON_IRREGULAR;
+     const REASON_RESET;
+     const REASON_CLOSE;
+     const REASON_CLONE;
+     
+     /* UConverterType */
+     const UNSUPPORTED_CONVERTER);
+     const SBCS;
+     const DBCS;
+     const MBCS;
+     const LATIN_1;
+     const UTF8;
+     const UTF16_BigEndian;
+     const UTF16_LittleEndian;
+     const UTF32_BigEndian;
+     const UTF32_LittleEndian;
+     const EBCDIC_STATEFUL;
+     const ISO_2022;
+     const LMBCS_1;
+     const LMBCS_2;
+     const LMBCS_3;
+     const LMBCS_4;
+     const LMBCS_5;
+     const LMBCS_6;
+     const LMBCS_8;
+     const LMBCS_11;
+     const LMBCS_16;
+     const LMBCS_17;
+     const LMBCS_18;
+     const LMBCS_19;
+     const LMBCS_LAST;
+     const HZ;
+     const SCSU;
+     const ISCII;
+     const US_ASCII;
+     const UTF7;
+     const BOCU1;
+     const UTF16;
+     const UTF32;
+     const CESU8;
+     const IMAP_MAILBOX;
+     
+     __construct(string $toEncoding, string $fromEncoding);
+     
+     /* Setting/Checking current encoders */
+     string getSourceEncoding();
+     void setSourceEncoding(string $encoding);
+     string getDestinationEncoding();
+     void setDestinationEncoding(string $encoding);
+     
+     /* Introspection for algorithmic conversions */
+     UConverterType getSourceType();
+     UConverterType getDestinationType();
+     
+     /* Basic error handling */
+     string getSubstChars();
+     void setSubstChars(string $chars);
+     
+     /* Default callback functions */
+     mixed toUCallback  (UConverterCallbackReason $reason, string $source, string $codeUnits, UErrorCode &$error);
+     mixed fromUCallback(UConverterCallbackReason $reason, Array  $source, long   $codePoint, UErrorCode &$error);
+     
+     /* Primary conversion workhorses */
+     string convert(string $str[, bool $reserve = false]);
+     static string transcode(string $str, string $toEncoding, string $fromEncoding[, Array $options]);
+     
+     /* Errors */
+     int getErrorCode();
+     string getErrorMessage();
+     
+     /* Ennumeration and lookup */
+     static string reasonText(UConverterCallbackReason $reason);
+     static Array getAvailable();
+     static Array getAliases(string $encoding);
+     static Array getStandards();
+   }
+
+Simple uses
+-----------
+
+The usage and purpose of UConverter::transcode() is identical to it's
+mbstring counterpart mb_convert_encoding() with the exception of an
+added "options" parameter.
+
+::
+
+   $utf8string = UConverter::transcode($latin1string, 'utf-8', 'latin1');
+
+By default, ICU will substitute a ^Z character (U+001A) in place of any
+code point which cannot be converted from the original encoding to
+Unicode, or from Unicode to the target encoding. Note that the former
+condition is extremely rare compared to the latter.
+
+::
+
+   $asciiString = UConverter::transcode("Espa\xD1ol", 'ascii', 'latin1');
+   // Yields Espa^Zol
+
+To override the default substitution, the optional fourth parameter may
+be set to an array of options.
+
+::
+
+   $opts = array('from_subst' => '?', 'to_subst' => '?');
+   $asciiString = UConverter::transcode("Espa\xD1ol", 'ascii', 'latin1', $opts);
+   // Yields Espa?ol
+
+Note that substitution characters must represent a single codepoint in
+the encoding which is being converted from or to.
+
+Object Oriented Use
+-------------------
+
+The OOP use-case allows the caller to reuse the same converter across
+multiple calls:
+
+::
+
+   $c = new UConverter('utf-8', 'latin1');
+   echo $c->convert("123 PHPstra\xDFa\n");
+   echo $c->convert("M\xFCnchen DE\n");
+
+Similar to the functional interface above, basic error handling may be
+employed using substitution characters:
+
+::
+
+   $c = new UConverter('ascii', 'latin1');
+   $c->setSubstChars('?');
+   echo $c->convert("123 PHPstra\xDFa\n");
+   echo $c->convert("M\xFCnchen DE\n");
+
+The converter may also run the conversion backwards with an optional
+second parameter to UConverter::convert:
+
+::
+
+   $c = new UConverter('utf-8', 'latin1');
+   echo $c->convert("123 PHPstra\xC3\x9Fa\n", true);
+   echo $c->convert("M\xC3\xBCnchen DE\n", true);
+
+Advanced Use
+------------
+
+The UConverter class actually does two conversion cycles. One from the
+source encoding to its internal UChar (Unicode) representation, then
+again from that to the destination encoding. During each cycle, errors
+are handled by the built-in toUCallback() and fromUCallback() methods
+which may be overridden in a child class:
+
+::
+
+   class MyConverter extends UConverter {
+     public function fromUCallback($reason, $source, $codepoint, &$error) {
+       if (($reason == UConverter::REASON_UNASSIGNED) && ($codepoint == 0x00F1)) {
+         // Basic transliteration 'ñ' to 'n'
+         $error = U_ZERO_ERROR;
+         return 'n';
+       }
+     }
+   }
+   $c = new MyConverter('ascii', 'latin1');
+   echo "Espa\xF1ol";
+   // Yields "Espanol"
+
+$reason will be one of the UConverterCallbackReason constants defined in
+the class definition above. UCNV_RESET, UCNV_CLOSE, and UCNV_CLONE are
+informational events and do not require any direct action. The remaining
+events describe some form of exception case which must be handled. See
+Return Values below.
+
+$source is the context from the original or intermediate string from the
+codeunits or codepoint where the exception occured onward. For
+toUCallback(), this will be a string of codeunits, for fromUCallback(),
+this will be an array of codepoints (integers).
+
+$codeUnits is one (or more) code unit from the original string in its
+source encoding which was unable to be translated to Unicode.
+
+$codepoint is the Unicode character from the intermediate string which
+could not be converter to the output encoding.
+
+$error is a by-reference value which will contain the specific ICU error
+encountered on input, and should be modified to U_ZERO_ERROR (or some
+appropriate value) before returning the replacement codepoint/codeunits.
+
+Return values for this method may be: NULL, Long, String, or Array. A
+value of NULL indicates that the codepoint/codeunit should be ignored
+and left out of the destination/intermediate string. A Long return value
+will be treated as either a Unicode codepoint for toUCallback(), or a
+single-byte character in the target encoding for fromUCallback(). A
+String return value will be treated as one (or more) UTF8 encoded
+codepoints for toUCallback(), or a multi-byte character (or characters)
+in the target encoding for fromUCallback().
+
+Error Handling
+--------------
+
+Follows ext/intl convention of storing for later inspection by
+getErrorCode()/getErrorMessage(), optionally thrown as exceptions (based
+on INI configuration).
+
+Ennumerators
+------------
+
+A few enumeration methods are exposed as convenience. Hopefully their
+usage is obvious enough that they don't bear going into beyond the class
+definition above.
+
+References
+----------
+
+ICU4C ucnv.h documentation:
+http://icu-project.org/apiref/icu4c/ucnv_8h.html
+
+Path: An implementation of the above can be found at
+https://github.com/sgolemon/php-src/compare/master...uconverter
+
+Additional Metadata
+-------------------
+
+:Original Authors: Sara Golemon pollita@php.net
+:Original Status: Implemented for 5.5 http://git.php.net/?p=php-src.git;a=commit;h=5ac35770f45e295cab1ed3c166131d11c27655f6
+:Slug: uconverter
+:Wiki URL: https://wiki.php.net/rfc/uconverter

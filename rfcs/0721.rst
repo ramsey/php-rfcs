@@ -1,0 +1,763 @@
+Partial Function Application
+============================
+
+:PHP-RFC: 0721
+:Title: Partial Function Application
+:Author: Paul Crovella, Levi Morrison, Joe Watkins, Larry Garfield
+:Status: Declined
+:Type: Unknown
+:Created: 2020-04-22
+:Version: 2
+
+Introduction
+------------
+
+This proposal defines a syntax for partial function application in PHP.
+It has been designed to provide a maximum of functionality with a
+minimum of new syntax while avoiding, to the extent possible, confusing
+and non-obvious behavior.
+
+Partial application has two main, complementary benefits:
+
+#. It allows developers to "fill in" a function call over time as its
+   arguments become available, in any order.
+#. It allows developers to reference a function directly, by name, with
+   or without providing some of its arguments in the process.
+
+A simple example of where that is beneficial would be in array
+application functions, for example:
+
+.. code:: php
+
+   $result = array_map(str_replace('hello', 'hi', ?), $arr);
+
+In practice, partial application behaves very similar to a short lambda
+that simply returns another function, passing along additional
+variables. The implementation is subtly different, and more efficient,
+but is logically equivalent. (See the examples section below.)
+
+Note that for the purposes of this RFC, "function" refers to any
+callable. Named function, named method, named static method, anonymous
+function, short-anonymous function, etc. Partial application applies to
+all of them.
+
+Background
+----------
+
+In order to better understand the terminology in this document and the
+feature being proposed here we need to lay some groundwork. We intend to
+use the word "application" in a very specific context for PHP.
+
+Developers intuitively think of a function call as an atomic action -
+either a call has been performed or it hasn't. However, calling a
+function is actually a multi-step process. The part of the process we
+are interested in is referred to as application.
+
+The following is what we normally refer to as a call site, or call:
+
+.. code:: php
+
+   foo(1, 2, 3)
+
+-  When the engine encounters ``foo``, a call frame is initialized and
+   pushed onto the stack.
+-  At the opening ``(`` the engine begins *applying* arguments to the
+   call frame.
+-  At the closing ``)``, application is complete and the call is
+   performed.
+
+"Application" then, in simple terms, refers to what is happening between
+the opening and closing brace at a call site.
+
+Partial Function Application
+----------------------------
+
+In partial application, one or more of the arguments at the call site
+are replaced by place holders; The engine does the normal work of
+application, but at the closing ``)`` application is only partially
+complete, and so no call is performed. For example:
+
+.. code:: php
+
+   foo(1, ?, 3);
+
+Instead the engine will return a Closure which stores the function that
+was invoked (in this case, ``foo``) at the call site along with scope
+information (ie. ``$this``), and the arguments exactly as applied.
+Execution then continues normally, freeing the partially complete frame
+initially pushed onto the stack.
+
+The programmer is able to fill in the place holders by further (partial,
+or complete) application of the Closure: Upon further application, the
+Closure will merge all arguments as applied up to this point with the
+arguments from the current application. If there are still placeholders
+to fill, it will return a new Closure with the new partially-completed
+argument list. If not, the original function will be invoked and its
+result returned.
+
+The Closure also includes a function stub with a signature derived from
+the original function's signature, excluding the parameters that were
+already provided. That means to the rest of the engine, and in
+particular the reflection API, the Closure has a signature compatible
+with further application. In particular, that means parameter names,
+type declarations, and reference-or-not are carried through to the
+Closure.
+
+Placeholder Semantics
+---------------------
+
+This RFC introduces two place holder symbols:
+
+-  The argument place holder ``?`` means that exactly one argument is
+   expected at this position.
+-  The variadic place holder ``...`` means that zero or more arguments
+   may be supplied at this position.
+
+The following rules apply to partial application:
+
+-  ``...`` may only occur zero or one time
+-  ``...`` may only be followed by named arguments
+-  named arguments must come after all place holders
+-  named placeholders are not supported
+
+Examples
+--------
+
+.. code:: php
+
+   // Given:
+   function stuff(int $i, string $s, float $f, Point $p, int $m = 0) {}
+
+   // Each of these blocks contain logically equivalent statements.
+   // The result if each is the creation of a callable named $c.
+
+   // Ex 1
+   $c = stuff(?, ?, ?, ?, ?);
+   $c = fn(int $i, string $s, float $f, Point $p, int $m) 
+     => stuff($i, $s, $f, $p, $m);
+
+   // Ex 2
+   // This differs from Ex 1 because the ... 
+   // retains the optionalness of $m.
+   $c = stuff(?, ?, ...);
+   $c = stuff(...);
+   $c = fn(int $i, string $s, float $f, Point $p, int $m = 0)
+     => stuff($i, $s, $f, $p, $m);
+
+   // Ex 3
+   $c = stuff(1, 'hi', ?, ?, ?);
+   $c = fn(float $f, Point $p, int $m) => stuff(1, 'hi', $f, $p, $m);
+
+   // Ex 4
+   $c = stuff(1, 'hi', ...);
+   $c = fn(float $f, Point $p, int $m = 0) => stuff(1, 'hi', $f, $p, $m);
+
+   // Ex 5
+   $c = stuff(1, ?, 3.5, ?, ?);
+   $c = fn(string $s, Point $p, int $m) => stuff(1, $s, 3.5, $p, $m);
+
+   // Ex 6
+   $c = stuff(1, ?, 3.5, ...);
+   $c = fn(string $s, Point $p, int $m = 0) => stuff(1, $s, 3.5, $p, $m);
+
+   // Ex 7
+   $c = stuff(?, ?, ?, ?, 5);
+   $c = fn(int $i, string $s, float $f, Point $p) 
+     => stuff($i, $s, $f, $p, 5);
+
+   // Ex 8
+   // Not accounting for an optional argument
+   // means it will always get its default value.
+   $c = stuff(?, ?, ?, ?); 
+   $c = fn(int $i, string $s, float $f, Point $p) 
+     => stuff($i, $s, $f, $p);
+
+   // Ex 9
+   $c = stuff(?, ?, f: 3.5, p: $point);
+   $c = stuff(?, ?, p: $point, f: 3.5);
+   $c = fn(int $i, string $s) => stuff($i, $s, 3.5, $point);
+
+   // Ex 10
+   $c = stuff(?, ?, ..., f: 3.5, p: $point);
+   $c = fn(int $i, string $s, int $m = 0) => stuff($i, $s, 3.5, $point, $m);
+
+   // Ex 11
+   // Prefill all params, making a "delayed call"
+   $c = stuff(1, 'hi', 3.4, $point, 5, ...);
+   $c = fn(...$args) => stuff(1, 'hi', 3.4, $point, 5, ...$args);
+
+   // Ex 12
+   $c = stuff(?, ?, ?, ..., p: $point);
+   $c = fn(int $i, string $s, float $f, ...$args) 
+     => stuff($i, $s, $f, $point, ...$args);
+
+
+   // For a function with a variadic argument, the 
+   // variadic-ness is not propagated to the partial directly.
+   // It may, however, be implicitly handled by ''...''
+
+   function things(int $i, float $f, Point ...$points) { ... }
+
+   // Ex 13
+   $c = things(...);
+   $c = fn(int $i, float $f, ...$args) => things(...[$i, $f, ...$args]);
+
+   // Ex 14
+   $c = things(1, 3.14, ...);
+   $c = fn(...$args) => things(...[1, 3.14, ...$args]);
+
+   // Ex 15
+   // In this version, the partial requires precisely four arguments,
+   // the last two of which will get received 
+   // by things() in the variadic parameter.
+   $c = things(?, ?, ?, ?);
+   $c = fn(int $i, float $f, Point $p1, Point $p2) => things($i, $f, $p1, $p2);
+
+
+   function four(int $a, int $b, int $c, int $d) {
+       print "$a, $b, $c, $d\n";
+   }
+
+   // Ex 16
+   // These all print "1, 2, 3, 4"
+   (four(...))(1, 2, 3, 4);
+   (four(1, 2, ...))(3, 4);
+   (four(1, 2, 3, ?))(4);
+   (four(1, ?, ?, 4))(2,3);
+   (four(1, 2, 3, 4, ...))();
+   (four(..., d: 4, a: 1))(2, 3);
+
+   // Ex 17
+   function zero() { print "hello\n"; }
+   zero(...)(); // prints "hello\n"
+
+Error examples
+--------------
+
+The following examples are all errors, for the reasons given.
+
+.. code:: php
+
+   // Given
+   function stuff(int $i, string $s, float $f, Point $p, int $m = 0) {}
+
+   // throws Error(not enough arguments and or place holders for application of stuff)
+   $c = stuff(?);
+
+   // throws Error(too many arguments and or place holders for application of stuff)
+   $c = stuff(?, ?, ?, ?, ?, ?);
+
+   // throws Error(Named parameter $i overwrites previous place holder)
+   $c = stuff(?, ?, 3.5, $point, i: 5);
+
+   // Fatal error: Named arguments must come after all place holders
+   $c = stuff(i:1, ?, ?, ?, ?);
+
+   // Cannot use placeholder on named arguments.
+   // Parse error: syntax error, unexpected token "?"
+   $c = stuff(1, ?, 3.5, p: ?);
+
+   // Fatal error: Named arguments must come after all place holders
+   $c = stuff(?, ?, ?, p: $point, ?);
+
+Variables/References
+--------------------
+
+Variable arguments are ``use``\ d, and done so by reference if specified
+in the called function definition.
+
+.. code:: php
+
+   function f($value, &$ref) {}
+    
+   $array = ['arg' => 0];
+
+   $f = f(?, $array['arg']);
+
+is equivalent to
+
+.. code:: php
+
+   $ref = &$array['arg'];
+   $f = function($value) use (&$ref) {
+       return f($value, $ref);
+   };
+
+func_get_args() and friends
+---------------------------
+
+``func_get_args()``, ``func_num_args()``, and similar functions are
+unaware of intermediate applications: The underlying function is only
+ever called once, using all the parameters that were built up over any
+number of partial applications. That means they will behave exactly as
+though all of the specified arguments were passed directly to the
+function all at once.
+
+.. code:: php
+
+   function f($a = 0, $b = 0, $c = 3, $d = 4) {
+       echo func_num_args() . PHP_EOL;
+       
+       var_dump(
+           $a, 
+           $b, 
+           $c, 
+           $d);
+   }
+
+   f(1, 2);
+
+   $f = f(?, ?);
+
+   $f(1, 2);
+
+Would output:
+
+.. code:: php
+
+   2
+   int(1)
+   int(2)
+   int(3)
+   int(4)
+   2
+   int(1)
+   int(2)
+   int(3)
+   int(4)
+
+Variadic Functions
+------------------
+
+Targeting a variadic parameter with ``?`` means the variadic becomes
+required, because ``?`` means exactly one parameter.
+
+Targeting a variadic parameter with ``...`` allows it to accept a
+variable number of arguments, which will be passed through to the
+variadic parameter. This behavior is consistent with the general model
+of "a partial is a function that passes all of its arguments through to
+the underlying function, after mixing them together."
+
+For example:
+
+.. code:: php
+
+   function f(...$args) {
+       print_r($args);
+   }
+
+   // This will require precisely 3 arguments, which
+   // f() will receive as a 4 element $args.
+   $f1 = f(1, ?, ?, ?);
+
+   // This will require 2 or more arguments, which
+   // f() will receive as a 2 or more element $args.
+   $f2 = f(?, ?, ...);
+
+   // This will require exactly 1 argument.
+   // f() will receive a 3 element $args.
+   $f3 = f(1, ?, 3);
+
+   // This will require exactly 3 arguments.
+   // f() will receive a 6 element $args.
+   $f4 = f(?, 2, ?, 4, ?, 6);
+
+   // This will require at least 2 arguments.
+   // f() will receive an $args array with the fixed values
+   // and additional arguments interleaved, followed by
+   // whatever additional arguments are provided.
+   $f5 = f(?, 2, ?, 4, ...);
+
+Evaluation order
+----------------
+
+One subtle difference between the existing short lambda syntax and the
+partial application syntax is that argument expressions are evaluated in
+advance. That is:
+
+.. code:: php
+
+   function getArg() {
+     print __FUNCTION__ . PHP_EOL;
+     return 'hi';
+   }
+
+   function speak(string $who, string $msg) {
+     printf("%s: %s\n", $who, $msg);
+   }
+
+   $arrow = fn($who) => speak($who, getArg());
+   print "Joe\n";
+   $arrow('Larry');
+
+   /* Prints:
+   Joe
+   getArg
+   Larry: hi
+   */
+
+   $partial = speak(?, getArg());
+   print "Joe\n";
+   $partial('Larry');
+
+   /* Prints:
+   getArg
+   Joe
+   Larry: hi
+   */
+
+The reason is that in the partial application case, the arguments are
+all evaluated first, and then the engine detects that some have
+placeholders. In the short lambda case, the closure object is created
+first around an expression body that just so happens to include a
+function call that will happen later.
+
+Constructors
+------------
+
+Constructors would normally be only partially compatible with partial
+application (pun intended), as constructor creation is two step: First
+create the object, then call the constructor to initialize it. A naive
+implementation of partial application would result in the partial being
+created between those two steps. Thus, partially applying a constructor
+and then invoking it multiple times would invoke the constructor on the
+same object multiple times, rather than creating multiple objects.
+
+That would be unexpected and undesireable from the user point of view.
+Special handling has therefore been included for constructors so that
+both object creation and the constructor invocation occur upon complete
+application.
+
+That means the following will result in 4 objects created, as one would
+expect.
+
+.. code:: php
+
+   class Person {
+     public function __construct(private string $name) {}
+   }
+
+   $data = [
+     'Larry',
+     'Joe',
+     'Levi',
+     'Paul',
+   ];
+
+   // $people is an array of 4 distinct Person instances.
+   $people = array_map(new Person(?), $data);
+
+Magic methods
+-------------
+
+Magic methods ``__call`` and ``__callStatic`` are supported.
+Specifically, creating a partial Callable off of a magic method will
+result in a callable with a signature consisting the number of arguments
+specified in the partial call, all with no type and named ``$args`` in
+reflection.
+
+Named arguments are also supported, the same as with ``__call``
+natively, even though the name won't match reflection.
+
+For example:
+
+.. code:: php
+
+   class Foo {
+       public function __call($method, $args) {
+           printf("%s::%s\n", __CLASS__, $method);
+           print_r($args);
+       }
+   }
+
+   $f = new Foo();
+   $m = $f->method(?, ?);
+
+   $m(1, 2);
+
+   /* Prints:
+   Foo::method
+   Array
+   (
+       [0] => 1
+       [1] => 2
+   )
+   */
+
+   $m(a: 1, b: 2);
+
+   /* Prints:
+   Foo::method
+   Array
+   (
+       [a] => 1
+       [b] => 2
+   )
+   */
+
+The ``__get`` and ``__set`` magic methods are not called as methods, and
+thus there is no way to partially apply them.
+
+Common use cases
+----------------
+
+Although partial application has a wide range of use cases, in practice
+we anticipate there to be three general categories that will be the
+overwhelming majority cases:
+
+Callable reference
+~~~~~~~~~~~~~~~~~~
+
+First class support for creating a Closure from a callable with ``...``.
+
+That means it can be used to create a reference to a function, method,
+or other callable without resorting to strings or arrays as a
+pseudo-callable format.
+
+For example:
+
+.. code:: php
+
+   class Foo {
+     public function bar($a, $b, $c, $d): string { ... }
+   }
+
+   $f = new Foo();
+   $p = $f->bar(...);
+
+   // $p is now a partially applied function with the same 4 arguments
+   // as Foo::bar. Effectively there is no difference between now calling 
+   // $p(1, 2, 3, 4) and $f->bar(1, 2, 3, 4).
+
+That would make such functions still accessible to refactoring and
+static analysis tools, while avoiding any new syntax. This is especially
+useful when trying to use a method as a callable, or when passing a
+reference to a named function or method as an argument.
+
+.. code:: php
+
+   function do_logic(Point $p) { }
+
+   array_map(do_logic(...), $list_of_points);
+
+Unary functions
+~~~~~~~~~~~~~~~
+
+A unary function is a function with a single parameter. Many callbacks
+require a unary function, which partial application makes trivial to
+produce. For example:
+
+.. code:: php
+
+   $result = array_map(in_array(?, $legal, strict: true), $input);
+
+This use case is especially useful in combination with the `Pipe
+Operator v2 </rfc/pipe-operator-v2>`__ RFC, as discussed below.
+
+Delayed execution
+~~~~~~~~~~~~~~~~~
+
+Partial application may return a closure with all required arguments
+applied, followed by ``...``: That results in a closure that has all the
+arguments it needs for the underlying function but is not, yet,
+executed, and takes zero or more arguments. It may therefore be called
+to execute the original function with its parameters at a later time.
+
+.. code:: php
+
+   function expensive(int $a, int $b, Point $c) { /* ... */ }
+
+   $default = expensive(3, 4, $point, ...);
+   // $default here is a closure object.
+   // expensive() has not been called.
+
+   // Some time later, evaluate the function call only when necessary.
+   if ($some_condition) {
+     $result = $default();
+   }
+
+Optimizations
+-------------
+
+Although the result of partial application is a ``Closure``, since
+partial application is cumulative, there is no need to call intermediate
+objects upon complete application.
+
+That is:
+
+.. code:: php
+
+   function foo(int $a, int $b, int $c, int $d, int $e) { 
+       throw new Exception("boo");
+   }
+
+   $foo = foo(1, ?, ?, ?, ?);
+
+   $bar = $foo(2, ...);
+
+   $baz = $bar(3, ...);
+
+   $boo = $baz(4, ...);
+
+   $boo(5);
+
+Reflection
+----------
+
+Because a partial application results in a ``Closure``, no changes to
+the reflection API are necessary. It may be used by reflection in the
+same fashion as any other Closure or function, specifically using
+``ReflectionFunction``.
+
+One additional method has been added to ReflectionFunctionAbstract:
+
+.. code:: php
+
+   public function ReflectionFunctionAbstract::isPartial() : bool;
+
+Comparison to other languages
+-----------------------------
+
+Partial function application is a common pattern in computer science
+generally. In practice, though, few mainstream languages have a
+dedicated syntax for it, relying instead on user-space implementations
+similar to "just write your own arrow function."
+
+The languages that do have native support for it are generally highly
+functional languages such as Haskell or OCaml, in which all functions
+are automatically curried to single argument functions anyway. In those
+languages, calling a function with fewer arguments than it specifies
+will automatically partially apply it with just those arguments,
+returning a function that expects the remaining arguments. One
+limitation of that approach, however, is that functions may be partially
+applied only from left to right. There is no way to "pre fill" just the
+right-most argument.
+
+The notable exception is Raku (formerly known as Perl 6), which has an
+``assuming`` method that prefills arguments left to right as well.
+
+The net result is that the functionality described here would give PHP
+the most robust and powerful partial application syntax of any
+significant language on the market today. Which is pretty damned cool,
+frankly.
+
+Source: https://rosettacode.org/wiki/Partial_function_application
+
+There is a pending proposal for Javascript to add PFA syntax that is
+remarkably similar to that proposed here, although it is not as far
+along: https://github.com/tc39/proposal-partial-application
+
+Syntax choices
+--------------
+
+The ``?`` character was chosen for the placeholder largely because it
+was unambiguous and easy to implement. Prior, similar RFCs (such as the
+original `Pipe Operator </rfc/pipe-operator>`__ proposal from several
+years ago) used the ``$$`` (lovingly called T_BLING) sigil instead. So
+far no compelling argument has been provided for changing the character,
+so the RFC is sticking with ``?``.
+
+The ``...`` symbol was chosen for its similarity to variadic arguments.
+They are conceptually similar, and thinking of ``...`` as the partial
+equivalent of ``...$args`` in a normal function is approximately
+accurate.
+
+A few reviewers have suggested ``...?`` as an alternative variadic
+placeholder symbol, on the grounds that it is more-parallel with
+existing variadics. However, Nikita Popov noted that would seem to imply
+it was a placeholder *for* a variadic, rather than a placeholder that is
+variadic. Given that confusion, and that it entails a 33% increase in
+the number of characters needed for a common case, that alternative was
+rejected.
+
+Excluded functionality
+----------------------
+
+Some functionality was considered but rejected for now as either overly
+complex, overly confusing, or both. They may be reintroduced in the
+future by other RFCs should the engine be adapted to make their
+implementation more reasonable.
+
+Argument unpacking
+~~~~~~~~~~~~~~~~~~
+
+Argument unpacking when creating a partial is not supported. There are
+some cases where it would work fine, and others where it would result in
+a variety of error conditions such as variables being out of order,
+variables being used as positional placeholders and in the unpacked
+array, etc. Rather than have support for only some combinations, which
+would not be easily identifiable through static analysis, the
+implementation omits them entirely for consistency.
+
+Named placeholders
+~~~~~~~~~~~~~~~~~~
+
+Placeholders are only positional. Named placeholders introduce a number
+of complications, in particular around reordering. It's not obvious if a
+named placeholder should result in the created partial Closure having
+its parameters in an altered order or not, if it should then require
+being called with named arguments only or not, etc. Named arguments also
+complicate the implementation. After some experimentation, we opted to
+exclude them at this time in the name of simplicity.
+
+Related RFCs
+------------
+
+Although this RFC is stand-alone, it naturally complements a few others
+under current discussion.
+
+The `Pipe Operator v2 </rfc/pipe-operator-v2>`__ RFC proposes a new
+``|>`` (pipe) operator that concatenates two callables, but was hampered
+by PHP's poor syntax for callables. This RFC would largely resolve that
+issue and allow for the following syntax for pipes:
+
+.. code:: php
+
+   $result = $var
+   |> step_one(?)
+   |> step_two(?, 'config')
+   |> $obj->stepThree('param', ?);
+
+The original Pipes v1 proposal several years ago included similar
+functionality baked directly into the pipe operator. By separating the
+two, it allows partial application to be used generally while still
+offering the same convenience for the pipe use case.
+
+Backward Incompatible Changes
+-----------------------------
+
+None.
+
+Proposed Voting Choices
+-----------------------
+
+As per the voting RFC a yes/no vote with a 2/3 majority is needed for
+this proposal to be accepted.
+
+The vote was opened on 16 June 2021 and closes 30 June 2021.
+
+Question: Add partial function application PHP
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Implementation
+--------------
+
+PR is available here: https://github.com/php/php-src/pull/6898
+
+Proposed PHP Version(s)
+-----------------------
+
+Next major/minor
+
+Additional Metadata
+-------------------
+
+:Original Authors: Paul Crovella, Levi Morrison, Joe Watkins, Larry Garfield
+:Slug: partial_function_application
+:Wiki URL: https://wiki.php.net/rfc/partial_function_application

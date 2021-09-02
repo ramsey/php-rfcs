@@ -1,0 +1,1413 @@
+Horizontal Reuse For PHP
+========================
+
+:PHP-RFC: 0042
+:Title: Horizontal Reuse For PHP
+:Author: Stefan Marr <php.at.stefan-marr.de>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2008-10-12
+:PHP-Version: 5.4
+:Version: 2.1.1
+
+This RFC discusses two different approaches to reuse behavior
+independently from the class hierarchy, i.e., in an horizontal manner.
+The main motivation of both approaches is to provide a broader
+opportunity to model classes and class hierarchies with a clear
+conceptual background and optimal code reuse at the same time.
+Furthermore, the main distinction to other approaches is the explicit
+handling of conflicts resulting from overlapping interfaces in complex
+reuse scenarios. Both approaches would be valuable extensions to the PHP
+language, but both of them have their own benefits and drawbacks. Thus,
+this RFC is meant to provide a base for further discussion to be able to
+decide, which variant is the most PHP-like reuse mechanism.
+
+Why Do We Need Horizontal Reuse?
+================================
+
+Code reuse is one of the main goals that object-oriented languages try
+to achieve with inheritance. Unfortunately, single inheritance often
+forces the developer to take a decision in favor for either code reuse
+*or* conceptual clean class hierarchies. To achieve code reuse, methods
+have either to be duplicated or to be moved near the root of the class
+hierarchy, but this hampers understandability and maintainability of
+code.
+
+To circumvent this problems multiple inheritance and Mixins have been
+invented. But both of them are complex and hard to understand. PHP5 has
+been explicitly designed with the clean and successful model of Java in
+mind: single inheritance, but multiple interfaces. This decision has
+been taken to avoid the known problems of for example C++. The presented
+approaches have been designed to avoid those problems and to enable
+designers to build conceptually clean class hierarchies without the need
+to consider code reuse or complexity problems, but focusing on the real
+problem domain and maintainability instead.
+
+Limitations to Reuse in Single Inheritance Languages
+----------------------------------------------------
+
+There are several issues with reuse in PHP. To achieve as much reuse as
+possible you will probably move methods as high as possible in your
+inheritance hierarchy. At this point, there is a trade-off between
+conceptual consistency and reuse, because classes starts to have methods
+they do not need. So, when it is decided that the conceptual consistency
+is more valuable because of understandability of the class model, code
+duplication is caused or needs to be worked around by e.g. delegation,
+which is not always as nice as method implemented in the class tree.
+
+Beside conceptual issues, there are problems with third-party code you
+can not or might not want to modify. The following code illustrates the
+current implementation of an extended version of the PHP reflection API
+which provides detailed access to doc comment blocks.
+``ReflectionMethod`` and ``ReflectionFunction`` are classes from the
+reflection API and have to be extended with exactly the same code. In
+this case it is impossible to change the classes itself, because they
+are not under our control i.e. they are implemented in C as part of the
+language.
+
+.. code:: php
+
+    <?php
+    class ezcReflectionMethod extends ReflectionMethod {
+      /* ... */
+      function getReturnType() { /*1*/ }
+      function getReturnDescription() { /*2*/ }
+      /* ... */
+    }
+
+    class ezcReflectionFunction extends ReflectionFunction {
+      /* ... */
+      function getReturnType() { /*1*/ }
+      function getReturnDescription() { /*2*/ }
+      /* ... */
+    }
+    ?>
+
+Thus, eventually, we end up with much duplicated code in both classes
+extending the original extension classes.
+
+Which Opportunities Does PHP Have?
+----------------------------------
+
+For the sake of distinction and discussion, the two approaches are named
+differently. The idea of *Traits* for PHP has been already proposed in a
+former `RFC </rfc/Traits>`__. In addition to that, this RFC introduces
+the notion of *Grafts* (the term is borrowed from `agrarian
+cultivation <http://www.robinsonlibrary.com/agriculture/plant/propagation/grafting.htm>`__).
+
+A *Trait* is an unit of behavioral reuse. It is very lightweight,
+stateless and allows for a very flexible composition of behavior into
+classes. A *Graft* is a class composed into another class. It is very
+much like grafting is done in the agriculture. It allows for a
+full-fledged reuse of classes inside of other classes independent of the
+class hierarchy. The following proposal will introduce both flavors of
+horizontal reuse and compares them in the context of PHP.
+
+Traits - Reuse of Behavior (committed to trunk)
+===============================================
+
+*Traits* is a mechanism for code reuse in single inheritance languages
+such as PHP. A Trait is intended to reduce some limitations of single
+inheritance by enabling a developer to reuse sets of methods freely in
+several independent classes living in different class hierarchies. The
+semantics of the combination of Traits and classes is defined in a way,
+which reduces complexity and avoids the typical problems associated with
+multiple inheritance and Mixins.
+
+They are recognized for their potential in supporting better composition
+and reuse, hence their integration in languages such as Perl 6, Squeak,
+Scala, Self, Slate and Fortress. Traits have also been ported to Java
+and C#. In the following, the concepts behind Traits will be adapted for
+PHP to propose two different approaches which resemble the main ideas.
+
+A Trait is similar to a class, but only intended to group functionality
+in a fine-grained and consistent way. It is not possible to instantiate
+a Trait on its own. It is an addition to traditional inheritance and
+enables horizontal composition of behavior.
+
+In the introduction an example has been given illustrating reuse
+limitations of single inheritance. With Traits it is possible to remove
+the duplicated code without compromising conceptual consistency.
+
+.. code:: php
+
+    <?php
+    trait ezcReflectionReturnInfo {
+      function getReturnType() { /*1*/ }
+      function getReturnDescription() { /*2*/ }
+    }
+
+    class ezcReflectionMethod extends ReflectionMethod {
+      use ezcReflectionReturnInfo;
+      /* ... */
+    }
+
+    class ezcReflectionFunction extends ReflectionFunction {
+      use ezcReflectionReturnInfo;
+      /* ... */
+    }
+    ?>
+
+This is just a small example of what Traits are useful for. The next
+sections will discuss more advanced techniques and describe how Traits
+are used in PHP.
+
+The Flattening Property
+-----------------------
+
+As already mentioned, multiple inheritance and Mixins are complex
+mechanisms. Traits are an alternative which have been designed to impose
+no additional semantics on classes. Traits are only entities of the
+literal code written in your source files. There is no notion about
+Traits at runtime. They are used to group methods and reuse code and are
+totally flattened into the classes composed from them. It is almost like
+a language supported and failsafe copy'n'paste mechanism to build
+classes.
+
+Even though, there is no runtime notion of Traits, since they are part
+of the source code and thus, define the structure of the system,
+reflection about Traits still is possible, but they do not influence the
+runtime behavior of the system.
+
+Precedence Order
+~~~~~~~~~~~~~~~~
+
+Flattening is achieved by applying some simple rules on the composition
+mechanism. Instead of implementing a fancy and awkward algorithm to
+solve problems, the entire control about the composition is left in the
+hand of the developer and fits nicely into the known inheritance model
+of PHP. The following examples illustrate the semantics of Traits and
+their relation to methods defined in classes.
+
+.. code:: php
+
+    <?php
+    class Base {
+      public function sayHello() {
+        echo 'Hello ';
+      }
+    }
+    
+    trait SayWorld {
+      public function sayHello() {
+        parent::sayHello();
+        echo 'World!';
+      }
+    }
+
+    class MyHelloWorld extends Base {
+      use SayWorld;
+    }
+
+    $o = new MyHelloWorld();
+    $o->sayHello(); // echos Hello World!
+    ?>
+
+As shown in the above code, an inherited method from a base class is
+overridden by the method inserted into ``MyHelloWorld`` from the
+``SayWorld`` Trait. The behavior is the same for methods defined in the
+``MyHelloWorld`` class. The precedence order is that methods from the
+current class override Trait methods, which in return override methods
+from the base class.
+
+.. code:: php
+
+    <?php
+    trait HelloWorld {
+      public function sayHello() {
+        echo 'Hello World!';
+      }
+    }
+
+    class TheWorldIsNotEnough {
+      use HelloWorld;
+      public function sayHello() {
+        echo 'Hello Universe!';
+      }
+    }
+
+    $o = new TheWorldIsNotEnough();
+    $o->sayHello(); // echos Hello Universe!
+    ?>
+
+Multiple Traits Usage
+~~~~~~~~~~~~~~~~~~~~~
+
+To keep things simple in the beginning, there has only one Trait being
+used at a time, but obviously a class could use multiple Traits at the
+same time.
+
+.. code:: php
+
+    <?php
+    trait Hello {
+      public function sayHello() {
+        echo 'Hello ';
+      }
+    }
+
+    trait World {
+      public function sayWorld() {
+        echo ' World';
+      }
+    }
+    
+    class MyHelloWorld {
+      use Hello, World;
+      public function sayExclamationMark() {
+        echo '!';
+      }
+    }
+    
+    $o = new MyHelloWorld();
+    $o->sayHello();
+    $o->sayWorld();
+    $o->sayExclamationMark();
+    // Results eventually in: Hello World!
+
+Conflict Resolution
+~~~~~~~~~~~~~~~~~~~
+
+Traits are already used in different programming languages and it has
+shown that conflicts will occur, but they are the exception, not the
+rule. In most systems under investigation, the mechanisms to resolve
+conflicts have been used very infrequently, but also have proven to be a
+valuable mechanisms. Since it increases the composition power of the
+developers. One example for a typical conflict are different Traits
+providing methods with the same name.
+
+.. code:: php
+
+    <?php
+    trait A {
+      public function smallTalk() {
+        echo 'a';
+      }
+      public function bigTalk() {
+        echo 'A';
+      }
+    }
+
+    trait B {
+      public function smallTalk() {
+        echo 'b';
+      }
+      public function bigTalk() {
+        echo 'B';
+      }
+    }
+    ?>
+
+Both classes have to be used in a class named ``Talker``. Multiple
+inheritance and Mixins define an algorithm to resolve this conflict.
+Traits don't. Conflicts are not solved implicitly by any kind of
+precedence. Instead, to avoid implicit complexity, the developer has
+full control over class composition.
+
+.. code:: php
+
+    <?php
+    class Talker {
+      use A, B;
+    }
+    ?>
+
+In case of the above definition of ``Talker``, PHP will abort
+compilation with a fatal error since there have been conflicts. It will
+name the methods ``smallTalk()`` and ``bigTalk()`` as the reason of this
+conflict. A fatal error is issued since the conflict indicates that an
+incompatible change was made to the code that potentially breaks the
+expected behavior.
+
+To solve the conflict, the developer can exactly define which of the
+colliding methods has to be used.
+
+.. code:: php
+
+    <?php
+    class Talker {
+      use A, B {
+        B::smallTalk insteadof A;
+        A::bigTalk insteadof B;
+      }
+    }
+    ?>
+
+This definition will result in leaving out ``smallTalk()`` from Trait A
+and ``bigTalk()`` from Trait B. Therefore, the resulting class Talker
+would echo ``'b``' for ``smallTalk()`` and ``'A``' for ``bigTalk().``
+But this simple form of exclusion of methods is not the best choice for
+all situations.
+
+.. code:: php
+
+    <?php
+    class Talker {
+      use A, B {
+        B::smallTalk insteadof A; 
+        A::bigTalk insteadof B;
+        B::bigTalk as talk;
+      }
+    }
+    ?>
+
+Beside leaving out methods it is possible to introduce a new name for a
+method from a Trait. This is done like
+``originalMethodName as additionalMethodName``. In the example above, it
+has to be read as ``use B::bigTalk as talk in class Talker``. This does
+not imply any `#renaming <#renaming>`__, instead ``talk`` is introduced
+as an additional name for this method. Thus, recursion inside of
+``talk`` will still call a method with the name bigTalk. The resulting
+``Talker`` class will consist of following three methods:
+
+-  ``bigTalk() { echo 'A'; }``
+-  ``smallTalk() { echo 'b'; }``
+-  ``talk() { echo 'B'; }``
+
+Since the new name is recognized as an additional method, the
+``bigTalk`` method still has to be excluded. Otherwise, PHP would print
+a warning that two methods from Traits have a conflict and are excluded.
+The introduction of a new name is not `#renaming <#renaming>`__ and
+references in methods to a given method name aren't changed either. On
+the first look this may sound strange, but it provides the opportunity
+to build Traits and even hierarchies of Traits which fit together very
+well.
+
+Traits Composed from Traits
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Not explicitly mentioned yet, but implied by the flattening property is
+the composition of Traits from Traits. Since Traits are fully flattened
+away at compile time it is possible to use Traits to compose Traits
+without any additional impact on the semantics. The following code
+illustrates this:
+
+.. code:: php
+
+    <?php
+    trait Hello {
+      public function sayHello() {
+        echo 'Hello ';
+      }
+    }
+
+    trait World {
+      public function sayWorld() {
+        echo 'World!';
+      }
+    }
+
+    trait HelloWorld {
+      use Hello, World;
+    }
+
+    class MyHelloWorld {
+      use HelloWorld;
+    }
+
+    $o = new MyHelloWorld();
+    $o->sayHello();
+    $o->sayWorld();
+    // Results eventually in: Hello World!
+    ?>
+
+Traits itself can take part in arbitrary compositions, but Traits are
+not part of the inheritance tree i.e., it is not possible to inherit
+from a Trait to avoid confusion and misuse of Traits.
+
+Express Requirements by Abstract Methods
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Since Traits do not contain any state/properties, there is a need to
+describe the requirements a Trait will rely on. In PHP it would be
+possible to utilize the dynamic language features, but it is a common
+practice to give this requirements explicitly. This is possible with
+abstract methods like it is used for abstract classes.
+
+.. code:: php
+
+    <?php
+    trait Hello {
+      public function sayHelloWorld() {
+        echo 'Hello'.$this->getWorld();
+      }
+      abstract public function getWorld();
+    }
+
+    class MyHelloWorld {
+      private $world;
+      use Hello;
+      public function getWorld() {
+        return $this->world;
+      }
+      public function setWorld($val) {
+        $this->world = $val;
+      }
+    }
+    ?>
+
+The usage of abstract methods allows to state not always obvious
+relation ships and requirements explicitly. It is favored over the
+implicit usage of the dynamic method resolution and property creation in
+the context of complex projects for the sake of readability.
+
+Static Variables
+~~~~~~~~~~~~~~~~
+
+The flattening property implies that all methods are independent from
+each other at their usage point, even so, they might origin from the
+same method/trait. Imagine you would like to implement a counter by
+using a static variable and use that at various places. Each of the
+counters should be independent.
+
+.. code:: php
+
+     <?php
+       trait Counter {
+         public function inc() {
+           static $c = 0;
+           $c = $c + 1;
+           echo "$c\n";
+         }
+       }
+
+       class C1 {
+         use Counter;
+       }
+
+       class C2 {
+         use Counter;
+       }
+
+       $o = new C1(); $o->inc(); // echo 1
+       $p = new C2(); $p->inc(); // echo 1
+     ?>
+
+Static Methods
+~~~~~~~~~~~~~~
+
+Following the idea that traits are almost like compiler assisted
+copy'n'paste, all the features presented so far also apply to static
+methods. This is useful for instance to provide a reusable
+implementation for the singleton pattern:
+
+.. code:: php
+
+     <?php
+       trait Singleton {
+         public static function getInstance() { ... }
+       }
+
+       class MySingleton extends SomeUnrelatedSuperClass {
+         use Singleton;
+       }
+
+       MySingleton::getInstance();
+     ?>
+
+Traits Semantics Summarized
+---------------------------
+
+#. Traits do not add runtime semantics, they only take part in the
+   process of building a class.
+#. Traits integrate into the precedence order of method overriding.
+#. To avoid complexity, conflicts between Trait methods have to be
+   solved explicitly. Otherwise a warning is generated and the
+   conflicting methods are excluded.
+#. In combinations with conflicts, developers have to chose explicitly
+   which method has to be used, methods not chosen will be excluded from
+   the composition.
+#. Aliases can be defined for methods to enable reuse of conflicting
+   methods.
+#. Traits can be composed from Traits.
+#. Traits can make requirements explicit by abstract methods.
+
+As a result of this semantics, at runtime, classes build using Traits
+are not distinguishable from classes not using Traits but traditional
+code duplication instead. Semantics of ``parent`` and ``$this`` hasn't
+changed, too. Used in a Trait method, they behave exactly the same as if
+the method has been defined in the class directly.
+
+Visibility
+----------
+
+Visibility modifiers have not been discussed so far. Since Traits are
+meant as units of reuse, modifiers should be changeable easily in the
+context of a composed class. Therefore, the aliasing operation is able
+to change the visibility modifier of a method, too.
+
+.. code:: php
+
+    <?php
+    trait HelloWorld {
+      public function sayHello() {
+        echo 'Hello World!';
+      }
+    }
+
+    class MyClass1 {
+      use HelloWorld { sayHello as protected }
+    }
+
+    class MyClass2 {
+      use HelloWorld { doHelloWorld as private sayHello }
+    }
+    ?>
+
+The final modifier is supported, too. The static modifier can not be
+used in this context. That means, a normal method can not be converted
+to a static method, because it would change the methods semantics and
+references to ``$this`` would break.
+
+Handling of Properties/State
+----------------------------
+
+Traits do not provide any provisioning for handling state. They are
+meant to provide a light-weight mechanism for flexible code reuse, with
+the main goal being to avoid code duplication. Moreover, traits should
+not be confused with typical use cases of classes. When a strong
+coherence/coupling between methods and state is required, and invariants
+have to be maintained on the state, this is a good indication that a
+class is the right abstraction to implement that problem with.
+
+However, every behavior needs state to operate on, otherwise it could be
+just a static functional helper method. Thus, trait code will either
+need to use accessors, which is favorite way to go since it provides
+full traits semantics, or they use properties, which is possible but
+rather a convenience feature.
+
+Since state is a complex problem, and the knowledge about compatibility
+of state form different traits is only present in a concrete
+composition, proper state handling would need language features which
+are currently considered beyond the scope of what is necessary for PHP.
+(See `Bergel et
+al <http://scg.unibe.ch/archive/papers/Berg07eStatefulTraits.pdf>`__)
+
+Thus, the goal for a consistent language design is to raise awareness of
+the problem, promote the use of accessors, and break early in case the
+changes to a trait is potentially problematic for a class using it. This
+results in the following rules:
+
+#. Properties are considered incompatible if they differ in their
+   definition. This means, they differ in the applied modifiers (static,
+   public, protected, private) or their initial value.
+#. Incompatible properties result in a fatal error.
+#. In all other cases, i.e., when the definitions are identical, an
+   E_STRICT notice is shown to raise awareness about the potentially
+   problematic, and discouraged use of properties.
+#. For those checks, all properties are treated equal. Properties from
+   the base class and the composing class have to be compatible with
+   properties from traits as well as the properties between all traits
+   have to be compatible.
+#. Non-coliding properties, and properties which are not considered
+   incompatible behave exactly the same as if they would have been
+   defined in the composing class.
+
+This property handling was implemented in `SVN revision
+306476 <http://svn.php.net/viewvc?view=revision&revision=306476>`__ and
+examples are given in the test cases.
+
+Reflection
+----------
+
+Status: The Reflection API is not completely adapted for traits yet.
+
+The following functions are added to match the existing class- or
+interface-specific functions.
+
+-  trait_exists() -- returns true for traits, false for all kind of
+   classes and interfaces
+-  get_declared_traits() -- returns the defined traits, no classes or
+   interfaces
+
+Grafts - Class Composition (not implemented)
+============================================
+
+A *Graft* is a class composed into another class to reuse it avoiding
+inheritance and without an explicit need for delegation. The most
+important difference to a Trait is the possibility to define state in
+addition to behavior inside the reused entity. Furthermore, the grafting
+approach is not about reuse methods in a manner focused on flexibility,
+but instead it is about reusing small encapsulated units of behavior and
+state to build classes from them. Thus, it could be viewed as a form of
+private multiple inheritance which avoids conflicts by keeping
+everything private to the Graft per default.
+
+Grafts can be used in an similar way as Traits can be used. Thus, the
+example from the introduction can be optimized with Grafts as well.
+
+.. code:: php
+
+    <?php
+    class ezcReflectionReturnInfo {
+      function getReturnType() { /*1*/ }
+      function getReturnDescription() { /*2*/ }
+    }
+
+    class ezcReflectionMethod extends ReflectionMethod {
+      use ezcReflectionReturnInfo {
+        public getReturnType();
+        public getReturnDescription();
+      }
+      /* ... */
+    }
+
+    class ezcReflectionFunction extends ReflectionFunction {
+      use ezcReflectionReturnInfo {
+        public getReturnType();
+        public getReturnDescription();
+      }
+      /* ... */
+    }
+    ?> 
+
+Since, everything is local to the Graft per default, the methods need to
+be enumerated to be accessible in the class and its interface.
+
+Grafting Classes
+----------------
+
+A Graft is a class itself and can be instantiated at will. Compared to a
+normal class, there are no restrictions, it can use state and it can use
+everything else allowed for a class i.e. it is a normal class.
+
+The following class is an example for a simple counter:
+
+.. code:: php
+
+    <?php
+    class Counter {
+      private $cnt = 0;
+      public function inc() {
+        $this->cnt++;
+      }
+      public function reset() {
+        $this->cnt = -1;
+        $this->inc();
+      }
+    }
+    ?>
+
+The ``reset()`` is defined a bit strange, because it uses the ``inc()``
+function to set the counter value to zero. This is to illustrate the
+semantics of a Graft inside another class. This counter can be used
+totally on its own. Thus, ``$c = new Counter(); $c->inc();`` is valid
+code and will work as expected.
+
+Another example class might be a database helper class to initialize and
+reset a connection:
+
+.. code:: php
+
+    <?php
+    class DB {
+      private $db;
+      public function connect() {
+        $this->db = new FooDB('param');
+      }
+      public function reset() {
+        $this->db->flush();
+        unset($this->db);
+      }
+      public function doFoo(){echo 'foo';}
+    }
+
+Nothing special in this class. The ``connect()`` function uses some Foo
+database abstraction layer to initialize the connection and ``reset()``
+will issue a flush operation on the database object and unsets it
+afterwards.
+
+Compose A Class From Classes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Inheritance is one of the most misunderstood relationships in
+object-oriented programming. It is often abused to achieve code reuse,
+but originally it was meant to describe the relationship between classes
+from a conceptual view. Thus, apples and oranges might be characterized
+as subclasses of a class fruit and could be subclassed themselves into
+classes for specific variants.
+
+In a web application where you for instance would like to build a page
+with a language allowing multiple inheritance you could start to model a
+``MyPage`` class as subclass of ``Counter`` and ``DB``, since you like
+to derive the behavior of both of them. But from the conceptual view it
+is not clear why MyPage is a counter or a database. Both relationships
+are implied by the ``instanceof`` operation. Technically, this might
+have its values, but still it sounds strange.
+
+Thus, in single inheritance languages, *delegation* i.e. *forwarding* is
+used instead. The ``MyPage`` class provides the necessary interfaces for
+``Counter`` and ``DB`` but instead of implementing it itself, it
+forwards the method call to another object:
+
+.. code:: php
+
+    <?php
+    class MyPage {
+      private $cnt;
+      private $db;
+      /* ... */
+      public function inc() { $cnt->inc(); }
+      public connect() { $db->connect(); }
+      /* ... */
+    }
+    ?>
+
+This approach is very common and has its merits. Unfortunately, it
+requires explicit code to implement forwarding and object injection or
+creation which is tedious. In complex cases this might even cause a
+broken encapsulation, since it might be necessary to forward data to
+another object which should be private to the calling object.
+
+Grafts are designed to overcome this situation and provide similar
+opportunities for reuse like Traits do. The following code demonstrates
+how Grafts can be used to compose the ``MyPage`` class from the two
+other classes:
+
+.. code:: php
+
+    <?php
+    class MyPage {
+      use Counter {
+        public incCnt() from inc();
+        public resetCnt() from reset();
+      }
+      use DB {
+        public connect();
+        public reset();
+      }
+      public function inc() {
+        /* next page */
+      }
+    }
+    ?>
+
+The example above shows ``MyPage`` using classes ``Counter`` and ``DB``,
+to graft their functionality into it. Since, all methods from a grafted
+class are hidden from the grafting class by default, the methods to be
+used in the grafting class or from another class need to be named
+explicitly. With this approach, conflicts are avoided upfront. In case
+of methods with the same name in a graft and another graft or the class
+itself, it is possible to make a method available by another name. In
+the given example the method ``reset()`` is made available by the name
+``resetCnt()``. This alias does not influence the inner working of the
+``Counter`` class in anyway. Thus, recursion inside of
+``Counter::reset()`` would still work like expected and the call to
+``incCnt()`` results in an invocation of ``Counter::inc()``. This would
+be not true for Traits as explained earlier.
+
+With this attributes of Grafts in mind, the following example shows the
+results of the execution of methods in the context of ``MyPage``:
+
+.. code:: php
+
+    <?php
+    $page = new MyPage();
+    $page->connect();
+    $page->incCnt();   // Counter::$cnt == 1
+    $page->resetCnt(); // Counter::$cnt == 0
+    $page->inc();      // goto next page
+    $page->doFoo();    // FATAL ERROR
+    ?>
+
+The call to ``connect()`` is forwarded as expected to ``DB::connect()``,
+``incCnt()`` results in a call to ``Counter::inc()`` as already
+mentioned, the call to ``inc()`` will invoke the ``MyPage::inc()``
+method defined directly in the class. The call to ``doFoo()`` results in
+an error, since the method defined in ``DB`` has not been made available
+in ``MyPage`` explicitly.
+
+Interaction of Grafts with Grafted Classes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In class-based languages like PHP, the notion of abstract classes was
+introduced, to be able to define a unit of reuse in a partial manner and
+to be able to refine it in a more concrete context.
+
+This notion can be used combined with grafting as well. Thus, abstract
+methods can be fulfilled by a graft or from the grafting class.
+
+The following example shows how a class can be used by grafting to
+fulfill a required abstract method:
+
+.. code:: php
+
+    <?php
+    abstract class Base {
+      abstract public function foo();
+    }
+    
+    class MyGraft {
+      public function foo() { echo 'foo'; }
+    }
+    
+    class MyGraftedClass extends Base {
+      use MyGraft {
+        public foo();
+      }
+    }
+
+    $o = new MyGraftedClass();
+    $o->foo(); // echos 'foo'
+    ?>
+
+In addition, this notion can also be utilized to provide methods to a
+graft, which states a requirement by an abstract class. This case is
+shown in the code below:
+
+.. code:: php
+
+    <?php
+    abstract class MyGraft {
+      abstract public function foo();
+      public function bar() {
+        $this->foo();
+      }
+    }
+
+    class MyGraftedClass {
+      public function foo() { echo 'foo'; }
+      use MyGraft {
+        public bar();
+      }
+    }
+
+    $o = new MyGraftedClass();
+    $o->bar(); // echos 'foo'
+    ?>
+
+For properties and methods not explicitly required, it is not possible
+to provide something similar, since this would lead to ambiguity. The
+reasons are described in the discussion section.
+
+Grafting of the Same Class Multiple Times
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Since, different grafts are separated from each other, it is possible to
+graft the same class multiple times into one class::
+
+.. code:: php
+
+    <?php
+    class MyGraft {
+      public function foo() { echo 'foo'; }
+    }
+    class MyGraftedClass {
+      use MyGraft {
+        public foo();
+      } 
+      use MyGraft {
+        public bar() from foo();
+      }
+    }
+    $o = new MyGraftedClass();
+    $o->foo(); // echos 'foo'
+    $o->bar(); // echos 'foo'
+    ?>
+
+This might not be useful for all classes, but could be used to graft
+data structures like lists or maps into a class which are used for
+multiple purposes.
+
+Restrictions and Initialization of Grafts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Actually an instantiated graft is nothing else but an object. Since
+grafts are full-fledged classes themselves, they could use typical
+constructors to initialize resources or prepare their inner state for
+further usage. In the current form of this proposal, the notion of
+initializing grafts is not supported, thus, only classes with a standard
+constructor without arguments can be used to be grafted into another
+class.
+
+Another restriction is that classes can not graft themselves and more
+generally, grafting is not allowed to cause recursion in any way. Since,
+it is not meant to be evaluated lazily, it would case an infinite
+recursion which needs to be prevented.
+
+Implementation Idea
+~~~~~~~~~~~~~~~~~~~
+
+Eventually, the implementation seems only to be feasible by maintaining
+the notion of separate objects for classes grafted into another class.
+Thus, for each graft in a class, a normal object is instantiated. This
+approach will ease the implementation and will reduce modification in
+method lookup and the Zend Engine in general.
+
+Methods propagated to the grafting class will be generated like usual
+methods implemented by hand. Thus, they will contain the opcodes to
+forward the method call to the grafted object. In reverse, it would be
+the same for methods introduced by abstract methods satisfied by the
+grafting class. Those methods will call the method provided by the
+grafting class.
+
+The most visible problem in this approach will be the handling of object
+identity of grafted objects. Imagine the following code:
+
+.. code:: php
+
+    <?php
+    class MyGraft {
+      public function returnThis() {
+        return $this;
+      }
+    }
+    class MyGraftedClass {
+      use MyGraft {
+        public returnThis();
+      }
+    }
+    $o = new MyGraftedClass();
+    var_dump($o->returnThis());
+    ?>
+
+The result returned should be definitely equal to ``$o`` i.e.
+``$o === $o->returnThis()``. The reason for this requirement is to
+preserve encapsulation and hide implementation details from all clients
+of ``MyGraftedClass``. To achieve this property some kind of context
+dependent treatment of the ``$this`` lookup has to be implemented or
+some kind of data flow analysis will have to be done. Neither of them
+seem to be easy to achieve with respect to the fact, that a grafted
+class cold hold its own ``$this`` value in some property, for whatever
+reason.
+
+The other way around would be to open up the notion of grafts and add
+mechanisms to inject instances of grafts into a class while object
+construction. By the way, this would allow more fancy dependency
+injection and gives a reason to think about grafts not only as
+implementation details, but an interface related i.e. *client visible*
+characteristic. But, this notion is currently not part of this proposal.
+
+Grafts Semantics Summarized
+---------------------------
+
+#. A Graft is a normal class composed into another class.
+#. The encapsulation of grafts is preserved completely.
+#. All methods available as part of the grafting class have to be
+   enumerated explicitly and can have a different name than the method
+   in the grafted class, without breaking inner coherence.
+#. Grafts can interact with grafting classes via abstract methods.
+#. Methods introduced by a Graft can be used to fulfill abstract
+   methods.
+#. Classes can be grafted into a class multiple times.
+#. Classes to be used as Grafts are not allowed to use constructors with
+   arguments.
+
+Traits vs. Grafts
+=================
+
+This section gives a basic overview about the differences of both
+concepts and discusses benefits and drawbacks.
+
+*Traits* are entities of behavioral reuse. Thus, they provide a
+lightweight way to compose methods into classes. They are highly
+composable themselves, not hindered by a strong notion of encapsulation
+and abandon state for the sake of simplicity.
+
+*Grafts* are classes composed into other classes to achieve reuse of
+full-fledged classes. It introduces a stronger notion of composition of
+classes than typical delegation/forwarding does for OOP languages.
+
+**Traits**
+
+-  stateless
+-  can "break"
+-  notation is DRY
+-  flexible composition of behavior
+-  flattenable, no runtime impact
+
+**Grafts**
+
+-  complete classes
+-  robust encapsulation
+-  some overhead in notation
+-  convenient composition of classes
+-  language supported delegation/forwarding
+
+This proposal does only suggest Traits without state to avoid the
+introduction of any notion of Traits at runtime. The key idea of Traits
+is that they provide method implementations which are flattened into a
+class. Thus, all state is defined in the class and Traits method have to
+rely on PHPs dynamic nature or have to use abstract method definitions
+to require getters and setters. Since Grafts are full-fledged classes,
+they have state and handle it as expected for distinct objects.
+
+One point of criticism from the community on the notion of Traits is
+that the methods provided by Traits are not reliable connected. This
+leads to missing features like recursion for methods introduced by
+aliases. From the perspective of composition, this is desired, since it
+provides additional opportunities for combination of behavior. Traits
+are not meant to provide encapsulation on the level of classes, but
+flexibility. Grafts do avoid this problem by its nature of being
+classes, but this comes for the cost of flexibility. Grafts can not
+combined with another. They are completely separated entities which only
+can be combined by abstract methods.
+
+The notion of Traits avoids any impact on the runtime. For Grafts this
+is not feasible. They need to maintain strong encapsulation which is
+achieved in an consistent way only by preserving the notion of internal
+objects. Thus, there is overhead in memory consumption for the objects
+and runtime cost for forwarding method calls compared to Traits.
+
+Another point where Grafts might be improved (see syntax proposals) is
+the syntax for using a class. To avoid conflicts methods are private to
+a graft per default and thus, need to be enumerated explicitly. Compared
+to Traits this is not DRY and implies a little overhead in code, but
+obviously less overhead than typical forwarding cases. With respect to
+Traits, research has shown that conflicts occur only rarely and explicit
+handling of it is much less overhead and brings more power than trying
+to solve it implicitly.
+
+Discussions
+===========
+
+For the original Traits proposal a lot discussion has already taken
+place. The `RFC </rfc/traits>`__ summarizes the most important ones.
+Eventually, it resulted in an additional
+`RFC </rfc/nonbreakabletraits>`__ proposing non-breakable Traits, which
+led finally to this proposal. The first thread on was started on the
+`mailing list <php-internals@120336491008719>`__ back in February 2008.
+
+Renaming
+--------
+
+One of the main issues of the Traits proposal has always been the fact,
+that aliasing does not mean renaming. The reason for this is the dynamic
+nature of PHP. The fact that it is possible to use meta-programming
+features everywhere in the code means that names as present in the
+source-code have to be equal to the names at run time.
+
+Consider the following example:
+
+.. code:: php
+
+   <?php
+   class TestClass {
+       function foo() { echo "func: foo\n"; }
+       function bar() { echo "func: bar\n"; }
+       
+       function test() {
+           $funcName = "foo";
+           $this->$funcName();
+
+           $funcName = "bar";
+           $this->$funcName();
+       }
+   }
+
+   $o = new TestClass;
+   $o->test();
+
+Renaming would imply that it would not be possible to use this or
+similar techniques with Traits. At least, it would not be stable. It
+would be possible to hack around it, but these hacks would be brittle,
+and lead to additional maintenance work.
+
+Requiring Composing Class to Implement Interface
+------------------------------------------------
+
+Traits are able to express required methods by using abstract method
+declarations. An abstract method can be satisfied in varios ways, for
+instance by implementing it in the composing class or by bringing it in
+from another Trait.
+
+However, for traits that require complex interfaces to be satisfied,
+this approach is tedious and fragile, since it requires the developer to
+state all used methods explicitly.
+
+Another solution is that a Trait expresses a requirement for the
+composing class to implement a certain interface. This is not entirely
+identical to using abstract methods, however. First, it imposes a
+requirement on interface level and thus will have the same fragility
+with respect to interface changes as all other clients of an interface.
+On the other hand, it avoids duplications of abstract method definitions
+and makes the interface the main entity of responsibility as for normal
+client-interface uses in current code.
+
+.. code:: php
+
+   <?php
+   // IteratorUser works with $this using the Iterator interface
+   trait IteratorUser require Iterator {
+       function foo() {
+           $next = $this->next();
+           ...
+       }
+   }
+
+   // composed into a class that needs to implement the interface
+   class Example implements Iterator {
+     use IteratorUser;
+   }
+
+Note: brought up in the discussion of
+http://marc.info/?l=php-internals&m=129188077704898
+
+Grafts
+------
+
+PHP as a dynamic language would give the opportunity to work with this
+grafts functionality more flexible, even without abstract method
+definitions, but this would be very unintuitive since the graft does not
+know it is using methods or properties from the grafted class. On the
+one hand this would even break the notion of encapsulation and on the
+other hand, it would cause trouble at least for properties because here
+it might be that the different order of method execution results in
+unintended different results. Imagine something simple like::
+
+.. code:: php
+
+    <?php
+    class MyGraft {
+      public function get() { return $this->value; }
+      public function set($value) { $this->value = $value; }
+    }
+    ?>
+
+Grafted into a class it would depend on the behavior of the grafted
+class, whether there is a property named value and thus the
+encapsulation is broken. Thus, it would be ambiguous to allow a
+forwarding from within a grafted class to its grafting class for
+non-defined properties and methods.
+
+Alternative Syntax Proposals
+----------------------------
+
+Different keywords and alternative syntaxes for traits have been already
+discussed on the mailing list and are documented more detailed in the
+original `RFC </rfc/traits>`__.
+
+Some important proposals and new additional proposals are listed below
+for traits as well as grafts.
+
+Traits
+~~~~~~
+
+Assignment instead of ``insteadof``:
+
+Keywords are a rare resource in any language. Thus, new keywords should
+be introduced carefully. To avoid the ``insteadof`` keyword, a notion of
+assignment was proposed. On the first look, it seams even to avoid an
+impression of renaming:
+
+.. code:: php
+
+    <?php
+    class Talker {
+      use A, B, C, D {
+        smallTalk = A::smallTalk; // this says that if 
+                                  // B, C or D implement smallTalk,
+                                  // it is ignored
+        talk = A::bigTalk;
+      }
+    }
+    ?>
+
+.. _grafts-1:
+
+Grafts
+~~~~~~
+
+Grafts use wildcard:
+
+The proposed Grafts syntax is not DRY and all methods names to be made
+available need to be enumerated. To avoid this enumeration, a syntax
+with a wildcard was proposed:
+
+.. code:: php
+
+    <?php
+    class MyGraftingClass {
+      use MyGraftClass *;
+    }
+    ?>
+
+Scala Synthax and practical example
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This is inpired from http://www.scala-lang.org/node/117.
+
+Use case #1 (user comments on a given object)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A trait would prevent duplicating this code (~roughly similar) in 9
+classes (existing PHP framework).
+
+.. code:: php
+
+   trait User_Comments 
+   {
+        function addComment($c)
+        {
+              $db = App::getDb();   
+              $db->Execute("INSERT INTO user_comments (type, type_id, user_id, text)VALUES ($c->type, $c->type_id, $c->uid, $c->text)");
+        }
+
+        function getComments($filter)
+        {
+              return array();
+        }
+
+        function removeComment($id)
+        {
+              $db = App::getDb();   
+              $db->Execute("DELETE FROM user_comments ... ");
+        }
+   }
+
+Using the trait:
+
+.. code:: php
+
+   class App_Email with User_Comments {}
+
+   class App_Document with User_Comments  {
+
+        function removeComment($id)
+        {
+              $db = App::getDb();   
+              $db->Execute("DELETE FROM user_comments ... ");
+
+              $db->Execute("UPDATE app_documents SET comments_count = ... ");
+        }
+   }
+   // PHP notice : 'User_Comments::removeComment() definition skipped in App_Document'
+
+   $doc = new App_Document;
+
+   echo is_a($doc, 'App_Document');     // true
+   echo is_a($doc, 'User_Comments');    // false
+   echo is_with($doc, 'User_Comments'); // true
+
+We deal with conflicting class definitions by simply ignoring them.
+
+.. code:: php
+
+   trait Conflict_Comments 
+   {
+        function removeComment($id)
+        {
+              return false;
+        }
+   }
+
+   class App_Document_Conflict with User_Comments, Conflict_Comments  {
+
+        function removeComment($id)
+        {
+              $db = App::getDb();   
+              $db->Execute("DELETE FROM user_comments ... ");
+
+              $db->Execute("UPDATE app_documents SET comments_count = ... ");
+        }
+   }
+   // PHP notice : 'User_Comments::removeComment() definition skipped in App_Document_Conflict'
+   // PHP notice : 'Conflict_Comments::removeComment() definition skipped in App_Document_Conflict'
+
+   $doc = new App_Document_Conflict;
+
+   echo is_a($doc, 'App_Document_Conflict');// true
+   echo is_with($doc, 'User_Comments');     // true
+   echo is_with($doc, 'Conflict_Comments'); // true
+
+Use case #2 (bitmask flags)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A trait would prevent duplicating this code (~roughly similar) in 21
+classes (existing PHP framework).
+
+.. code:: php
+
+   trait Bitmask_Flags {
+
+       private $_flags;
+
+       private function _hasFlag($flag, $yesNo)
+       {
+           if(is_null($yesNo))
+               return (($this->_flags & $flag) == $flag);
+           
+           if($yesNo)
+               $this->_flags |= $flag;
+           else
+               $this->_flags &= ~$flag;
+               
+           if((int)$flag === 0)
+               $this->_flags = 0;
+       }
+   }
+
+Using the trait:
+
+.. code:: php
+
+   class Sports_Game with Bitmask_Flags {
+
+       function isOvertime($yesNo = NULL)
+       {
+           return $this->_hasFlag(self::FLAG_OVERTIME, $yesNo);
+       }
+
+       function isShootout($yesNo = NULL)
+       {
+           return $this->_hasFlag(self::FLAG_SHOOTOUT, $yesNo);
+       }
+           //...
+   }
+
+   class User with Bitmask_Flags {
+
+       function isAdmin($yesNo = NULL)
+       {
+           return $this->_hasFlag(self::FLAG_ADMIN, $yesNo);
+       }
+
+       function isActive($yesNo = NULL)
+       {
+           return $this->_hasFlag(self::FLAG_ACTIVE, $yesNo);
+       }
+           //...
+   }
+
+Links and Literature
+====================
+
+As already mentioned, Traits is not a totally new concept, but the
+semantics used in this proposal has been fully defined at first in 2003.
+For scientific information and papers about Traits
+http://www.iam.unibe.ch/~scg/Research/Traits/ is a good starting point.
+Since it isn't a purely academic concepts, there are already languages
+supporting Traits out there. Squeak, Perl6, Scala, Slate, Fortress and
+even for C#/Rotor implementation are available.
+
+A detailed technical report has been published at
+http://www.iam.unibe.ch/~scg/Archive/Papers/Duca06bTOPLASTraits.pdf It
+explains Traits and gives some formal proves about the soundness of
+Traits, too.
+
+Last but not least, in this PhD thesis
+http://www.iam.unibe.ch/~scg/Archive/PhD/schaerli-phd.pdf two case
+studies have been publish illustrating the benefits Traits are
+providing.
+
+Changelog
+=========
+
+2010-11-18: Added clarification on static modifier in the context of
+aliasing/visibility changes, and added section on static methods with an
+example suggested by Simas Toleikis
+
+2008-10-13: initial version for discussion
+
+Additional Metadata
+-------------------
+
+:First Patch: http://www.stefan-marr.de/2009/09/traits-patch-updated-backported-and-available-on-github/
+:First Published At: http://www.stefan-marr.de/artikel/rfc-horizontal-reuse-for-php.html
+:Original Authors: Stefan Marr <php.at.stefan-marr.de>
+:Original Date: 2008-10-12, last update 2011-01-09
+:Original Status: Implemented in PHP 5.4 (traits only)
+:Related Rfcs: `Traits <https://wiki.php.net/rfc/Traits>`__, `Non-breakable traits <https://wiki.php.net/rfc/NonBreakableTraits>`__
+:Rest Txt: http://www.stefan-marr.de/rfc-horizontal-reuse-for-php.txt
+:Slug: horizontalreuse
+:Wiki URL: https://wiki.php.net/rfc/horizontalreuse

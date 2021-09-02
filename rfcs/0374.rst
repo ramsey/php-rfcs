@@ -1,0 +1,685 @@
+Strict Argument Count On Function Calls
+=======================================
+
+:PHP-RFC: 0374
+:Title: Strict Argument Count On Function Calls
+:Author: Márcio Almada
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2015-02-20
+:Version: 0.6.2
+
+=> The RFC was withdraw due to many controversial points and overall
+rejection and won't be proposed again by the RFC author. The RFC author
+advises to not revive this RFC as it was already rejected. Even if you
+think you have a much better idea, think twice.
+
+Introduction
+------------
+
+This RFC proposes to conditionally add a **strict argument count** check
+for function **calls** on PHP7, being sensitive towards implementations
+already depending on the **variable-length** argument lists API.
+
+Strict checks on argument counts are **good** to **catch bugs**
+(sometimes dangerous bugs) on user space code. According to measurements
+presented on this RFC, done by running many FOOS projects test suites,
+the current PHP **silent behavior** is **not helpful** and **we should
+fix it**.
+
+Even PHP internal functions have a strict argument count check:
+
+.. code:: php
+
+   strlen("foo", "bar");
+   // PHP warning:  strlen() expects exactly 1 parameter, 2 given on line 1
+
+Proposal
+--------
+
+This RFC proposes that the engine should emit a ``Warning`` when a
+function is called with an exceeding number of arguments:
+
+.. code:: php
+
+   /**
+    * fn expects only one argument
+    * @param  $arg
+    */
+   function fn($arg) {}
+
+   fn(1); // Ok
+   fn(1, 2); // Warning
+   call_user_func_array("fn", [1, 2, 3]); // Warning
+
+   // Warning: fn() expects at most 1 parameter, 2 given, defined in %s on line %u and called in %s on line %u
+   // Warning: fn() expects at most 1 parameter, 3 given, defined in %s on line %u and called in %s on line %u
+
+The implementation is aware of the native
+``variable-length argument list API`` and won't emit any warning if the
+called function or method is explicitly variadic or implemented with:
+
+-  ``func_get_arg();``
+-  ``func_get_args();``
+
+The following examples **WON'T** break:
+
+.. code:: php
+
+   /** fn expects a variable-length argument lists */
+   function fn($arg) {
+       $arg = func_get_arg(0);
+       $args = func_get_args();
+   }
+
+   fn(1); // Ok
+   fn(...[1, 2, 3, 4, 5]); // Ok
+   call_user_func_array("fn", [1, 2, 3, 4, 5, 6, 7]); // Ok
+
+The implementation also supports **dynamic resolution** of function
+names. So **aliased** calls to dynamic arguments API is also covered:
+
+.. code:: php
+
+   namespace some\namespace;
+
+   use function func_get_arg  as foo;
+   use function func_get_args as bar;
+
+   /** fn expects a variable-length argument lists */
+   function fn($arg) {
+       $arg = foo(0);
+       $args = bar();
+   }
+
+   fn(1);
+   fn(1, 2); // Ok
+   call_user_func("fn", 1, 2, 3); // Ok
+
+Details
+-------
+
+During compilation the function implementations will be verified as
+sensitive to dynamic argument calls. In other words, all the functions
+and methods implemented with ``func_get_arg()`` and ``func_get_args()``
+will be marked with a ``ZEND_ACC_DYNAMIC_ARGCOUNT`` flag:
+
+.. code:: c
+
+   CG(active_op_array)->fn_flags |= ZEND_ACC_DYNAMIC_ARGCOUNT;
+
+During script execution, when the **function** or **method** finally
+gets invoked with an exceeding argument count, the engine will check for
+the flag and emit a warning in case current ``execute_data`` is **not
+variadic** and was not marked as sensitive to dynamic argument count:
+
+::
+
+   Warning: %s() expects at most %u parameters, %u given, defined in %s on line %u and called in %s on line %u
+
+=> It's worth to mention that, currently, PHP implementation already
+checks for exceeding arguments on every function call, the proposal only
+adds a warning according to each function implementation. The
+performance impact is **negligible**.
+
+About Dead Code
+~~~~~~~~~~~~~~~
+
+Functions will be marked as sensitive to variable-length argument list
+even if the implementation contains dead code such as:
+
+.. code:: php
+
+   function fn($arg) {
+       if(false){
+           func_get_args();
+       }
+   }
+   fn(1, 2, 3); // Ok
+
+Maybe when other levels of optimizations get added to PHP and dead code
+gets wiped before execution this little limitation will vanish. But,
+right now, there is no advantages into checking for dead code and
+perhaps some might prefer the implementation this way.
+
+About @ Operator
+~~~~~~~~~~~~~~~~
+
+The implementation is aware of the ``@`` operator.
+
+About \__call and \__callStatic
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The patch won't affect method calls implemented with ``__call`` and
+``__callStatic``. Missing methods have no signature thus there is no way
+to validate argument count.
+
+About Variadic Functions
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Variadic functions are explicitly implemented to handle variable-length
+argument lists, and won't be affected by the patch.
+
+About Anonymous Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC considers that anonymous functions are not intended to have a
+formal signature and should skip the exceeding argument count check.
+
+About Callbacks, \__invoke And Dynamic Calls
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC considers that functions and objects passed as callbacks
+(relates to ``invoke``) should not be affected by the exceeding argument
+count check, as well as dynamic function calls. So the following code is
+not affected:
+
+.. code:: php
+
+   $unknownCallable($arg, $arg, $arg);
+   $someObj->$unknownDispatch($arg, $arg, $arg);
+   $class::$unknownDispatch($arg, $arg, $arg);
+
+This is a concession to provide a good alternative to people calling
+unknown functions and doing method|functional dispatching.
+
+About Obfuscated ``func_get_arg*()`` Calls
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Current patch is not aware of "obfuscated" calls to ``func_get_arg()``
+and ``func_get_args()``:
+
+.. code:: php
+
+   function fn() {
+       $fn = "func_get_args"
+       $fn();
+   }
+
+   fn(1, 2, 3);
+   // Warning: fn() expects at most 1 parameter, 3 given, defined in %s on line %d and called...
+
+This is **not** a **common** use case. A github search for the term
+"func_get_args" haven't revealed a single result of the API being used
+in this way. Besides that, there is no legit reason to use the
+variable-length argument API like that.
+
+Therefore, this RFC also proposes to warn when ``func_get_arg()``,
+``func_get_args()`` is called dynamically by emitting a ``Warning``:
+
+.. code:: php
+
+   $fn = "func_get_args";
+   $fn();
+   Warning: func_get_args() should not be called dynamically...
+
+=> This bit was not implemented on the patch yet. It will be implemented
+if we reach consensus on that or maybe after the voting phase if the RFC
+passes.
+
+Backward Incompatible Changes
+-----------------------------
+
+-  Code with functions not implemented to manage variable-length
+   argument lists being called with an exceeding amount of arguments,
+   according to function signatures, will emit a warning.
+
+-  People using ``debug_backtrace()[0]["args"];`` as a **substitute**
+   ``for func_get_args()`` are candidates to be affected, but this is
+   not guaranteed.
+
+=> All localized BC breaks. Besides that, ``debug_backtrace()`` should
+not be **abused** this way in the first place, we have a dedicated API
+for that.
+
+=> This is a good BC break. In a staggering majority of use cases,
+passing extra arguments is or will become a bug at some point.
+
+=> I made a blog post to clarify possible misunderstandings of this RFC
+on community media, it contains an anecdotal user story you may find
+worth reading: `Why strict argument count on function calls will make
+PHP better, saner,
+easier… <https://medium.com/@marcioalmada/why-strict-arg-count-on-function-calls-will-make-php-better-saner-easier-cc360bf7c7da>`__
+
+BC Breaks On The Real World
+---------------------------
+
+In this section we will explore how the BC breaks, claimed here to be
+isolated or easy to fix, really will affect package ecosystem out there.
+
+Take this as a previously partially opinionated response to anyone
+saying that the BC breaks will be massive to the point of disproving the
+usefulness of what's being proposed by this RFC.
+
+The proposed patch has been tested against many widely used packages.
+Some important packages displayed warnings regarding the strict argument
+count check. This is a list of the packages and how they were easily
+fixed.
+
+PHPUnit
+~~~~~~~
+
+This was the first package I had to test, for obvious reason.
+**PHPUnit** seems to be passing a wrong argument count in a single place
+and this produced a good amount of warnings while running tests suites,
+but all of them had the same common causes:
+
+::
+
+   SebastianBergmann\Comparator\ScalarComparator::assertEquals() expects at most 5 parameters, 6 given,
+   defined in %s/sebastian/comparator/src/ScalarComparator.php on line 89 and called in %s
+
+   PHPUnit_Framework_MockObject_Generator::getObjectForTrait() expects at most 6 parameters, 7 given, defined in
+   %s/phpunit/phpunit-mock-objects/src/Framework/MockObject$Generator.php on line 442 and called in %s
+
+This is how the ``assertEquals`` method was
+`defined <https://github.com/sebastianbergmann/comparator/blob/master/src/ScalarComparator.php#L56>`__,
+with **5** arguments:
+
+.. code:: php
+
+   function assertEquals($expected, $actual, $delta = 0.0, $canonicalize = false, $ignoreCase = false) {
+
+This is how the method was
+`called <https://github.com/sebastianbergmann/comparator/blob/master/src/ArrayComparator.php#L80>`__,
+with **6** arguments:
+
+.. code:: php
+
+   $comparator->assertEquals($value, $actual[$key], $delta, $canonicalize, $ignoreCase, $processed);
+
+If you care to analyze the
+`context <https://github.com/sebastianbergmann/comparator/blob/master/src/ArrayComparator.php#L52-L80>`__,
+you will notice that the ``$processed`` argument is declared as a
+reference on the caller's scope and while being passed to the
+``ScalarComparator::assertEquals`` method it's being completely ignored!
+This is probably not the intended behavior (possibly a bug). The other
+warning was also caused by a obvious mistake.
+
+It would take less than 4 minutes to fix this and get **PHPUnit** ready
+for PHP7, in case the proposal is accepted. It's worth to say that
+**PHPUnit** has a big code base (counting all the dependencies) and only
+**2** warnings related to this RFC were emitted, according to the test
+suite coverage.
+
+Synfony Packages
+~~~~~~~~~~~~~~~~
+
+With such a big codebase, many warnings were expected. But no big issues
+found! Only a few warnings to fix:
+
+Symfony/Yaml
+^^^^^^^^^^^^
+
+::
+
+   Warning: Symfony\Component\Yaml\Parser::isStringUnIndentedCollectionItem() expects 0 parameters, 1 given,
+   defined in vendor/symfony/yaml/Symfony/Component/Yaml/Parser.php on line 668 and called in
+   ~/.composer/vendor/symfony/yaml/Symfony/Component/Yaml/Parser.php on line 332
+
+This is the method signature:
+
+.. code:: php
+
+   /**
+    * Returns true if the string is un-indented collection item
+    *
+    * @return bool    Returns true if the string is un-indented collection item, false otherwise
+    */
+   private function isStringUnIndentedCollectionItem()
+   {
+       return (0 === strpos($this->currentLine, '- '));
+   }
+
+This is how the method is being called all over the place inside the
+package:
+
+.. code:: php
+
+   $unindentedEmbedBlock = $this->isStringUnIndentedCollectionItem($this->currentLine);
+
+Looks like some parameter was removed during some refactory but, since
+PHP doesn't warn about argument lists going out of bounds, the residual
+parameters were not removed. This one took me ~4 minutes to fix.
+
+Symfony/Process
+^^^^^^^^^^^^^^^
+
+This caused many warnings on many other components test suites not
+listed here, but it was a one liner fix. The warning:
+
+::
+
+   Symfony\Component\Process\Pipes\UnixPipes::getDescriptors() expects 0 parameters, 1 given, defined in
+   %s/Symfony/Component/Process/Pipes/UnixPipes.php on line 53
+   and called on %s/Symfony/Component/Process/Process.php
+
+This is how the method was
+`defined <https://github.com/symfony/symfony/blob/2.7/src/Symfony/Component/Process/Pipes/UnixPipes.php#L53>`__,
+with no arguments:
+
+.. code:: php
+
+   /**
+    * {@inheritdoc}
+    */
+   public function getDescriptors() {
+
+This is how the method was
+`called <https://github.com/symfony/symfony/blob/2.7/src/Symfony/Component/Process/Process.php#L1277>`__,
+with one argument:
+
+.. code:: php
+
+   $descriptors = $this->processPipes->getDescriptors($this->outputDisabled);
+
+Synfony has very high quality packages we all rely on a daily basis, but
+this clearly was a mistake that could have been avoided if PHP was
+helping instead of hiding the problems.
+
+All Other Symfony Components
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+All other components were fine. A good amount of tests of many
+components failed or hanged forever for reasons unrelated to the
+proposed patch (most likely PHP7 bugs). Which means PHP7 has some
+incompatibilities that probably won't be so straightforward to fix, at
+least when compared to what's being proposed on this RFC.
+
+Composer
+~~~~~~~~
+
+Composer converts all errors to exceptions. That's understandable
+because composer is built to be a reliable package manager, hence the
+low tolerance for errors. When running composer update:
+
+::
+
+   [ErrorException]                  
+   Symfony\Component\Process\Pipes\UnixPipes::getDescriptors() expects 0 parameters, 1 given, defined in
+   phar:///usr/local/bin/composer/vendor/symfony/process/Symfony/Component/Process/Pipes/UnixPipes.php
+   on line 53 and called...
+
+If you've been reading this RFC with attention you already know that the
+cause of this warning **was already covered** a few paragraphs above and
+it's a one liner fix on ``Symfony/Process`` component. So, no big deal
+with composer too.
+
+Laravel + Components
+~~~~~~~~~~~~~~~~~~~~
+
+A few warnings were noticed on ``Laravel/Cache`` and
+``Laravel/Validate`` components. All easily fixable. For instance:
+
+::
+
+   Warning: Illuminate\Cache\RedisStore::forever() expects at most 2 parameters, 3 given, defined in %s/Illuminate/Cache/RedisStore.php on line 106
+   and called in %s/laravel/tests/Cache/CacheFileStoreTest.php:74
+
+This is how the method was
+`implemented <https://github.com/laravel/framework/blob/5.0/src/Illuminate/Cache/RedisStore.php#L106>`__,
+with **2** arguments:
+
+.. code:: php
+
+   /**
+    * Store an item in the cache indefinitely.
+    *
+    * @param  string  $key
+    * @param  mixed   $value
+    * @return void
+    */
+   public function forever($key, $value) {
+
+This is how the method was
+`called <https://github.com/laravel/framework/blob/5.0/tests/Cache/CacheRedisStoreTest.php#L81>`__
+on a test case, with **3** arguments:
+
+.. code:: php
+
+   $store->forever('foo', 'Hello World', 60);
+
+Again, this was probably not intended and is most likely to be a
+mistake. This could become problematic if, in the future, a new argument
+gets introduced on the related method since the test is already silently
+passing an extra ``int 60`` value on the method call pointed.
+
+=> The other components had no warnings.
+
+Zend Framework 2 + Components
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+I really tried to run the test suite but so many things unrelated to
+this proposal caused fatal errors:
+
+::
+
+   PHP Fatal error:  Redefinition of parameter $notUsed in %s/zf2/tests/ZendTest/Db/Sql/Platform/IbmDb2/SelectDecoratorTest.php on line 60
+
+After fixing this error, other errors appeared. Hence there is no
+numbers for **ZF2**. And it's probably safe to say that the strict
+argument count check proposed on this RFC will be the least important
+problem during PHP7 migration.
+
+Wordpress
+~~~~~~~~~
+
+**Wordpress** test suite is basically composed by integration tests and
+a single warning on the code base is usually multiplied by thousands. At
+first this might sound scary: running the **Wordpress** test suite
+resulted in **4.597** warnings directly related to the proposed RFC.
+**But** after some heuristics it was noticeable that the warnings had a
+common cause:
+
+I parsed the output file from the test case to detect **repeated
+warnings** and the result was a derisive number of **only 27 unique
+warnings**. In practice it means that **27** warnings were found, not
+**4.597**. You can see the condensed list of unique warnings below:
+
+::
+
+   Warning: wp_maybe_load_widgets() expects 0 parameters, 1 given, defined in %s/wp-includes/functions.php on line 3227 and called in %s/wp-includes/plugin.php on line 496
+   Warning: wp_maybe_load_embeds() expects 0 parameters, 1 given, defined in %s/wp-includes/media.php on line 2288 and called in %s/wp-includes/plugin.php on line 496
+   Warning: sanitize_comment_cookies() expects 0 parameters, 1 given, defined in %s/wp-includes/comment.php on line 1168 and called in %s/wp-includes/plugin.php on line 496
+   Warning: preview_theme() expects 0 parameters, 1 given, defined in %s/wp-includes/theme.php on line 649 and called in %s/wp-includes/plugin.php on line 496
+   Warning: create_initial_post_types() expects 0 parameters, 1 given, defined in %s/wp-includes/post.php on line 19 and called in %s/wp-includes/plugin.php on line 496
+   Warning: create_initial_taxonomies() expects 0 parameters, 1 given, defined in %s/wp-includes/taxonomy.php on line 21 and called in %s/wp-includes/plugin.php on line 496
+   Warning: wp_widgets_init() expects 0 parameters, 1 given, defined in %s/wp-includes/default-widgets.php on line 1440 and called in %s/wp-includes/plugin.php on line 496
+   Warning: WP_Widget_Factory::_register_widgets() expects 0 parameters, 1 given, defined in %s/wp-includes/widgets.php on line 582 and called in %s/wp-includes/plugin.php on line 496
+   Warning: WP_Http_Streams::test() expects at most 1 parameter, 2 given, defined in %s/wp-includes/class-http.php on line 1245 and called in %s/wp-includes/class-http.php on line 322
+   Warning: _show_post_preview() expects 0 parameters, 1 given, defined in %s/wp-includes/revision.php on line 518 and called in %s/wp-includes/plugin.php on line 496
+   Warning: _custom_header_background_just_in_time() expects 0 parameters, 1 given, defined in %s/wp-includes/theme.php on line 1646 and called in %s/wp-includes/plugin.php on line 496
+   Warning: WP_Http_Curl::test() expects at most 1 parameter, 2 given, defined in %s/wp-includes/class-http.php on line 1624 and called in %s/wp-includes/class-http.php on line 322
+   Warning: wp_ob_end_flush_all() expects 0 parameters, 1 given, defined in %s/wp-includes/functions.php on line 3270 and called in %s/wp-includes/plugin.php on line 496
+   Warning: twentyfifteen_setup() expects 0 parameters, 1 given, defined in %s/wp-content/themes/twentyfifteen/functions.php on line 54 and called in %s/wp-includes/plugin.php on line 496
+   Warning: twentyfifteen_custom_header_setup() expects 0 parameters, 1 given, defined in %s/wp-content/themes/twentyfifteen/inc/custom-header.php on line 15 and called in %s/wp-includes/plugin.php on line 496
+   Warning: twentyfifteen_widgets_init() expects 0 parameters, 1 given, defined in %s/wp-content/themes/twentyfifteen/functions.php on line 131 and called in %s/wp-includes/plugin.php on line 496
+   Warning: smilies_init() expects 0 parameters, 1 given, defined in %s/wp-includes/functions.php on line 2937 and called in %s/wp-includes/plugin.php on line 496
+   Warning: wp_cron() expects 0 parameters, 1 given, defined in %s/wp-includes/cron.php on line 312 and called in %s/wp-includes/plugin.php on line 496
+   Warning: wp_schedule_update_checks() expects 0 parameters, 1 given, defined in %s/wp-includes/update.php on line 626 and called in %s/wp-includes/plugin.php on line 496
+   Warning: check_theme_switched() expects 0 parameters, 1 given, defined in %s/wp-includes/theme.php on line 1889 and called in %s/wp-includes/plugin.php on line 496
+   Warning: WP_Widget_Recent_Posts::flush_widget_cache() expects 0 parameters, 1 given, defined in %s/wp-includes/default-widgets.php on line 790 and called in %s/wp-includes/plugin.php on line 496
+   Warning: kses_init() expects 0 parameters, 1 given, defined in %s/wp-includes/kses.php on line 1449 and called in %s/wp-includes/plugin.php on line 496
+   Warning: WP_Widget_Recent_Comments::flush_widget_cache() expects 0 parameters, 1 given, defined in %s/wp-includes/default-widgets.php on line 849 and called in %s/wp-includes/plugin.php on line 496
+   Warning: __clear_multi_author_cache() expects 0 parameters, 1 given, defined in %s/wp-includes/author-template.php on line 451 and called in %s/wp-includes/plugin.php on line 496
+   Warning: wp_timezone_override_offset() expects 0 parameters, 1 given, defined in %s/wp-includes/functions.php on line 3914 and called in %s/wp-includes/plugin.php on line 213
+   Warning: twentyfifteen_category_transient_flusher() expects 0 parameters, 1 given, defined in %s/wp-content/themes/twentyfifteen/inc/template-tags.php on line 166 and called in %s/wp-includes/plugin.php on line 496
+   Warning: delete_get_calendar_cache() expects 0 parameters, 1 given, defined in %s/wp-includes/general-template.php on line 1758 and called in %s/wp-includes/plugin.php on line 496
+
+After checking case by case among the **27** warnings found, the
+conclusion is that **all of them** are a result of **human mistake**
+from some code refactory that left function calls with residual
+parameters behind. This could be fixed in less than 1 hour.
+
+=> You can see the raw **Wordpress** test output
+`here <https://gist.githubusercontent.com/marcioAlmada/959b45aa561503499bc0/raw/strict-argcount-impact-wordpress-raw.txt>`__.
+
+Conclusion
+~~~~~~~~~~
+
+During the tests it became **clearly measurable** that the proposed
+strict argument count check **won't be an issue**. Actually, it's quite
+the opposite. It **will** help to **increase** PHP code **quality** from
+PHP7 and forward as all warnings were useful to catch mistakes or even
+bugs.
+
+=> Many other packages were tested and resulted in very similar results,
+and in the end the ones that presented more issues or unique properties
+were listed here. For instance, **Composer** was chosen because it
+converts all error levels to exceptions and **Wordpress** was chosen for
+having a massive procedural code base and popularity...
+
+Hassle Factor
+-------------
+
+So far we've been listing the advantages of this RFC on cases that out
+of bounds argument lists are a result of user mistakes. According to
+tests, mistakes and bugs represent the unquestionable majority of the
+situations.
+
+But there are people exploiting the current PHP silent behavior
+intentionally. This section explores the possible drawbacks towards this
+group of users and how the warning could be fixed.
+
+"Flexible" Interface Implementations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sometimes a package contains an interface that defines some method with
+a given number of arguments but later it's noticed that the
+implementations of that given interface could benefit from additional
+arguments. This usually means that the interface needs to be updated to
+fit the new needs but...
+
+To avoid updating the interface and releasing another major version of a
+package, some maintainers have been adding extra optional arguments to
+the implementations itself. Like what happened with the
+``Zend/Validator`` component.
+
+This is how the
+`interface <https://github.com/zendframework/zf2/blob/eb5877723db6a5a608945eb638d401588e0f0cb9/library/Zend/Validator/ValidatorInterface.php#L25>`__
+looks like:
+
+.. code:: php
+
+   interface ValidatorInterface
+   {
+       public function isValid($value);
+       //...
+
+And this is how the interface was
+`implemented <https://github.com/zendframework/zf2/blob/b952b35a18d13e3645adcf5721440cbc446d923d/library/Zend/Validator/Csrf.php#L117>`__
+**sometimes**. Notice the additional ``$context`` argument.:
+
+.. code:: php
+
+   class Csrf implements ValidatorInterface
+   {
+      public function isValid($value, $context = null) {
+      //...
+
+This has been considered an acceptable "PHPism" but would now require a
+better solution. This was one of the reaction towards the proposal on
+`twitter <https://twitter.com/mwop/status/570586161485230081>`__ that
+illustrates the situation pretty well:
+
+   Tweet: I'm torn. On the 1 hand, we have a valid use case. On another:
+   we should update our interface.
+
+**This is perfectly fixable** though. The options are:
+
+-  Update the bad designed interface and release **minor** and sometimes
+   **major** versions while evolving interfaces to accommodate new use
+   cases.
+-  Convert the offending method call into a dynamic method call as the
+   exceeding argument check will not be done for this kind of call.
+
+=> As the author of the RFC I'd say it's not a bad thing. But in
+fairness to release managers of PHP packages out there, this should also
+be discussed.
+
+Proposed PHP Version(s)
+-----------------------
+
+This is proposed for the next PHP x, which at the time of this writing
+would be PHP 7.
+
+Vote
+----
+
+Vote started on 15th March and ends on 29th March.
+
+Feature
+~~~~~~~
+
+As this is a language change, the main voting requires a 2/3 majority to
+pass.
+
+Question: Should PHP7 warn about exceeding argument count on function calls?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Error Level
+~~~~~~~~~~~
+
+This is a secondary voting to decide what error level should be emitted:
+``E_WARNING`` or ``E_NOTICE``. A ``50% + 1`` majority is required. In
+the event of a tie the RFC author will take the final decision.
+
+Question: What's the error level that should be emitted?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  E_WARNING
+-  E_NOTICE
+
+Patch
+-----
+
+#. Pull request is at\ https://github.com/php/php-src/pull/1108
+
+=> Some unrelated tests broke because the new emitted warning evidenced
+bugs on them. These tests were fixed without prejudice to the test
+suite.
+
+Rejected Features
+-----------------
+
+-  Dynamic calls to ``func_get_arg*`` won't fatal anymore, the proposal
+   now generates a warning.
+-  ``E_DEPRECATE`` option was removed because it implies future changes
+   and if somebody is willing to push for that, another RFC should be
+   created.
+-  ``E_STRICT`` option was removed so we don't conflict conceptually
+   with the `Reclassify
+   E_STRICT <https://wiki.php.net/rfc/reclassify_e_strict>`__ RFC.
+
+Changelog
+---------
+
+-  0.1: Initial patch and RFC
+-  0.2: Remove compile check for ``func_num_args()`` as it's is not
+   directly associated with variadic behaviors
+-  0.3: Remove runtime check for anonymous functions
+-  0.4: Warning instead of fatal on dynamic func_get_arg*() calls, real
+   world examples, clarify anonymous functions behavior
+-  0.5: Define voting and voting options
+-  0.6: Remove E_DEPRECATED option, add E_NOTICE option
+-  0.6.1: Remove E_STRICT voting option
+-  0.6.2: Remove runtime check for \__invoke and explicit dynamic calls
+
+Additional Metadata
+-------------------
+
+:Original Authors: Márcio Almada
+:Original Status: Withdraw
+:Slug: strict_argcount
+:Wiki URL: https://wiki.php.net/rfc/strict_argcount

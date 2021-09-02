@@ -1,0 +1,208 @@
+Systemd Socket Activation Support For PHP-FPM
+=============================================
+
+:PHP-RFC: 0180
+:Title: Systemd Socket Activation Support For PHP-FPM
+:Author: David Strauss <david@davidstrauss.net>, Jerry Blakley <jerry@getpantheon.com>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2012-10-17
+:Version: 1.0
+
+Introduction
+------------
+
+Linux distributions with systemd support a "socket activation" feature
+that allows systemd to listen on the socket from early in the boot
+process and start the service when the first client connects.
+
+Benefits
+--------
+
+Supporting this in PHP-FPM streamlines systems with many pools (so they
+can start on-demand), for administrators that prefer to have a PHP-FPM
+pool listen on a privileged port or path without having to start it
+initially as root, and for administrators wanting to resolve a
+dependency between the web server accepting requests and PHP-FPM's
+socket being able to queue or service them.
+
+launchd and legacy internet superservers support socket activation in
+similar ways.
+
+Socket activation creates no overhead once the daemon has started.
+systemd does not proxy any traffic; it just hands over the file
+descriptor. Once the daemon is running and using the systemd-provided
+socket(s), there's no distinction in daemon operation until shutdown,
+where it skips closing the socket(s).
+
+Socket activation allows replacing the entire binary (as with a PHP-FPM
+security update) without interrupting listening on the socket. PHP-FPM
+supports reloading to a limited degree, but it doesn't seem possible to
+fully replace the executable. The suggested configuration below also
+allows restarting and reloading individual PHP-FPM pools without any
+effect on others.
+
+There is work underway to have socket activation on the base system
+spawn or start full containers (like LXC) on-demand. Since PHP-FPM will,
+itself, be in the container, something else needs to listen on its
+behalf.
+
+Finally, it's a platform consistency issue. As more services move to
+socket activation in Fedora, Arch, Suse, and Red Hat Enterprise Linux
+(and its derivatives), socket units will become a sort of "common
+currency" for configuring which services listen where.
+
+Implementation details
+----------------------
+
+When systemd starts a socket-activated service, it passes the bound,
+listening socket in as a file descriptor. PHP-FPM is already accustomed
+to such behavior using the FPM_SOCKETS environmental variable. It's
+actually possible to "socket activate" PHP-FPM *once* by setting it
+cleverly (so that it looks for the file descriptor(s) created by
+systemd). Unfortunately, PHP-FPM's shutdown behavior leaves the systemd
+socket in a state that's unusable for subsequent activations.
+
+It's possible to provide reliable socket activation support by having a
+loop before or after the "import inherited sockets" one in
+fpm_sockets_init_main(). The loop can either inspect the environmental
+variables systemd sends in directly or call the reference
+implementations defined in systemd/sd-daemon.h. Jerry and I have a patch
+working with the latter approach, including the necessary linking
+against systemd's library. (Linking is also desirable to ease adding
+support later for sd_notify(), which can inform systemd of PHP-FPM's
+current lifecycle status, including startup, reloading, and shutdown.)
+
+Adding the support also requires marking the systemd-imported sockets as
+persistent past shutdown so PHP-FPM does not perform various cleanup
+actions on them that break subsequent activations of the service.
+
+If systemd socket activation support isn't enabled at build time, this
+feature will have no effect. Even if this feature is enabled for a
+build, it will have no effect on non-users of socket activation.
+
+Usage for end-users
+-------------------
+
+The recommended use for PHP-FPM with socket activation is a 1:1:1
+relationship between the listening socket unit in systemd, the service
+unit in systemd, and the PHP-FPM pool. This approach allows each pool to
+spawn on-demand. It also has nice effects like allowing cgroups resource
+limitations (like CPU shares, memory, block I/O, and network I/O) and
+security isolations (like PrivateTmp and syscall restrictions) to be set
+per-pool in the corresponding systemd service unit. Logs will also
+aggregate per-pool in the systemd journal for the corresponding service.
+
+Here's an example configuration. It's still possible to have PHP-FPM
+drop its own permissions or have it perform its own daemonization fork,
+but it's unnecessary. It's also possible to directly start the PHP-FPM
+pool without waiting for the first incoming connection; systemd will
+still start the necessary socket and pass it in.
+
+/etc/systemd/system/my-php-fpm-pool.socket
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+::
+
+   [Socket]
+   ListenStream=/var/run/my-php-fpm-pool.socket
+
+   [Install]
+   WantedBy=sockets.target
+
+/etc/systemd/system/my-php-fpm-pool.service
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+::
+
+   [Service]
+   User=my-php-fpm-pool
+   Group=my-php-fpm-pool
+   ExecStart=/usr/sbin/php-fpm --fpm-config=/etc/php-fpm.d/my-php-fpm-pool.conf
+   KillMode=process
+
+/etc/php-fpm.d/my-php-fpm-pool.conf
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It's possible the final implementation may move to "listen = fd:3" or
+similar syntax to directly request use of an inherited socket rather
+than requiring a perfect socket configuration match-up between the
+systemd socket configuration and the PHP-FPM pool configuration. This
+would make PHP's inheritance more consistent with my nginx proposal.
+
+::
+
+   [global]
+   pid = /var/run/my-php-fpm-pool.pid        ; Not really used by anything with daemonize = no.
+   error_log = syslog                        ; Will aggregate to the service's systemd journal.
+   daemonize = no                            ; systemd handles the forking.
+
+   [www]
+   listen = /var/run/my-php-fpm-pool.socket  ; Must match systemd socket unit.
+   user = my-php-fpm-pool                    ; Ignored but required.
+   group = my-php-fpm-pool                   ; Ignored but required.
+   pm = static
+   pm.max_children = 10
+   slowlog = syslog
+
+Enabling the pool
+~~~~~~~~~~~~~~~~~
+
+::
+
+   systemctl enable my-php-fpm-pool.socket # Enables the socket at system startup.
+   systemctl start my-php-fpm-pool.socket  # Starts the socket listening.
+
+Potential Objections
+--------------------
+
+Why not just use the ondemand process manager?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ondemand process manager still keeps considerable memory allocated,
+and PHP-FPM currently has some idle CPU load when not processing
+requests. It's <1% of a core per service, but it adds up when you manage
+500+ pools, each as a service for security/resource isolation, on a box.
+
+The ondemand process manager doesn't solve the dependency issue
+mentioned earlier (a web server requiring PHP-FPM to be ready) or allow
+privileges to be dropped before PHP-FPM gets invoked at all. The latter
+is useful for platform providers that let users configure PHP-FPM for
+their individual use cases but want to provide assigned "listening"
+sockets.
+
+What about Upstart support?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Upstart seems to have basic socket activation support, and integrating
+PHP-FPM with it would be a great follow-on project. All socket
+activation basically works the same way, in the sense of a file
+descriptor getting handed into the daemon. This RFC would pave the way
+for integration into additional superserver and init daemons.
+
+What about APC opcode cache efficiency?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In order for pools to share an opcode cache they must be forked from the
+same parent process. There are ways to work around that, but it requires
+some fancy fd passing footwork in APC and I guess in many instances you
+don't actually want to share across pools anyway. (Abbreviated from
+Rasmus on PHP internals)
+
+Changelog
+---------
+
+-  2012-11-09: Explain a minor configuration change possibility to
+   harmonize this proposal with the one for nginx.
+-  2012-10-18: Integrate discussion items from the PHP internals list.
+-  2012-10-18: Patches added.
+-  2012-10-17: Initial version.
+
+Additional Metadata
+-------------------
+
+:Original Authors: David Strauss david@davidstrauss.net, Jerry Blakley jerry@getpantheon.com
+:Original Status: Inactive
+:Patches: `build.patch <rfc/socketactivation/build.patch>`__ (needs to be made optional), `activate.patch <rfc/socketactivation/activate.patch>`__
+:Slug: socketactivation
+:Wiki URL: https://wiki.php.net/rfc/socketactivation

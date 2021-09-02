@@ -1,0 +1,185 @@
+Add Return Type Declarations For Internal Methods
+=================================================
+
+:PHP-RFC: 0796
+:Title: Add Return Type Declarations For Internal Methods
+:Author: Máté Kocsis <kocsismate@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2021-03-06
+:PHP-Version: 8.1
+:Version: 1.0
+
+Introduction
+------------
+
+PHP 8.0 added parameter and return type declarations for the vast
+majority of internal functions and methods (`Stubs
+initiative <https://github.com/php/php-src/pulls?q=is%3Apr+label%3AStubs+is%3Aclosed>`__)
+because the different variance-related RFCs, as well as the `PHP RFC:
+Consistent type errors for internal
+functions </rfc/consistent_type_errors>`__, the `PHP RFC: Union Types
+2.0 </rfc/union_types_v2>`__, and the `PHP RFC: Mixed Type
+v2 </rfc/mixed_type_v2>`__ RFCs made it possible to cover nearly any
+cases. However, there are a few reasons why type information can be
+still missing:
+
+-  **When a type includes resources:** it's not possible to declare
+   types containing resources as there is no ``resource`` type
+   declaration. However, resources are currently being phased out
+   (`Resource to object
+   migration <https://github.com/php/php-tasks/issues/6>`__), so there
+   are less and less of such type declarations each day.
+-  **When a function or method doesn't parse parameters according to the
+   general rules:** This can be the case when e.g. an internal function
+   or method doesn't respect the strict_types mode. PHP 8.0 fixed lots
+   of such issues, but around 250 parameters are still not parsed
+   correctly, due to various reasons. These could be fixed individually
+   in the future.
+-  **For ``out`` pass-by-ref parameters**: the type of these parameters
+   is not validated during ZPP, thus it would be incorrect to declare
+   any type for the parameters in question. An in/out parameter RFC
+   would be a prerequisite in order to do so.
+-  **For the return type of non-final methods**: According to the
+   covariance rules, adding return types to overridden methods
+   constitutes as a BC break, since the overriding method's signature
+   becomes incompatible. As all non-final internal methods are possibly
+   overridden, the PHP project leaders decided not to cause such a big
+   BC break just yet.
+
+The current RFC aims to solve the last problem by providing a longer
+term, gradual migration path for users to update their codebases with
+the necessary method return types.
+
+Proposal
+--------
+
+Non-final internal method return types - when possible - are declared
+tentatively in PHP 8.1, and they will become enforced in PHP 9.0. It
+means that in PHP 8.x versions, a "deprecated" notice is raised during
+inheritance checks when an internal method is overridden in a way that
+the return types are incompatible, and PHP 9.0 will make these a fatal
+error. A few examples:
+
+The overriding method doesn't declare any return type (PHP 8.1):
+
+.. code:: php
+
+   class MyDateTime extends DateTime
+   {
+       public function modify(string $modifier) { return false; }
+   }
+
+   // Deprecated: Declaration of MyDateTime::modify(string $modifier) should be
+   // compatible with DateTime::modify(string $modifier): DateTime|false
+
+The overriding method doesn't declare any return type (PHP 9.0):
+
+.. code:: php
+
+   class MyDateTime extends DateTime
+   {
+       public function modify(string $modifier) { return false; }
+   }
+
+   // Fatal error: Declaration of MyDateTime::modify(string $modifier) must be
+   // compatible with DateTime::modify(string $modifier): DateTime|false
+
+The overriding method declares a wrong return type (PHP 8.1):
+
+.. code:: php
+
+   class MyDateTime extends DateTime
+   {
+       public function modify(string $modifier): ?DateTime { return null; }
+   }
+
+   // Deprecated: Declaration of MyDateTime::modify(string $modifier): ?DateTime should be
+   // compatible with DateTime::modify(string $modifier): DateTime|false
+
+The overriding method declares a wrong return type (PHP 9.0):
+
+.. code:: php
+
+   class MyDateTime extends DateTime
+   {
+       public function modify(string $modifier): ?DateTime { return null; }
+   }
+
+   // Fatal error: Declaration of MyDateTime::modify(string $modifier): ?DateTime must be
+   // compatible with DateTime::modify(string $modifier): DateTime|false
+
+Unfortunately, union return types impose a compatibility challenge for
+libraries: as this construct is only supported since PHP 8.0, libraries
+would have to accept the fact by default that their code triggers
+``E_DEPRECATED`` notices on PHP 8.1 if they also want to support PHP
+versions below 8.0. As a remedy, this RFC proposes to add a
+``ReturnTypeWillChange`` attribute which could be used to suppress the
+related ``E_DEPRECATED`` notices. Thanks to the backward compatible
+syntax of attributes, this can be done in code which is compatible with
+PHP 7 and below.
+
+.. code:: php
+
+   class MyDateTime extends DateTime
+   {
+       /**
+        * @return DateTime|false
+        */
+       #[ReturnTypeWillChange]
+       public function modify(string $modifier) { return false; }
+   }
+
+   // No notice is triggered 
+
+Reflection
+----------
+
+As the tentative return type declarations in question wouldn't be
+enforced in PHP 8 versions, ``ReflectionMethod::hasReturnType()`` and
+``ReflectionMethod::getReturnType()`` won't take these into account
+until PHP 9.0.
+
+On the other hand, two new methods are proposed for addition to the
+``ReflectionMethod`` class in order to provide reflection information
+about tentative return types:
+
+.. code:: php
+
+   class ReflectionMethod
+   {
+       public function hasTentativeReturnType(): bool {}
+       public function getTentativeReturnType(): ?ReflectionType {}
+   }
+
+Backward Incompatible Changes
+-----------------------------
+
+In PHP 8.1, an ``E_DEPRECATED`` notice would be raised for each method
+which has an incompatible return type with its overridden internal
+method. In PHP 9.0, incompatible return types would always trigger a
+fatal error.
+
+Vote
+----
+
+Voting started 2021-04-22 and ends 2021-05-06 UTC. The vote requires 2/3
+majority to be accepted.
+
+Question: Add return type declarations for internal methods in the proposed schedule?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/6548
+:Original Authors: Máté Kocsis kocsismate@php.net
+:Original PHP Version: PHP 8.1
+:Slug: internal_method_return_types
+:Wiki URL: https://wiki.php.net/rfc/internal_method_return_types

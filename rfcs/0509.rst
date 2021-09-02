@@ -1,0 +1,265 @@
+E_WARNING For Invalid Container Read Array-access
+=================================================
+
+:PHP-RFC: 0509
+:Title: E_WARNING For Invalid Container Read Array-access
+:Author: David Walker <dave@mudsite.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2016-08-16
+:PHP-Version: 7.4
+:Version: 1.0
+
+Introduction
+------------
+
+PHP current array-access system works very well when attempting to
+access containers of type array, reference(to an array), and objects
+that implement ArrayAccess. However, accessing elements not of those
+types results in a NULL value returned without any alert as to why it's
+null. This feature has been requested in
+`37676 <https://bugs.php.net/bug.php?id=37676>`__ and duplicated in at
+least `39915 <https://bugs.php.net/bug.php?id=39915>`__ and
+`72636 <https://bugs.php.net/bug.php?id=72636>`__. PHP correctly returns
+a warning when you attempt to use an offset that is of an invalid type,
+PHP should also provide a warning when a container is of an invalid
+type.
+
+Proposal
+--------
+
+This RFC proposed to combine a couple of existing
+PR's\ `[1 <https://wiki.php.net/rfc/notice-for-non-valid-array-container#references>`__]\ `[2 <https://wiki.php.net/rfc/notice-for-non-valid-array-container#references>`__]
+as well as my implementation to raise a E_WARNING when a container type
+is used that does not contain array-accessable data. The default
+behavior, of a silent NULL return, is not correctly defined in the
+`Array
+Documentation <http://php.net/manual/en/language.types.array.php>`__
+however is noted in a
+`comment <http://php.net/manual/en/language.types.array.php#111367>`__
+
+As compared to the previous PR's (referenced below) this proposed
+implementation takes effort to limit throwing errors multiple times.
+
+.. code:: php
+
+   <?php
+   $var = false;
+   $var[1][2][3][4][5]; // This will throw a single E_WARNING, as accessing ($a[1])[2] 
+                        // is attempting to access a IS_VAR chain that is NULL.
+                        // Output would be:
+                        // Warning: Variable of type boolean does not accept array offsets
+                        
+   $var = array(123);
+   $var[0][1];          // This will throw an E_WARNING, as accessing $a[0] is valid
+                        // [1] is accessing an integer as an array.                     
+                        // Output would be:
+                        // Warning: Variable of type integer does not accept array offsets
+                        
+   // Brought up during vote:
+   $a = [null];
+   $c = null;
+   var_dump($a[0][0] + $c[0]);  // This will through 2 E_WARNINGS, First would be $a[0][0]
+                                // For the same reason as above, $a[0] is rightfully NULL
+                                // and accessing [0] on null is invalid.  The second, 
+                                // would be $c[0] for the same reason.
+                                // Output:
+                                // int(0)
+
+Backward Incompatible Changes
+-----------------------------
+
+In terms of error-reporting for default INI settings there would be no
+BC-break for production, but there would be warnings for development.
+Many production deployments alter default INI settings for
+error-reporting and as such could be exposed to this warning displaying.
+This would need to be documented in release notes for users to properly
+address in development environments.
+
+However, error-reporting isn't the only aspect that needs to be
+addressed here. ``set_error_handler()``, if listening to E_WARNING will
+be triggered for this warning regardless of INI settings. As well
+``error_get_last()`` would also contain this warning if it was the most
+recent error. These two operate regardless of ``error_reporting(0)``.
+
+This RFC aims to limit the quantity of warnings on a single line,
+however, large projects may have many locations that might need variable
+type checking around unknown container access. Typically, one might
+assume access of a variable to be an array or object, and could do
+checks to make sure the variable about to be accessed is an array, or an
+object.
+
+Performance Impact
+------------------
+
+Test run was:
+
+.. code:: php
+
+   <?php
+   $a = false;
+   for ($i = 0; $i < 1000000; $i++) {
+       $a[0];
+   }
+
+Execution Time (DualCore 3ghz; 2g ram)
+
+-  Current Master : ~0.09s (~489m operations)
+-  Current Master w/RFC Displaying Warnings: ~33.25s (~7.799b
+   operations)
+-  Current Master w/RFC Hiding Warnings: ~0.82s (~4.091b operations)
+
+We can see there is a significant increase in operations on huge loads.
+However, I wouldn't suspect 1m of these errors per request almost ever.
+So, yes there is; but I'd call it useful information overhead.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 7.x (currently 7.2)
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+No expected impact to SAPI's
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+No Extensions
+
+To Opcache
+~~~~~~~~~~
+
+No Opcodes are touched with this RFC
+
+To Documentation
+~~~~~~~~~~~~~~~~
+
+It would probably be nice to document the E_WARNING behavior for
+accessing on non-array types in the Array Documentation either
+`here <http://php.net/manual/en/language.types.array.php#language.types.array.syntax.accessing>`__
+or
+`here <http://php.net/manual/en/language.types.array.php#language.types.array.donts>`__
+
+Discussed Issues
+----------------
+
+E_NOTICE or E_WARNING
+~~~~~~~~~~~~~~~~~~~~~
+
+I began this RFC with the implementation raising an E_NOTICE. However,
+when attempting to access a scalar value as array for a
+`write-context <https://github.com/bp1222/php-src/blob/7369cfcc0f215156eafae71e2b62a573512b3d05/Zend/zend_execute.c#L1776>`__
+it raises an E_WARNING. So I'm mimicking this behavior when accessing
+any scalar not just those <= IS_FALSE on a read-context.
+
+NULL Identity
+~~~~~~~~~~~~~
+
+Should NULL variables be treated as a special identity so that accessing
+array on a null just returns null.
+
+-  **Pro:** easier checking by doing a ``if (!is_scalar($var))``, before
+   doing access since NULL is not a scalar.
+-  **Con:** I'd like to know if I'm accessing a null wrong.
+
+list() access
+~~~~~~~~~~~~~
+
+Should we ignore throwing warnings for list() accesses? (where
+``$foo = null``)
+
+-  ``list($a, $b) == $foo`` -- Warn for each list element? First?
+-  ``foreach(list($a, $b) = each($foo))`` -- Would need to prevent warn
+   on 'final' null each
+
+Per discussion on the
+`PR <https://github.com/php/php-src/pull/2031#issuecomment-238366706>`__
+I have limited this RFC to not raise warnings when setting any value by
+use of list().
+
+Reference Assignment Access
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Discussed on the
+`PR <https://github.com/php/php-src/pull/2031#issuecomment-238939626>`__
+was how to handle access like
+
+.. code:: php
+
+   $value = null;
+   $dim = 0;
+   $new_val =& $value[$dim];
+   var_dump($value);
+   /*
+      Output:
+      array(1) {
+        [0] =>
+        &NULL
+      }
+   */
+
+In the above example the variable ``$null`` is accessed via write, and
+current operations there instruct the variable to become an array, where
+$value[$dim] is created as null, and then make it a reference. I dislike
+how this is unique to NULL values being accessed, wherein
+bools/floats/ints silently fail, and the return value is undefined.
+Regardless, because this is accessed as a write, it falls outside the
+scope of this RFC which aims to raise a warning for read access.
+
+Proposed Voting Choices
+-----------------------
+
+Requires 2/3 Vote
+
+Question: E_WARNING for invalid container read array-access
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Vote Start: 2016-08-16 15:36
+
+Vote End: 2016-08-31 23:59
+
+Patches and Tests
+-----------------
+
+`RFC Proposed
+Implementation <https://github.com/php/php-src/pull/2031>`__
+
+References
+----------
+
+Current Open PR's
+~~~~~~~~~~~~~~~~~
+
+[1] `PR 866 <https://github.com/php/php-src/pull/866>`__
+
+[2] `PR 1269 <https://github.com/php/php-src/pull/1269>`__
+
+Initial Email to Internals
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+`Email
+Thread <http://marc.info/?l=php-internals&m=146999353828790&w=2>`__
+
+Previous Email Discussion
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+`Email Thread <http://marc.info/?t=143379796900001&r=1&w=2>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: David Walker (dave@mudsite.com)
+:Original Status: Implemented (in PHP 7.4)
+:Slug: notice-for-non-valid-array-container
+:Wiki URL: https://wiki.php.net/rfc/notice-for-non-valid-array-container

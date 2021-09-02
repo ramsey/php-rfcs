@@ -1,0 +1,584 @@
+Server-Side Request And Response Objects
+========================================
+
+:PHP-RFC: 0696
+:Title: Server-Side Request And Response Objects
+:Author: Paul M. Jones <pmjones@pmjones.io>
+:Status: Declined
+:Type: Unknown
+:Created: 2020-03-17
+:Version: 2.2
+
+Introduction
+------------
+
+This RFC proposes an object-oriented approach around request and
+response functionality already existing in PHP, in order to reduce the
+global mutable state problems that come with superglobals and the
+various response-related functions.
+
+The SQLite "about" page says, "Think of SQLite not as a replacement for
+Oracle but as a replacement for fopen()."
+https://www.sqlite.org/about.html
+
+Likewise, think of this RFC not as a replacement for HttpFoundation or
+PSR-7, or as a model of HTTP messages, but as an object-oriented
+alternative to superglobals, header(), setcookie(), setrawcookie(), and
+so on.
+
+Proposal
+--------
+
+This RFC proposes an extension to declare three new classes and one
+interface in the root namespace:
+
+-  SapiRequest, composed of immutable read-only copies of PHP
+   superglobals, and some other commonly-used values parsed out from
+   those superglobals
+
+-  SapiResponse and SapiResponseInterface, a buffer for response-related
+   PHP functions
+
+-  SapiResponseSender, to emit the SapiResponse using PHP functions
+
+The full README, working code, and all tests are available at
+https://github.com/pmjones/ext-request, in the 2.x branch.
+
+An earlier version of the extension is in the 1.x branch of the same
+repository; differences from that version are discussed later this
+proposal.
+
+Summary
+~~~~~~~
+
+::
+
+
+   Instead of the superglobal ...          ... use SapiRequest:
+   --------------------------------------- ---------------------------------------
+   $_COOKIE                                $request->cookie
+   $_GET                                   $request->query
+   $_GET['key'] ?? 'default'               $request->query['key'] ?? 'default'
+   $_FILES                                 $request->files
+   $_POST                                  $request->input
+   $_SERVER                                $request->server
+   $_SERVER['REQUEST_METHOD']              $request->method
+   $_SERVER['HTTP_HEADER_NAME']            $request->headers['header-name']
+   $_SERVER['CONTENT_LENGTH']              $request->contentLength
+   $_SERVER['HTTP_CONTENT_MD5']            $request->contentMd5
+   $_SERVER['PHP_AUTH_PW']                 $request->authPw
+   $_SERVER['PHP_AUTH_TYPE']               $request->authType
+   $_SERVER['PHP_AUTH_USER']               $request->authUser
+
+   Instead of parsing ...                  ... use SapiRequest:
+   --------------------------------------- ---------------------------------------
+   $_FILES to look more like $_POST        $request->uploads
+   $_SERVER['CONTENT_TYPE']                $request->contentType
+                                           and
+                                           $request->contentCharset
+   $_SERVER['HTTP_ACCEPT']                 $request->accept
+   $_SERVER['HTTP_ACCEPT_CHARSET']         $request->acceptCharset
+   $_SERVER['HTTP_ACCEPT_ENCODING']        $request->acceptEncoding
+   $_SERVER['HTTP_ACCEPT_LANGUAGE']        $request->acceptLanguage
+   $_SERVER['HTTP_X_HTTP_METHOD_OVERRIDE'] $request->method
+   $_SERVER['PHP_AUTH_DIGEST']             $request->authDigest
+
+   Instead of emitting ...                  ... buffer with SapiResponse:
+   --------------------------------------- ---------------------------------------
+   header('HTTP/1.1', true, 200)           $response->setVersion('1.1');
+                                           $response->setCode(200);
+   header('Foo: bar', true);               $response->setHeader('Foo', 'bar');
+   header('Foo: bar', false);              $response->addHeader('Foo', 'bar');
+   setcookie('foo', 'bar');                $response->setCookie('foo', 'bar');
+   setrawcookie('foo', 'bar');             $response->setRawCookie('foo', 'bar');
+   echo $content;                          $response->setContent($content);
+
+   Instead of sending with ...             ... send with SapiResponseSender:
+   --------------------------------------- ---------------------------------------
+   echo, header(), setcookie(), etc.       $responseSender->send($response);
+
+There is more: please see the docs at
+https://github.com/pmjones/ext-request/blob/2.x/README.md for more
+information.
+
+Criticism and Objections
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Why Do This In PHP Itself?
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For a language as closely related to the web as it is, PHP has lacked
+core server-side request and response objects for its entire existence.
+It has date objects, database objects, XML objects, and other
+object-oriented extensions, but none for server-side request and
+response objects. This proposal fills that gap, covering a set of common
+functionality that has until now been available only in userland.
+
+Further, truly read-only objects in PHP userland are difficult if not
+impossible to achieve, especially when you take immutability of values
+into account. Working within an extension is the surest way of doing it,
+a la the request object offered here.
+
+What About Existing Userland Projects?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+I would prefer to discuss this proposal on its own merits, and thereby
+stay away from what might appear to be negative commentary on other
+projects. Nonetheless, prior critics of this proposal have demanded
+comparison between it and pre-existing projects.
+
+With all that in mind, I will present limited comparisons to two other
+major projects, hopefully hitting the high points without sounding
+overly-negative. If further comparison is desired, I will attempt to
+provide it.
+
+Symfony HttpFoundation
+''''''''''''''''''''''
+
+HttpFoundation provides a very wide range of functionality, as evidenced
+by its documentation at
+https://symfony.com/doc/current/components/http_foundation.html. It does
+so at a cost of necessarily greater complexity and higher code volume.
+
+As it happens, this proposal turns out to mimic a reduced subset of
+HttpFoundation functionality. The same subset is common to many userland
+implementations: Aura, Cake, CodeIgniter, Horde, Jooma, Klein, Lithium,
+MediaWiki, Nette, Phalcon, Yaf, Yii, and Zend/Laminas (among others).
+That subset is:
+
+-  a way to read the request-related superglobals such as $_GET, $_POST,
+   etc. from an object; and,
+
+-  a way to set headers and content into an object so they can be
+   inspected and modified before sending.
+
+So, this proposal is in some ways a distillation and summary of widely
+desired functionality in userland.
+
+Back to HttpFoundation specifically, an example of setting cookies
+provides an illustrative comparison:
+
+.. code:: php
+
+   use Symfony\Component\HttpFoundation\Cookie;
+
+   $response->headers->setCookie(Cookie::create('foo', 'bar'));
+
+This is not so terrible, though it does additionally involve the
+HeaderBag and Cookie classes. Whereas with this proposal, again intended
+only to wrap existing PHP functionality, the code would be:
+
+.. code:: php
+
+   $response->setCookie('foo', 'bar');
+
+HttpFoundation request and response objects are both fully mutable. In
+contrast, this proposal offers a request object with read-only
+properties; the class can be extended to add mutable or immutable
+properties. The response object offered here is fully mutable, though
+its methods are marked as final; this leaves the response object open
+for extension by frameworks and libraries, but closed for modification
+to its core functions.
+
+PSR-7
+'''''
+
+(Full disclosure: I was one of the sponsors on PSR-7.)
+
+PSR-7 is a newer competitor to Symfony HttpFoundation. The PSR-7
+interoperability interfaces, and their various competing
+implemementations (each with their own idiosyncrasies and additions),
+attempt to model HTTP messages, both for use by an HTTP client (as in
+Guzzle) and by server-side applications (as in Laminas).
+
+Using PSR-7 for server-side requests and responses can be challenging.
+For good or bad, the specification defines a way of working that is very
+different from implementations pre-existing it. A number of followup
+PSRs have been created to relieve these issues, as have other userland
+helper packages.
+
+Using the same example as with HttpFoundation above, setting a cookie in
+PSR-7 is no simple task. PSR-7 only provides a way to set headers, which
+generally means a helper library is necessary to set cookies properly.
+For examples of such libraries, see
+https://github.com/dflydev/dflydev-fig-cookies and
+https://github.com/hansott/psr7-cookies, among others.
+
+Using the FigCookies project, this is how to set a cookie into a PSR-7
+Response:
+
+.. code:: php
+
+   use Dflydev\FigCookies\SetCookies;
+   use Dflydev\FigCookies\SetCookie;
+
+   $response = $response->withAddedHeader(
+     SetCookies::SET_COOKIE_HEADER,
+     SetCookie::create('foo', 'bar')
+   );
+
+As such, PSR-7 is not "batteries included": a 3rd-party helper library
+is needed for cookie work.
+
+In contrast, this proposal offers something much more straightforward:
+not to model HTTP messages, but to wrap existing PHP functionality in
+object properties and methods. It is as about as easy as using PHP
+itself.
+
+.. code:: php
+
+   $response->setCookie('foo', 'bar', $options);
+
+In a polar opposite of HttpFoundation, PSR-7 specifies immutability of
+both the request and the response. It turns out this is only imperfectly
+achievable for multiple reasons, not least of which is that the streams
+used for content are themselves mutable.
+
+To reiterate, this proposal offers read-only properties on the request
+with consistent and reliable immutability of those values. The response
+object remains mutable.
+
+Userland Availability, Comparability, and Ecosystem
+'''''''''''''''''''''''''''''''''''''''''''''''''''
+
+(Copied, with light editing, from
+https://externals.io/message/108436#108493.)
+
+One common objection, with variations, has been: "There is a wider
+userland ecosystem that already performs the proposed functions, with
+more capabilities, and with potentially hundreds of thousands of
+implementations already in place. Does the proposal add capabilities
+which do not or cannot exist in userland? If not, then leave it to
+userland."
+
+The proposal authors recognize and understand the sentiment. The
+following counterargument, in relation to previous PHP extensions, is
+presented in return.
+
+When ext/pdo was added to core, there was already a "wider ecosystem
+that already performs these functions, with more capabilities, and with
+potentially hundreds of thousands of implementations already in place."
+Some of those implementations at the time included AdoDB, Metabase, MDB,
+PEAR_DB, and many more.
+
+PDO did not "add capabilities which do not or cannot exist in userland".
+(The proposal authors grant that FETCH_INTO_OBJECT setting properties
+directly without using the constructor was not possible in userland, but
+that's an exception that tests the rule.) Indeed, PDO had a relatively
+reduced feature set in comparison to some of those userland libraries,
+especially AdoDB.
+
+And yet, PDO has turned out to be of great benefit, because it brought
+together features into core that (figuratively speaking) everybody
+needed and was rewriting in userland over and over.
+
+PDO is the strongest example here, but depending on how you count, there
+are 2-3 other extensions that also serve: ext/date, ext/phar, and
+(reaching back to antiquity) ext/session.
+
+So, there is a long history of widely-needed userland functionality
+being brought into core. This proposal is a pretty tame example of doing
+so; as presented, it is very similar to the way PHP itself already does
+things, just wrapped in object properties and methods, and is very
+similar to how things are being done across a wide swath of userland.
+
+Now, it is possible that the above objection should have prevented PDO
+(et al.) from going into core. If that is the case, and (in hindsight)
+it was a mistake to allow them, then consistency alone makes the
+objection valid here as well.
+
+However, if (in hindsight) it was not a mistake to allow those
+extensions, then the objection is not an especially strong argument
+against this RFC. That's not to say "because PDO was allowed into core,
+this RFC must therefore be allowed into core" but to say "that objection
+alone would not have been a barrier to PDO, so it alone should not be a
+barrier to this RFC".
+
+Other Questions And Comments
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Q: The proposal compares and contrasts with HttpFoundation and the
+various PSR-7 implementations; how does it compare to other projects?
+
+A: See this message for a starting point:
+https://externals.io/message/108436#108889. In short, the proposed
+functionality is representative of functionality common to the
+dozen-plus researched projects.
+
+Q: Are these global single-instance objects?
+
+A: No, you can create as many instances as you like, in whatever scopes
+you like.
+
+Q: Do these objects replace the superglobals?
+
+A: No.
+
+Q: Do these objects deal with $_SESSION and the session functions?
+
+A: No; it is explicitly out of scope for this RFC.
+
+Q: Does SapiRequest hold references to the superglobals, or copies?
+
+A: Copies, made at instantiation time. Changes to \`$_GET\` after the
+SapiRequest is instantiated will not be reflected in the existing
+instance.
+
+Q: Since the $query, $post etc. properties are the same as $_GET and
+$_POST, does that mean they retain the same name mangling scheme?
+
+A: They do; that is, SapiRequest uses whatever is passed into it at
+construction time. If PHP changes its name mangling, or if different
+array values are passed in, SapiRequest will use those instead.
+
+Q: Readonly properties are unusual for PHP.
+
+A: Granted, though not unheard of. PdoStatement::$queryString is one
+precedent here. Further, of the researched userland projects, more than
+half of them present the relevant superglobals as nominally readonly in
+the public scope, making readonly access a reasonable choice here.
+
+Q: Does this has any performance impact?
+
+A: Compared to userland, probably greater performance, but the scope is
+so small that I expect little end-to-end impact on applications as a
+whole.
+
+Q: Why is SapiRequest readonly, and SapiResponse mutable?
+
+A: It makes sense that you would not want to change what you have
+received as a request; however, as you are in charge of creating the
+response, modifying it as needed seems reasonable. Further, the
+"readonly request with mutable response" matches half or more of the
+researched userland projects.
+
+Q: Why is SapiRequest composed only of properties, and SapiResponse
+composed only of methods?
+
+A: It's an outgrowth of an asymmetry that already exists in PHP: $_GET,
+$_POST, et al. are properties representing the request, whereas
+header(), setcookie(), et al. are all functions for sending a response.
+
+Q: Why not write (PSR-7|HttpFoundation|OtherImplementation) in C,
+instead of your own version?
+
+A: This is not "my own version." This is an OO-approach to what PHP
+itself already does; it is representative of PHP's way of doing things,
+not "my" way of doing things.
+
+Q: Does it support HTTP/2?
+
+A: It supports HTTP/2 exactly as much as PHP itself does.
+
+Q: Does it support async?
+
+A: Async is not in scope for the proposed API.
+
+Q: What would a migration path look like?
+
+A: Something like the one outlined in the later portion of this message:
+https://externals.io/message/108436#108893
+
+Changes From The 1.x Version
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Based on user feedback over the past couple of years, this proposal
+differs from the earlier 1.x version in the following substantial ways:
+
+-  The "Server" prefix on the class names has been changed to "Sapi".
+
+-  Some users objected on principle to the SapiRequest constructing
+   itself using the superglobals internally. As a result, the
+   constructor now requires a single array parameter; the corresponding
+   argument is typically $GLOBALS but can be any array that mimics the
+   $GLOBALS structure.
+
+-  The SapiRequest object no longer has the immutable
+   application-related functionality represented by withInput(),
+   withParams(), withUrl(), and their sibling methods. Some users felt
+   this functionality was better left to application-specific
+   implementations; other users merely did not need them and were happy
+   to ignore them. This means SapiRequest is now only a public read-only
+   set of properties with immutable values, while still being extensible
+   in userland for application concerns if desired.
+
+-  The SapiResponse object no longer has setContent() convenience
+   methods such as setContentJson() and setContentDownload(). Users
+   found these less convenient than anticipated, and preferred to add
+   their own application-specific convenience methods.
+
+-  SapiResponse no longer has a self-sending capability. It was noted
+   that to customize sending logic, you needed a custom SapiResponse
+   object. As a result, the sending logic has been extracted to a
+   SapiResponseSender class.
+
+-  To address some concerns from an earlier round of discussion, all
+   SapiResponse properties are now private, and all its methods are now
+   final, though the class itself is not. This keeps the class open for
+   extension but closed for modification.
+
+-  SapiResponse::setHeader() and addHeader() methods no longer convert
+   array values to CSV header strings; this functionality was so rarely
+   used as to be unnecessary. Removing it brings these methods back in
+   line with the PHP header() signature. Likewise, the date() helper
+   method is similarly removed. These helper methods, if ever needed,
+   are easily added to userland implementations.
+
+In all, these removals and changes bring the proposal much closer to PHP
+as-it-is.
+
+Open Questions
+~~~~~~~~~~~~~~
+
+1. Should these classes go into an existing extension, rather than one
+of their own? Or should they go into "core" proper?
+
+Backward Incompatible Changes
+-----------------------------
+
+Userland code that declares classes named SapiRequest, SapiResponse, or
+SapiReponseSender will need to rename those classes.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 7.x or 8.0.
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+It would be convenient if the php_head_parse_cookie_options_array()
+function in ext/standard/head.c was published in head.h, so that the
+logic there would not need to be duplicated in php_request.c. Doing so
+would make it easier to keep the logic in sync, but is not a
+requirement.
+
+To Opcache
+~~~~~~~~~~
+
+None.
+
+New Constants
+~~~~~~~~~~~~~
+
+None.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+None.
+
+Open Issues
+-----------
+
+None at this time.
+
+Unaffected PHP Functionality
+----------------------------
+
+The remainder of PHP should remain unaffected.
+
+Future Scope
+------------
+
+This extension acts as an object-oriented wrapper around existing PHP
+request and response functionality; as the scope of that PHP
+functionality expands, this extension should expand with it.
+
+Proposed Voting Choices
+-----------------------
+
+For or against the proposal.
+
+Patches and Tests
+-----------------
+
+The C code for the extension and tests are at
+https://github.com/pmjones/ext-request in the 2.x branch.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+1.x discussions:
+
+https://externals.io/message/96156
+
+https://externals.io/message/97461
+
+https://externals.io/message/97547
+
+http://paul-m-jones.com/post/2016/11/22/the-php-7-request-extension/
+
+https://www.reddit.com/r/PHP/comments/5ecfj1/the_php_7_request_extension/
+
+http://paul-m-jones.com/post/2017/01/03/rfc-serverrequest-and-serverresponse/
+
+https://www.reddit.com/r/PHP/comments/5lshko/rfc_serverrequest_and_serverresponse/
+
+2.x discussions:
+
+https://www.reddit.com/r/PHP/comments/f26a7m/rfc_for_builtin_request_and_response_objects/
+
+https://externals.io/message/108436 (discussion thread)
+
+https://externals.io/message/109161 (voting thread)
+
+https://externals.io/message/109563 (epilogue)
+
+Rejected Features
+-----------------
+
+Add filter_input integration to SapiRequest.
+
+Add .ini setting(s) to disable superglobals, and/or warn on their use.
+
+Add .ini setting(s) to disable response-related functions, and/or warn
+on their use.
+
+Expand the number of classes provided, to allow for various
+SapiRequest-related value objects.
+
+Provide builder and locking methods for SapiRequest.
+
+Make the SapiRequest properties mutable.
+
+Add a SapiResponse::addContent() method.
+
+Embed the PHP multipart/form-data and application/x-www-url-ncoded
+parsing mechanisms into SapiRequest, possibly exposing them wider use.
+
+Vote
+----
+
+Question: Adopt Server-Side Request and Response Objects?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Original Authors: Paul M. Jones, pmjones@pmjones.io
+:Slug: request_response
+:Wiki URL: https://wiki.php.net/rfc/request_response

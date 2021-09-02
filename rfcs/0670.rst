@@ -1,0 +1,234 @@
+Implement New DOM Living Standard APIs In Ext/dom
+=================================================
+
+:PHP-RFC: 0670
+:Title: Implement New DOM Living Standard APIs In Ext/dom
+:Author: Benjamin Eberlei <beberlei@php.net>, Thomas Weinert
+:Status: Implemented
+:Type: Standards Track
+:Created: 2019-09-15
+:PHP-Version: 8.0
+:Version: 0.3
+
+Introduction
+------------
+
+Working with XML (HTML) documents is a necessary task for many web
+applications and the dom extension implements a standardized API that
+was previously specified by a w3 group into 3 DOM Levels. Since then the
+standard has evolved and is now a `Living
+Standard <https://dom.spec.whatwg.org>`__ similar to HTML 5 and
+continuously evolving and maintained by the Web Hypertext Application
+Technology Working Group (WHATWG).
+
+Because the new API provides much improved traversal and manipulation
+APIs than the old API we propose to add the new methods to the existing
+ext/dom API. Specifically we think this is a better solution to
+providing them in userland, because
+
+#. ext/dom + DOMDocument are an implementation of the DOM Standard, so
+   we should continue to support it with evolving versions.
+#. the added methods are a huge value add for users/developers.
+   Workarounds exist but are usually complex and hard to find for both
+   newcomers and experienced developers that don't work with the dom
+   extension everyday.
+
+Proposal
+--------
+
+Implement new DOM Living Standard APIs for ext/dom
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC proposes to adapt the current DOM standard changes to the PHP
+langauge by introducing new interfaces and public properties that
+simplify traversal and manipulation of DOM elements.
+
+.. code:: php
+
+   <?php
+   interface DOMParentNode
+   {
+       /** access to the first child of this node that is a DOMElement */
+       public readonly ?DOMElement $firstElementChild;
+      
+       /** access to the last child of this node that is a DOMElement */
+       public readonly ?DOMElement $lastElementChild;
+       
+       /** counts all child nodes that are DOMElements */
+       public readonly int $childElementCount;
+
+       /** appends one or many nodes to the list of children behind the last child node */
+       public function append(...DOMNode|string|null $nodes) : void;
+       
+       /** prepends one or many nodes to the list of children before the first child node */
+       public function prepend(...DOMNode|string|null $nodes) : void;
+   }
+
+   class DOMDocument implements DOMParentNode {}
+   class DOMElement implements DOMParentNode {}
+   class DOMDocumentFragment implements DOMParentNode {}
+
+   interface DOMChildNode
+   {
+       /** Returns the previous node in the same hierachy that is a DOMElement or NULL if there is none */
+       public readonly ?DOMElement $previousElementSibling;
+      
+       /** Returns the next node in the same hierachy that is a DOMElement or NULL if there is none */ 
+       public readonly ?DOMElement $nextElementSibling;
+
+       /** acts as a simpler version of $element->parentNode->removeChild($element); */
+       public function remove() : void;
+       
+       /** add passed node(s) before the current node */
+       public function before(...DOMNode|string|null $nodes) : void;
+       
+       /** add passed node(s) after the current node */
+       public function after(...DOMNode|string|null $nodes) : void;
+       
+       /** replace current node with new node(s), a combination of remove() + append() */
+       public function replaceWith(...DOMNode|string|null $nodes) : void;
+   }
+
+   class DOMElement implements DOMChildNode {}
+   class DOMCharacterData implements DOMChildNode {}
+
+Implementation choices
+~~~~~~~~~~~~~~~~~~~~~~
+
+We deviate from the DOM Living Standard in some details, because it is
+written for Browser/Javascript implementations and the concepts cannot
+all be transferred 1:1 to PHP ext/dom.
+
+The living standard implements *DOMParentNode* and *DOMChildNode* as
+"traits" or mixins and doesn't provide interfaces for them (as
+Javascript has no interfaces). This might make more sense with the
+primary language target (JavaScript), but for PHP it makes more sense to
+have the functionality available through an interface, so that code can
+test for *$node instanceof DOMParentNode* for example.
+
+The living standard contains an intermediate trait (interface)
+*DOMNonDocumentTypeChildNode* that defines the *previousElementSibling*
+and *nextElementSibling* properties. This is introduced in the living
+standard to provide backwards compatibility with browser/web
+implementations, which are not our concern. In addition PHP interfaces
+cannot declare properties, so it wouldn't make sense to add this empty
+interface. For this reason this interface *DOMNonDocumentTypeChildNode*
+will not be introduced and the properties are instead declared on each
+class implementing *DOMChildNode* directly.
+
+In the standard *DOMDocumentType* is also a *DOMChildNode*. The use of
+this is extremely limited, because the doctype is on the same level as
+the root element and traversal between both has a very limited use case.
+
+The *querySelector* and *querySelectorAll* methods defined on the
+*DOMParentNode* interface are not implemented and the methods omitted
+fromt he interface, because of their underlying complexity (using a CSS
+query selector parser). We recommend to leave implementations of
+comparable functionality to userland libraries such as PhpCss or Symfony
+CSS Selector.
+
+Not adopting Nodes For Now
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The old DOM Level 1-3 standards did not automatically adopt nodes into
+the current document when they got passed, instead a WRONG DOCUMENT
+error was thrown. The new DOM Living standard changed this by modifying
+the behavior to automatically adopt nodes.
+
+- Old behavior (See Exceptions):
+https://www.w3.org/TR/DOM-Level-2-Core/core.html#ID-184E7107 - New
+behavior: https://dom.spec.whatwg.org/#concept-node-pre-insert
+
+In PHP API terms this essentially is the difference between this current
+approach:
+
+.. code:: php
+
+   <?php
+   $element->appendChild($element->ownerDocument->importNode($elementFromOtherDocument));
+   $elementFromOtherDocument->parentNode->removeChild($elementFromOtherDocument);
+
+And it would simplify to the following if all manipulation APIs would
+automatically adopt nodes:
+
+.. code:: php
+
+   <?php
+   $element->appendChild($elementFromOtherDocument);
+
+To put the behavior of the new methods in line with existing
+appendChild, insertBefore and replaceChild behavior, the new methods
+will also throw WRONG DOCUMENT errors for now. Relaxing this constraint
+could be done in another step.
+
+Backward Incompatible Changes
+-----------------------------
+
+Code using registerNodeClass to overwrite DOM classes can be affected IF
+they already implement the new functionality in a way that doesn't
+satisfy the behavior or signature of this proposed code changes.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 8.0
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+No effect on SAPIs.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+The dom extensions API is changed in a mostly backwards compatible way
+(only adding new properties/methods). Breaking is code using
+registerNodeClass that adds child classes that also implement the new
+methods, but use a different signature.
+
+The new functionality can all be implemented entirely using the already
+available libxml2 datastructures, so no changes to the libxml2
+dependency is nceessary.
+
+To Opcache
+~~~~~~~~~~
+
+No effect on Opcache.
+
+Patches and Tests
+-----------------
+
+https://github.com/php/php-src/pull/4709
+
+The pull request is mostly finished and only refactorings need to be
+done.
+
+Vote
+----
+
+Voting requires 2/3 majority and closes on 25th November 2019 UTC
+23:59:59
+
+Question: Accept changes to DOM API to add support for new methods added in WHATWG groups DOM living standard?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+References
+----------
+
+- DOM Living Standard Document https://dom.spec.whatwg.org
+
+Additional Metadata
+-------------------
+
+:Original Authors: Benjamin Eberlei (beberlei@php.net), Thomas Weinert
+:Slug: dom_living_standard_api
+:Wiki URL: https://wiki.php.net/rfc/dom_living_standard_api

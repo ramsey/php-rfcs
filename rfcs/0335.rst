@@ -1,0 +1,267 @@
+Unicode Codepoint Escape Syntax
+===============================
+
+:PHP-RFC: 0335
+:Title: Unicode Codepoint Escape Syntax
+:Author: Andrea Faulds <ajf@ajf.me>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2014-11-24
+:PHP-Version: 7.0
+:Version: 0.1.3
+
+Introduction
+------------
+
+Despite the wide and increasing adoption of Unicode (and UTF-8 in
+particular) in PHP applications, PHP does not yet have a Unicode
+codepoint escape syntax in string literals, unlike many other languages.
+This is unfortunate, as in many cases it can be useful to specify
+Unicode codepoints by number, rather than using the codepoint directly.
+For example, say you wish to output the UTF-8 encoded Unicode codepoint
+``U+202E RIGHT-TO-LEFT OVERRIDE`` in order to display text
+right-to-left. You could embed it in source code directly, but it is an
+invisible character and would display the rest of the line of code (or
+indeed entire program) in reverse!
+
+The solution is to add a Unicode codepoint escape sequence syntax to
+string literals. This would mean you could produce U+202E like so:
+
+.. code:: php
+
+   echo "\u{202E}Reversed text"; // outputs ‮Reversed text
+
+Another use is to visually distinguish between visually similar or
+identical, yet differently encoded, Unicode characters, if you need to
+output one or the other specifically. The following two lines of code
+actually have slightly different output, but you couldn't tell by
+looking at them:
+
+.. code:: php
+
+   echo "mañana";
+   echo "mañana";
+
+However, by using an escape sequence to produce the ñ, it becomes
+clearer:
+
+.. code:: php
+
+   echo "ma\u{00F1}ana"; // pre-composed character
+   echo "man\u{0303}ana"; // "n" with combining ~ character (U+0303)
+
+A further use is to produce characters you can't type on your keyboard.
+If you are unable to type the emoji for ``FACE WITH TEARS OF JOY``, you
+can use its escape sequence instead:
+
+.. code:: php
+
+   echo "\u{1F602}"; // outputs 😂
+
+Proposal
+--------
+
+A new escape sequence is added for double-quoted strings and heredocs,
+with the following syntax:
+
+::
+
+   dq-unicode-escape-sequence::
+     \u{  codepoint-digits  }
+
+::
+
+   codepoint-digits::
+      hexadecimal-digit
+      hexadecimal-digit   codepoint-digits
+
+It produces the UTF-8 encoding of a Unicode codepoint, specified with
+hexadecimal digits. If the codepoint is outside the maximum range
+permissible (beyond U+10FFFF), an error is thrown.
+
+Syntax Rationale
+~~~~~~~~~~~~~~~~
+
+In most languages with a Unicode codepoint escape syntax, it follows the
+format ``\uXXXX``, where XXXX is four hexadecimal digits. That would
+then beg the question of why I didn't decide to follow other languages
+here.
+
+The first reason is that only allowing four hexadecimal digits restricts
+the syntax to only representing codepoints in the Basic Multilingual
+Plane (U+0000 to U+FFFF). However, Unicode has supported codepoints
+beyond 16 bits (and hence outside the BMP) since UTF-16 in 1996, 18
+years ago, and many useful characters are outside of the BMP, so it
+would be unreasonable to restrict programmers to only using BMP
+codepoints. We could instead require six hexadecimal digits (which
+covers the entirety of Unicode), but this would cause bugs, as
+programmers used to other languages would only expect four to be
+supported, and expect ``"\u100000"`` to produce U+1000 followed by
+``"00"``, not ``U+100000``. We could also make it variable-length, but
+this would cause the same problems.
+
+The second reason is that I think non-clearly-delineated escape
+sequences are harmful for readability and likely to cause bugs. It would
+not be a stretch for a programmer to expect the octal escape sequence
+``"\10000"`` to refer to produce some single character character
+``10000``, however it actually would produce ``"\u100" . "00"``. Plus,
+these sequences, if they are variable-length, force programmers to
+insert awkward breaks in the middle of strings when these escape
+sequences precede literal numbers or other characters that would be
+interpreted as part of the escape sequence, but are not intended to be.
+
+Finally, the ``\uXXXX`` syntax is fixed-length and therefore requires
+leading zeroes to be used for codepoints, which makes some sequences
+longer than they need to be.
+
+For all these reasons, the ``\u{xxxxxx}`` syntax is proposed instead. It
+can easily represent any valid Unicode character, e.g. ``"\u{20}"``,
+``"\u{FF}"``, ``"\u{202e}"`` or ``"\u{10F602}"``. It has a clearly
+delimited start and end, which avoids ambiguity (compare ``"\u001000"``
+and ``"\u{10}00"``) and accidental misinterpretation. Finally, it
+doesn't require leading zeros, they are entirely optional, so the
+programmer can write ``"\u{00FF}"`` or ``"\u{FF}"`` as they see fit.
+
+Prior Art
+^^^^^^^^^
+
+ECMAScript 6 will have an identical ``\u{xxxxxx}`` syntax to that which
+is proposed.
+
+Ruby supports this syntax also, however it allows for multiple
+codepoints, e.g. ``\u{20AC A3 A5}``, which is not proposed in this RFC.
+
+(See References below)
+
+Encoding Rationale
+~~~~~~~~~~~~~~~~~~
+
+The production of UTF-8 might be controversial, given PHP's strings
+don't have any specific encoding. However, UTF-8 is now the *de facto*
+standard encoding for PHP, with most standard library functions assuming
+this is used unless told otherwise, and UTF-8 is also now the effective
+standard encoding of the web. It is, furthermore, highly unlikely that
+this will change any time soon. I do not expect it will cause problems
+with other Unicode representations, as UTF-16 and UTF-32 are very rarely
+used in modern web applications, and this is getting even rarer.
+Finally, it is worth remembering that applications which aren't using
+UTF-8 would not be forced to use this.
+
+Backward Incompatible Changes
+-----------------------------
+
+Double-quoted strings and heredocs that contained sequences beginning
+with ``\u`` will now be interpreted differently, and if what followed
+did not form a valid Unicode escape sequence, PHP will throw a fatal
+compile error.
+
+This change would take place in a major version, so some level of
+backwards-compatibility breakage would be justified. In cases where it
+caused problems with existing code, fixing it could be done quite
+trivially by either switching to single-quoted strings, or escaping the
+backslash.
+
+In order to reduce backwards-compatibility issues, particularly with
+JSON in string literals, ``\u`` which is not followed by an opening
+``{`` will pass through verbatim (instead of being interpreted as an
+escape sequence) and not raise an error. This means that existing code
+like ``json_decode("\"\u202e\"");`` will continue to work properly. On
+the other hand, ``"\u{foobar"`` will raise an error.
+
+Proposed PHP Version(s)
+-----------------------
+
+This is proposed for the next major version of PHP, which would be PHP 7
+at the time of writing.
+
+Unaffected PHP Functionality
+----------------------------
+
+Single-quoted strings and nowdocs are unaffected. This produces a UTF-8
+encoding of the codepoint as bytes, but it does not change the fact that
+PHP's strings are byte-strings with no specific encoding.
+
+Future Scope
+------------
+
+Alain Williams suggested on the mailing list that we could add a named
+literal syntax (i.e. something like ``\U{arabic letter alef}``), like
+`Perl's
+\\N <http://perldoc.perl.org/perlreref.html#ESCAPE-SEQUENCES>`__.
+
+Vote
+----
+
+As this is a language change, a 2/3 majority would be required.
+
+Voting started on 2014-12-08 and ended on 2014-12-18.
+
+Question: Accept the Unicode Codepoint Escape Syntax RFC and merge into master?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+A working pull request containing a patch with tests, is here:
+https://github.com/php/php-src/pull/918
+
+A language specification pull request with a patch and tests can be
+found here: https://github.com/php/php-langspec/pull/92
+
+Provisional HHVM implementation: https://reviews.facebook.net/D30153
+
+Implementation
+--------------
+
+-  php-src merge:
+   https://github.com/php/php-src/commit/bae46f307c2d0cdef9b8f5426adcc46920776700
+   (will go into PHP 7)
+-  HHVM merge:
+   https://github.com/facebook/hhvm/commit/b2df7016e63ddcf328dc5bcfdf18760bba8549ec
+
+No manual entry yet.
+
+References
+----------
+
+-  Ruby supports the same ``\u{xxxxxx}`` syntax:
+   http://leejava.wordpress.com/2009/03/11/unicode-escape-in-ruby/
+-  ECMAScript 6 will also have this syntax:
+   https://mathiasbynens.be/notes/javascript-unicode
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Errata
+------
+
+The name of this RFC `ought to have been "unicode codepoint escape
+sequence", not "unicode codepoint escape
+syntax" <https://blog.ajf.me/2015-12-07-poorly-named-rfcs>`__.
+
+Changelog
+---------
+
+-  (2016-03-13) Added Errata
+-  v0.1.3 - ``\u`` without a following opening ``{`` passes through
+   verbatim
+-  v0.1.2 - Ruby support
+-  v0.1.1 - Added Future Scope note on named literals
+-  v0.1 - Initial version
+
+Additional Metadata
+-------------------
+
+:Original Authors: Andrea Faulds, ajf@ajf.me
+:Original Date: 2014-11-24, Last Updated 2014-12-08
+:Original Status: Implemented (PHP 7.0)
+:Slug: unicode_escape
+:Wiki URL: https://wiki.php.net/rfc/unicode_escape

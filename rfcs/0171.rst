@@ -1,0 +1,202 @@
+Remove Calls With Incompatible Context
+======================================
+
+:PHP-RFC: 0171
+:Title: Remove Calls With Incompatible Context
+:Author: Gustavo Lopes
+:Status: Implemented
+:Type: Standards Track
+:Created: 2012-07-30
+:PHP-Version: 5.6
+:Version: 1.0
+
+An RFC for deprecating and removing ``$this`` from incompatible context.
+
+-  Version: 1.0
+-  Date: 2012-07-30
+-  Author: Gustavo Lopes
+-  Status: Deprecation implemented in PHP 5.6
+-  First Published at: http://wiki.php.net/rfc/incompat_ctx
+
+Introduction
+------------
+
+This RFC proposes deprecating (in PHP 5.5) and removing (in the next
+version) the "``$this`` from incompatible context" feature.
+
+What this proposal is not about
+-------------------------------
+
+This proposal is not about removing static calls to instance methods or
+instance-like calls to static methods.
+
+The feature
+-----------
+
+To be clear, the feature I'm proposing to remove is this:
+
+.. code:: php
+
+   class A {
+       function foo() { var_dump(get_class($this)); }
+   }
+   class B {
+      function bar() { A::foo(); }
+   }
+   $b = new B;
+   $b->bar(); //string(1) "B"
+
+Internal methods cannot be called in this fashion.
+
+The Change
+----------
+
+Even though I think an error at call site would be the most useful to
+the user, the most sensible option is to just have ``$this === null``
+inside the callee, like when you do:
+
+.. code:: php
+
+   class A { function foo() {} }
+   A::foo(); // E_STRICT
+
+Rationale
+---------
+
+Method implementations almost always assume that $this refers to an
+instance of a compatible type. When they are called with an incompatible
+``$this``, there'll a bug most of the time. The only warning is an
+``E_STRICT`` message, which many people have disabled.
+
+Because this feature is surprising and little-known, a simple error like
+calling Class::foo() instead of ::fooStatic() (when foo() and
+fooStatic() have similar names), by not failing on the call site, can be
+difficult to identify.
+
+When combined with LSB, it can be even more difficult to identify. See
+https://bugs.php.net/bug.php?id=62446
+
+BC break
+--------
+
+The break should be minor. I very much doubt there are many lines of
+code that rely on this feature. It has been discouraged with an
+``E_STRICT`` since 2006 (see
+`6f76b170 <https://github.com/php/php-src/commit/6f76b170>`__).
+
+This feature, as noted in the
+`comment <http://lxr.php.net/xref/PHP_TRUNK/Zend/zend_vm_def.h?r=80497ea7dfade2ccd032ef65103c0a113338653a#2335>`__,
+exists only for compatibility with PHP 4. Far more used legacy features,
+like register globals, have already been axed.
+
+This feature can, however, be used to implement trait-like behavior, and
+I'm sure someone somewhere did such a thing.
+
+Alternatives
+------------
+
+Using traits is perhaps the easiest and cleanest way to replace code
+that relies on the feature to be removed. Changing the code to use
+traits implies: 1) refactoring the instance methods called from
+incompatible contexts into a trait, 2) make the callers from
+incompatible contexts use the new trait, 3) change the call sites to use
+``$this->method()`` instead of ``OrigClass::method()``. Example:
+
+.. code:: php
+
+   <?php
+   class A {
+       function dumpClass() {
+           var_dump(get_class($this));          
+       }
+   }
+   class B {
+       function test() {
+           A::dumpClass();
+       }
+   }
+
+   $a = new A;
+   $b = new B;
+   $a->dumpClass();
+   $b->test();
+
+would become:
+
+.. code:: php
+
+   <?php
+   trait ATrait {
+       function dumpClass() {
+           var_dump(get_class($this));          
+       }
+   }
+   class A {
+       use ATrait;
+   }
+   class B {
+       use ATrait;
+       function test() {
+           $this->dumpClass();
+       }
+   }
+
+   $a = new A;
+   $b = new B;
+   $a->dumpClass();
+   $b->test();
+
+A worse solution, which relies on the possibility of calling instance
+methods statically would be using an extra parameter:
+
+.. code:: php
+
+   <?php
+   class A {
+       function dumpClass($obj=null) {
+           if ($obj === null)
+               $obj = $this;
+           var_dump(get_class($obj));           
+       }
+   }
+   class B {
+       function test() {
+           A::dumpClass($this); //E_STRICT ($this would be NULL on callee)
+       }
+   }
+
+   $a = new A;
+   $b = new B;
+   $a->dumpClass();
+   $b->test();
+
+Vote
+----
+
+Voting ends not before Monday, January 28th 2013. The PHP language is
+ultimately changed, so a 2/3 majority is required.
+
+Question: Deprecate calls with incompatible context in 5.5 and disallow them in the version after (be it 5.6 or 6.0)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Changelog
+---------
+
+-  2012-07-30: Initial version
+-  2013-01-20: Opened vote
+-  2013-01-28: Closed vote; RFC accepted unanimously with 15 votes in
+   favor
+
+Additional Metadata
+-------------------
+
+:Original Authors: Gustavo Lopes
+:Original Status: Deprecation implemented in PHP 5.6
+:Slug: incompat_ctx
+:Wiki URL: https://wiki.php.net/rfc/incompat_ctx

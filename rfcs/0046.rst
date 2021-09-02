@@ -1,0 +1,315 @@
+Non Fully Qualified Namespaced Identifier Resolution RFCs
+=========================================================
+
+:PHP-RFC: 0046
+:Title: Non Fully Qualified Namespaced Identifier Resolution RFCs
+:Author: Lukas Smith <smith@pooteeweet.org>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2008-10-30
+:PHP-Version: 5.3
+:Version: 1.1.0
+
+This RFC discusses the way identifiers inside a namespace are to be
+resolved that are not fully qualified.
+
+Introduction
+------------
+
+Generally in namespaces we support fully qualified names as well as
+importing namespaces via "use". However what happens if a non fully
+qualified name is used that is not defined or imported inside the
+namespace? Should this cause a fatal error or should an attempt be made
+to resolve this call to the global namespace?
+
+.. code:: php
+
+   <?php
+   namespace foo;
+
+   $bar = new bar();
+   bar();
+   ?>
+
+Its important that we make a conscious decision for these questions.
+Depending on how we approach this, users might unintentionally trigger
+autoload, call functions in the global namespace they did not expect or
+they could run into trouble when trying to migrate existing code to
+namespaces.
+
+One way to avoid this is via an explicit "use" statement or by fully
+qualifying the name
+
+.. code:: php
+
+   <?php
+   namespace foo;
+   use \dong as bar;
+
+   $bar = new bar();
+   \bar();
+   ?>
+
+While there is no way to magically import the right things all
+namespaces, we do have the option of automatically falling back into the
+global namespace if the identifier does not resolve in the local
+namespace. This RFC details some alternative approaches for this as well
+as how things would be like if such a fallback would not exist.
+
+Possible approaches
+-------------------
+
+Fallback to the global namespace
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In this scenario when an identifier does not resolve inside the current
+namespace and attempt would be made to find the identifier in the global
+namespace.
+
+When referencing global identifiers in namespaces, it is probably a
+reasonable assumption that the bulk of that will be function calls. This
+is because currently most functionality in PHP is provided via
+functions. Also once an instance of a class has been made, one does not
+have to reference the identifier again in common usage (there will still
+be cases, like with instanceof/type hint checks or static calls).
+
+In the past people often created classes for the sole reason of being
+able to sort of "namespace" their functions. Given that we now have real
+namespaces, class usage as a namespace replacement is no longer
+necessary. Still another possible assumption, which is considerably more
+dangerous to make, is that most code that uses namespaces will mostly
+use classes for its implementation and considerably less depend on
+namespaced functions.
+
+One noteworthy aspect here is that for classes we have autoload. If non
+fully qualified identifiers can be used to reference global identifiers,
+"lazy" programmers can skip fully qualifying identifiers even if they
+have the full intention of referencing a global identifier. With
+autoload this could trigger expensive operations, which are essentially
+useless.
+
+For functions however we do not have autoload capabilities. This brings
+the advantage that falling back to the global namespace does not run the
+performance risk of autoload. So a fallback would be much less
+expensive, but there would still be overhead for not making intentional
+references to the global namespace fully qualified.
+
+At the same time the ability to automatically fallback into the global
+namespace gives the ability to overload global identifiers inside a
+namespace without having to modify existing code inside that namespace.
+This however can also be considered dangerously similar to the ambiguity
+issues we solved by changing the namespace separator (for example static
+code analysis becomes more difficult).
+
+Furthermore users need to be aware that if they are overloading internal
+identifiers that they need to make sure that the relevant code is loaded
+in time. For classes there is the autoload approach which would help
+ensure that the class to overload is loaded on demand if necessary.
+However users that do not use autoload or that are overloading function
+(and constants) run the risk of their code behaving differently in not
+so obvious ways if they do not always load all files defining relevant
+functions (and constants) for this namespace.
+
+file1.php
+
+.. code:: php
+
+   <?php
+   namespace foo;
+   function strlen(){}
+   ?>
+
+file2.php
+
+.. code:: php
+
+   <?php
+   namespace foo;
+   // removing the commenting of the following line will change the behavior of file2.php
+   // include 'file1.php';
+   strlen();
+   ?>
+
+One approach to make it at least noticeable when a fallback into the
+global namespace occurs would be to throw an E_NOTICE in this case. This
+would discourage users from using the fallback for overloading, but it
+would ensure that people migrating legacy code or people who have not
+yet fully understood namespaces, would be able to find out about where
+they are loosing performance.
+
+Another approach to reduce (though it does not remove the issues
+entirely) some of the issues is by simply removing functions (and
+constants) from namespaces.
+
+As a result of the above notes, we might decide to go with a few
+different options based on how one weighs these aspects:
+
+#. Only for functions/constants
+#. Only for classes
+#. Only for internal identifiers
+#. For everything
+
+Only for functions/constants
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Assumption: Most people will use global functions and namespaced
+classes.
+
+Notes: By throwing an E_NOTICE when a fallback occurs, the performance
+issues become more manageable, but it would reduce the feasibility of
+overloading. Also note that if functions (and constants) would be
+removed from namespaces, then most disadvantages would be removed as
+functions (and constants) would always directly reference the global
+namespace.
+
+Advantages
+''''''''''
+
+#. Does not require fully qualified names for functions (and constants)
+#. No performance "bomb" with autoload
+#. Ability to overload global functions (and constants)
+
+Disadvantages
+'''''''''''''
+
+#. Overloading global identifiers requires ensuring that all relevant
+   files are loaded or unexpected behavior might occur
+#. There is still overhead for the fallback
+#. Classes still need fully qualified names
+
+Only for classes (autoload first)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Assumption: People want to overload global classes
+
+Notes: By throwing an E_NOTICE when a fallback occurs, the performance
+issues become more manageable, but it would reduce the feasibility of
+overloading. Also if instead of checking autoload before global, one
+could first check global before falling back to autoload. This prevents
+performance issues, but would raise issues with the load order similar
+to functions/constants.
+
+.. _advantages-1:
+
+Advantages
+''''''''''
+
+#. Does not require fully qualified names for classes
+#. Ability to overload global classes
+
+.. _disadvantages-1:
+
+Disadvantages
+'''''''''''''
+
+#. Functions (and constants) still need fully qualified names
+#. Possible performance bomb with autoload
+
+Only for internal identifiers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Assumption: People will leave the global namespace to PHP and namespace
+their own code.
+
+.. _advantages-2:
+
+Advantages
+''''''''''
+
+#. Does not require fully qualified names for all internal identifiers
+#.  Internal identifiers work the same inside and outside of namespaces
+   (though overloading would still be possible)
+
+.. _disadvantages-2:
+
+Disadvantages
+'''''''''''''
+
+#. Less clear rule as its not possible form just reading the calling
+   code if something is internal or not
+#. Defining a function in userland code to emulate functionality from a
+   newer PHP version will not enable fallbacks
+#. Higher performance overhead (???)
+
+For everything
+^^^^^^^^^^^^^^
+
+Assumption: People want to easily migrate their existing code and
+beginners should not have to know (as much about) if they are coding
+inside a namespace or not.
+
+Notes: By throwing an E_NOTICE when a fallback occurs, the performance
+issues become more manageable, but it would reduce the feasibility of
+overloading. Also note that if functions (and constants) would be
+removed from namespaces, then some of the disadvantages would be removed
+as functions (and constants) would always directly reference the global
+namespace. Also if instead of checking autoload before global, one could
+first check global before falling back to autoload. This prevents
+performance issues for classes, but would raise issues with the load
+order similar to functions/constants, but means things would be
+consistent in the sense that overloading requires defining the relevant
+identifiers ahead of use for everything (classes/functions/constants).
+
+.. _advantages-3:
+
+Advantages
+''''''''''
+
+#. Does not require fully qualified names for all global identifiers
+#. Simple rule, everything falls back
+#. Ability to overload any kind of global identifier
+
+.. _disadvantages-3:
+
+Disadvantages
+'''''''''''''
+
+#. There is overhead for the fallback
+#. Additionally there is a possible performance bomb with autoload
+#. Overloading global identifiers requires ensuring that all relevant
+   files are loaded or unexpected behavior might occur
+
+Do not fall back to the global namespace
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Assumption: People are willing to spend more time on updating their
+legacy code that they migrate to namespaces and adapt their coding style
+to fully qualify global identifiers when working within namespaces.
+
+.. _advantages-4:
+
+Advantages
+''''''''''
+
+#. No risk for people relying on behavior that does the same but with
+   more overhead
+#. No risk for ambiguity
+
+.. _disadvantages-4:
+
+Disadvantages
+'''''''''''''
+
+#. Require fully qualified names (or use statements) for all global
+   identifiers
+
+More about namespaces
+~~~~~~~~~~~~~~~~~~~~~
+
+#. http://wiki.php.net/rfc/namespaceseparator
+#. http://wiki.php.net/rfc/backslashnamespaces
+
+Changelog
+---------
+
+- from 1.0 to 1.1: added variant with 1) ns 2) global 3) autoload - from
+1.0 to 1.0.1: tweaked examples - from 0.9 to 1.0: added some examples,
+added note about use statement, fixed some language issues
+
+Additional Metadata
+-------------------
+
+:Original Authors: Lukas Smith smith@pooteeweet.org
+:Original Status: Implemented in PHP 5.3 (with fallback to global for functions/constants)
+:Slug: namespaceresolution
+:Wiki URL: https://wiki.php.net/rfc/namespaceresolution

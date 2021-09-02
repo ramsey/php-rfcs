@@ -1,0 +1,405 @@
+Userspace Operator Overloading
+==============================
+
+:PHP-RFC: 0683
+:Title: Userspace Operator Overloading
+:Author: Jan Böhmer <jan.h.boehmer@gmx.de>
+:Status: Declined
+:Type: Standards Track
+:Created: 2020-02-01
+:PHP-Version: 8.0
+:Version: 0.5
+
+Introduction
+------------
+
+At the moment expressions like ``$a + $b`` or ``$a * 2`` are only valid
+if ``$a`` and ``$b`` are scalar types like int or float. However, in
+many other programming languages like Python, C# or C++ it is possible
+to overload these operators to use them on classes, to implement custom
+math (and other) objects. This RFC proposes userspace operator
+overloading for PHP.
+
+Using objects to represent money values and arbitrary precision numbers
+or create mathematical objects like complex numbers and vectors is quite
+common. With this proposal operations with these objects could be
+written in the more natural and intuitive way of
+
+.. code:: php
+
+   $result = $a * ($b + $c * $d);
+
+instead of the currently function based method
+
+.. code:: php
+
+   $a->multiply($b->add($c->multiply($d));
+
+PHP has already an internal mechanism for operator overloading using the
+``do_operation`` object handler, which is used for example by GMP and
+FFI data objects. However, this mechanism is only available for internal
+PHP objects and currently can not be used for classes created inside
+PHP.
+
+This RFC only proposes overloading for arithmetic and concatenation
+operators. Comparison and equality operators are handled differently
+internally and logic is more complex, so these should be handled in a
+different RFC.
+
+Proposal
+--------
+
+Syntax
+~~~~~~
+
+Operator overloading is done by static magic functions per operator in a
+class. These functions receive both operands and must return a non null
+value:
+
+.. code:: php
+
+   class Vector3()
+   {
+       public static function __add($lhs, $rhs) {
+           // Do something with the values and return a non-null value
+       }
+       
+       public static function __mul($lhs, $rhs): ?Vector3 {
+           // If the given types are not supported, the function can return a special const.
+           //...
+           return PHP_OPERAND_TYPES_NOT_SUPPORTED;
+       }
+   }
+
+   $a = new Vector3();
+   $b = new Vector3();
+
+   // Equivalent to $x = Vector3::__add($a, $b)
+   $x = $a + $b;
+   //Equivalent to $y = Vector3::__mul(3, $b)
+   $y = 3 * $b;
+
+By passing both operands to the handler, it can decide between the cases
+on non-commutative operators (``$a / 2`` vs. ``2 / $a``), which would be
+more difficult when only the "other" operand (besides ``$this``) is
+passed.
+
+The magic function can accept any type, the function has to decide if it
+can handle the type (and the value). If it can not handle the given
+type, it has to return the constant ``PHP_OPERAND_TYPES_NOT_SUPPORTED``
+(currently just null).
+
+The argument **must not** specify any argument typehints (an error is
+thrown otherwise), as typehints and occuring type errors would break
+operator evaluation (`see
+discussion <https://externals.io/message/108788#108993>`__).
+
+Handlers **can** specify return typehints, but note that the return type
+has to be nullable (as PHP_OPERAND_TYPES_NOT_SUPPORTED has the value
+null).
+
+Overloadable Operators
+~~~~~~~~~~~~~~~~~~~~~~
+
+Direct overloadable operators
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Like mentioned above only basic arithmetic operators should be
+overloadable, not compare or equality operators. The operators which are
+allowed to be overloaded (explicitly) and their associated magic
+functions are:
+
+=================== ======== ==============
+\                   Operator Magic function
+Addition            ``+``    \__add
+Subtraction         ``-``    \__sub
+Multiplication      ``*``    \__mul
+Division            ``/``    \__div
+Power               ``**``   \__pow
+Modulo              ``%``    \__mod
+Concatenation       ``.``    \__concat
+Bitwise shift left  ``<<``   \__shiftLeft
+Bitwise shift right ``>>``   \__shiftRight
+Bitwise OR          ``|``    \__bitwiseOr
+Bitwise AND         ``&``    \__bitwiseAnd
+Bitwise XOR         ``^``    \__bitwiseXor
+Bitwise NOT         ``~``    \__bitwiseNot
+=================== ======== ==============
+
+Indirect overloadable operators
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following operators derive their behavior from the operators above
+and therefore can be overloaded by implementing functions from above.
+They can not be overloaded on their own:
+
++----------------------+----------------------+----------------------+
+|                      | Operator             |                      |
++----------------------+----------------------+----------------------+
+| Negative value       | ``- $a``             | interpreted as       |
+|                      |                      | **``(-1)*$a``**, can |
+|                      |                      | be overloaded by     |
+|                      |                      | implementing \__mul  |
++----------------------+----------------------+----------------------+
+| Positive value       | ``+ $a``             | interpreted as       |
+|                      |                      | **``(+1)*$a``**, can |
+|                      |                      | be overloaded by     |
+|                      |                      | implementing \__mul  |
++----------------------+----------------------+----------------------+
+| Shorthand assignment | ``+=``, ``*=``,      | ``$a += $b`` is      |
+|                      | ``.=``, etc.         | interpreted as       |
+|                      |                      | ``$a = $a + $b``,    |
+|                      |                      | can be overloaded by |
+|                      |                      | implementing \__add  |
++----------------------+----------------------+----------------------+
+| Increment            | ``$a++`` (and        | interpreted as       |
+|                      | ``++$a``)            | ``$a = $a + 1``, can |
+|                      |                      | be overloaded by     |
+|                      |                      | implementing \__add  |
++----------------------+----------------------+----------------------+
+| Decrement            | ``$a--`` (and        | interpreted as       |
+|                      | ``--$a``)            | ``$a = $a - 1``, can |
+|                      |                      | be overloaded by     |
+|                      |                      | implementing \__sub  |
++----------------------+----------------------+----------------------+
+
+Operators that can not be overloaded
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following operators can not be overloaded by using this method
+(neither explicit or implicit):
+
++----------------------+----------------------+----------------------+
+|                      | Operator             |                      |
++----------------------+----------------------+----------------------+
+| Comparision          | ``<``, ``<=``,       | maybe subject of a   |
+| operators            | ``>``, ``==`` etc.   | future RFC           |
++----------------------+----------------------+----------------------+
+| Assignment operator  | ``=``                |                      |
++----------------------+----------------------+----------------------+
+| Logic operators      | ``||``, ``!``,       |                      |
+|                      | ``&&``               |                      |
++----------------------+----------------------+----------------------+
+| Object operators     | ``instanceof``,      |                      |
+|                      | ``new``, ``clone``   |                      |
++----------------------+----------------------+----------------------+
+| Null concealing      | ``??``               |                      |
+| operator             |                      |                      |
++----------------------+----------------------+----------------------+
+| Tenary operator      | ``? :``              |                      |
++----------------------+----------------------+----------------------+
+| Error control        | ``@``                |                      |
+| operator             |                      |                      |
++----------------------+----------------------+----------------------+
+| Object access        | ``->``               |                      |
+| operator             |                      |                      |
++----------------------+----------------------+----------------------+
+
+Evaluation order
+~~~~~~~~~~~~~~~~
+
+The overloaded operators follow the normal operator precedence (e.g. \*
+is evaluated before +). Brackets can be used to control the evaluation
+order in the way it possible for scalar operands.
+
+If an object is encountered as one of the operands, it tried to call the
+magic function on the left object. If the left operand is not an object
+or its class does not overload the operator, the magic function is
+called on the right operand.
+
+.. code:: php
+
+   $test = $a + $b;
+   //First ClassA::__add($a, $b) is called
+   //If not possible (method not existing or types not supported) ClassB::__add($a, $b) is called
+
+An operand handler can signal that it does not support the given types
+by returning the const ``PHP_OPERAND_TYPES_NOT_SUPPORTED`` (at the
+moment null). In this case it is tried to use the handler on the left
+object. If both handlers do not support the given operand types an error
+is thrown.
+
+Error handling
+~~~~~~~~~~~~~~
+
+If an operator is used with an object that does not overload this
+operator, an NOTICE is triggered (to not break existing code), which
+gives the user a hint about the method that has to be overloaded. For
+backward compatibility objects, which do not overload the operator, are
+converted to integer 1 (current behavior).
+
+If the class overloads the operator, and the magic method do not return
+a value, an ERROR is triggered.
+
+If the given operand types are not supported on both objects, an ERROR
+is thrown.
+
+If the operator handler declares argument type hints or arguments should
+be passed-by-reference an ERROR is thrown.
+
+Other
+~~~~~
+
+A user who overloads an operator MUST ensure, that the magic function do
+not change the existing operand objects, or it will cause undesirable
+behavior. At the moment there is no way to enforce immutability on
+objects, so the user is responsible. The documentation should include a
+warning about this.
+
+Backward Incompatible Changes
+-----------------------------
+
+As long as the user does not implement, the operator magic functions,
+operators on objects will behave in the previous way. When users has
+implemented functions with the names above (e.g. ``__add``), this code
+will break (most likely an error about invalid signature will be
+thrown). However, according to
+`documentation <https://www.php.net/manual/en/userlandnaming.rules.php>`__
+every function or method name beginning with two underscores (``__``)
+are reserved and should not be used by users at all except for using
+documented magic methods.
+
+Code that has declared a constant with the name
+``PHP_OPERAND_TYPES_NOT_SUPPORTED`` will break. However, the chance that
+users used exactly that name is very low.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 8.0
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Extensions can override the ``do_operation`` object handler for their
+own classes like before. If the defined classes should be inheritable,
+the classes should define the operator methods, so a child class can
+simply call ``parent::__add()`` to invoke the original behavior.
+
+To Opcache
+~~~~~~~~~~
+
+None.
+
+New Constants
+~~~~~~~~~~~~~
+
+``PHP_OPERAND_TYPES_NOT_SUPPORTED``
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+None.
+
+Future Scope
+------------
+
+The following things are related to operator overloading but are **not**
+part of this RFC:
+
+Comparison operators
+~~~~~~~~~~~~~~~~~~~~
+
+The comparison operators (like ``<``, ``>``, ``==``, etc.) can not be
+overloaded in the way discussed in this RFC. For custom object
+comparison an interface (like proposed in this `old
+RFC </rfc/comparable>`__) could be useful. Some objects can not be
+really compared (in the way greater/lesser than the other), but only
+decided on if they are equal. For these cases an ``Equatable`` Interface
+(with an ``equalTo()`` function) could be useful.
+
+Immutable types
+~~~~~~~~~~~~~~~
+
+To ensure that objects can not be changed (which could cause undesirable
+behavior), immutable objects (see this `old RFC </rfc/immutability>`__)
+could be helpful.
+
+Allow overloading of shorthand assignment operators and increment/decrement operators
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+At moment the engine interprets the assignment and increment/decrement
+operators in the way described above ('$a += $b' becomes
+``$a = $a + $b``). For memory saving reasons it could be useful to allow
+to overload these operators separately (no new memory is allocated for
+the newly created value, if the object can mutate itself). This would
+take some deeper changes in the way PHP interprets operators, for little
+benefit (the garbage collector destroys unused objects), so this is not
+part of this RFC.
+
+Proposed Voting Choices
+-----------------------
+
+Add userspace operator overloading as described: yes/no
+
+Vote
+----
+
+Voting started 2020-03-23 and ends 2020-04-06.
+
+Question: Add userspace operator overloading as described?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+Implementation can be found here:
+https://github.com/php/php-src/pull/5156
+
+References
+----------
+
+::
+
+    * [[https://gist.github.com/jbtronics/84ab9a88ded5808f61f0c2537794f1fd|Demo code showing operator overloading]]
+    * [[https://externals.io/message/108300|First email discussion]]
+    * [[rfc:operator-overloading|Old RFC with an similar propose]]
+    * [[https://externals.io/message/108608|Discussion part 1]]
+    * [[https://externals.io/message/108788|Discussion part 2]]
+
+Rejectected features
+--------------------
+
+-  Use interfaces instead of magic methods
+-  Use type hints to declare supported types (this would introduce some
+   special kind of function overloading)
+
+Changelog
+---------
+
+-  **0.1:** Initial version
+-  **0.2:** Allow to signal that the operator handler can not handle the
+   given types by returning ``PHP_OPERAND_TYPES_NOT_SUPPORTED`` or
+   throwing a TypeError.
+-  **0.3:** Do not catch TypeErrors as they can be thrown in users code
+   (signature checking is done separately from method calling).
+-  **0.3.1** Renamed shift handler to ``__lshift`` and ``__rshift``
+-  **0.3.2** Renamed some functions handler. Added tables which
+   operators can be overloaded indirectly and which can not be
+   overloaded at all.
+-  **0.4** Removed type support decisions based on typehints, because
+   this introduces some kind of function overloading.
+-  **0.5** Disallow argument typehints in operator handlers.
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5156
+:Original Authors: Jan Böhmer, jan.h.boehmer@gmx.de
+:Original PHP Version: PHP 8.0
+:Slug: userspace_operator_overloading
+:Wiki URL: https://wiki.php.net/rfc/userspace_operator_overloading

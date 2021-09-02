@@ -1,0 +1,331 @@
+Namespace Issues And Greg's Solutions
+=====================================
+
+:PHP-RFC: 0043
+:Title: Namespace Issues And Greg's Solutions
+:Author: Greg Beaver <cellog@php.net>
+:Status: Withdrawn
+:Type: Standards Track
+:Created: 2008-10-15
+:Version: 1.1.1
+
+This RFC discusses issues with the current namespace implementation in
+PHP, and Greg's proposed solutions
+
+Introduction
+------------
+
+Namespaces are mostly working, but there are a few issues to be
+resolved. A short list:
+
+::
+
+   1. conflict between namespaced functions and static class methods
+   2. resolving access to internal classes
+
+Contrary to the doom and gloom on php-internals, there is no technical
+barrier to implementing namespaces properly. There is, however, a
+substantial political barrier. The internals developers who are
+namespace experts do not agree on the priorities for namespaces, and
+this is the only reason nothing has been committed. I strongly disagree
+with the contention that namespaces are flawed. One need only use them
+to see that they work just fine, except for a few rare edge cases.
+
+My interest in this document is simply to point out the only remaining
+issues and how easy it is to solve them. None of the other solutions
+proposed (such as re-using -> for staticclass->method()) will work.
+Let's be clear: the solutions for problem #1 I am mentioning here are
+the **only** way to solve the problems that will be manageable and safe.
+The solution I mention for problem #2 is also the only way to safely
+solve the problem, although it does introduce some extra work to use
+internal classes.
+
+Conflict between namespaced functions and static class methods
+--------------------------------------------------------------
+
+The problem
+~~~~~~~~~~~
+
+The first file "foo.php":
+
+.. code:: php
+
+   <?php
+   namespace one::step;
+   function two(){}
+
+   namespace one;
+   class step {
+   static function two(){}
+   }
+   ?>
+
+The second file "main.php":
+
+.. code:: php
+
+   include 'foo.php';
+   // is this class one::step or namespace one::step?
+   one::step::two();
+
+The solutions
+~~~~~~~~~~~~~
+
+There are 4 easy ways to solve this problem
+
+::
+
+   1. use ::: as primary namespace separator
+   2. use a different separator between namespace name and element such as one::step:::two() or one:::step::two()
+   3. explicit disambiguation using "use namespace blah::blah;/use class blah::blah;"
+
+.. code:: php
+
+   <?php
+   include 'foo.php';
+   use namespace one::step;
+   // this is now namespace one::step, function two
+   one::step::two();
+
+::
+
+      If the "use" statement is missing, an E_WARNING should also be thrown to alert the user to the ambiguity
+
+::
+
+      Note that existing code relying upon "use" statements would work unchanged - the only change needed would be in the case of
+      a naming conflict.
+   4. disallow mixing namespaces and classes with the same name
+
+I prefer #2, but would be happy with #3 or #1.
+
+use ::: as primary namespace separator
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+pros
+''''
+
+::
+
+   1. ambiguity is resolved
+
+cons
+''''
+
+::
+
+   1. all existing namespace code must be rewritten with extra : added to all ::
+   2. ::: is visually similar to :: so this:::example:::with::slight:::error:::is:::hard:::to::see();
+
+use ::: as separator between namespace name and element
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _pros-1:
+
+pros
+''''
+
+::
+
+   1. ambiguity is resolved
+   2. less chance for visual error (con #2 above)  this::example::with:::slight::error::is::easier:::to::see();
+
+.. _cons-1:
+
+cons
+''''
+
+::
+
+   1. requires new paradigm, a separator between namespace and element name, something no other language does.
+   2. all namespaced code would need to be modified with this difference.
+   3. ::name would probably need to be changed to :::name for consistency.
+
+explicit disambiguation with "use namespace blah::blah;" or "use class blah::blah;"
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _pros-2:
+
+pros
+''''
+
+::
+
+   1. no changes need be made to existing syntax
+   2. ambiguity is resolved with a single line of code
+   3. a clear warning is issued when ambiguity exists
+   4. execution never halts on ambiguity
+
+.. _cons-2:
+
+cons
+''''
+
+::
+
+   1. blah::blah(); would trigger autoload in the ambiguity detection, so code that mixes __autoload() with namespaced functions
+      could experience a performance slowdown.
+
+disallow mixing namespaces and classes with the same name
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _pros-3:
+
+pros
+''''
+
+::
+
+   1. no changes need be made to existing syntax
+   2. ambiguity is resolved by fatal error - very clear.
+
+.. _cons-3:
+
+cons
+''''
+
+::
+
+   1. namespaces and classes cannot have the same name, a common practice with Underscored_Class_Names
+   2. in autoloaded code, the error would almost always be at runtime, making debugging difficult
+
+Resolving access to internal classes
+------------------------------------
+
+.. _the-problem-1:
+
+The Problem
+~~~~~~~~~~~
+
+Currently, PHP resolves this code as follows:
+
+blah.php:
+
+.. code:: php
+
+   namespace blah;
+   function __autoload($class)
+   {
+       include $class . '.php';
+   }
+   $a = new Exception('hi');
+
+1. if blah::Exception exists, use it 2. if internal class Exception
+exists, use it 3. try to autoload blah::Exception
+
+Thus, $a will be an object of class "Exception" even if blah::Exception
+exists in "Exception.php" as it will never be autoloaded. However, if
+this file were executed:
+
+.. code:: php
+
+   namespace blah;
+   class Exception {}
+   include 'blah.php';
+
+$a would be an object of class "blah::Exception".
+
+The Solution
+~~~~~~~~~~~~
+
+The solution is to change the resolution order to:
+
+1. if blah::Exception exists, use it 2. try to autoload blah::Exception
+3. if internal class Exception exists, use it
+
+This has the advantage that the above examples will always run the same
+way, instantiating "blah::Exception." The only drawback is that for true
+internal classes, autoload() would still be called, as in the following
+example.
+
+This will introduce an autoload for RecursiveIteratorIterator and
+RecursiveDirectoryIterator in this script:
+
+autoload.php:
+
+.. code:: php
+
+   <?php
+   function __autoload($class) {include $class . '.php';}
+   ?>
+
+.. code:: php
+
+   <?php
+   namespace blah;
+   include 'autoload.php';
+   $a = new RecursiveIteratorIterator(new RecursiveDirectoryIterator('.'));
+   ?>
+
+but fortunately it can be easily fixed via a use statement:
+
+.. code:: php
+
+   <?php
+   namespace blah;
+   use ::RecursiveIteratorIterator,::RecursiveDirectoryIterator;
+   include 'autoload.php';
+   $a = new RecursiveIteratorIterator(new RecursiveDirectoryIterator('.'));
+
+This will be better for 99% of scripts, as evidenced by the ratio of
+internal vs. userspace classes (see
+http://marc.info/?l=php-internals&m=122127176407546&w=2 for detail)
+
+Why Stas's proposed solution doesn't work
+-----------------------------------------
+
+`Stas's proposed
+solution </rfc/namespaceref#namespaces_with_functionsconstants>`__
+suggests:
+
+   New syntax for static access is introduced: using ``Name->Member`` is
+   the same as ``Name::Member``, e.g.:
+
+::
+
+   ClassName->Foo() - static method call
+   ClassName->$Foo - static property access
+   ClassName->Foo - class constant access
+
+Although this would in theory solve the ambiguity, it does not solve the
+ambiguity for all existing code, which as we know uses this syntax:
+
+.. code:: php
+
+   <?php
+   ClassName::Foo();
+   ?>
+
+In fact, this proposal would require every single reference to a static
+method or class constant to be rewritten as ClassName->Foo(), a major
+shift in the language. Inertia will prevent PHP developers from doing
+this, just as it has for all other quick fixes introduced. For example,
+many PHP projects circumvented the need to rewrite code that relied upon
+register_globals by simply importing $_GET and $_POST into the global
+space, introducing a whole new host of security issues that Stefan Esser
+and others have repeatedly ranted about with good reason.
+
+The only fixes that can solve the problem are fixes that do **not**
+force PHP developers to rewrite code. Every proposal below would only
+require changes to as-yet-unwritten code. Solution #3 would in fact not
+even require changes to code written based on PHP 5.3alpha2. Solution #1
+and #2 would require code based on PHP 5.3alpha2 namespaces to be
+modified, and Solution #4 may require re-factoring of code if namespaces
+and classes share the same name.
+
+Changelog
+---------
+
+-  Version 1.1: add `new
+   section <#why_stas_s_proposed_solution_doesn_t_work>`__ to explain
+   why ClassName->Blah fails to solve the problem
+-  Version 1.1.1: move Classname->Blah to bottom of proposal for reading
+   flow
+
+Additional Metadata
+-------------------
+
+:Original Authors: Greg Beaver cellog@php.net
+:Original Status: Under Discussion
+:Slug: namespaceissues
+:Wiki URL: https://wiki.php.net/rfc/namespaceissues

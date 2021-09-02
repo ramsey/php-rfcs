@@ -1,0 +1,659 @@
+Typed Properties
+================
+
+:PHP-RFC: 0457
+:Title: Typed Properties
+:Author: Joe Watkins <krakjoe@php.net>, Phil Sturgeon <philstu@php.net>
+:Status: Declined
+:Type: Unknown
+:Created: 2016-03-16
+:Version: 1.1.1
+
+..
+
+   This proposal has been **superseded** by `Typed Properties
+   2.0 </rfc/typed_properties_v2>`__, which has been implemented in PHP
+   7.4.
+
+Following the raging success of PHP 7.0 additions `scalar type
+hints <https://wiki.php.net/rfc/scalar_type_hints_v5>`__ and `return
+types <https://wiki.php.net/rfc/return_types>`__, the next logical step
+is to provide optional typed properties.
+
+Introduction
+------------
+
+Typed Properties allow for an optional keyword in the definition, after
+the visibility scope, which contains the type the property should allow.
+
+Proposal
+--------
+
+Properties can have the same types as parameters:
+
+.. code:: php
+
+   class Foo {
+     public int $int = 1;
+     public float $flt = 2.2;
+     public array $arr = [];
+     public bool $bool = false;
+     public string $string;
+     public callable $callable;
+     public stdClass $std;
+     public OtherThing $other;
+     public $mixed;
+   }
+
+*Notice there is no support for void here, as that would make no sense
+for a property.*
+
+This can be rather useful, as a lot of the job of setters is to ensure
+the values being passed in are the correct type.
+
+There are two possible outcomes to type mismatches, as one check is done
+at compile time and another done at runtime.
+
+Properties will support nullability, as decided by the
+`nullable_types </rfc/nullable_types>`__ RFC (``?Type``).
+
+Default Values
+--------------
+
+`If an attempt is made to assign a value of an incorrect type at compile
+time, a fatal error will be raised: <https://3v4l.org/EnGUI/rfc#tabs>`__
+
+.. code:: php
+
+   <?php
+   new class {
+       public int $bar = "turtle";
+   };
+
+::
+
+   PHP Fatal error:  Default value for properties with integer type can only be integer in turtle.php on line 3
+
+`This is consistent with default parameter
+values: <https://3v4l.org/gq95J#tabs>`__
+
+.. code:: php
+
+   <?php
+   $cb = function (int $bar = "42") {
+       
+   };
+
+::
+
+   Fatal error: Default value for parameters with a integer type can only be integer or NULL in /in/gq95J on line 2
+
+While parameters allow null to be accepted as the default value, null is
+only a valid value for nullable properties.
+
+Coercion and Strictness
+-----------------------
+
+The rules for strictness and coercion here are identical to how things
+with with type hints for parameters. As outlined above, default values
+(which are checked and set during compile time) are always strict, as
+there is no reason why you'd need coercion for a value being hardcoded
+into a property.
+
+At runtime however, strict_types will be respected.
+
+`In weak mode (default), a numeric string passed at runtime is
+considered a valid int: <https://3v4l.org/O4bdX/rfc#tabs>`__
+
+.. code:: php
+
+   var_dump(new class() {
+       public int $bar;
+
+           public function __construct() {
+               $this->bar = "42";
+           }
+   });
+
+::
+
+   object(class@anonymous)#1 (1) { 
+     ["bar"]=> int(42) 
+   }
+
+This is not a new rule for the language so should not be seen as a
+complication. It is using existing rules and logic.
+
+TypeError
+---------
+
+`Due to the usage of TypeError, you can catch runtime errors for
+mismatched types: <https://3v4l.org/obW7U/rfc#tabs>`__
+
+.. code:: php
+
+   class Math {
+       public int $x;
+       public int $y;
+       
+       public function __construct($x, $y) {
+           $this->x = $x;
+           $this->y = $y;
+       }
+       
+       public function add() {
+           return $this->x + $this->y;
+       }
+   }
+
+   try {
+       (new Math(3, "nonsense"))->add();
+   } catch (Error $e) {
+       echo "Look, I'm Python!";
+   }
+
+::
+
+   Look, I'm Python!
+
+Use before initialization
+-------------------------
+
+`The implementation will raise an exception where a typed property is
+accessed before being initialized: <https://3v4l.org/cVkcj/rfc#tabs>`__
+
+.. code:: php
+
+   $foo = new class {
+       
+     public int $bar;  
+   };
+
+   var_dump($foo->bar);
+
+::
+
+   Fatal error: Uncaught TypeError: Typed property class@anonymous::$bar must not be accessed before initialization in /in/cVkcj:7 
+   Stack trace: 
+     #0 {main} thrown in /in/cVkcj on line 7
+
+Some have voiced concern that, if an object has typed properties and the
+constructor does not set them, an exception should be raised because the
+object is in an invalid state.
+
+However, lazy initialization of properties is a common idiom in PHP,
+that the authors of the RFC are not willing to restrict to untyped
+properties.
+
+*No rules have been violated until the engine returns a value*, since
+any value returned is *always* of the correct type, we do not see the
+need to place further restrictions upon typed properties.
+
+To put it another way: Type safety is the goal of this RFC, not
+validating objects. Currently developers are forced to do isset() and
+is_int() checks, but with the functionality provided in this RFC they
+will only need isset() if they are building classes that rely on lazy
+initialization. As such, developers relying on lazy initialization get a
+small benefit, and those building their objects "correctly" with fully
+initialized properties will not need any isset() boilerplate at all, as
+an exception will make it nice and clear to them that they're not
+building their objects as completely as they expected.
+
+Nullable properties are not exempt from this rule, they too will raise
+an exception when accessed before initialization.
+
+References
+----------
+
+`The implementation prohibits the use of references to properties with
+type information: <https://3v4l.org/WEZHv/rfc#tabs>`__
+
+.. code:: php
+
+   <?php
+   $foo = new class {
+     
+     public int $bar = 42;
+   };
+
+   $reference = &$foo->bar;
+
+::
+
+   Fatal error: Uncaught TypeError: Typed property class@anonymous::$bar must not be referenced in /in/WEZHv:7 
+   Stack trace: 
+     #0 {main} thrown in /in/WEZHv on line 7
+
+This might seem strange at first, but references are somewhat of a mess
+when it comes to this sort of type strictness due to their very nature.
+
+.. code:: php
+
+   class Foo {
+       public int $bar = 42;
+   }
+
+   $foo = new Foo;
+   $bar =& $foo->bar;
+   unset($foo);
+   $bar = "xyz";
+
+Whether this is supported or considered a failure has downsides either
+way. `Nikita Popov <http://news.php.net/php.internals/91819>`__ has
+written more on this topic, and explains that reference support could be
+added later if somebody can imagine an intelligent solution.
+
+This means that a typed property cannot be directly passed to sort(),
+but a side-benefit of this is that it will make PHP developers more
+aware of which standard library functions are modifying their code via
+reference, and that awareness has a strong benefit.
+
+Given the choice of a) typed properties without references in PHP 7.1,
+or b) typed properties with references in PHP 9.0, the RFC authors see
+value in approach a.
+
+Magic (__get)
+-------------
+
+`The magical \__get method is not allowed to violate the declared
+type: <https://3v4l.org/Lq5dA/rfc#tabs>`__
+
+.. code:: php
+
+   $foo = new class {
+       
+     public int $bar;
+     
+     public function __construct() {
+         unset($this->bar); # will result in the invocation of magic when $bar is accessed
+     }
+     
+     public function __get($name) {
+         return "oh dear!";
+     }
+   };
+
+   var_dump($foo->bar);
+
+::
+
+   Fatal error: Uncaught TypeError: Typed property class@anonymous::$bar must be integer, string used in /in/Lq5dA:15 
+   Stack trace: 
+     #0 {main} thrown in /in/Lq5dA on line 15
+
+This may seem counter intuitive, but it's consistent with how normal
+objects work.
+
+When a normal objects property is unset, it will result in the
+invocation of magic get when subsequently accessed, as if the property
+had never been declared, but the engine does not actually remove the
+property; If the property is assigned a value, access will be controlled
+as the declaration defines on any subsequent read of the property.
+
+Therefore, we allow the invocation of magic for unset properties, but do
+not allow the return value to violate the type declared.
+
+Mixed Declarations
+------------------
+
+Given the following code:
+
+.. code:: php
+
+   new class {
+       public int $foo, $bar;
+   };
+
+The engine already makes the assumption that $bar is public, whether
+that is right or wrong is irrelevant; We can't change it.
+
+To stay consistent with the way visibility is applied to the group, type
+is applied in the same way. Any property in this statement will be
+considered an int too.
+
+Mixing type declarations in a grouped statement is not allowed, and will
+cause a parser error:
+
+.. code:: php
+
+   new class {
+       public int $foo, string $bar;
+   };
+
+::
+
+   Parse error: syntax error, unexpected 'string' (T_STRING), expecting variable (T_VARIABLE)
+
+If you want to declare multiple properties with different types, use
+multiple statements.
+
+Unset
+-----
+
+It is possible to unset typed properties, and return them to the same
+state as a property that was never set. There are no special differences
+or rules around this.
+
+.. code:: php
+
+   $foo = new class {
+       public int $bar;
+
+       public function __construct()
+       {
+           $this->bar = 12;
+       }
+   };
+
+   unset($foo->bar);
+
+   var_dump(isset($foo->bar));
+
+   var_dump($foo->bar * 2);
+
+::
+
+   bool(false)
+
+   Fatal error: Uncaught TypeError: Typed property class@anonymous::$bar must not be accessed before initialization
+
+Reflection
+----------
+
+`A new ReflectionProperty::getType() method is
+provided. <https://3v4l.org/A6XZO/rfc#tabs>`__
+
+.. code:: php
+
+   class PropTypeTest {
+       public int $int;
+       public string $string;
+       public array $arr;
+       public callable $callable;
+       public stdClass $std;
+       public OtherThing $other;
+       public $mixed;
+   }
+
+   $reflector = new ReflectionClass(PropTypeTest::class);
+
+   foreach ($reflector->getProperties() as $name => $property) {
+       if ($property->hasType()) {
+           printf("type: %s $%s\n", $property->getType(), $property->getName());
+       } else {
+           printf("mixed: $%s\n", $property->getName());
+       }
+   }
+
+::
+
+   type: int $int
+   type: string $string
+   type: array $arr
+   type: callable $callable
+   type: stdClass $std
+   type: OtherThing $other
+   mixed: $mixed
+
+Similarities to HHVM
+--------------------
+
+The type system in HHVM uses matching syntax.
+
+In fact, an example taken from the `HHVM Type
+System <https://docs.hhvm.com/hack/types/type-system>`__ works perfectly
+with this implementation:
+
+.. code:: php
+
+   class A {
+     protected float $x;
+     public string $y;
+
+     public function __construct() {
+       $this->x = 4.0;
+       $this->y = "Day";
+     }
+     public function foo(bool $b): float {
+       return $b ? 2.3 * $this->x : 1.1 * $this->x;
+     }
+   }
+
+   function bar(): string {
+     // local variables are inferred, not explicitly typed
+     $a = new A();
+     if ($a->foo(true) > 8.0) {
+       return "Good " . $a->y;
+     }
+     return "Bad " . $a->y;
+   }
+
+   var_dump(bar()); // string(8) "Good Day"
+
+Whilst the syntax is almost identical, this works a little differently
+to Hack.
+
+Hack a offers static analysis tools to detect mismatched types, but when
+the code is executed it will allow any type to be passed through. This
+implementation is done at compile time to avoid the need for this, and
+validates properties being set at runtime too. Static analysis tools and
+editors/IDEs will no doubt catch up.
+
+Other Languages
+---------------
+
+Of course, while "But Xlang does it!" is never a strong reason to do
+anything, it is sometimes nice to know how our friends are doing it in
+other languages.
+
+-  `\|Hack/HHVM <https://docs.hhvm.com/hack/types/type-system>`__ - See
+   similarities above.
+-  `C# <https://en.wikipedia.org/wiki/Property_(programming)#C.23>`__
+-  `C++ <https://en.wikipedia.org/wiki/Property_(programming)#C.2B.2B>`__
+-  `D <https://en.wikipedia.org/wiki/Property_(programming)#D>`__
+-  `Delphi/Free
+   Pascal <https://en.wikipedia.org/wiki/Property_(programming)#Delphi.2FFree_Pascal>`__
+-  `ActionScript <https://en.wikipedia.org/wiki/Property_(programming)#ActionScript_3.0>`__
+-  `Visual
+   Basic <https://en.wikipedia.org/wiki/Property_(programming)#Visual_Basic>`__
+
+Syntax
+------
+
+The authors of this RFC considered other syntax possibilities, however
+they were considered to be inferior for the following reasons.
+
+One approach could be to match how return types are done with a colon
+after the name of the declaration, which is also how Delphi and
+ActionScript handle things:
+
+.. code:: php
+
+   public $bar: int;
+   public $bar: int = 2;
+   // or 
+   public $bar = 2: int;
+
+Maybe, but if a ternary was used it would be really hard to see what was
+happening:
+
+::
+
+   public $bar = Stuff::BAZ ? 20 : 30 : int; 
+
+Another approach would be to copy VisualBasic:
+
+.. code:: php
+
+   public $bar as int;
+   public $bar = 2 as int;
+
+That sticks out a bit, we don't do this anywhere else.
+
+The current patch seems the most consistent with popular languages,
+avoids new reserved words, skips syntax soup and looks great regardless
+of assignment being used or not.
+
+Static Properties
+-----------------
+
+Static properties are global variables as far as the engine is
+concerned, it uses the same opcode to assign a static property as it
+does to assign any other variable ZEND_ASSIGN, the only exception being
+instance variables which are assigned with ZEND_ASSIGN_OBJ - giving us
+opportunity to provide type safety.
+
+In the assign opcode, there is no information available about where the
+variable came from.
+
+Even if we ignore that, and somehow find ways to always provide the
+information, changing ZEND_ASSIGN does not seem like a very good idea.
+
+Generating completely new opcodes is an option, but would likely change
+the performance characteristics of all static assignments, since all
+static assignments would have to use the new opcode, and would certainly
+complicate the implementation.
+
+Static typed properties are a separate feature, that can either be
+implemented on their own, when we determine if the performance impact
+and additional complication is worth the feature, or alternatively
+(preferably) we get them by proxy with typed variables at sometime in
+the future.
+
+Performance
+-----------
+
+The latest version of the proposed patch doesn't make visible
+performance change of real0life apps.
+
+On Wordpress and Mediawiki it makes about 0.1% slowdown, that may be
+caused not by the additional checks but by the worse CPU cache
+utilization, because the size of PHP code was increased on 40KB.
+
+However,
+`micro-benchmarks <https://gist.github.com/dstogov/33b0d79de779627bad810eb16d6156a5>`__
+show significant slowdown (up to 20%) on primitive operations with
+untyped properties. Usage of typed properties makes additional slowdown.
+The following table shows relative slowdown of operations with
+properties in comparison to master branch.
+
++-------------+-------------+------------+-------------+-------------+
+|             | $o->p = $x; | $o->p +=2; | $x =        | $x=         |
+|             |             |            | ++$o->p;    | $o->p++;    |
++=============+=============+============+=============+=============+
+| untyped     | 15%         | 1%         | 7%          | 19%         |
+| property    |             |            |             |             |
++-------------+-------------+------------+-------------+-------------+
+| untyped     | 16%         | 2%         | 8%          | 19%         |
+| property in |             |            |             |             |
+| class with  |             |            |             |             |
+| typed       |             |            |             |             |
+| properties  |             |            |             |             |
++-------------+-------------+------------+-------------+-------------+
+| typed       | 23%         | 37%        | 8%          | 19%         |
+| property    |             |            |             |             |
++-------------+-------------+------------+-------------+-------------+
+
+In principle, knowing the type of a property may allow us to make
+further optimizations.
+
+Backward Incompatible Changes
+-----------------------------
+
+None
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.1
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+None
+
+To Opcache
+~~~~~~~~~~
+
+Opcache has been patched.
+
+Future Scope
+------------
+
+Union Types
+~~~~~~~~~~~
+
+If the `union_types </rfc/union_types>`__ RFC is accepted then ``?Foo``
+will be exactly equivalent to ``Foo | Null``. The union types RFC will
+be responsible for intersecting decisions, such as whether ``?`` can be
+used in conjunction with other union types.
+
+Typed Local Variables
+~~~~~~~~~~~~~~~~~~~~~
+
+This is an entirely different feature, and something not worth
+conflating into this RFC. The idea might be wanted, but to keep things
+simple it will not be discussed in this RFC.
+
+Typed Constant Properties
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There is currently no known value in adding a type to a constant. Seeing
+as constants cannot be modified, the type is just whatever the constant
+is set to, and seeing as it cannot change there is no chance for a
+constant to be assigned a invalid value afterwards.
+
+Vote
+----
+
+Voting started 10th June, ends 24th June 2016.
+
+Question: Merge typed properties ?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+This branch will be cleaned up with feedback and squashed, and
+doubtlessly more tests will be provided as people seek clarification on
+functionality.
+
+https://github.com/php/php-src/compare/master...krakjoe:typed-properties
+
+===== Changelog =====
+
+-  v1.1.1: Add nullability support
+-  v1.1.0: Change mixed declarations
+-  v1.0.2: Explain mixed declarations
+-  v1.0.1: Explain static property limitation
+-  v1.0.0: Expand on references
+-  v0.2.5: Expand on "strict at compile time"
+-  v0.2.4: Explain magic
+-  v0.2.3: Explain unset
+-  v0.2.2: Mention ReflectionProperty::getType()
+-  v0.2.1: Mention the runtime checks in syntax section too
+-  v0.2.0: Revision prompted by feedback and consensus
+-  v0.1.2: Definitely not allowing void
+-  v0.1.1: Expanded on compile time vs. run time errors
+-  v0.1.0: Initial draft
+
+Additional Metadata
+-------------------
+
+:Original Authors: Joe Watkins krakjoe@php.net, Phil Sturgeon philstu@php.net
+:Slug: typed-properties
+:Wiki URL: https://wiki.php.net/rfc/typed-properties

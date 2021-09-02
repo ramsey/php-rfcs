@@ -1,0 +1,276 @@
+Object Keys In Arrays
+=====================
+
+:PHP-RFC: 0678
+:Title: Object Keys In Arrays
+:Author: Nikita Popov <nikic@php.net>
+:Status: Draft
+:Type: Standards Track
+:Created: 2020-01-07
+:PHP-Version: 8.1
+:Version: 1.0
+
+Introduction
+------------
+
+The `enumerations proposal </rfc/enumerations>`__ implements enums as
+special objects. This has many advantages, and one significant
+limitation: Objects currently cannot be used as array keys.
+
+To pick up the running ``Suit``\ s example, writing this kind of code is
+currently not possible:
+
+.. code:: php
+
+   enum Suit {
+       case Hearts;
+       case Diamonds;
+       case Clubs;
+       case Spades;
+   }
+
+   $counts = [
+       Suit::Hearts => 0,
+       Suit::Diamonds => 0,
+       Suit::Clubs => 0,
+       Suit::Spades => 0,
+   ];
+   foreach ($cards as $card) {
+       $counts[$card->suit]++;
+   }
+
+The enumerations RFC suggests to instead use either ``WeakMap`` or
+``SplObjectStorage``. Both of them work in this case (due to the
+specifics of enums), and the former has a saner API. However, it is not
+possible to construct an array literal using either, limiting the places
+where they can be used. More importantly, both of these are specialized
+structures, and as such not supported by any array-based functions
+(including the entire ``array_*`` portion of the standard library.)
+
+This RFC proposes to address this issue by allowing the use of object
+keys (and thus enum keys) inside array. This change will also make it
+simpler to support other key kinds in the future, for example if PHP
+were to switch to arbitrary-precision integers.
+
+Proposal
+--------
+
+This RFC allows the use of object keys inside arrays:
+
+.. code:: php
+
+   $obj1 = new stdClass;
+   $obj2 = new stdClass;
+
+   $array = [];
+   $array[$obj1] = 1;
+   $array[$obj2] = 2;
+
+   var_dump($array[$obj1]); // int(1)
+   var_dump($array[$obj2]); // int(2)
+
+Object keys are compared by object identity. That is, ``$array[$obj1]``
+and ``$array[$obj2]`` refer to the same array element if and only if
+``$obj1 === $obj2``.
+
+While an extension to support custom object hashing and comparison
+overloads may be possible in the future, it is very much out of scope of
+this proposal. ``SplObjectStorage`` can be used to specify a custom hash
+function.
+
+Impact on standard library functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For most standard library functions the behavior of object keys is
+straightforward. E.g. ``array_keys()`` still returns all the keys, but
+they can now also be objects. The following lists some cases where there
+is some non-trivial behavior to consider:
+
+-  ``extract()``: Ignore object keys. Alternatively we could try to
+   convert them to strings, which would most likely throw.
+-  ``var_dump()`` etc: How should object keys get represented?
+-  ``serialize()``: The serialization format can easily deal with object
+   keys. However, keys are currently not counted for back references. To
+   preserve proper identity for object keys, while retaining backwards
+   compatibility with the existing format, we need to count object keys
+   only for back references.
+-  ...
+
+Backward Incompatible Changes
+-----------------------------
+
+The primary backwards compatibility impact is that arbitrary arrays can
+now have object keys, which might invalidate assumptions of existing
+code:
+
+.. code:: php
+
+   function accepts_array(array $array) {
+       foreach ($array as $key => $value) {
+           // Previously code was guaranteed that $key is either int or string here.
+           // Now it can also be an object.
+       }
+   }
+
+It should be noted that Traversables could already yield non-string,
+non-integer keys beforehand and as such more generic code already needs
+to handle them gracefully. However, code dealing specifically with
+arrays could have reasonably assumed keys to only be strings or
+integers.
+
+Implementation Impact
+---------------------
+
+Hashtable entries are currently represented using the following
+structure:
+
+.. code:: c
+
+   typedef struct _Bucket {
+       zval val; // u2 = next index
+       zend_ulong h;
+       zend_string *key;
+   } Bucket;
+
+To implement this proposal, the structure would change to:
+
+.. code:: c
+
+   typedef struct _Bucket {
+       zval val; // u2 = next index
+       zval key; // u2 = hash
+   } Bucket;
+
+The size of this structure remains the same on 64-bit systems (on legacy
+32-bit systems it is 8 bytes larger).
+
+The stored hash value is reduced to 32-bits in order to fit into u2
+space. As hash indices are already limited to 32-bits, this is not
+problematic.
+
+The key zval may have type ``IS_LONG``, ``IS_STRING`` or ``IS_OBJECT``.
+During bucket lookups, object keys can be mostly treated the same way as
+integer keys, because comparison of objects only requires comparison of
+the object pointers. The hash value for object keys is the object
+pointer shifted right by the minimum object alignment. The hash is
+computed by ``zend_hash_obj_key()``.
+
+A number of new hash APIs for working with object keys is added:
+
+.. code:: c
+
+   ZEND_API zval* ZEND_FASTCALL zend_hash_obj_key_add(HashTable *ht, zend_object *obj_key, zval *val);
+   ZEND_API zval* ZEND_FASTCALL zend_hash_obj_key_add_new(HashTable *ht, zend_object *obj_key, zval *val);
+   ZEND_API zval* ZEND_FASTCALL zend_hash_obj_key_update(HashTable *ht, zend_object *obj_key, zval *val);
+   ZEND_API zend_result ZEND_FASTCALL zend_hash_obj_key_del(HashTable *ht, zend_object *obj_key);
+   ZEND_API zval* ZEND_FASTCALL zend_hash_obj_key_find(const HashTable *ht, zend_object *obj_key);
+
+However, the majority of internal code will never use these APIs
+directly. They only need to be used when working with object keys
+specifically.
+
+Instead, a new ``zkey`` family of hash functions and macros is added,
+which allows working with hash table keys in a more generic manner.
+``zkey`` functions accept a zval key, which must be of type ``IS_LONG``,
+``IS_STRING`` or ``IS_OBJECT``.
+
+The following new functions are added:
+
+.. code:: c
+
+   ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_add_or_update(HashTable *ht, zval *key, zval *val, uint32_t flag);
+   ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_update(HashTable *ht, zval *key, zval *val);
+   ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_add(HashTable *ht, zval *key, zval *val);
+   ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_add_new(HashTable *ht, zval *key, zval *val);
+   ZEND_API zend_result ZEND_FASTCALL zend_hash_zkey_del(HashTable *ht, zval *key);
+   ZEND_API zval* ZEND_FASTCALL zend_hash_zkey_find(const HashTable *ht, zval *key);
+   static zend_always_inline zend_bool zend_hash_zkey_exists(const HashTable *ht, zval *key);
+
+   // This is a low-level API that requires the hash value in u2 to be initialized.
+   static zend_always_inline zval *_zend_hash_zkey_append(HashTable *ht, zval *key, zval *zv);
+
+Similarly, ``ZKEY`` variants of ``ZEND_HASH_FOREACH`` macros are
+introduced:
+
+.. code:: c
+
+   ZEND_HASH_FOREACH_ZKEY(ht, key)
+   ZEND_HASH_FOREACH_ZKEY_VAL(ht, key, val)
+   // etc.
+
+The existing ``ZEND_HASH_FOREACH_KEY`` macro family is removed, as it
+encodes the assumption that keys can only be integers or strings.
+
+The ``ZEND_HASH_FOREACH_NUM_KEY`` macro family is changed to assert that
+the key is of type ``IS_LONG``.
+
+The ``ZEND_HASH_FOREACH_STR_KEY`` macro family is changed to use a NULL
+key for non-string keys (rather than integer keys specifically).
+
+This allows replacing hashtable iteration code that currently assumes
+specific key types with generic code. For example, this typical pattern:
+
+.. code:: c
+
+   zval *val;
+   zend_ulong h;
+   zend_string *key;
+   ZEND_HASH_FOREACH_KEY_VAL(input_ht, h, str, val) {
+       zval new_val;
+       transform_val(&new_val, val);
+       if (str) {
+           zend_hash_add_new(output_ht, str, &new_val);
+       } else {
+           zend_hash_index_add_new(output_ht, h, &new_val);
+       }
+   } ZEND_HASH_FOREACH_END();
+
+Can be replaced by:
+
+.. code:: c
+
+   zval *key, *val;
+   ZEND_HASH_FOREACH_ZKEY_VAL(input_ht, key, val) {
+       zval new_val;
+       transform_val(&new_val, val);
+       zend_hash_zkey_add_new(output_ht, key, &new_val);
+   } ZEND_HASH_FOREACH_END();
+
+As the key is only passed through to a new array in this case, using the
+new APIs makes the code more straightforward. Of course, code that does
+something meaningful with the key will need to figure out how to handle
+object keys properly in a given situation.
+
+The new macros can be polyfilled for older PHP versions, which is also
+why this introduces new macros rather than modifying existing ones.
+
+The ``zend_hash_get_current_key(_ex)`` function is removed. Instead, one
+of the following two functions can be used (where the former already
+exists on older PHP versions, while the latter is more efficient):
+
+.. code:: c
+
+   /* This function populates `key` with a copy of the key, or a null zval if exhausted. */
+   ZEND_API void  ZEND_FASTCALL zend_hash_get_current_key_zval_ex(const HashTable *ht, zval *key, HashPosition *pos);
+
+   /* This function returns the key zval directly, or NULL if exhausted. */
+   ZEND_API zval* ZEND_FASTCALL zend_hash_get_current_zkey(const HashTable *ht, HashPosition *pos); 
+
+The ``zend_hash_get_current_key_type(_ex)`` function and the
+``HASH_KEY_IS_LONG``, ``HASH_KEY_IS_STRING`` and
+``HASH_KEY_NON_EXISTENT`` constants are also removed, and should be
+replaced by taking the type of the key zval.
+
+Vote
+----
+
+Yes/No.
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/6588
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.1
+:Slug: object_keys_in_arrays
+:Wiki URL: https://wiki.php.net/rfc/object_keys_in_arrays

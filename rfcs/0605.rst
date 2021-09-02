@@ -1,0 +1,243 @@
+Deprecate And Remove Case-Insensitive Constants
+===============================================
+
+:PHP-RFC: 0605
+:Title: Deprecate And Remove Case-Insensitive Constants
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2018-06-24
+:PHP-Version: 7.3
+:Version: 1.0
+
+Introduction
+------------
+
+PHP currently supports both case-sensitive and case-insensitive
+constants. Case-insensitive constants see very little practical use, are
+subject to various inconsistencies in functionality and cause undue
+implementational complexity. This RFC proposes to deprecate and remove
+case-insensitive constants.
+
+The current state of the matter is:
+
+-  Class constants are always case-sensitive.
+-  Global constants declared with ``const`` are always case-sensitive.
+   It should be noted that this applies only to the shortname of the
+   constant, while namespaces in PHP are always case-insensitive.
+-  Constants declared with ``define()`` are case-sensitive by default.
+-  It is possible to declare case-insensitive constants by passing
+   ``true`` as the third parameter of ``define()``.
+
+This RFC proposes to:
+
+-  In PHP 7.3: Deprecate calling ``define()`` with third parameter
+   ``true``.
+-  In PHP 7.3: Deprecate accessing a case-insensitive constant with a
+   casing that differs from the declaration-site. The constants
+   ``true``, ``false`` and ``null`` are exempt from this.
+-  In PHP 8.0: Remove the possibility of declaring case-insensitive
+   constants.
+-  In PHP 8.0: ``true``, ``false`` and ``null`` are converted from
+   special-cased constants into reserved keywords.
+
+Motivation
+----------
+
+Symbols in PHP don't use consistent casing rules. Some symbols such as
+function names are case-insensitive, while others such as variable names
+are case-sensitive. The problem with constants is that they can be
+*both*. Apart from unnecessarily complicating the language, this also
+causes various issues outlined in the following.
+
+Aliasing is case-sensitive
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+PHP supports the ``use const NS\FOO`` syntax for importing constants in
+namespaced code. Because aliasing (and namespaces in general) is purely
+compile-time functionality, this syntax cannot depend on whether the
+constant ``NS\FOO`` is case-sensitive or case-insensitive, as this is
+only decided at run-time. As such, the syntax has to choose one way or
+the other.
+
+Because constants in PHP are predominantly case-sensitive, the
+``use const`` syntax assumes case-sensitivity. Of course, this means
+that the functionality will not work correctly with case-insensitive
+constants:
+
+.. code:: php
+
+   namespace {
+       define('NS\FOO', 42, true); // Case-insensitive constant
+   }
+
+   namespace Test {
+       use const NS\FOO;
+       var_dump(FOO); // Works
+       var_dump(foo); // Warning: Use of undefined constant foo
+   }
+
+This is a fundamental issue that cannot be resolved.
+
+Constant redeclarations
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Constants are supposed to be constant, i.e., their value may not change
+after initial declaration. For this reason PHP makes sure that constants
+are not redeclared:
+
+.. code:: php
+
+   define('FOO', 42);
+   var_dump(FOO); // int(42)
+   define('FOO', 24); // Notice: Constant FOO already defined
+   var_dump(FOO); // int(42)
+
+These checks are not performed (or only in some very narrow cases) if
+case-sensitive and case-insensitive constants are mixed:
+
+.. code:: php
+
+   define('foo', 42, true);
+   var_dump(FOO); // int(42);
+   define('FOO', 24);
+   var_dump(FOO); // int(24)
+
+Not only was the declaration of a clashing constant permitted, but it
+effectively changed the value of the ``FOO`` constant.
+
+This problem is further confounded by assumptions (such as: constants
+are constant) in the PHP engine and opcache optimizations, resulting in
+additional issues like `bug
+#74450 <https://bugs.php.net/bug.php?id=74450>`__, where the value of a
+constant changes retroactively.
+
+This is an issue that can in principle be resolved, however it would
+come with significant additional implementation complexity and a hit to
+performance and memory usage. At the least, it would require storing
+lower-cased variants of all constants and checking against them on new
+constant declarations.
+
+Implementation complexity and overhead
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Support for case-insensitive constants makes the implementation more
+complex and slower. Constant lookups are implemented by first looking up
+the constant name directly, and then looking up a lowercased variant.
+
+A particularly extreme case are access to unqualified constants inside
+namespaces. For example, if constant ``FOO`` is accessed inside
+namespace ``NS``, the ``FETCH_CONST`` opcode is created with a
+record-breaking five literals. In order, ``ns\FOO``, ``ns\foo``, ``FOO``
+and ``foo`` need to be looked up, and finally ``NS\FOO`` is used for
+error-reporting. For the common case where the intended constant was
+``FOO`` this results in three lookups. Thankfully the impact is
+mitigated by runtime caching (which is actually incorrect due to the
+previous point).
+
+Proposal
+--------
+
+In PHP 7.3 both the declaration of case-insensitive constants, as well
+as their access (with a name different from the declared one) will
+result in a deprecation warning:
+
+.. code:: php
+
+   define('FOO', 42, true); // Deprecated: define(): Declaration of case-insensitive constants is deprecated
+   var_dump(FOO); // Ok!
+   var_dump(foo); // Deprecated: Case-insensitive constants are deprecated. The correct casing for this constant is "FOO"
+
+The ``defined()`` function is not affected. It will continue to return
+``true`` for case-insensitive constants, without generating a
+deprecation warning.
+
+Declaration of case-insensitive constants by extensions will not
+generate a deprecation warning (though their access will). The reason
+behind this is that the end-user will not be able to do anything about
+this deprecation warning, while the extension maintainer may not be able
+to change the declaration for BC reasons at this point.
+
+The reason why both declaration and access generate deprecation warnings
+is that both may generally fall into the responsibility of different
+maintainers. While accesses are performed by library users and can
+always be trivially fixed, definitions may be part of libraries that
+cannot immediately switch to case-sensitive constants due to backwards
+compatibility guarantees.
+
+In PHP 8 the ability to declare case-insensitive constants will be
+removed.
+
+Handling of true, false and null
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``true``, ``false`` and ``null`` in PHP are originally "ordinary"
+case-insensitive constants, though in practice they are subject to
+various special casing. For example, these constants are not subject to
+namespace fallback, as we must be able to resolve their values at
+compile-time.
+
+``true``, ``false`` and ``null`` are the only case-insensitive constants
+which are commonly used with a casing different from their declaration
+(which is ``TRUE``, ``FALSE`` and ``NULL``). In the mind of programmers
+not familiar with the details of the PHP implementation, these resemble
+keywords more than constants.
+
+This RFC proposes to convert ``true``, ``false`` and ``null`` into
+proper reserved keywords in PHP 8 (reserved keywords are always
+case-insensitive). This has two implications with regard to backwards
+compatibility:
+
+-  As ``true``, ``false`` and ``null`` are no longer constants, they
+   will not be accessible through ``constant("true")``,
+   ``defined("true")`` etc. The names can also no longer be treated as
+   namespaced names, such that ``\true`` and ``namespace\true`` would
+   become invalid.
+-  ``true``, ``false`` and ``null`` can no longer be used as
+   identifiers. They will remain legal method and class constant names,
+   as these are not subject to reserved keyword restrictions. It should
+   be noted that these symbols are already forbidden as class names and
+   as (namespaced) global constant names, so effectively this means that
+   only the use as a function name is additionally forbidden.
+
+Backward Incompatible Changes
+-----------------------------
+
+Additional deprecation warnings are thrown in PHP 7.3. Case-insensitive
+constants are removed in PHP 8.
+
+``true``, ``false`` and ``null`` become reserved keywords in PHP 8. See
+the end of the previous section for the BC implications this has.
+
+Unaffected PHP Functionality
+----------------------------
+
+Magic constants are not affected. These are already reserved keywords
+(always case-insensitive), not accessible via ``constant()``, etc.
+
+Class constants are not affected, they are already case-sensitive.
+
+Vote
+----
+
+Since this is a language change, a 2/3 majority is required. The vote
+ends 2018-07-16.
+
+Question: Deprecate (and later remove) case-insensitive constants?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Additional Metadata
+-------------------
+
+:Discussion: https://externals.io/message/102389
+:Implementation: https://github.com/php/php-src/pull/3321
+:Original Authors: Nikita Popov nikic@php.net
+:Original Status: Implemented (in PHP 7.3)
+:Slug: case_insensitive_constant_deprecation
+:Wiki URL: https://wiki.php.net/rfc/case_insensitive_constant_deprecation

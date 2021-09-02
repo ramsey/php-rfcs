@@ -1,0 +1,933 @@
+Deprecations For PHP 8.1
+========================
+
+:PHP-RFC: 0791
+:Title: Deprecations For PHP 8.1
+:Author: Nikita Popov <nikic@php.net>, George Peter Banyard <girgias@php.net>, Máté Kocsis <kocsismate@php.net>, Rowan Tommins <imsop@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2021-02-23
+:PHP-Version: 8.1
+:Version: 1.0
+
+Introduction
+------------
+
+The RFC proposes to deprecate the listed functionality in PHP 8.1 and
+remove it in PHP 9.
+
+The following list provides a short overview of the functionality
+targeted for deprecation, while more detailed explanation is provided in
+the Proposal section:
+
+-  ``date_sunrise()`` and ``date_sunset()``
+-  ``key()``, ``current()``, ``next()``, ``prev()``, and ``reset()`` on
+   objects
+-  ``mb_check_encoding()`` without argument
+-  ``get_class()``, ``get_parent_class()`` and ``get_called_class()``
+   without argument
+-  ``FILE_BINARY`` and ``FILE_TEXT`` constants
+-  ``t`` fopen mode
+-  Passing bool for ``$value`` argument of ``IntlCalendar::roll()``
+-  Accessing static members on traits
+-  ``strptime()``
+-  ``strftime()`` and ``gmtstrftime()``
+-  ``mhash*()`` function family
+-  ``ctype_*()`` function family accepts ``int`` parameters
+-  Return by reference with void type
+-  NIL constant defined by the IMAP extension
+-  Calling overloaded pgsql functions without the connection argument
+-  ``$num_points`` parameter of ``image(open|filled)polygon``
+-  ``mysqli::init()``
+-  ``filter.default`` ini setting
+-  ``auto_detect_line_endings`` ini setting
+-  ``ssl_method`` option to ``SoapClient`` constructor
+-  ``FILTER_SANITIZE_STRING``
+-  ``oci8.old_oci_close_semantics`` ini setting
+-  ``odbc_result_all()``
+
+Proposal
+--------
+
+Each feature proposed for deprecation is voted separately and requires a
+2/3 majority. All votes refer to deprecation in PHP 8.1 and removal in
+PHP 9.0.
+
+Voting started on 2021-06-30 and ends on 2021-07-14.
+
+date_sunrise() and date_sunset()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These two functions have the signature:
+
+.. code:: php
+
+   function date_sunset(
+       int $timestamp,
+       int $format = SUNFUNCS_RET_STRING,
+       float $latitude = ini_get("date.default_latitude"),
+       float $longitude = ini_get("date.default_longitude"),
+       float $zenith = ini_get("date.sunset_zenith"),
+       float $gmt_offset = 0
+   ): mixed;
+
+This function depends on ini settings that specify the "default"
+latitude and longitude, a concept that makes very little sense.
+Additionally it requires familiarity with appropriate zenith values to
+use for different purposes.
+
+``date_sunset()`` and ``date_sunrise()`` have since been superseded by
+``date_sun_info()``:
+
+.. code:: php
+
+   function date_sun_info(int $time, float $latitude, float $longitude): array;
+
+This function does not use "default" latitude and longitude, and returns
+an associative array of multiple different definitions of the
+sunrise/sunset concept.
+
+The proposal is to deprecate ``date_sunset()`` and ``date_sunrise()`` in
+favor of ``date_sun_info()``. The ini settings
+``date.default_latitude``, ``date.default_longitude`` and
+``date.sunset_zenith`` are marked as deprecated in the documentation. In
+the next major version, both the functions and the ini settings will be
+removed. This was initially discussed in:
+https://github.com/php/php-src/pull/4423.
+
+Question: Deprecate date_sunrise() and date_sunset()?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+key(), current(), next(), prev(), reset() on objects
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``key()`` family of functions, which are used to manipulate the
+internal array pointer, also accept objects. In this case they work on
+the mangled property table. That is, using ``key()`` and friends on an
+object is essentially the same as using them on
+``get_mangled_object_vars($object)``.
+
+This catches many people off guard, because they expect ``key()`` etc.
+to integrate with the iterator interface. That is, if the passed object
+implements ``Iterator`` then ``key($object)`` should perform an
+``$object->key()`` call. The water here have been further muddied by
+``ArrayObject``, which prior to PHP 7.4 was the only object where
+``key()`` etc. *did* effectively integrate with the iterator interface.
+
+There are principally two ways to resolve this: The first is to
+deprecate the use of ``key()`` etc on objects, and instead require
+people to perform an explicit ``(array)`` cast or
+``get_mangled_object_vars()`` call beforehand. The other is to actually
+make these functions integrate with iterators. The issue I see with the
+latter is that we would only be able to support the ``Iterator``
+interface proper, but not general ``Traversable``\ s: For these
+``IteratorAggregate::getIterator()``, or the internal ``get_iterator()``
+handler need to be called once at the start, which is not possible
+through the array iteration interface, as it consists of multiple
+independent functions. Additionally, the ``prev()`` function cannot be
+implemented for iterators.
+
+As such, the proposal is to deprecate key(), current(), next(), prev()
+and reset() on objects. The suggested replacement is to cast the object
+to array first, or call ``get_mangled_object_vars()``, depending on what
+the intention is.
+
+Question: Deprecate key(), current(), next(), prev(), reset() on objects?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+mb_check_encoding() without argument
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``mb_check_encoding()`` usually accepts a string and an encoding,
+but can also be called without arguments. The documentation says:
+
+   If it is omitted, this function checks all the input from the
+   beginning of the request.
+
+The implementation says:
+
+::
+
+   /* FIXME: Actually check all inputs, except $_FILES file content. */
+   if (MBSTRG(illegalchars) == 0) {
+       RETURN_TRUE;
+   }
+   RETURN_FALSE;
+
+This FIXME does not induce a sense of confidence in this function...
+
+Further research shows that the documentation is correct, in that *any*
+encoding checking or conversion functionality invoked during a request
+will increment ``MBSTRG(illegalchars)``. As such,
+``mb_check_encoding()`` tells you whether any illegal encoding has been
+encountered at any point. My best guess is that this was intended to be
+used in conjunction with the ``encoding_translation`` feature, which
+"treats" incoming SAPI data.
+
+Overall this functionality is confusing, and the implementation is
+unfinished or broken. There are no calls to ``mb_check_encoding()``
+without argument in popular composer packages.
+
+The proposal is to deprecate calling ``mb_check_encoding()`` without
+arguments.
+
+Question: Deprecate mb_check_encoding() without argument?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-2:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+get_class(), get_parent_class() and get_called_class() without argument
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In PHP 7.2, `passing null to
+``get_class()`` </rfc/get_class_disallow_null_parameter>`__ was
+forbidden, because this behavior was very bug prone. However, the
+ability to call ``get_class()`` without argument was retained. In that
+case ``get_class()`` is approximately the same as ``self::class``.
+``get_parent_class()`` exhibits the same behavior.
+
+The proposal is to deprecate argument-less ``get_class()``,
+``get_parent_class()`` and ``get_called_class()`` in favor of the
+dedicated ``self::class``, ``parent::class`` and ``static::class``
+syntax, which was introduced in PHP 5.5. (``get_called_class()`` only
+has an argument-less form, so it would be deprecated entirely.)
+
+As a caveat, if ``get_parent_class()`` is used to check whether the
+class has a parent, it is necessary to use
+``get_parent_class(self::class)`` instead, because ``parent::class``
+will generate an error if used inside a class without parent.
+
+Question: Deprecate get_class(), get_parent_class() and get_called_class() without argument?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-3:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+FILE_BINARY and FILE_TEXT constants
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These were introduced in PHP 5.2.7 for forward compatibility with PHP 6,
+but don't have any effect. These constants are especially confusing
+because ``fopen()`` supports ``b`` (binary) and ``t`` (text) modes,
+which *do* have an effect, but a completely unrelated one.
+
+The proposal is to deprecate the ``FILE_BINARY`` and ``FILE_TEXT``
+constants.
+
+This was pointed out in: https://github.com/php/php-src/pull/5556
+
+Question: Deprecate FILE_BINARY and FILE_TEXT constants?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-4:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+"t" fopen mode
+~~~~~~~~~~~~~~
+
+Next to the standard modes, fopen also accepts ``t`` and ``b`` modes,
+which are only meaningful on Windows. When ``b`` is used (which is the
+default), the file is treated as usual. If ``t`` is specified, automatic
+conversion between LF and CRLF line endings is performed. The
+documentation says:
+
+   Again, for portability, it is also strongly recommended that you
+   re-write code that uses or relies upon the 't' mode so that it uses
+   the correct line endings and 'b' mode instead.
+
+The proposal is to deprecate the use of ``t`` mode in fopen() and other
+mode arguments. Explicitly specifying the ``b`` mode remains supported.
+
+While ``fopen()`` defaults to binary mode, some other functions like
+``proc_open()`` on pipe descriptors still default to text mode. Cases
+that use ``t`` as the default mode are excluded from this deprecation
+for the time being. We may include them in the future, which would
+require explicitly specifying ``b`` mode for them during a transitionary
+period.
+
+Question: Deprecate t fopen mode?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-5:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Passing bool for $value argument of IntlCalendar::roll()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``IntlCalendar::roll()`` accepts an integer which specifies how much to
+add to a given field. The integer can be negative to subtract.
+
+However, it also accepts a boolean argument, in which case ``true`` is
+interpreted as ``1`` and ``false`` is interpreted as ``-1``. This does
+not appear to be actually useful for anything, makes for a confusing
+function signature, and violates PHP's usual type coercion rules.
+
+The proposal is to deprecate passing a boolean to this method argument.
+
+Question: Deprecate passing bool for $value argument of IntlCalendar::roll()?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-6:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Accessing static members on traits
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Currently, it is possible to directly access static trait members,
+rather than accessing them on the class using the trait:
+
+.. code:: php
+
+   trait T {
+       public static $foo;
+   }
+   class C {
+       use T;
+   }
+   var_dump(T::$foo); // Currently allowed.
+
+This is conceptually wrong, and causes various complications. For
+example, the meaning of ``self`` is ill-defined -- normally, it refers
+to the using class, not the trait, but there is no "using class" in this
+context. Static member access on traits is a regular complication for
+new functionality, because it results in an impure behavior model. For
+example, opcache preloading had to require evaluated initializers in
+traits, because there is a possibility that that members are accessed
+directly, even though in ordinary usage they can only be accessed after
+being imported into some class.
+
+There is a somewhat dated analysis of projects using this functionality
+at https://github.com/php/php-src/pull/4829#issuecomment-542224541.
+
+The proposal is to deprecate the ability to access static properties and
+static methods directly on traits.
+
+Question: Deprecate accessing static members on traits?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-7:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+strptime()
+~~~~~~~~~~
+
+The ``strptime()`` function parses a date/time string into an array.
+However, this function is not supported on Windows, and the manual
+further warns:
+
+   Internally, this function calls the strptime() function provided by
+   the system's C library. This function can exhibit noticeably
+   different behaviour across different operating systems. The use of
+   date_parse_from_format(), which does not suffer from these issues, is
+   recommended on PHP 5.3.0 and later.
+
+Notably, distributions like alpine that use musl instead of glibc may
+exhibit unexpected behavior. Additionally, ``strptime()`` is
+locale-based, and as such may be affected by code running in a different
+thread.
+
+As the note already mentioned, ``date_parse_from_format()`` is an
+alternative that is always available and always behaves consistently.
+``DateTime::createFromFormat()`` is another alternative that creates a
+``DateTime`` object instead. ``IntlDateFormatter::parse()`` is available
+as a more sophisticated, localization-aware alternative.
+
+The proposal is to deprecate the ``strptime()`` function in favor of
+portable alternatives.
+
+Question: Deprecate strptime()?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-8:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+strftime() and gmstrftime()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``strftime()`` and ``gmstrftime()`` functions exhibit similar issues
+as ``strptime()``, in that the formats they support, as well as their
+behavior, is platform-dependent. Unlike ``strptime()``, these functions
+are available on Windows, though with a different feature set than on
+Linux. Musl-based distributions like Alpine do not support
+timezone-related format specifiers correctly. These functions are also
+locale-based, and as such may exhibit thread-safety issues.
+
+Once again ``date()`` or ``DateTime::format()`` provide portable
+alternatives, and ``IntlDateFormatter::format()`` provides a more
+sophisticated, localization-aware alternative.
+
+The proposal is to deprecate ``strftime()`` and ``gmstrftime()`` in
+favor of these alternatives.
+
+Question: Deprecate strftime() and gmstrftime()?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-9:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+mhash*() function family
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``mhash*()`` functions were integrated into ext/hash in PHP 5.3 as a
+compatibility layer for ext/mhash (which has been removed in PHP 7.0).
+Unlike the ``hash_*()`` functions, the ``mhash*`` functions are not
+always available, and have to be separately enabled when configuring
+PHP.
+
+The proposal is to deprecate ``mhash()``, ``mhash_keygen_s2k()``,
+``mhash_count()``, ``mhash_get_block_size()`` and
+``mhash_get_hash_name()`` in favor of the standard ext/hash
+functionality.
+
+Question: Deprecate mhash*() family of functions?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-10:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+ctype_*() function family accepts int parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Next to strings, the ``ctype_*()`` functions also accept integers, with
+semantics described by this note in the manual:
+
+    If an integer between -128 and 255 inclusive is provided, it is
+    interpreted as the ASCII value of a single character (negative
+    values have 256 added in order to allow characters in the Extended
+    ASCII range). Any other integer is interpreted as a string
+    containing the decimal digits of the integer.
+
+This is a common cause for confusion, especially when passing integer
+values to ``ctype_digit()``. ``ctype_digit(5)`` will return false, while
+``ctype_digit("5")`` will return true. This violates the general
+principle that integral strings and integers should behave consistently.
+
+Support for similar behavior in the ``strpos()`` family of functions has
+already been removed in PHP 8. If an ASCII codepoint should be checked,
+then it needs to be converted into a string explicitly using ``chr()``.
+
+The proposal is to deprecate passing of non-strings to ``ctype_*()``
+functions. In the next major versions, ``ctype_*()`` will be changed to
+accept a string parameter under standard semantics.
+
+Question: Deprecate int parameters to ctype_*() functions?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-11:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Return by reference with void type
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It is currently possible to declare functions that return void by
+reference:
+
+.. code:: php
+
+   function &test(): void {}
+
+This is contradictory, as void functions are not supposed to have a
+return value. Calling such a function will always result in a "Only
+variable references should be returned by reference" notice once it
+returns.
+
+The proposal is to throw a compile-time deprecation for function
+signatures using by-reference returns in conjunction with void.
+
+Question: Deprecate return by reference with void type?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-12:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+NIL constant defined by the IMAP extension
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``NIL`` constant corresponds to the value ``0``, and can be confused
+with ``null``. It is an ideosyncracy of the IMAP C API.
+
+The proposal is to deprecate this constant.
+
+Question: Deprecate NIL constant defined by the IMAP extension?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-13:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Calling overloaded pgsql functions without the connection argument
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+ext/pgsql has a few overloaded functions which can be called without
+providing the connection as the first argument. An example for this is
+the ``pg_query()`` function, which can be called in two ways:
+
+.. code:: php
+
+   pg_query($queryString); // uses default connection
+   pg_query($connection, $queryString);
+
+As PHP has no native support for function overloading, this makes for a
+hard to understand function signature. The function is currently
+specified as:
+
+.. code:: php
+
+   /**
+    * @param resource|string $connection
+    * @return resource|false
+    */
+   function pg_query($connection, string $query = UNKNOWN) {}
+
+The proposal is to deprecate any use of the "default connection" in
+ext/pgsql. A deprecation notice will be thrown if a pgsql function is
+called without explicitly specifying the connection.
+
+Question: Deprecate calling overloaded pgsql functions without the connection argument?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-14:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+$num_points parameter of image(open|filled)polygon
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``imagepolygon``, ``imageopenpolygon`` and ``imagefilledpolygon`` have
+an overloaded signature as of PHP 8.0.0, which allows to omit the
+``$num_points`` parameter, which is of doubtful use, and likely has only
+been introduced, because the underlying ``gdImagePolygon`` and friends
+also have this parameter, although it is necessary in C, but not in PHP.
+
+The proposal is to deprecate the old signatures which accept four
+parameters in favor of the new signatures which accept only three
+parameters. `Suggested
+implementation <https://github.com/php/php-src/pull/6789>`__.
+
+The follwing example shows how to avoid the deprecation. It should be
+noted that drawing a triangle from a four point array is likely rare in
+practice, and might even hint at a bug.
+
+.. code:: php
+
+   $points = [10, 10, 10, 90, 90, 90, 90, 10];
+
+   // draw a rectangle (i.e. use all points)
+   imagepolygon($im, $points, count($points)/2, 0x000000); // before
+   imagepolygon($im, $points, 0x000000); // after
+
+   // draw a triangle (i.e. use only 3 points)
+   imagepolygon($im, $points, 3, 0x000000); // before
+   imagepolygon($im, array_slice($points, 0, 6), 0x000000); // after
+
+Question: Deprecate $num_points parameter of image(open|filled)polygon?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-15:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+mysqli::init()
+~~~~~~~~~~~~~~
+
+This methods is the same as the function ``mysqli_init()``. However, the
+use of the method form is very confusing, because it is an instance
+method rather than a static method. Calling ``mysqli::__construct()``
+without any arguments will already create an initialized but not
+connected ``mysqli`` object and calling ``mysqli::init()`` afterwards is
+neither necessary nor useful.
+
+The only known "real" use case for this method is in polymorphism. If
+you extend mysqli class you can call ``init()`` instead of the parent
+constructor.
+
+The proposal is to deprecate ``mysqli::init()`` in favor of
+``mysqli::__construct()``, for example:
+
+.. code:: php
+
+   class test extends mysqli
+   {
+       public function __construct($host, $user, $passwd, $db, $port, $socket) {
+           // parent::init();
+           // replace the above line with the following line:
+           parent::__construct();
+           
+           parent::real_connect($host, $user, $passwd, $db, $port, $socket);
+       }
+   }
+
+Question: Deprecate mysqli::init()?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-16:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+filter.default ini setting
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``filter.default`` ini setting allows to apply a filter to all GPCRS
+data. As the documentation states:
+
+   Filter all $_GET, $_POST, $_COOKIE, $_REQUEST and $_SERVER data by
+   this filter. Original data can be accessed through filter_input().
+
+For example, ``filter.default=magic_quotes`` or
+``filter.default=add_slashes`` (depending on PHP version) can be used to
+resurrect the magic quotes functionality that was removed in PHP 5.4.
+``filter.default=special_chars`` gives you magic quotes, but for HTML.
+
+Magic quotes were removed for very good reason, and ``filter.default``
+provides functionality that is even worse, because it allows a wider
+range of different filters, and there is much less awareness of its
+existence.
+
+The proposal is to emit a deprecation warning if ``filter.default`` is
+set to a value other than ``unsafe_raw`` (the default). No separate
+deprecation warning is emitted for ``filter.default_options``, but both
+ini settings will be removed together in the next major version.
+
+Question: Deprecate filter.default ini setting?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-17:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+auto_detect_line_endings ini setting
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``auto_detect_line_endings`` ini setting modifies the behavior of
+``file()`` and ``fgets()`` to support an isolated ``\r`` (as opposed to
+``\n`` or ``\r\n``) as a newline character. These newlines were used by
+"Classic" Mac OS, a system which has been discontinued in 2001, nearly
+two decades ago. Interoperability with such systems is no longer
+relevant.
+
+The proposal is to emit a deprecation warning if
+``auto_detect_line_endings`` is enabled.
+
+Question: Deprecate auto_detect_line_endings ini setting?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-18:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+ssl_method option to SoapClient constructor
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+One of the many options which can be passed (in an associative array) to
+the ``SoapClient`` constructor is ``ssl_method``, which theoretically
+allows selection of the SSL/TLS version. The value is one of four
+extension-specific constants:
+
+-  Due to changes elsewhere, both ``SOAP_SSL_METHOD_TLS`` and
+   ``SOAP_SSL_METHOD_SSLv23`` are the same as the default, which is
+   currently to negotiate TLS 1.0 or higher
+-  SOAP_SSL_METHOD_SSLv2 will always result in an error, because PHP no
+   longer supports SSL 2
+-  SOAP_SSL_METHOD_SSLv3 will select SSL 3, if the OpenSSL in use
+   includes support; it's use is probably very rare, since SSL 3 has
+   been considered insecure for many years
+
+A full set of options (including both SSL 3 and all individual versions
+of TLS) is available using the ``['ssl' => ['crypto_method' => ...]``
+option to ``stream_context_create``, which can then be passed to the
+``SoapClient`` in the ``context`` parameter.
+
+The proposal is to deprecate passing an ``ssl_method`` option to the
+constructor, and recommend the use of ``context`` option instead.
+
+Question: Deprecate ssl_method option to SoapClient constructor?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-19:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+FILTER_SANITIZE_STRING
+~~~~~~~~~~~~~~~~~~~~~~
+
+This is a very dubious filter that has almost no use. It removes NUL
+bytes, encodes single and double quotes in HTML, and removes anything
+between ``<`` and optional ``>``. It does not function the same as
+``strip_tags()`` as pointed out in this comment
+https://www.php.net/manual/en/filter.filters.sanitize.php#118186
+
+This filter is dangerously misleading and encourages bad practice, in
+that the set of encoded/stripped characters is not suitable for any
+particular purpose. It seems to be intended as a kind of generic string
+filter that renders the string safe in a magic fashion, without taking
+into account the context where it will be used. Use of this filter
+should be replaced with escaping/encoding specific to the given context.
+
+The name of the filter can also be confused with a default filter for
+accepting arbitrary strings (which would be more in line with what other
+filters like FILTER_SANITIZE_INT do). The filter that actually does this
+is FILTER_UNSAFE_RAW, which sounds like something one should not use. In
+reality, it is the use of FILTER_SANITIZE_STRING which will result in
+data corruption.
+
+The proposal is to deprecate the ``FILTER_SANITIZE_STRING`` constant,
+its alias ``FILTER_SANITIZE_STRIPPED``, as well as use of this filter.
+
+Question: Deprecate FILTER_SANITIZE_STRING?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-20:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+oci8.old_oci_close_semantics INI setting
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By enabling this INI setting, ``oci_close()`` will do nothing instead of
+closing the connection. As it only exists for backward compatibility
+purposes for a long time, we should remove it.
+
+The proposal is to throw a deprecation warning if
+``oci8.old_oci_close_semantics`` is enabled.
+
+Question: Deprecate oci8.old_oci_close_semantics INI setting?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-21:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+odbc_result_all()
+~~~~~~~~~~~~~~~~~
+
+The `odbc_result_all() <https://www.php.net/odbc_result_all>`__ function
+prints all rows from an ODBC query result as an HTML table. However, the
+printed data is not escaped. This means that the function is not only of
+very dubious usefulness, but also actively dangerous when used for
+non-debugging purposes.
+
+The proposal is to deprecate the ``odbc_result_all()`` function.
+
+Question: Deprecate odbc_result_all()?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-22:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Backward Incompatible Changes
+-----------------------------
+
+For PHP 8.1 additional deprecation notices will appear. For PHP 9.0 the
+previously deprecated functionality will no longer be available.
+
+Removed from this proposal
+--------------------------
+
+The following entries were originally added to this proposal and then
+dropped.
+
+get_browser() function
+~~~~~~~~~~~~~~~~~~~~~~
+
+This was originally included on the rationale that ``get_browser()`` is
+much slower than userland browscap implementations. However, this is no
+longer the case since a PHP 7.0 patch release, see
+https://github.com/php/php-src/pull/2242.
+
+DatePeriod::__construct()
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This is a heavily overloaded function (it has 3 signatures) which should
+be deprecated in favor of 3 factory methods. However, those factory
+methods need to be introduced first, before the constructor can be
+deprecated.
+
+Passing a method name as the first parameter to ReflectionMethod::__construct()
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``ReflectionMethod::__construct()`` currently also accepts a single
+argument of the form ``"ClassName::methodName"``, as opposed to the
+class and method name being passed separately. A
+``ReflectionMethod::fromMethodName()`` method should be added as a
+replacement. The replacement should be added before this overload can be
+deprecated.
+
+unserialize_callback_func INI setting
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This ini setting is currently still used (by Symfony for example) to
+throw an exception if a class is not found, instead of creating an
+instance of ``__PHP_Incomplete_Class``. We should introduce an
+unserialize option that achieves this before the deprecate the ini
+setting.
+
+Predefined variable $http_response_header
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The
+```$http_response_header`` <https://www.php.net/manual/en/reserved.variables.httpresponseheader.php>`__
+variable is magically created in the local scope whenever an HTTP
+request is performed through PHP's stream layer. Creating a variable in
+the local scope is a terrible way of returning additional information,
+and we have removed all other features using this operating principle,
+such as ``$php_errormsg``.
+
+It is possible to replace ``$http_response_header`` by making use of
+stream wrapper metadata. However, this means that you cannot simply use
+``file_get_contents()`` anymore, and need to drop down to the stream
+layer:
+
+.. code:: php
+
+   // Replace:
+   $url = 'https://example.org';
+   $response = file_get_contents($url);
+   $headers = $http_response_header;
+
+   // With:
+   $url = 'https://example.org';
+   $f = fopen($url, 'r');
+   $reponse = stream_get_contents($f);
+   $headers = stream_get_meta_data($f)['wrapper_data'];
+
+Things become more complicated once you want to access headers of a
+request that failed. In this case, stream meta data will not be
+available, as the ``fopen()`` call will fail. Instead, it is necessary
+to set the ``ignore_errors`` option:
+
+.. code:: php
+
+   $url = 'https://example.org/file_not_found';
+   $context = stream_context_create([
+       'http' => [
+           'ignore_errors' => true,
+       ],
+   ]);
+   $f = fopen($url, 'r', context: $context);
+   $response = stream_get_contents($f);
+   $headers = stream_get_meta_data($f)['wrapper_data'];
+
+This also means that you now manually need to detect whether the request
+failed based on the headers.
+
+These alternatives are workable, but also not great. Possibly we should
+add a function that returns the last response headers, instead of
+creating a variable?
+
+Additional Metadata
+-------------------
+
+:Original Authors: Nikita Popov nikic@php.net, George Peter Banyard girgias@php.net, Máté Kocsis kocsismate@php.net, Rowan Tommins imsop@php.net
+:Slug: deprecations_php_8_1
+:Wiki URL: https://wiki.php.net/rfc/deprecations_php_8_1

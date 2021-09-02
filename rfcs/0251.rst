@@ -1,0 +1,583 @@
+Inconsistent Behaviors To Discuss/document
+==========================================
+
+:PHP-RFC: 0251
+:Title: Inconsistent Behaviors To Discuss/document
+:Author: Yasuo Ohgaki <yohgaki@php.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2014-01-08
+:Version: 0.1
+
+This RFC is to discuss comparison and conversion inconsistencies in PHP.
+
+Introduction
+------------
+
+There are number of in comparison and conversion inconsistencies.
+
+For example,
+
+-  https://bugs.php.net/bug.php?id=53104 reports comparison
+   inconsistency in min() function.
+
+There are number issues of like this.
+
+Purpose of this RFC is fix inconsistency where it's feasible, otherwise
+document then fully if it's not documented already.
+
+Inconsistency
+-------------
+
+Conversion/comparison
+~~~~~~~~~~~~~~~~~~~~~
+
+Type juggling only works for INTEGER or HEX like strings.
+
+Most problematic is HEX like strings being auto-coerced during
+comparison, but using *different rules* from manual casting. That is, (
+0x0A == "0x0A" ) is not treated as ( 0x0A == (int)"0x0A" ), although
+"0x0A" *is* translated to a number.
+
+This despite
+http://us2.php.net/manual/en/language.operators.comparison.php, which
+states clearly that for number-string comparison, we "Translate strings
+and resources to numbers." While it is feasible that some string
+patterns cannot be "translated" (OCTAL and BINARY) at all, once a
+"translation" is attempted, it should follow the same rules as (int)
+casting for the same string. It is hard to view it is anything but a bug
+that it does not.
+
+HEX
+^^^
+
+Code
+
+::
+
+   var_dump(0x0A);
+   var_dump("0x0A");
+   var_dump((int)"0x0A");
+   var_dump((float)"0x0A");
+   var_dump(intval("0x0A"));
+   var_dump(floatval("0x0A"));
+
+Output
+
+::
+
+   int(10)
+   string(4) "0x0A"
+   int(0)
+   float(0)
+   int(0)
+   float(0)
+
+Code
+
+::
+
+   if (0x0A == '0x0A') {
+     echo "0x0A == '0x0A'".PHP_EOL;
+   }
+   if (0x0A == "0x0A") {
+     echo '0x0A == "0x0A"'.PHP_EOL;
+   }
+
+Output
+
+::
+
+   0x0A == '0x0A'
+   0x0A == "0x0A"
+
+Octal
+^^^^^
+
+Code
+
+::
+
+   var_dump(010);
+   var_dump("010");
+   var_dump((int)"010");
+   var_dump((float)"010");
+   var_dump(intval("010"));
+   var_dump(floatval("010"));
+
+Output
+
+::
+
+   int(8)
+   string(3) "010"
+   int(10)
+   float(10)
+   int(10)
+   float(10)
+
+CODE
+
+::
+
+   if (010 == '010') {
+     echo "010 == '010'".PHP_EOL;
+   }
+   if (010 == "010") {
+     echo '010 == "010"'.PHP_EOL;
+   }
+
+OUTPUT
+
+::
+
+   (NONE)
+
+BINARY
+^^^^^^
+
+Code
+
+::
+
+   var_dump(0b110);
+   var_dump("0b110");
+   var_dump((int)"0b110");
+   var_dump((float)"0b110");
+   var_dump(intval("0b110"));
+   var_dump(floatval("0b110"));
+
+Output
+
+::
+
+   int(6)
+   string(5) "0b110"
+   int(0)
+   float(0)
+   int(0)
+   float(0)
+
+CODE
+
+::
+
+   if (0b010 == '0b010') {
+     echo "0b010 == '0b010'".PHP_EOL;
+   }
+   if (0b010 == "0b010") {
+     echo '010 == "010"'.PHP_EOL;
+   }
+
+OUTPUT
+
+::
+
+   (NONE)
+
+Array of Chars
+^^^^^^^^^^^^^^
+
+Null string is not handled as ARRAY.
+
+https://github.com/php/php-src/pull/463
+
+Test script:
+
+::
+
+   $a = ''; // empty string
+   $a[10] = 'a';
+   echo $a; // "Array"
+
+   $b = ' '; // non empty string
+   $b[10] = 'b';
+   echo $b; // "          b"
+
+Expected result:
+
+::
+
+   "          a"
+   "          b"
+
+Actual result:
+
+::
+
+   "Array"
+   "          b"
+
+String Integer conversion
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+PHP converts "integer like string to integer".
+
+::
+
+   <?php
+
+   // this is the problem, which we'd expect
+   // to return false, but which returns true:
+   echo (2 == '2b').'<br />';
+
+   // this is probably what's happening:
+   echo (2 == intval('2b')).'<br />';
+
+   // this is what probably should happen:
+   echo (strval(2) != '2b').'<br />';
+
+   ?>
+
+https://bugs.php.net/bug.php?id=66211
+
+Not only is this not a bug, it isn't even exceptional behavior on the
+modern web. Users who find this behavior surprising are likely
+inexperienced with MySQL -- clearly PHP's partner in server-side
+ubiquity as part of the dominant \*AMP stack -- which has the exact same
+rules for auto-coercion of "numeroalphabetic" strings in a comparison
+context.
+
+In MySQL (all supported versions):
+
+.. code:: sql
+
+   SELECT CASE WHEN '-45herearesomeletters' = -45 THEN 'true' ELSE 'false' END
+
+prints 'true'
+
+There are other popular languages that follow the same casting/coercion
+rule, though they do not automatically perform the coercion during
+comparison. For example, JavaScript parseInt('-45herearesomeletters')
+results in the integer -45. In SQLite, the ubiquitous embedded SQL
+database, also CAST( '-45herearesomeletters' AS SIGNED ) produces the
+integer -45.
+
+The SQLite documentation explains the logic well:
+
+   When casting a TEXT value to INTEGER, the longest possible prefix of
+   the value that can be interpreted as an integer number is extracted
+   from the TEXT value and the remainder ignored. Any leading spaces in
+   the TEXT value when converting from TEXT to INTEGER are ignored. If
+   there is no prefix that can be interpreted as an integer number, the
+   result of the conversion is 0.
+   (http://www.sqlite.org/lang_expr.html#castexpr)
+
+And this behavior is not considered particularly "distinctive".
+(http://sqlite.org/different.html)
+
+Since the ubiquity of MySQL has been used to support the expectations
+users should have of PHP, it's fair to note Oracle, SQL Server, and
+PostgreSQL will not allow the above comparison to be performed: the
+statement produces a fatal error. It's a runtime casting error: these
+languages do not prohibit comparing values of different datatypes, as
+long as the engine can cast the runtime contents of the value. Yet such
+implementations, arguably, violate the "least astonishment" concept,
+since a errant letter modifier like '1A' will cause a fatal error where
+the expectation might be to either have a '1A' compare equal to 1 (as in
+MySQL) or fail gracefully (as in SQLite). In this respect, the SQLite
+behavior is more balanced than that of Oracle/MSSQL/PGSQL, and PHP and
+MySQL's behavior is graceful, generous, and reasonable.
+
+With PHP and MySQL agreeing on this behavior, it is clear that
+automatically coercing a "numeroalphabetic" string (for want of a better
+term) to a number via truncation is common practice on the web, even if
+it is news to the inexperienced user.
+
+String decrements
+~~~~~~~~~~~~~~~~~
+
+String decrements is inconsistent
+
+https://wiki.php.net/rfc/alpanumeric_decrement
+
+NAN/INF of float
+~~~~~~~~~~~~~~~~
+
+NAN/INF issue.
+
+::
+
+   $f = NAN;
+   var_dump(++$f);                 // float NAN
+   var_dump((float) NAN);   // float NAN
+   var_dump((int) NAN);       // int -2147483648 -> what?
+   var_dump((bool) NAN);   // bool true -> makes sense
+
+   $f = INF;
+   var_dump(++$f);                         // float INF
+   var_dump((float) INF);             // float INF
+   var_dump((int) INF);                 // int 0 -> what?
+   var_dump((bool) INF);             // bool true -> so why int 0?
+   var_dump((int) (bool) INF);   // int 1
+
+E_WARNING for these invalid/unreliable operations might be better.
+
+This could be mitigated by GMP float support.
+
+Object Array conversion of numeric property/index
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Object/Array cast looses accessibility of numeric property/element.
+https://bugs.php.net/bug.php?id=66173
+
+::
+
+   $ php -v
+   PHP 5.5.7 (cli) (built: Dec 11 2013 07:51:06) 
+   Copyright (c) 1997-2013 The PHP Group
+   Zend Engine v2.5.0, Copyright (c) 1998-2013 Zend Technologies
+
+   $ php -r '$obj = new StdClass; $obj->{12} = 234; ${1} = 567; var_dump($obj, ${1}); $ary = (array)$obj; var_dump($ary, $ary[12]);'
+   object(stdClass)#1 (1) {
+     ["12"]=>
+     int(234)
+   }
+   int(567)
+
+::
+
+   Notice: Undefined offset: 12 in Command line code on line 1
+   array(1) {
+     ["12"]=>
+     int(234)
+   }
+   NULL <= SHOULD BE int(234)
+
+Function/Method
+---------------
+
+assert
+~~~~~~
+
+assert() does not accept closure while it accepts functions.
+
+::
+
+   php > function f() {return FALSE;}
+   php > assert(f());
+
+   Warning: assert(): Assertion failed in php shell code on line 1
+   php > assert(function() {return FALSE;});
+
+https://wiki.php.net/rfc/expectations
+
+base_convert
+~~~~~~~~~~~~
+
+https://wiki.php.net/rfc/base-convert
+
+filter_var
+~~~~~~~~~~
+
+https://bugs.php.net/bug.php?id=66682
+
+.. code:: php
+
+   var_dump(filter_var('01', FILTER_VALIDATE_INT));
+   var_dump(filter_var('01', FILTER_VALIDATE_FLOAT));
+
+::
+
+   bool(false)
+   double(1)
+
+is_numeric
+~~~~~~~~~~
+
+https://bugs.php.net/bug.php?id=66399
+
+min
+~~~
+
+https://bugs.php.net/bug.php?id=53104
+
+This is not a bug. If one of operand is BOOL(or NULL), both operands are
+converted to BOOL and evaluated as BOOL. It may be good idea that
+document this behavior in min() manual.
+
+**Status** Documented.
+
+http://jp2.php.net/min
+
+Return value of wrong internal function/method parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If not all, almost all functions return NULL when required function
+parameter is missing or wrong type. However, almost all functions return
+FALSE when they have errors.
+
+The manual has document for this behavior
+http://www.php.net/manual/en/functions.internal.php
+
+::
+
+   Note: If the parameters given to a function are not what it expects, such as passing an array 
+   where a string is expected, the return value of the function is undefined. In this case it will 
+   likely return NULL but this is just a convention, and cannot be relied upon.
+
+This behavior could be cause of bug in scripts. For instance,
+
+::
+
+   if (FALSE === some_func($wrong_parameter)) {
+      // Error happend!
+   } else {
+      // OK to go
+   }
+
+Users should not rely on return value as it may return NULL for wrong
+parameters. Users should rely on error/exception handler for such case
+as internal functions raise E_WARNING in this case. (If there are
+function that does not raise error, it is subject to be fixed.)
+
+It may be good to add use of error/exception handler as best practice in
+the manual. http://www.php.net/manual/en/functions.internal.php
+
+There are bug reports that complain return value inconsistency. The
+document could be improved with more explanations.
+
+**Related Bug Reports**
+
+-  https://bugs.php.net/bug.php?id=60338 (Returns value for wrong key())
+-  https://bugs.php.net/bug.php?id=64860 (returns NULL for wrong file
+   parameter)
+-  https://bugs.php.net/bug.php?id=65986 (returns NULL for wrong
+   parameter)
+-  https://bugs.php.net/bug.php?id=65604 (returns NULL for too huge
+   parameter, probably)
+-  https://bugs.php.net/bug.php?id=59225 (returns NULL when it should
+   return FALSE? when server is not accessible?)
+-  https://bugs.php.net/bug.php?id=65910 (returns NULL for wrong
+   parameter)
+-  https://bugs.php.net/bug.php?id=62492 (returns NULL for wrong
+   parameter)
+-  https://bugs.php.net/bug.php?id=44049 (returns NULL for wrong
+   parameter by mistake? Expecting prepared query params?)
+-  https://bugs.php.net/bug.php?id=64140 (returns NULL for wrong
+   parameter without error/exception?)
+
+Bug reports are not verified carefully. Removing wrong one, adding
+proper one is appreciated.
+
+Developer Guideline
+-------------------
+
+-  Internal function/method should raise error(or exception) for invalid
+   parameters. (parse parameters function does this)
+-  Internal function/method is better to return NULL for invalid
+   parameters as most functions do.
+-  Internal function/method is better to return FALSE for other errors.
+
+User Guideline
+--------------
+
+-  User should not rely return value only for failure condition, but
+   should rely error/exception handler for failure also.
+
+Proposal
+--------
+
+Not yet.
+
+Backward Incompatible Changes
+-----------------------------
+
+Not yet.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 6.0 probably.
+
+Impact to Existing Extensions
+-----------------------------
+
+Not yet.
+
+New Constants
+-------------
+
+Not yet.
+
+php.ini Defaults
+----------------
+
+If there are any php.ini settings then list:
+
+-  hardcoded default values
+-  php.ini-development values
+-  php.ini-production values
+
+Not yet.
+
+Open Issues
+-----------
+
+Make sure there are no open issues when the vote starts!
+
+Unaffected PHP Functionality
+----------------------------
+
+List existing areas/features of PHP that will not be changed by the RFC.
+
+This helps avoid any ambiguity, shows that you have thought deeply about
+the RFC's impact, and helps reduces mail list noise.
+
+Future Scope
+------------
+
+This sections details areas where the feature might be improved in
+future, but that are not currently proposed in this RFC.
+
+Proposed Voting Choices
+-----------------------
+
+Include these so readers know where you are heading and can discuss the
+proposed voting options.
+
+Patches and Tests
+-----------------
+
+Links to any external patches and tests go here.
+
+If there is no patch, make it clear who will create a patch, or whether
+a volunteer to help with implementation is needed.
+
+Make it clear if the patch is intended to be the final patch, or is just
+a prototype.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+Links to external references, discussions or RFCs
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+ChangeLog
+---------
+
+-  2014/02/05 - Renamed to "inconsistent-behaviors"
+-  2013/10/31 - Initial version.
+
+Additional Metadata
+-------------------
+
+:First Published At: http://wiki.php.net/rfc/comparison_inconsistency
+:Original Authors: Yasuo Ohgaki yohgaki@php.net
+:Original Status: Inactive
+:Renamed To: https://wiki.php.net/rfc/inconsistent-behaviors
+:Slug: inconsistent-behaviors
+:Wiki URL: https://wiki.php.net/rfc/inconsistent-behaviors

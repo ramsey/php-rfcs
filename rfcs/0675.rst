@@ -1,0 +1,184 @@
+Weak Maps
+=========
+
+:PHP-RFC: 0675
+:Title: Weak Maps
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2019-11-04
+:PHP-Version: 8.0
+:Version: 1.0
+
+Introduction
+------------
+
+Weak maps allow creating a map from objects to arbitrary values (similar
+to SplObjectStorage) without preventing the objects that are used as
+keys from being garbage collected. If an object key is garbage
+collected, it will simply be removed from the map.
+
+In PHP 7.4 first-class support for `weak references </rfc/weakrefs>`__
+was already introduced. However, raw weak references are only of limited
+usefulness by themselves and weak maps are much more commonly used in
+practice. It is not possible to implement an efficient weak map on top
+of PHP weak references, because the ability to register a destruction
+callback is not provided.
+
+The general use case for weak maps is to associate data with individual
+object instances, without forcing them to stay alive and thus
+effectively leak memory in long-running processes. For example, a weak
+map may be used to memoize a computation result:
+
+.. code:: php
+
+   class FooBar {
+       private WeakMap $cache;
+       
+       public function getSomethingWithCaching(object $obj) {
+           return $this->cache[$obj] ??= $this->computeSomethingExpensive($obj);
+       }
+       
+       // ...
+   }
+
+This will invoke the ``computeSomethingExpensive()`` method only once
+for each object. At the same time it will also drop the cached value
+from the map if the object is destroyed. Doing the same with a normal
+array (or rather ``SplObjectStorage``) would result in a memory leak.
+
+Proposal
+--------
+
+Add a ``WeakMap`` class with the following prototype:
+
+.. code:: php
+
+   final class WeakMap implements ArrayAccess, Countable, Traversable {
+       public function offsetGet($object);
+       public function offsetSet($object, $value): void;
+       public function offsetExists($object): bool;
+       public function offsetUnset($object): void;
+       public function count(): int;
+   }
+
+Objects used as weak map keys are "weakly referenced", which means that
+they are not prevented from being garbage collected. If an object that
+is used as a weak map key is garbage collected, the key is removed from
+the weak map. This is illustated in the following example:
+
+.. code:: php
+
+   $map = new WeakMap;
+   $obj = new stdClass;
+   $map[$obj] = 42;
+   var_dump($map);
+   // object(WeakMap)#1 (1) {
+   //   [0]=>
+   //   array(2) {
+   //     ["key"]=>
+   //     object(stdClass)#2 (0) {
+   //     }
+   //     ["value"]=>
+   //     int(42)
+   //   }
+   // }
+
+   // The object is destroyed here, and the key is automatically removed from the weak map.
+   unset($obj);
+   var_dump($map);
+   // object(WeakMap)#1 (0) {
+   // }
+
+Some details of the ``WeakMap`` behavior are outlined in the following:
+
+-  Just like ``WeakReference``, ``WeakMap`` is not serializable and
+   setting dynamic properties on it is forbidden.
+-  Unlike ``WeakReference``, ``WeakMap`` can be cloned. Cloning
+   ``WeakReference``\ s is not allowed because the objects are uniqued,
+   which does not apply to ``WeakMap``\ s.
+-  Using a non-object key in ``$map[$key]`` or one of the ``offset*()``
+   methods results in a ``TypeError`` exception.
+-  Appending to a weak map using ``$map[]`` results in an ``Error``
+   exception.
+-  Reading a non-existent key results in an ``Error`` exception.
+-  Overloaded operations on map entries are supported, i.e.
+   ``$map[$obj][] = $x`` and similar work.
+-  By-reference iteration of ``WeakMap``\ s is supported.
+
+Backward Incompatible Changes
+-----------------------------
+
+No backwards incompatible changes apart from using the ``WeakMap`` class
+name.
+
+Vote
+----
+
+Voting started 2019-12-18 and closes 2020-01-01.
+
+Question: Add WeakMap class in PHP 8.0?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Differences to spl_object_id() and WeakReference
+------------------------------------------------
+
+Weak maps require first-class language support and cannot be implemented
+using existing functionality provided by PHP.
+
+At first sight, it may seem that an array mapping from
+``spl_object_id()`` to arbitrary values could serve the purpose of a
+weak map. This is not the case for multiple reasons:
+
+-  ``spl_object_id()`` values are reused after the object is destroyed.
+   Two different objects can have the same object ID -- just not at the
+   same time.
+-  The object ID cannot be converted back into an object, so iteration
+   over the map is not possible.
+-  The value stored under the ID will not be released when the object is
+   destroyed.
+
+Using the ``WeakReference`` class introduced in PHP 7.4, it is possible
+to avoid the first two issues, by using the following construction:
+
+.. code:: php
+
+   // Insertion
+   $this->map[spl_object_id($object)] = [WeakReference::create($object), $data];
+
+   // Lookup
+   $id = spl_object_id($object);
+   if (isset($this->map[$id])) {
+       [$weakRef, $data] = $this->map[$id];
+       if ($weakRef->get() === $object) {
+           return $data;
+       }
+       // This entry belongs to a destroyed object.
+       unset($this->map[$id]);
+   }
+   return null;
+
+This makes use of the ``WeakReference`` to determine whether the object
+ID has been reused. However, this does not solve the third problem: The
+data will not be released when the object is destroyed. It will only be
+released on the next access with an object that has the same reused ID,
+or if a garbage collection mechanism, which performs regular sweeps of
+the whole map, is implemented.
+
+A native weak map implementation will instead remove the value from the
+weak map as soon as the object key is destroyed.
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/4882
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.0
+:Slug: weak_maps
+:Wiki URL: https://wiki.php.net/rfc/weak_maps

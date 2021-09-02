@@ -1,0 +1,259 @@
+Safe Casting Functions
+======================
+
+:PHP-RFC: 0318
+:Title: Safe Casting Functions
+:Author: Andrea Faulds <ajf@ajf.me>
+:Status: Declined
+:Type: Unknown
+:Created: 2014-10-20
+:Version: 0.1.8
+
+Introduction
+------------
+
+Currently, PHP only provides one means of type conversion: explicit
+casts. These casts never fail or emit errors, making them dangerous to
+use, as when passed garbage input, they will simply return garbage
+instead of indicating that something went wrong. This makes it difficult
+to write robust applications which handle user data. They also prevent
+any suggestion of strict type hinting for scalar types, because if that
+were to be added, users would simply use dangerous explicit casts to get
+around errors and the result would be code that is buggier than it would
+have been without type hinting at all.
+
+For int and float conversion specifically, ``ext/filter`` provides
+``FILTER_VALIDATE_INT`` and ``FILTER_VALIDATE_FLOAT``.
+``filter_var($foo, FILTER_VALIDATE_INT)`` and
+``filter_var($foo, FILTER_VALIDATE_FLOAT)``. However, these are rather
+unwieldy, encouraging people to use the shorter explicit casts, and
+suffer from a performance and safety standpoint by their converting
+values to strings before validating (allowing, for example, booleans, or
+objects with ``__toString``). Furthermore, their use requires explicit
+error handling by checking for a FALSE return value. If the programmer
+forgets to check it, they are no safer than explicit casts.
+
+Proposal
+--------
+
+Two families of "safe casting" functions are added to ``ext/standard``,
+``try_``\ \* and ``to_``\ \*, for ``int``, ``float`` and ``string``.
+These functions validate their input to ensure data is not lost with the
+cast (thus the cast can be considered safe), instead of casting blindly.
+If the input fails to validate, the ``to_``\ \* functions throw a
+``CastException``, while the ``try_``\ \* functions return NULL. If
+validation succeeds, the converted result is returned.
+
+``to_int()`` and ``try_int()`` accept only ints, non-NaN integral floats
+within the range of an integer (``PHP_INT_MIN`` to ``PHP_INT_MAX``), and
+strings containing decimal integer sequences within the range of an
+integer. Leading and trailing whitespace is not permitted, nor are
+leading zeros.
+
+``to_float()`` and ``try_float()`` accept only ints, floats, and strings
+representing floats. Leading and trailing whitespace is not permitted,
+nor are leading zeros.
+
+``to_string()`` and ``try_string()`` accept only strings, objects which
+cast to strings, ints and floats.
+
+The new class ``CastException`` is added to ``ext/standard``, which
+extends SPL's ``RuntimeException``.
+
+Rationale
+~~~~~~~~~
+
+The concept was developed in my thoughts, and in discussions with
+Anthony Ferrara (both in-person at PHPNW14 and online) and others in
+`StackOverflow's PHP
+chatroom <http://chat.stackoverflow.com/rooms/11/php>`__. Here, I list
+some of my or our rationale for particular decisions.
+
+-  The functions don't accept anything which wouldn't be converted
+   properly by normal unsafe explicit casts (i.e. ``(int)`` and
+   ``intval()``), such that their accepted inputs should be a strict
+   subset of inputs converted by unsafe casts. This is why hexadecimal
+   and exponents are not permitted for ``to_int()`` and ``try_int()``.
+-  Whitespace is not allowed because it is expected that most input will
+   lack it, and it can be easily stripped before conversion using
+   ``trim()``
+-  Generally, no data is allowed to be lost, with the exception of
+   floats, which are allowed to lose accuracy from their decimal
+   representations. This is because zero data-loss is impossible (or at
+   least highly impractical) for floats, as PHP does not output them in
+   full precision, and many decimal values don't have exact binary
+   representations, and vice-versa. Furthermore, some loss of accuracy
+   is expected when dealing with floats.
+-  Leading zeros are not accepted for ``to_int()`` and ``try_int()``,
+   because strings containing them are not consistently interpreted
+   (sometimes they are considered octal, sometimes decimal), nor is user
+   intent consistent.
+-  There are two sets of functions, one that returns NULL on failure and
+   the other that throws an exception for the following reasons:
+
+::
+
+       * In some cases, invalid input is an exceptional case, so an exception is desirable, but in other cases, it is not exceptional, so an exception shouldn't be used. Having two functions allows both these scenarios to be covered.
+           * It is often repeated that exceptions shouldn't be used for flow control.
+       * It is PHP tradition to allow both object-oriented (exceptions) and procedural (error return value) approaches to problems.
+       * This placates both people who would like an error return value, and people who would like exceptions.
+       * Return values are better for chaining in some circumstances.
+       * Checking exceptions is generally slower than checking return values, especially in HHVM).
+
+Examples Table
+~~~~~~~~~~~~~~
+
+A sample table of whether values pass or fail generated by `this
+script <https://gist.github.com/TazeTSchnitzel/19c91f800e47d53cc28c>`__,
+on a 64-bit machine:
+
+================================= ======= ========= ==========
+value                             try_int try_float try_string
+================================= ======= ========= ==========
+string(6) "foobar"                fail    fail      pass
+string(0) ""                      fail    fail      pass
+string(1) "0"                     pass    pass      pass
+int(0)                            pass    pass      pass
+float(0)                          pass    pass      pass
+string(2) "10"                    pass    pass      pass
+string(3) "010"                   fail    fail      pass
+string(3) "+10"                   pass    pass      pass
+string(3) "-10"                   pass    pass      pass
+int(10)                           pass    pass      pass
+float(10)                         pass    pass      pass
+string(19) "9223372036854775807"  pass    pass      pass
+int(9223372036854775807)          pass    pass      pass
+string(20) "-9223372036854775808" pass    pass      pass
+int(-9223372036854775808)         pass    pass      pass
+string(4) "10.0"                  fail    pass      pass
+string(5) "75e-5"                 fail    pass      pass
+string(5) "31e+7"                 fail    pass      pass
+NULL                              fail    fail      fail
+bool(true)                        fail    fail      fail
+bool(false)                       fail    fail      fail
+object(stdClass)#1 (0) {}         fail    fail      fail
+resource(5) of type (stream)      fail    fail      fail
+array(0) {}                       fail    fail      fail
+float(1.5)                        fail    pass      pass
+string(3) "1.5"                   fail    pass      pass
+string(5) "10abc"                 fail    fail      pass
+string(5) "abc10"                 fail    fail      pass
+string(4) "100 "                  fail    fail      pass
+string(4) " 100"                  fail    fail      pass
+string(5) " 100 "                 fail    fail      pass
+string(4) "0x10"                  fail    fail      pass
+float(INF)                        fail    pass      pass
+float(-INF)                       fail    pass      pass
+float(NAN)                        fail    pass      pass
+float(1.844674407371E+19)         fail    pass      pass
+float(-1.844674407371E+19)        fail    pass      pass
+string(18) "1.844674407371E+19"   fail    pass      pass
+string(19) "-1.844674407371E+19"  fail    pass      pass
+object(Stringable)#2 (0) {}       fail    fail      pass
+object(NotStringable)#3 (0) {}    fail    fail      fail
+object(stdClass)#4 (0) {}         fail    fail      fail
+================================= ======= ========= ==========
+
+Proposed PHP Version(s)
+-----------------------
+
+This is proposed for the next major version of PHP, currently PHP 7.
+
+Open Issues
+-----------
+
+None.
+
+Unaffected PHP Functionality
+----------------------------
+
+This does not touch the explicit cast operators (``(int)``, ``(float)``,
+``(string)`` etc.) nor the explicit cast functions (``intval()``,
+``floatval``, ``strval()`` etc.).
+
+Future Scope
+------------
+
+This might be extended to other types. However, support for the other
+scalar types has deliberately not been included. For booleans, there is
+no clear single format to accept, nor a consistent interpretation of
+particular values depending on the format used. Furthermore, strict
+boolean conversion is very simple to do so manually. NULL is a type with
+only one possible value, so there is no point in casting. Resources are
+special and don't really count as scalars.
+
+Proposed Voting Choices
+-----------------------
+
+As this is not a language change and only introduces new functions, only
+a 50%+1 majority will be required. The vote will be a straight Yes/No
+vote on accepting the RFC and merging the patch into master.
+
+Vote
+~~~~
+
+Voting opened 2014-11-19 and ended 2014-11-29.
+
+Question: Should the Safe Casting Functions RFC be accepted, and the patch merged into master?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+I have made a patch and pull request on GitHub against the master
+branch: https://github.com/php/php-src/pull/874
+
+Theodore Brown has created a userland polyfill with the same behaviour:
+https://github.com/theodorejb/PolyCast
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+Safer or stricter casts have been requested before:
+
+-  http://marc.info/?l=php-internals&m=141029082416896&w=2
+-  http://marc.info/?l=php-internals&m=138868787412173&w=2
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Changelog
+---------
+
+-  v0.1.8 - ext/filter note in Introduction
+-  v0.1.7 - Allow positive signs
+-  v0.1.6 - Dropped zero round trip data loss principle, added octal and
+   whitespace rationale
+-  v0.1.5 - Renamed ``to_`` functions to ``try_``, added ``to_``
+   functions which throw exception
+-  v0.1.4 - Reject leading '+' and '0' for int/float,
+   ``to_Y($A) !== NULL IFF (X)(Y)$A === $A`` principle in rationale
+-  v0.1.3 - Return NULL, don't include exceptions in vote
+-  v0.1.2 - Leading and trailing whitespace is not permitted
+-  v0.1.1 - Rationale
+-  v0.1 - Created
+
+Additional Metadata
+-------------------
+
+:Original Authors: Andrea Faulds, ajf@ajf.me
+:Original Date: 2014-10-20, Last Updated 2014-11-14
+:Slug: safe_cast
+:Wiki URL: https://wiki.php.net/rfc/safe_cast

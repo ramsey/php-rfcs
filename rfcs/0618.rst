@@ -1,0 +1,586 @@
+FFI - Foreign Function Interface
+================================
+
+:PHP-RFC: 0618
+:Title: FFI - Foreign Function Interface
+:Author: Dmitry Stogov <dmitry@zend.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2018-12-04
+:PHP-Version: 7.4
+:Version: 0.9
+
+Introduction
+------------
+
+FFI is one of the features that made Python and LuaJIT very useful for
+fast prototyping. It allows calling C functions and using C data types
+from pure scripting language and therefore develop "system code" more
+productively. For PHP, FFI opens a way to write PHP extensions and
+bindings to C libraries in pure PHP.
+
+Proposal
+--------
+
+It is proposed to extend PHP with a simple FFI API designed after
+LuaJTI/FFI and Python/CFFI (the latter was actually based on former).
+This API allows loading shared libraries (.DLL or .so), calling C
+functions and accessing C data structures, in pure PHP, without having
+to have deep knowledge in the Zend extension API, and without having to
+learn a 3rd "intermediate" language.
+
+The public API is implemented as a single class **FFI** with a few
+static methods (some of them may be called non-statically), and
+overloaded object methods, that perform actual interaction with C data.
+Before diving into the details of FFI API, lets take a look into few
+examples, demonstrating simplicity of FFI API usage for regular tasks.
+
+Calling a function from shared library
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: php
+
+   <?php
+   // create FFI object, loading libc and exporting function printf()
+   $ffi = FFI::cdef(
+       "int printf(const char *format, ...);", // this is regular C declaration
+       "libc.so.6");
+   // call C printf()
+   $ffi->printf("Hello %s!\n", "world");
+
+Calling a function, returning structure through argument
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: php
+
+   <?php
+   // create gettimeofday() binding
+   $ffi = FFI::cdef("
+       typedef unsigned int time_t;
+       typedef unsigned int suseconds_t;
+
+       struct timeval {
+           time_t      tv_sec;
+           suseconds_t tv_usec;
+       };
+
+       struct timezone {
+           int tz_minuteswest;
+           int tz_dsttime;
+       };
+
+       int gettimeofday(struct timeval *tv, struct timezone *tz);    
+   ", "libc.so.6");
+   // create C data structures
+   $tv = $ffi->new("struct timeval");
+   $tz = $ffi->new("struct timezone");
+   // calls C gettimeofday()
+   var_dump($ffi->gettimeofday(FFI::addr($tv), FFI::addr($tz)));
+   // access field of C data structure
+   var_dump($tv->tv_sec);
+   // print the whole C data structure
+   var_dump($tz);
+
+Accessing C variables
+~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: php
+
+   <?php
+   // create FFI object, loading libc and exporting errno variable
+   $ffi = FFI::cdef("int errno;", // this is regular C declaration
+       "libc.so.6");
+   // print C errno
+   var_dump($ffi->errno);
+
+Working with C arrays
+~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: php
+
+   <?php
+   // create C data structure
+   $a = FFI::new("unsigned char[1024*1024]");
+   // work with it like with regular PHP array
+   for ($i = 0; $i < count($a); $i++) {
+     $a[$i] = $i;
+   }
+   var_dump($a[25]);
+   $sum = 0;
+   foreach ($a as $n) {
+     $sum += $n;
+   }
+   var_dump($sum);
+   var_dump(FFI::sizeof($a));
+
+PHP FFI API
+-----------
+
+FFI::cdef([string $cdef = "" [, string $lib = null]]): FFI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Creates a new FFI object. The first optional argument is a string,
+containing a sequence of declarations in regular C languages (types,
+structures, functions, variables, etc). Actually, this string may be
+copy-pasted from C header files. The second optional argument is a
+shared library file name, to be loaded and linked with definitions. All
+the declared entities are going to be available to PHP through
+overloaded functions or other FFI API functions:
+
+-  C variables may be accessed as FFI object properties
+-  C functions may be called as FFI object methods
+-  C type names may be used to create new C data structures using
+   **FFI::new**, **FFI::type**, etc
+
+Note: At this time we don't support C preprocessor directives. #include,
+#define and CPP macros won't work.
+
+FFI::new(mixed $type [, bool $own = true [, bool $persistent = false]]): FFI\CData
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Creates native data structure of given C type. $type may be any valid C
+string declaration or an instance of **FFI\CType** created before. Using
+the second argument, it's possible to create **owned** data (default),
+or unmanaged. In the first case, data structure is going to live
+together with returned FFI\CData object, and die when last reference is
+released by regular PHP reference counting or GC. However, in some
+cases, programmer may decide to keep C data even after, releasing of
+**FFI\CData** object and manually free it through **FFI::free()**
+similar to regular C. By default, the memory for the data is allocated
+on PHP request heap (using emalloc()), but it's also possible to use
+system heap, specifying true in the third argument.
+
+This function may be called statically or as a method of previously
+created **FFI** object. In the first case, it may use only predefine C
+type names (e.g int, char, etc), and in the second, any type declared in
+the string passed to **FFI::cdef()** or file passed to **FFI::load()**.
+
+The returned **FFI\CData** object may be used in a number of ways as a
+regular PHP data
+
+-  C data of scalar types may be read and assigned as regular PHP data.
+   **``$x = FFI::new("int"); $x = 42;``**
+-  C struct/union field may be accessed as regular PHP object property.
+   **``$cdata->field``**
+-  C array elements may be accessed as regular PHP array elements.
+   **``$cdata[$offset]``**
+-  C array may be iterated using **foreach** statement.
+-  C array may be used as an argument of **count()** function.
+-  C pointers may be dereferenced as arrays. **``$cdata[0]``**
+-  C pointers may be compared using regualar comparison operators (<,
+   <=, ==, !==, >=, >).
+-  C pointers may be increment/decrement using regular +/-/++/--
+   operation. **``$cdata += 5``**
+-  C pointers may be subtracted one from another using regular **-**
+   operation.
+-  C pointer to function may be called as a regular PHP closure.
+   **``$cdata()``**
+-  Any C data may be duplicated by **clone** operator.
+   **``$cdata2 = clone $cdata;``**
+-  Any C data may be visualized using **var_dump()**, **print_r()**,
+   etc.
+-  It's possible to pass PHP functions as C callbacks
+
+-  **isset()**, **empty()** and **unset()** functions don't work with
+   CData
+-  **foreach** statement doesn't work with C struct/union
+
+FFI::free(FFI\CData $cdata): void
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Manually releases a previously created "not-owned" data structure.
+
+FFI::cast(mixed $type, FFI\CData $cdata): FFI\CData
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Performs C type cast. It creates a new **FFI\CData** object, that
+references the same C data structure, but associated with different
+type. The resulting object doesn't own the C data, and the source $cdata
+must relive the result. C type may be specified as a string with any
+valid C type declaration or **FFI\CType** object, created before.
+
+This function may be called statically or as a method of previously
+created **FFI** object. In the first case, it may use only predefine C
+type names (e.g int, char, etc), and in the second, any type declared in
+the string passed to **FFI::cdef()** or file passed to **FFI::load()**..
+
+FFI::addr(FFI\CData $cdata): FFI\CData
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Creates a not owned pointer to the C data represented by given
+**FFI\CData**. The source $data must relive the resulting pointer. This
+function is mainly useful to pass arguments of C functions by pointer.
+
+FFI::type(string $type): FFI\CType
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This function creates and returns a FFI\CType object for the given
+string containing C type declaration.
+
+This function may be called statically or as a method of previously
+created **FFI** object. In the first case, it may use only predefine C
+type names (e.g int, char, etc), and in the second, any type declared in
+the string passed to **FFI::cdef()** or file passed to **FFI::load()**..
+
+FFI::arrayType(FFI\CType $type, array $dims): FFI\CType
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Dynamically constructs a new C array type with elements of type defined
+by the first argument and dimensions specified by the second. In the
+following example $t1 and $t2 are equivalent array types.
+
+.. code:: php
+
+   $t1 = FFI::type("int[2][3]");
+   $t2 = FFI::arrayType(FFI::type("int"), [2, 3]);
+
+FFI::typeof(FFI\CData $data): FFI\CType
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This function returns a **FFI\CType** object, representing the type of
+the given **FFI\CData** object.
+
+FFI::sizeof(mixed $cdata_or_ctype): int
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Returns size of the given **FFI\CData** or **FFI\CType**
+
+FFI::alignof(mixed $cdata_or_ctype): int
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Returns alignment of the given **FFI\CData** or **FFI\CType**
+
+FFI::memcpy(FFI\CData $dst, mixed $src, int $size): void
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Copies $size bytes from memory area $src to memory area $dst. $src may
+be any native data structure (**FFI\CData**) or PHP **string**.
+
+FFI::memcmp(mixed $src1, mixed $src2, int $size): int
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Compares $size bytes from memory area $src1 and $dst2. Both $src1 and
+$src2 may be any native data structures (**FFI\CData**) or PHP
+**string**\ s.
+
+FFI::memset(FFI\CData $dst, int $c, int $size): void
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Fills the $size bytes of the memory area pointed to by $dst with the
+given byte $c
+
+FFI::string(FFI\CData $src [, int $size]): string
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Creates a PHP string from $size bytes of the memory area pointed by
+$src. If size is omitted, $src must be a zero terminated array of C
+chars.
+
+FFI::load(string $file_name): FFI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In addition to ability of embedding C declaration code into
+**FFI::cdef()**, it's also possible to load C declarations from separate
+C header file.
+
+Note: C preprocessor directives are currently not supported. #include,
+#define and CPP macros don't work.
+
+It's possible to specify shared libraries, that should be loaded, using
+special **FFI_LIB** define in the loaded C header file.
+
+FFI definition parsing and shared library loading may take significant
+time. It's not useful to do it on each HTTP request in a Web
+environment. However, it's possible to preload FFI definitions and
+libraries at PHP startup, and instantiate FFI objects when necessary.
+Header files may be extended with special **FFI_SCOPE** #define (e.g.
+#define FFI_SCOPE "foo", the default scope is "C") and then loaded by
+**FFI::load()** during preloading. This leads to creation of persistent
+binding, that will be available to all the following requests through
+**FFI::scope()**. Please see the sample below for an example.
+
+It's possible to preload more than one C header file into the same
+scope.
+
+FFI::scope(string $scope_name): FFI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This function may be used to instantiate **FFI** object, containing C
+declarations parsed during preloading.
+
+PHP Callbacks
+-------------
+
+It's possible to assign PHP closure to native variable of function
+pointer type (or pass it as a function argument).
+
+.. code:: php
+
+   $zend = FFI::cdef("
+       typedef int (*zend_write_func_t)(const char *str, size_t str_length);
+       extern zend_write_func_t zend_write;
+   ");
+
+   echo "Hello World 1!\n";
+
+   $orig_zend_write = clone $zend->zend_write;
+   $zend->zend_write = function($str, $len) {
+       global $orig_zend_write;
+       $orig_zend_write("{\n\t", 3);
+       $ret = $orig_zend_write($str, $len);
+       $orig_zend_write("}\n", 2);
+       return $ret;
+   };
+   echo "Hello World 2!\n";
+   $zend->zend_write = $orig_zend_write;
+   echo "Hello World 3!\n";
+
+::
+
+   Hello World 1!
+   {
+       Hello World 2!
+   }
+   Hello World 3!
+
+This works, but this functionality is not supported on all libffi
+platforms, it is not efficient and leaks resources by the end of
+request. It's recommended to minimize the usage of PHP callbacks.
+
+PHP FFI API Restriction
+-----------------------
+
+FFI API opens all the C power, and consequently, also an enormous
+possibility to have something go wrong, crash PHP, or even worse. To
+minimize risk PHP FFI API usage may be restricted. By default FFI API
+may be used only in CLI scripts and preloaded PHP files. This may be
+changed through **ffi.enable** INI directive. This is INI_SYSTEM
+directive and it's value can't be changed at run-time.
+
+-  **ffi.enable=false** completely disables PHP FFI API
+-  **ffi.enable=true** enables PHP FFI API without any restrictions
+-  **ffi.enable=preload** (the default value) enables FFI but restrict
+   its usage to CLI and preloaded scripts
+
+PHP FFI API restriction makes effect only to **FFI** class, but not to
+overloaded functions of **FFI\CData** object. This means, it's possible
+to create some **FFI\CData** objects in preloaded files, and then use
+them directly in "user" code.
+
+A Complete PHP/FFI/preloading example
+-------------------------------------
+
+php.ini
+
+.. code:: ini
+
+   ffi.enable=preload
+   opcache.preload=preload.php
+
+preload.php
+
+.. code:: php
+
+   <?php
+   FFI::load(__DIR__ . "/dummy.h");
+   opcache_compile_file(__DIR__ . "/dummy.php");
+
+dummy.h
+
+.. code:: c
+
+   #define FFI_SCOPE "DUMMY"
+   #define FFI_LIB "libc.so.6"
+
+   int printf(const char *format, ...);
+
+dummy.php
+
+.. code:: php
+
+   <?php
+   final class Dummy {
+       private static $ffi = null;
+       function __construct() {
+           if (is_null(self::$ffi)) {
+               self::$ffi = FFI::scope("DUMMY");
+           }
+       }
+       function printf($format, ...$args) {
+          return (int)self::$ffi->printf($format, ...$args);
+       }
+   }
+
+test.php
+
+.. code:: php
+
+   <?php
+   $d = new Dummy();
+   $d->printf("Hello %s!\n", "world");
+
+PHP FFI Performance
+-------------------
+
+Accessing FFI data structures is significantly (about 2 times) slower,
+than accessing native PHP arrays and objects. It makes no sense to use
+them for speed, but may make sense to reduce memory consumption. This is
+true for all similar FFI implementations in interpretative mode.
+However, LuaJIT achieves improvement providing special support for FFI
+in its JIT.
+
+The following table shows time of execution of **ary3** benchmark from
+bench.php (in seconds, lower is better).
+
+.. code:: php
+
+   <?php
+   function ary3($n, bool $use_ffi = false) {
+     if ($use_ffi) {
+       $X = FFI::new("int[$n]");
+       $Y = FFI::new("int[$n]");
+     }
+     for ($i=0; $i<$n; $i++) {
+       $X[$i] = $i + 1;
+       $Y[$i] = 0;
+     }
+     for ($k=0; $k<1000; $k++) {
+       for ($i=$n-1; $i>=0; $i--) {
+         $Y[$i] += $X[$i];
+       }
+     }
+     $last = $n-1;
+     print "$Y[0] $Y[$last]\n";
+   }
+
+============ ====== =====
+\            Native FFI
+============ ====== =====
+Python       0.212  0.343
+PyPy         0.010  0.081
+LuaJit -joff 0.037  0.412
+LuaJit -jon  0.003  0.002
+PHP          0.040  0.093
+PHP + jit    0.016  0.087
+============ ====== =====
+
+Backward Incompatible Changes
+-----------------------------
+
+None, except of introduced **FFI** class and namespace.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 7.4
+
+RFC Impact
+----------
+
+To Opcache
+~~~~~~~~~~
+
+FFI is designed in conjunction with preloading (curently implemented as
+part of opcache). FFI C headers may be loaded during preloading by
+**FFI::load()** and become available to all the following HTTP requests
+without reloading overhead.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+::
+
+   ffi.enable=false|preload|true 
+
+allows enabling or disabling FFI API usage, or restricting it only to
+preloaded files. The default value is **preload**. This is INI_SYSTEM
+directive and it's value can't be changed at run-time.
+
+Open Issues
+-----------
+
+Make sure there are no open issues when the vote starts!
+
+Related Work
+------------
+
+There were few other attempts to implement FFI for PHP.
+
+-  Wez Furlong developed very similar `PECL
+   extension <https://github.com/php/pecl-php-ffi>`__ almost 15 year
+   ago.
+-  Michael Wallner created `PHP System
+   Interface <https://github.com/m6w6/ext-psi>`__
+-  Sara Golemon thought, PHP needs something similar to `HHVM
+   HNI <https://github.com/facebook/hhvm/wiki/extension-api>`__
+
+The usability of this FFI extension was proved by `TensorFlow
+binding <https://github.com/dstogov/php-tensorflow>`__, implemented in
+pure PHP.
+
+Future Scope
+------------
+
+Currently, the performance of C data structures access is worse than
+access of native PHP data structures (arrays and objects). This is a
+common problem, and both LuaJIT (in interpretator mode) and Python
+suffer from it as well. However, LuaJIT may also compile data access
+code in very efficient way (almost as C compiler), and produce highly
+efficient machine code. It's planned to try similar things, when we
+implement JIT for PHP.
+
+Proposed Voting Choices
+-----------------------
+
+Include FFI extension into PHP-7.4 (bundle) This project requires 50%+1
+majority The voting started 2018-12-20 and will close on 2019-01-09
+
+Question: Include FFI extension into PHP-7.4 (bundle)?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+https://github.com/dstogov/php-ffi implementation on top of libffi
+(tested on Linux and Windows)
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. it was merged into master (7.4)
+#. a link to the git
+   `commit <https://github.com/php/php-src/commit/e089d506d5c7716c62cee5232d32ab22d0ddde26>`__
+#. `PHP manual entry <https://www.php.net/manual/en/book.ffi.php>`__ for
+   the feature
+
+References
+----------
+
+#. `LuaJIT FFI <http://luajit.org/ext_ffi.html>`__
+#. `Python CFFI <https://cffi.readthedocs.io/en/latest/index.html>`__
+#. `PHP System Interface (aka FFI) <https://github.com/m6w6/ext-psi>`__
+#. `PECL FFI extension <https://github.com/php/pecl-php-ffi>`__
+#. `HHVM HNI <https://github.com/facebook/hhvm/wiki/extension-api>`__
+#. `TensoFlow PHP/FFI
+   binding <https://github.com/dstogov/php-tensorflow>`__
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Dmitry Stogov, dmitry@zend.com
+:Original Status: Implemented (in PHP 7.4)
+:Slug: ffi
+:Wiki URL: https://wiki.php.net/rfc/ffi

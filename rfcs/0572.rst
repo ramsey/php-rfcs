@@ -1,0 +1,322 @@
+Operator Functions
+==================
+
+:PHP-RFC: 0572
+:Title: Operator Functions
+:Author: Andrea Faulds <ajf@ajf.me>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2017-09-08
+:Version: 1.0.2
+
+Background
+----------
+
+Over time, PHP has gradually acquired more facilities that enable
+functional programming. A frequent pattern in functional programming is
+the use of higher-order functions (functions that take or return
+functions, e.g. ``array_map()``). With higher-order functions, small
+operations can be composed together to make more complex ones (or even
+an entire program). PHP's `standard
+library <http://php.net/manual/en/funcref.php>`__ comprises a large set
+of operations which can potentially be used with higher-order functions.
+However, PHP's most fundamental set of operations, `the
+operators <http://php.net/manual/en/language.operators.php>`__, are not
+functions and therefore cannot be directly used with higher-order
+functions. This means that either wrapper functions for operators must
+be written by PHP users, or otherwise-generic code which operates on
+functions must have specific code paths for the operators.
+
+Proposal
+--------
+
+Basics
+~~~~~~
+
+This RFC proposes that, for each of PHP's built-in operators that
+operate solely on expressions (no assignment operators), a corresponding
+function with the same symbol would be added to the PHP standard library
+in the root namespace (``\``). So, for the ``+`` operator there would be
+a corresponding ``'+'`` function, for the ``===`` operator a
+corresponding ``'==='`` function, and so on.
+
+These functions could then be passed as arguments to higher-order
+functions:
+
+.. code:: php
+
+   // Convert numbers from strings to ints or floats as appropriate
+   $numbers = array_map('+', $_GET["numbers"]);
+
+.. code:: php
+
+   // Adds the numbers in $terms together (equivalent to array_sum())
+   $sum = array_reduce($terms, '+', 0);
+
+.. code:: php
+
+   // Multiplies the numbers in $terms together (equivalent to array_product())
+   $product = array_reduce($terms, '*', 1);
+
+.. code:: php
+
+   // Union of the arrays (*NOT* the same as array_merge())
+   $merged = array_reduce($arrays, '+', []);
+
+.. code:: php
+
+   class Data
+   {
+       public $values;
+       public function __construct(array $values) {
+           $this->values = $values;
+       }
+       public function sort(callable $function) {
+           usort($this->values, $function);
+       }
+   }
+
+   $data = new Data([1, 22, 3]);
+
+   // Sorts using standard comparison rules
+   // (equivalent to sort(), but now doesn't need its own code-path)
+   $data->sort('<=>');
+
+   // Sorts using string comparison rules
+   $data->sort('strcmp');
+
+This is particularly useful when combined with partial application and
+function composition (primitives PHP currently does not yet have
+built-in, but can be written manually):
+
+.. code:: php
+
+   // Double all the numbers in the array
+   $doubled = array_map(partialApply('*', 2), $terms);
+
+.. code:: php
+
+   // Select only the positive numbers
+   $positiveSubset = array_filter($numbers, partialApply('<', 0));
+
+An example working partial application implementation would be:
+
+.. code:: php
+
+   function partialApply(callable $c, ...$args) {
+       return function (...$args2) use ($c, $args) {
+           return $c(...$args, ...$args2);
+       };
+   }
+
+Detail
+~~~~~~
+
+Because operators have symbols that aren't valid identifiers in PHP
+source code (e.g. ``+``), these functions cannot be called directly in
+the same manner as a normal function (i.e. ``+(1, 2)``). However, a
+function with any name can be called by specifying its name as a string
+(e.g. ``'+'(1, 1)`` or ``"+"(1, 1)``). Therefore, you could technically
+use these functions in place of operators:
+
+.. code:: php
+
+   // An excessively verbose version of sqrt(($x1 - $x2) ** 2 + ($y1 - $y2) ** 2)
+   $distance = sqrt('+'('**'('-'($x1, $x2), 2), '**'('-'($y1, $y2), 2)));
+
+Of course, there is no practical reason to do this. The usefulness of
+this proposal is in composing operators with higher-order functions.
+
+The table below lists the new functions that would be added to the root
+namespace (``\``). Each is named the same as its corresponding operator,
+including any aliases (for the sake of consistency).
+
+================== ======================= ==========================
+Function signature Corresponding operation Notes
+================== ======================= ==========================
+``'+'($a[, $b])``  ``+$a``, ``$a + $b``    
+``'-'($a[, $b])``  ``-$a``, ``$a - $b``    
+``'*'($a, $b)``    ``$a * $b``             
+``'/'($a, $b)``    ``$a / $b``             
+``'%'($a, $b)``    ``$a % $b``             
+``'**'($a, $b)``   ``$a ** $b``            
+``'&'($a, $b)``    ``$a & $b``             
+``'|'($a, $b)``    ``$a | $b``             
+``'^'($a, $b)``    ``$a ^ $b``             
+``'~'($a)``        ``~$a``                 
+``'<<'($a, $b)``   ``$a << $b``            
+``'>>'($a, $b)``   ``$a >> $b``            
+``'=='($a, $b)``   ``$a == $b``            
+``'==='($a, $b)``  ``$a === $b``           
+``'!='($a, $b)``   ``$a != $b``            
+``'<>'($a, $b)``   ``$a <> $b``            
+``'!=='($a, $b)``  ``$a !== $b``           
+``'<'($a, $b)``    ``$a < $b``             
+``'>'($a, $b)``    ``$a > $b``             
+``'<='($a, $b)``   ``$a <= $b``            
+``'>='($a, $b)``   ``$a >= $b``            
+``'<=>'($a, $b)``  ``$a <=> $b``           
+``'&&'($a, $b)``   ``$a && $b``            Can't fully short-circuit.
+``'and'($a, $b)``  ``$a and $b``           Can't fully short-circuit.
+``'||'($a, $b)``   ``$a || $b``            Can't fully short-circuit.
+``'or'($a, $b)``   ``$a or $b``            Can't fully short-circuit.
+``'xor'($a, $b)``  ``$a xor $b``           
+``'!'($a)``        ``!$a``                 
+``'.'($a, $b)``    ``$a . $b``             
+================== ======================= ==========================
+
+Since ``pow()`` already exists and behaves identically to how ``'**'()``
+would, ``'**'()`` is simply an alias of it.
+
+These functions do not perform any extra type checking on their
+arguments beyond that normally performed by the operators they
+correspond to.
+
+Missing operators
+~~~~~~~~~~~~~~~~~
+
+The table above (like the patch) currently contains all the operators in
+the `Operators section of the PHP
+Manual <http://php.net/manual/en/language.operators.php>`__, minus
+``instanceof``, :literal:`\`backticks\`` and the assignment operators.
+Whether these should have functions too is a matter to debate;
+``instanceof`` doesn't take arbitrary expressions and already has a
+functional counterpart (``is_a``). As for the assignment operators,
+references mean they could be done, but from a functional programming
+perspective they have limited utility.
+
+PHP also has some other constructs that could be classed as operators
+but aren't considered such by the manual. A (possibly non-exhaustive)
+list is:
+
+-  ``??`` (Can't ``isset()``. Can't short-circuit.)
+-  ``?:`` (Could be ``'?:'($a, $b[, $c])`` and map to ``$a ?: $b`` or
+   ``$a ? $b : $c`` depending on parameter count. Can't short-circuit.)
+-  ``@`` (Could not be made a function without changing it to act on a
+   callable.)
+-  ``(int)``, ``(string)`` etc. (Note ``intval()`` etc already exist.)
+-  ``clone``
+-  ``print`` (This always returns 1, so we might as well make ``echo`` a
+   function too even though it's a statement.)
+-  ``->`` (How do you distinguish between property lookup and method
+   calls? Are identifiers replaced with strings?)
+-  ``[]`` (Array indexing.)
+-  ``()`` (Function invocation. ``call_user_func`` exists already.)
+-  ``eval`` (Probably not a good rabbit hole to go down, this requires
+   frowned-upon stack gymnastics due to affecting the current scope.)
+-  ``include``, ``require``, ``include_once``, ``require_once``
+-  ``yield`` (Like ``eval``, would require dubious stack gymnastics. It
+   is a control-flow expression, not merely manipulating values.)
+
+Of these, ``->``, ``()``, ``@`` and ``eval`` are the most dubious.
+
+Backward Incompatible Changes
+-----------------------------
+
+All of these operator functions create no backwards-compatibility break,
+since they have names that cannot be used for userland functions, and
+thus they cannot conflict with function names in existing code
+(hypothetically this may not be true if using exotic extensions like
+runkit).
+
+Proposed PHP Version(s)
+-----------------------
+
+This would go in the next PHP 7.x, most likely 7.3.
+
+RFC Impact
+----------
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Because ``'**'()`` aliases it, ``pow()`` is moved out of
+``ext/standard`` and into ``Zend``. This is merely an organisational
+change and has no user impact.
+
+To Opcache
+~~~~~~~~~~
+
+The patch passes its test under OPcache.
+
+Open Issues
+-----------
+
+See “Missing operators” section.
+
+Unaffected PHP Functionality
+----------------------------
+
+The existing operators themselves behave the same as ever.
+
+Being able to quote function names in function calls (e.g.
+``'+'(1, 1)``) is not a new idea introduced by this RFC, it has been
+possible since `Uniform Variable
+Syntax </rfc/uniform_variable_syntax>`__ in PHP 7.0.
+
+Future Scope
+------------
+
+Operator functions would fit well with built-in partial application and
+function composition. These could be added as functions, methods on
+``\Closure``, or both.
+
+If built-in operators can have corresponding functions, then user
+functions could have corresponding operators in future, i.e.
+user-defined operators. This is possible in Haskell, for example, where
+new operators can be defined as functions.
+
+Proposed Voting Choices
+-----------------------
+
+This is technically a standard library addition, so may only require a
+50%+1 majority. It would be a straight Yes/No vote on whether to accept
+the RFC and merge the patch for PHP 7.3.
+
+Patches and Tests
+-----------------
+
+A complete patch for php-src, including test, can be found here:
+https://github.com/php/php-src/pull/2738
+
+There may be some merit to adding this to the language specification,
+even though it otherwise doesn't cover built-in functions. There is no
+patch for this at present.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+References
+----------
+
+-  PHP manual operators section:
+   http://php.net/manual/en/language.operators.php
+-  Haskell's infix functions (any normal operator is a function and
+   vice-versa) were an inspiration.
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Changelog
+---------
+
+-  v1.0.2 - add subsection discussing omissions
+-  v1.0.1 - acknowledge why certain operators are excluded
+-  v1.0 - first public non-draft version
+
+Additional Metadata
+-------------------
+
+:Original Authors: Andrea Faulds, ajf@ajf.me
+:Original Status: Under Discussion
+:Slug: operator_functions
+:Wiki URL: https://wiki.php.net/rfc/operator_functions

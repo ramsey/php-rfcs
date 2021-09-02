@@ -1,0 +1,952 @@
+Implementing Design By Contract
+===============================
+
+:PHP-RFC: 0360
+:Title: Implementing Design By Contract
+:Author: François Laupretre <francois@php.net>
+:Status: Withdrawn
+:Type: Unknown
+:Created: 2015-02-09
+:Version: 0.4
+
+::
+
+   This RFC is waiting for the decisions that will be made about scalar
+   type hinting. The reason is that the design and syntax
+   decisions that will be made about scalar type hinting heavily impact the
+   contents of this RFC. Proposal is subject to be changed according scalar type 
+   hinting implementation.
+
+Preamble
+--------
+
+This RFC is part of "Design by Contract Introduction" RFC
+
+-  https://wiki.php.net/rfc/introduce_design_by_contract
+
+There is alternative implementation proposal by "Definition"
+
+-  https://wiki.php.net/rfc/dbc2
+
+The original idea of introducing DbC in PHP comes from Yasuo Ohgaki
+yohgaki@ohgaki.net.
+
+Then, I offered to write an RFC where I propose to include DbC
+constraints in doc comments. This is the present document.
+
+While we agree on the concept, Yasuo is preferring a D-like syntax,
+which he's proposing in `another RFC <https://wiki.php.net/rfc/dbc2>`__.
+IMO, adopting the D syntax would be fine if we designed the language
+from scratch, but is not the best way to include the concept in PHP
+(more details below).
+
+Introduction
+------------
+
+For more than 10 years (since PHP 5 was released), the PHP core
+community has seen a lot of discussions about strict vs loose typing,
+type hinting and related features. Through these discussions, developers
+are actually searching for a way to help reduce coding errors by
+detecting them as early as possible. Strictifying types is an approach
+but, unfortunately, it does not fit so well with PHP as a loose-typed
+language.
+
+This RFC proposes an alternative approach, already present in several
+languages, named 'Design by Contract' (reduced to 'DbC' in the rest of
+the document).
+
+Here is the definition of a contract, according to the D language
+documentation :
+
+::
+
+   The idea of a contract is simple - it's just an expression that must evaluate
+   to true. If it does not, the contract is broken, and by definition, the program
+   has a bug in it. Contracts form part of the specification for a program, moving
+   it from the documentation to the code itself. And as every programmer knows,
+   documentation tends to be incomplete, out of date, wrong, or non-existent.
+   Moving the contracts into the code makes them verifiable against the program.
+
+For more info on the DbC theory, use the links in the 'reference'
+section below.
+
+An important point in DbC theory is that contracts are checked during
+the development/debugging phase only. A global switch allows to turn DbC
+checks off when the software goes to production.
+
+So, what we need to retain :
+
+-  DbC constraints can be highly sophisticated as we don't care about
+   performance.
+-  As they are checked at runtime, DbC constraints can check types AND
+   values.
+-  DbC checks must not handle checks that must always run, even in
+   production. Validating user input, for instance, must remain out of
+   DbC constraints.
+-  DbC and 'Test Driven Development' concepts are closely related, as
+   DbC heavily relies on the quality of test coverage.
+
+Examples
+--------
+
+First, an example of a function defining input and output constraints
+('$>' means 'return value'). This example is adapted from the `D
+language <http://ddili.org/ders/d.en/invariant.html>`__.
+
+.. code:: php
+
+   //===========================================================================
+   /**
+   * Compute area of a triangle
+   *
+   * This function computes the area of a triangle using Heron's formula.
+   *
+   * @param number $a Length of 1st side
+   * @requires ($a >= 0)
+   * @param number $b Length of 2nd side
+   * @requires ($b >= 0)
+   * @param number $c Length of 3rd side
+   * @requires ($c >= 0)
+   * @requires ($a <= ($b+$c))
+   * @requires ($b <= ($a+$c))
+   * @requires ($c <= ($a+$b))
+   *
+   * @return number The triangle area
+   * @ensures ($> >= 0)
+   */
+
+   function triangleArea($a, $b, $c)
+   {
+   $halfPerimeter = ($a + $b + $c) / 2;
+
+   return sqrt($halfPerimeter
+       * ($halfPerimeter - $a)
+       * ($halfPerimeter - $b)
+       * ($halfPerimeter - $c));
+   }
+
+Then :
+
+.. code:: php
+
+   $area=triangleArea(4,2,3);
+       -> OK
+
+   $area=triangleArea('foo',2,3);
+       -> PHP Fatal error: triangleArea: DbC input type mismatch - $a should match 'number' (string(3) "foo") in xxx on line nn
+
+   $area=triangleArea(10,2,3);
+       -> PHP Fatal error: triangleArea: DbC pre-condition violation ($a <= ($b+$c)) in xxx on line nn
+
+Another example with a PHP clone of str_replace() :
+
+.. code:: php
+
+   //===========================================================================
+   /**
+   * Replace all occurrences of the search string with the replacement string
+   *
+   * This function returns a string or an array with all occurrences of search
+   * in subject replaced with the given replace value.
+   *
+   * @param string|array(string) $search The value being searched for (aka needle)
+   * @param string|array(string) $replace The replacement value that replaces found search values
+   * @param string|array(string) $subject The string or array being searched and replaced on
+   * @param.out int $count The number of replacements performed
+   * @ensures ($count >= 0)
+   * @return string|array(string) A string or an array with the replaced values
+   *
+   * Ensure that returned value is the same type as input subject :
+   * @ensures (is_array($>)===is_array($subject))
+   */
+
+   function str_replace($search, $replace, $subject, &$count=null)
+   {
+   ...
+
+Note that we didn't provide any constraint on $count input, as this
+parameter is used for output only.
+
+Finally, we rewrite the first example as a class :
+
+.. code:: php
+
+   <?php
+   /**
+   * @invariant ($this->a >= 0) && ($this->a <= ($this->b+$this->c))
+   * @invariant ($this->b >= 0) && ($this->b <= ($this->a+$this->c))
+   * @invariant ($this->c >= 0) && ($this->c <= ($this->b+$this->a))
+   */
+
+   class triangle
+   {
+   /*-- Properties */
+
+   /** @var number Side lengths */
+
+   private $a,$b,$c;
+
+   //---------
+   /**
+   * @param number $a Length of 1st side
+   * @param number $b Length of 2nd side
+   * @param number $c Length of 3rd side
+   *
+   * No need to repeat constraints on values as they are checked by class invariants.
+   */
+
+   public function __construct($a,$b,$c)
+   {
+   $this->a=$a;
+   $this->b=$b;
+   $this->c=$c;
+   }
+
+   //---------
+   /**
+   * Compute area of a triangle
+   *
+   * This function computes the area of a triangle using Heron's formula.
+   *
+   * @return number The triangle area
+   * @ensures ($> >= 0)
+   */
+
+   public function area()
+   {
+   $halfPerimeter = ($this->a + $this->b + $this->c) / 2;
+
+   return sqrt($halfPerimeter
+       * ($halfPerimeter - $this->a)
+       * ($halfPerimeter - $this->b)
+       * ($halfPerimeter - $this->c));
+   }
+
+and check DbC constraints :
+
+.. code:: php
+
+   $t= new triangle(4,2,3);
+       -> OK
+
+   $t=new triangle('foo',2,3);
+       -> PHP Fatal error: triangle::__construct: DbC input type mismatch - $a should match 'number' (string(3) "foo") in xxx on line nn
+
+   $area=triangleArea(10,2,3);
+       -> PHP Fatal error: triangle: DbC invariant violation (($this->a >= 0) && ($this->a <= ($this->b+$this->c)) in xxx on line nn
+
+Proposal
+--------
+
+DbC defines three constraint types :
+
+-  pre-conditions: checked when entering a function/method. Generally
+   check that passed arguments are valid.
+-  post-conditions: checked when a function/method exits. Used to check
+   the return type/value and the returned type/value of arguments passed
+   by reference.
+-  class invariants: Constraints on class properties.
+
+In this document, we propose a mechanism to implement these constraints
+in the PHP world.
+
+Syntax
+~~~~~~
+
+We propose to include the DbC directives in phpdoc blocks. Here are the
+main reasons, that make it, in my opinion, a better choice than every
+other syntaxes proposed so far :
+
+-  it allows to keep the source code executable on previous PHP
+   interpreters.
+-  Phpdoc comments, while not perfect, have always played the role of
+   annotations in PHP. 'Real' annotations would be probably better but
+   the don't exist yet. And they won't be approved in the near future.
+   That's why everyone needing annotations so far has extended the
+   phpdoc syntax.
+-  DbC can use a great part of the already-written phpdoc informations
+   (@param and @return types, @throws information too). So, unchanged
+   code could already benefit of DbC.
+
+Note: Some people on the mailing list are religiously opposed to
+including information in phpdoc blocks, despite the fact that thousands
+of people already use them for this purpose. The reason is that the
+parser cannot handle that. I agree, but that's not a task for the
+parser, that's a task for an external tool. We just need the hooks.
+
+Side effects
+~~~~~~~~~~~~
+
+As DbC, by nature, can be turned on and off, DbC checks must not modify
+anything in the environment.
+
+While enforcing this is partially possible in theory, this
+implementation will leave it to the developer's responsibility, as most
+languages do.
+
+DbC types
+~~~~~~~~~
+
+DbC types are an extension and formalization of the pre-existing phpdoc
+argument/return types.
+
+DbC types are not present in original DbC syntax (like Eiffel or D
+implementation), which are based on conditions only. This is a
+PHP-specific addition to enhance simplicity and readability. DbC types
+can be seen as built-in conditions.
+
+Here are the main benefits of defining a set of DbC types :
+
+-  PHP is_xxx() functions are not as intuitive as they may seem, as they
+   are based on zval types (an equivalent of strict type checks). They
+   are not appropriate for people who just want to accept a limited set
+   of type juggling (accepting a numeric string from a DB, for
+   instance). Unfortunately, checking that a given value is an integer
+   or a string containing an integer is a common need, but is quite
+   complex to write in PHP.
+-  As it was already said, tons of source code already contains argument
+   return/types in phpdoc. DbC types are designed to match as much as
+   possible of this pre-existing information.
+-  Readability is a key point too: just compare a type like
+   'string|array(string|integer)' with the PHP code to check the same !
+-  DbC types allow static analysis, which is practically impossible with
+   conditions.
+-  A lot of other analyzis/debugging/profiling tools can use this
+   information.
+
+DbC types are used to check :
+
+-  arguments sent to a function
+-  arguments passed by ref returned by a function
+-  the function's return value
+-  the type of class properties
+
+.. _syntax-1:
+
+Syntax
+^^^^^^
+
+DbC types don't contain whitespaces.
+
+Here is a pseudo-grammar of DbC types :
+
+::
+
+   dbc-type = compound-type
+
+   compound-type = type, { "|", type }
+
+   type = "integer"
+       | "integer!"
+       | "number"
+       | "float!"
+       | "string"
+       | "string!"
+       | array-type
+       | "callable"
+       | object-type
+       | resource-type
+       | "null"
+       | "scalar"
+       | "mixed"
+       | "boolean"
+       | "boolean!"
+
+   array-type = "array"
+       | "array(", compound-type, ")"
+
+   object-type = "object"
+       | "object(", class-name, ")"
+
+   resource-type = "resource"
+       | "resource(", resource-name ")"
+
+DbC types vs zval types
+^^^^^^^^^^^^^^^^^^^^^^^
+
+DbC types follow specific rules to match PHP zvals. These rules are less
+permissive than PHP API type juggling and previously-proposed scalar
+'weak' typing, but more than previously-proposed strict typing.
+Actually, these types try to be a more intuitive compromise between
+both.
+
+Strict typing is sometimes required. That's why DbC types also include a
+set of strict types.
+
+Note that the benefit of DbC, here, is that we can match depending on
+zval values, as we don't care about performance.
+
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+|       | Zval  |       |       |       |       |       |       |       |
+|       | type  |       |       |       |       |       |       |       |
++=======+=======+=======+=======+=======+=======+=======+=======+=======+
+| DbC   | IS    | IS    | IS_D  | IS_BO | IS_   | IS_O  | IS_S  | I     |
+| type  | _NULL | _LONG | OUBLE | OL(1) | ARRAY | BJECT | TRING | S_RES |
+|       |       |       |       |       |       |       |       | OURCE |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| in    | No    | Yes   | (2)   | No    | No    | No    | (3)   | No    |
+| teger |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| int   | No    | Yes   | No    | No    | No    | No    | No    | No    |
+| eger! |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| n     | No    | Yes   | Yes   | No    | No    | No    | (4)   | No    |
+| umber |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| f     | No    | No    | Yes   | No    | No    | No    | No    | No    |
+| loat! |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| s     | No    | Yes   | Yes   | No    | No    | (6)   | Yes   | No    |
+| tring |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| st    | No    | No    | No    | No    | No    | (6)   | Yes   | No    |
+| ring! |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| array | No    | No    | No    | No    | Yes   | No    | No    | No    |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| cal   | No    | No    | No    | No    | (5)   | (5)   | (5)   | No    |
+| lable |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| o     | No    | No    | No    | No    | No    | Yes   | No    | No    |
+| bject |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| res   | No    | No    | No    | No    | No    | No    | No    | Yes   |
+| ource |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| s     | No    | Yes   | Yes   | Yes   | No    | No    | Yes   | No    |
+| calar |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| null  | Yes   | No    | No    | No    | No    | No    | No    | No    |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| mixed | Yes   | Yes   | Yes   | Yes   | Yes   | Yes   | Yes   | Yes   |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| bo    | No    | (7)   | (7)   | Yes   | No    | No    | No    | No    |
+| olean |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| boo   | No    | No    | No    | Yes   | No    | No    | No    | No    |
+| lean! |       |       |       |       |       |       |       |       |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+
+
+-  (1) IS_TRUE/IS_FALSE in PHP 7
+   \* (2) only if decimal part is null
+   \* (3) only if is_numeric(string) returns true and decimal part is
+   null
+   \* (4) only if is_numeric(string) returns true
+   \* (5) only if is_callable(arg,true) returns true
+   \* (6) only if class defines a \__toString() method
+   \* (7) O is false, 1 is true. Other values don't match (to be
+   discussed)
+
+.. _dbc-types-1:
+
+DbC types
+^^^^^^^^^
+
+integer
+'''''''
+
+An integer value, positive or negative.
+
+Note: This type is NOT equivalent to is_int($arg), as is_int() only
+accepts the IS_LONG zval type.
+
+Synonyms: 'int'
+
+.. _integer-1:
+
+integer!
+''''''''
+
+A zval-type-based integer value, positive or negative.
+
+Note: This type is equivalent to is_int($arg).
+
+Synonyms: 'int!'
+
+number
+''''''
+
+Any value that returns true through is_numeric().
+
+Equivalent to 'is_numeric($arg)'.
+
+Synonyms: 'numeric', 'float'
+
+float!
+''''''
+
+A zval-type-based float value.
+
+Note: This type is equivalent to is_float($arg).
+
+string
+''''''
+
+An entity that can be represented by a string. Numeric values are
+accepted as strings, as well as objects whose class defines a
+\__toString() method.
+
+.. _string-1:
+
+string!
+'''''''
+
+Accepts IS_STRING zvals and objects whose class defines a \__toString()
+method.
+
+array
+'''''
+
+A PHP array.
+
+Complements: Can be followed by a 'compound-type', enclosed in
+parentheses. This defines the acceptable types of the array values. This
+definition can be nested.
+
+Examples:
+
+::
+
+   * @param array $arr ...
+   * @param string|array(string) $... # Matches a string or an array of strings
+   * @param array(array(string|integer)) $... # A 2-dimension array containing strings and int only
+
+callable
+''''''''
+
+A string, object or array returning true through
+'is_callable($arg,true)'.
+
+Please consult the `is_callable()
+documentation <http://php.net/manual/en/function.is-callable.php>`__ for
+more details.
+
+object
+''''''
+
+An instance object.
+
+Synonyms: 'obj'
+
+Complements: Can be followed by a class name, enclosed in parentheses.
+Match will occur if the object is of this class or has this class as one
+of its parents (equivalent to is_a()).
+
+Examples:
+
+::
+
+   * @param object $arg
+   * @param object(Exception) $e
+   * @param object(MongoClient)|null $conn
+
+resource
+''''''''
+
+A PHP resource.
+
+Synonyms: 'rsrc'
+
+Complements: Can be optionally followed by a resource type. A resource
+type is a string provided when defining a resource via
+zend_register_list_destructors_ex(). As we don't support whitespaces in
+argument types, whitespaces present in the original resource type must
+be replaced with an underscore character ('_').
+
+The easiest way to display the string corresponding to a resource type
+is to display an existing resource using var_dump().
+
+Examples:
+
+::
+
+   * @param resource(OpenSSL_key) $...
+   * @param resource(pgsl_link) $...
+
+scalar
+''''''
+
+Shortcut for 'numeric|boolean|string'.
+
+Equivalent to 'is_scalar()'.
+
+null
+''''
+
+This corresponds exactly to the IS_NULL zval type.
+
+Equivalent to 'is_null($arg)'.
+
+Note that a number with a 0 value does not match 'null'.
+
+Synonyms: 'void' (mostly used for return type)
+
+Examples:
+
+::
+
+   * @param string|null $...
+   * @param resource(pgsl_link) $...
+   * @return null
+
+mixed
+'''''
+
+Accepts any zval type & value (catch-all).
+
+Synonyms: 'any'
+
+boolean
+'''''''
+
+A boolean value (true or false).
+
+In PHP 7, IS_BOOL is replaced with IS_TRUE and IS_FALSE.
+
+Equivalent to 'is_bool($arg)'.
+
+Synonyms: 'bool'
+
+.. _boolean-1:
+
+boolean!
+''''''''
+
+Accepts IS_BOOL zvals only (IS_TRUE/IS_FALSE on PHP 7).
+
+Synonyms: 'bool!'
+
+Pre-conditions
+~~~~~~~~~~~~~~
+
+These conditions are checked at the beginning of a function or method,
+after arguments have been received, but before starting executing the
+function body.
+
+Pre-conditions are expressed in two forms : argument types, and explicit
+assertions. Argument types are used first and explicit assertions
+supplement argument types with additional conditions (like conditions
+between arguments).
+
+Argument types are checked before explicit assertions, meaning that
+explicit assertions can assume correct types.
+
+Optional arguments
+^^^^^^^^^^^^^^^^^^
+
+When an optional argument is not set by the caller, its input (and
+possibly output) types are not checked. This allows to set a default
+value which does not match the argument's declared input type.
+
+Example :
+
+.. code:: php
+
+   /**
+   * ...
+   * @param int $flag ...
+   * ...
+   */
+
+   function myFunc(..., $flag=null)
+   {
+   if (is_null($flag)) {
+       // Here, we are sure that the parameter was not set by the caller, as
+       // a null value sent by the caller would be refused by DbC input check.
+       ...
+
+Input assertions
+^^^^^^^^^^^^^^^^
+
+These conditions supplement argument types for more complex conditions.
+They are executed in the function scope before executing the function's
+body.
+
+Syntax :
+
+::
+
+   /**
+   * ...
+   * @requires <php-condition>
+   * ...
+
+where <php-condition> is a PHP expression whose evaluation returns true
+or false.
+
+These assertions can appear anywhere in the phpdoc block. They are
+executed in the same order as they appear in the doc block.
+
+Inheritance
+^^^^^^^^^^^
+
+The DbC theory, in accordance with the
+`LSP <http://en.wikipedia.org/wiki/Liskov_substitution_principle>`__,
+states that a subclass can override pre-conditions only if it loosens
+them.
+
+The logic we implement is in the spirit of the way PHP handles class
+constructors/destructors :
+
+-  Function pre-conditions are checked. If the function does not define
+   any pre-condition, no check is performed, even if a parent's method
+   defines some.
+-  A special pre-condition is introduced. The '@parent' pre-condition
+   causes the engine to check the parent method's pre-conditions. No
+   existing parent method or parent method not defining any
+   pre-condition is not considered as an error. In this case, we just
+   have nothing to check.
+-  The special '@parent' pre-condition can appear anywhere in the list.
+
+Post-conditions
+~~~~~~~~~~~~~~~
+
+Post-conditions are checked at function's exit. Like pre-conditions,
+they are executed in the function scope.
+
+They are generally used to check the returned type and value, and
+arguments returned by ref.
+
+When a function exits because an exception was thrown, the function's
+post-conditions are not checked, but class constraints are checked.
+
+Returned type
+^^^^^^^^^^^^^
+
+Syntax:
+
+::
+
+   * @return <compound-type> [free-text]
+
+The syntax of <compound-type> is the same as argument types.
+
+Examples:
+
+::
+
+   * @return resource|null
+
+   // For a factory:
+
+   * @return object(MyClass)
+
+Argument return type
+^^^^^^^^^^^^^^^^^^^^
+
+This is the return type & value of the arguments passed by reference.
+
+Syntax:
+
+::
+
+   * @param.out <compound-type> $<arg-name> [free-text]
+
+Note that an argument passed by reference can have a '@param' line to
+define its input type and/or a '@param.out' line to define its output
+type. In the str_replace() example above, we don't define an input type
+for $count because it is undefined.
+
+Output assertions
+^^^^^^^^^^^^^^^^^
+
+Syntax:
+
+::
+
+   * @ensures <condition>
+
+As with input assertions, <condition> is a PHP condition that will be
+executed in the function scope. The only addition is that the '$>'
+string will be replaced with the function's return value before
+evaluation.
+
+As with pre-conditions, output types are checked before output
+assertions.
+
+.. _inheritance-1:
+
+Inheritance
+^^^^^^^^^^^
+
+The inheritance rules are the same as the ones for pre-conditions.
+
+Unlike the Eiffel or D implementations, parent post-conditions will be
+checked only if the child requires it using a '@ensures @parent'
+directive.
+
+Class constraints
+~~~~~~~~~~~~~~~~~
+
+These constraints are called 'invariants' in the DbC litterature. The
+idea is that properties must always verify a set of 'invariant'
+conditions.
+
+Class constraints take two forms : property types and class assertions.
+
+Each property type is defined in its own docblock, just before the
+definition of its property and class assertions are defined in the class
+docblock (the block just before the class definition).
+
+Note that we don't define a specific constraint type for static
+properties. They will be checked using the same syntax as dynamic
+properties.
+
+Property types
+^^^^^^^^^^^^^^
+
+Syntax:
+
+::
+
+   /** @var <compound-type> [free-text] */
+
+where <compound-type> follows the same syntax as argument types.
+
+Class assertions
+^^^^^^^^^^^^^^^^
+
+These are defined in class docblocks.
+
+Syntax:
+
+::
+
+   * @invariant <condition>
+
+<condition> must use '$this->' to access dynamic properties and 'self::'
+to access static properties.
+
+Execution
+'''''''''
+
+Property types are checked before class assertions.
+
+This set of constraints is checked :
+
+-  after the execution of the constructor, if it exists.
+-  before destroying the object, even if no destructor exists.
+-  before and after execution of a public dynamic method.
+
+Class constraints are executed before pre-conditions and/or after
+post-conditions.
+
+Scope
+'''''
+
+These constraints are executed in the class scope ('$this' and 'self'
+can be used).
+
+.. _inheritance-2:
+
+Inheritance
+'''''''''''
+
+The same mechanism is used as with pre/post-conditions. Parent
+constraints are checked only if explicitely called using '@invariant
+@parent'.
+
+Nested calls
+~~~~~~~~~~~~
+
+When a function or method is called from a DbC condition, its
+constraints are not checked.
+
+Constraint violations
+~~~~~~~~~~~~~~~~~~~~~
+
+When a DbC condition fails, an E_ERROR is raised, containing the file
+and line number of the failing condition.
+
+Backward Incompatible Changes
+-----------------------------
+
+None
+
+Proposed PHP Version(s)
+-----------------------
+
+As the plan is to implement this in a separate extension, it should be
+availbale for PHP 5 ans PHP 7.
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+None
+
+To Opcache
+~~~~~~~~~~
+
+None
+
+New Constants
+~~~~~~~~~~~~~
+
+None
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+A boolean whose name is still undefined.
+
+-  php.ini-development value: true
+-  php.ini-production value: false
+
+Open Issues
+-----------
+
+Unaffected PHP Functionality
+----------------------------
+
+When DbC is turned off, there's no change in PHP behavior.
+
+Future Scope
+------------
+
+#. Extend DbC to internal functions
+#. Add exception checks (using '@throws')
+#. Extend type syntax (define a syntax for ranges, enums, etc)
+#. Implement static-only class constraints (to be called before and
+   after executing a static or dynamic public method)
+#. Extend DbC to interfaces and traits
+
+Proposed Voting Choices
+-----------------------
+
+Required majority ? To be defined.
+
+Patches and Tests
+-----------------
+
+This should be implemented in a Zend extension, not in the core. This
+would be a perfect addition for XDebug.
+
+References
+----------
+
+`'Design by contract' on
+Wikipedia <http://en.wikipedia.org/wiki/Design_by_contract>`__
+
+`DbC in
+Eiffel <https://www.eiffel.com/values/design-by-contract/introduction/>`__
+
+`Contracts Programming in the D
+language <http://ddili.org/ders/d.en/contracts.html>`__
+
+`Alternative RFC <https://wiki.php.net/rfc/dbc2>`__
+
+Additional Metadata
+-------------------
+
+:Original Authors: François Laupretre francois@php.net
+:Original Status: Under Discussion
+:Slug: dbc
+:Wiki URL: https://wiki.php.net/rfc/dbc

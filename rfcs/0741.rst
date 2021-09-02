@@ -1,0 +1,221 @@
+Treat Namespaced Names As Single Token
+======================================
+
+:PHP-RFC: 0741
+:Title: Treat Namespaced Names As Single Token
+:Author: Nikita Popov <nikic@php.net>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2020-06-15
+:PHP-Version: 8.0
+:Version: 1.0
+
+Introduction
+------------
+
+PHP currently treats namespaced names like ``Foo\Bar`` as a sequence of
+identifiers and namespace separator tokens. This RFC proposes to treat
+namespaced names as a single token, and as such allow reserved keywords
+to appear inside them.
+
+There are two motivations: The first is to reduce the backwards
+compatibility impact of new reserved keyword additions in future
+versions of PHP. To give a specific example, PHP 7.4 added the ``fn``
+keyword as part of arrow function support. This broke my `iter
+library <https://github.com/nikic/iter>`__, because it was using ``fn``
+as part of a namespace name. However, this breakage was entirely
+unnecessary! Here is a typical usage example:
+
+.. code:: php
+
+   // In the library:
+   namespace iter\fn;
+
+   function operator($operator, $operand = null) { ... }
+
+   // In the using code:
+   use iter\fn;
+
+   iter\map(fn\operator('*', 2), $nums);
+
+As you can see, both references of ``fn`` are part of a namespaced name:
+``iter\fn`` and ``fn\operator``. Under this proposal, these are
+considered perfectly legal names, and the backwards compatibility break
+would not have occurred.
+
+Additionally, treating namespaced names as a single token avoids certain
+syntactical ambiguities. For example, the `shorter attribute
+syntax </rfc/shorter_attribute_syntax>`__ has the following ambiguity:
+
+.. code:: php
+
+   function test(@@A \ B $param) {}
+   // Can be interpreted as:
+   function test(
+      @@A\B
+      $param
+   ) {}
+   // Or:
+   function test(
+      @@A
+      \B $param
+   ) {}
+
+This RFC resolves this by making the first variant a syntax error, and
+requiring you to write whichever interpretation was intended. This
+proposal is a prerequisite for the implementation of the "shorter
+attribute syntax" in PHP 8.
+
+Proposal
+--------
+
+PHP distinguishes four kinds of namespaced names:
+
+-  Unqualified names like ``Foo``, which coincide with identifiers.
+-  Qualified names like ``Foo\Bar``.
+-  Fully qualified names like ``\Foo``.
+-  Namespace-relative names like ``namespace\Foo``.
+
+Each of these kinds will be represented by a distinct token:
+
+.. code:: php
+
+   Foo;
+   // Before: T_STRING
+   // After:  T_STRING
+   // Rule:   {LABEL}
+
+   Foo\Bar;
+   // Before: T_STRING T_NS_SEPARATOR T_STRING
+   // After:  T_NAME_QUALIFIED
+   // Rule:   {LABEL}("\\"{LABEL})+
+
+   \Foo;
+   // Before: T_NS_SEPARATOR T_STRING
+   // After:  T_NAME_FULLY_QUALIFIED
+   // Rule:   ("\\"{LABEL})+
+
+   namespace\Foo;
+   // Before: T_NAMESPACE T_NS_SEPARATOR T_STRING
+   // After:  T_NAME_RELATIVE
+   // Rule:   "namespace"("\\"{LABEL})+
+
+Individual namespace segments may contain reserved keywords:
+
+.. code:: php
+
+   // This is interpreted as T_LIST (i.e., as a reserved keyword):
+   List
+   // All of the following are interpreted as legal namespaced names:
+   \List
+   FooBar\List
+   namespace\List
+
+Whitespace is not permitted between namespace separators. If it occurs,
+the namespace separator will be parsed as ``T_NS_SEPARATOR``, which will
+subsequently lead to a parse error. It is not possible to allow
+whitespace, because namespaced names commonly occur next to keywords:
+
+.. code:: php
+
+   class Foo implements \Bar {}
+
+If we permitted whitespace, ``implements \Bar`` would end up being
+interpreted as a namespaced name. It should be noted that while this
+change has the potential to break some code, it also prevents
+programming mistakes I have seen in the wild:
+
+.. code:: php
+
+   // This would have previously been interpreted as a namespace-relative name,
+   // which is an obscure PHP feature that few people know about. Now it will
+   // result in a parse error.
+   namespace \Foo;
+
+   // This would have previously been interpreted as $foo = Foo\call($bar),
+   // now it will result in a parse error.
+   $foo = Foo // <- Missing semicolon
+   \call($bar);
+
+In the interest of consistency, the ``namespace`` declaration will
+accept any name, including isolated reserved keywords:
+
+.. code:: php
+
+   namespace iter\fn; // Legal
+   namespace fn;      // Legal
+
+This is to avoid a discrepancy where defining symbols like
+``iter\fn\operator`` is allowed, but ``fn\operator`` is not. The only
+restriction is that the namespace name cannot start with a ``namespace``
+segment:
+
+.. code:: php
+
+   namespace namespace;   // Illegal
+   namespace namespace\x; // Illegal
+
+This avoids introducing an ambiguity with namespace-relative names.
+
+Backward Incompatible Changes
+-----------------------------
+
+Existing code using whitespace (or comments) between namespace
+separators of namespaced names will now produce a parse error. An
+analysis of the top 2000 composer packages has found five occurrences of
+this issue:
+
+::
+
+   sylius/sylius/src/Sylius/Bundle/ApiBundle/ApiPlatform/Metadata/Property/Factory/ExtractorPropertyMetadataFactory.php:109
+       \ RuntimeException
+   api-platform/core/src/Metadata/Extractor/AbstractExtractor.php:121
+       \ RuntimeException
+   mck89/peast/lib/Peast/Syntax/Node/JSX/JSXFragment.php:13
+       Peast \Syntax\Node\Expression
+   mck89/peast/lib/Peast/Syntax/Node/JSX/JSXOpeningElement.php:13
+       Peast \Syntax\Node\Expression
+   mck89/peast/lib/Peast/Syntax/Node/JSX/JSXElement.php:13
+       Peast \Syntax\Node\Expression
+
+As such, the practical impact is very limited, and any issues are
+trivial to fix. On the other hand, this change will reduce the
+backwards-compatibility impact from any future keyword additions.
+
+Additionally tooling based on ``token_get_all()`` will need to be
+adjusted to handle the new ``T_NAME_*`` tokens. In practice, this will
+be the main negative impact of this proposal.
+
+Vote
+----
+
+Voting started 2020-07-17 and ends 2020-07-31. A 2/3 majority is
+required.
+
+Question: Treat namespaced names as a single token?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Future Scope
+------------
+
+An earlier version of this RFC also relaxed various reserved keyword
+restrictions for class, function and constant declarations. Because
+these have to deal with more perceived ambiguities, I have dropped them
+from this proposal. Reserved keyword restrictions can always be lifted
+later on, while the change in this RFC contains a
+backwards-compatibility break that is best done in PHP 8.0.
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/pull/5827
+:Original Authors: Nikita Popov nikic@php.net
+:Original PHP Version: PHP 8.0
+:Slug: namespaced_names_as_token
+:Wiki URL: https://wiki.php.net/rfc/namespaced_names_as_token

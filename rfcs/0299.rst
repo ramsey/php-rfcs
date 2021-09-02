@@ -1,0 +1,352 @@
+Native Regular Expression
+=========================
+
+:PHP-RFC: 0299
+:Title: Native Regular Expression
+:Author: Bishop Bettini <bishop@php.net>
+:Status: Draft
+:Type: Unknown
+:Created: 2014-08-13
+:Version: 1.0
+
+FIXME FIXME FIXME Jotting my ideas down here. Move along. Maybe called
+"first_class_citizens_regex" or something. Consider emulating structure
+of https://wiki.php.net/rfc/abstract_syntax_tree
+https://wiki.php.net/rfc/generators
+
+Introduction
+------------
+
+Regular expressions provide powerful string matching capabilities and
+play a critical role in most software written in PHP. For example,
+Github reports `10.5 million instances of the ``preg_*()`` family of
+functions <https://github.com/search?q=language%3Aphp+preg_filter+OR+preg_grep+OR+preg_match+OR+preg_match_all+OR+preg_replace+OR+preg_split&type=Code>`__\  [1]_ [2]_.
+
+In the current engine, regular expressions are plain old strings:
+
+.. code:: php
+
+   while (preg_match('/^\s*[^#]/', $line[$i++])) {}
+
+The primary disadvantage with string representation comes when the
+regular expression itself needs to contain a single quote, double quote,
+or the delimiters bracketing the regular expression. When that happens,
+the programmer has to make mental shifts to workaround the string
+representation, sometimes making the regular expression harder to read
+and maintain. Example:
+
+.. code:: php
+
+   // match foo in examples: ="foo"   and  ='foo'  and   = "foo"
+   preg_match_all('(=\s*['."'".'"]([^'."'".'"/]*)['."'".'"])x', $string, $matches);
+
+ [3]_
+
+In some other languages, regular expressions are part of the language
+itself.
+
+Another problem with regular expressions buried in plain old strings is
+that syntax highlighting becomes much more difficult.
+
+.. code:: php
+
+   function getLinesFromFile($fileName) {
+       if (!$fileHandle = fopen($fileName, 'r')) {
+           return;
+       }
+       
+       while (false !== $line = fgets($fileHandle)) {
+           yield $line;
+       }
+       
+       fclose($fileHandle);
+   }
+
+   $lines = getLinesFromFile($fileName);
+   foreach ($lines as $line) {
+       // do something with $line
+   }
+
+The code looks very similar to the array-based implementation. The main
+difference is that instead of pushing values into an array the values
+are ``yield``\ ed.
+
+Generators work by passing control back and forth between the generator
+and the calling code:
+
+When you first call the generator function
+(``$lines = getLinesFromFile($fileName)``) the passed argument is bound,
+but nothing of the code is actually executed. Instead the function
+directly returns a ``Generator`` object. That ``Generator`` object
+implements the ``Iterator`` interface and is what is eventually
+traversed by the ``foreach`` loop:
+
+Whenever the ``Iterator::next()`` method is called PHP resumes the
+execution of the generator function until it hits a ``yield``
+expression. The value of that ``yield`` expression is what
+``Iterator::current()`` then returns.
+
+Generator methods, together with the ``IteratorAggregate`` interface,
+can be used to easily implement traversable classes too:
+
+.. code:: php
+
+   class Test implements IteratorAggregate {
+       protected $data;
+       
+       public function __construct(array $data) {
+           $this->data = $data;
+       }
+       
+       public function getIterator() {
+           foreach ($this->data as $key => $value) {
+               yield $key => $value;
+           }
+           // or whatever other traversation logic the class has
+       }
+   }
+
+   $test = new Test(['foo' => 'bar', 'bar' => 'foo']);
+   foreach ($test as $k => $v) {
+       echo $k, ' => ', $v, "\n";
+   }
+
+Generators can also be used the other way around, i.e. instead of
+producing values they can also consume them. When used in this way they
+are often referred to as enhanced generators, reverse generators or
+coroutines.
+
+Coroutines are a rather advanced concept, so it very hard to come up
+with not too contrived an short examples. For an introduction see an
+example `on how to parse streaming XML using
+coroutines <https://gist.github.com/3111288>`__. If you want to know
+more, I highly recommend checking out `a presentation on this
+subject <http://www.dabeaz.com/coroutines/Coroutines.pdf>`__.
+
+New built-in "re". BNF is roughly:
+
+::
+
+   syntax := re <fence-post> <regex-chars> <fence-post> <regex-modifiers> <semic>
+   fence-post := <any character>
+   regex-chars := whatever is allowed in a regex
+   regex-modifiers := whatever is valid for modifiers
+   semic := ';'
+
+Example:
+
+::
+
+   $regex = re /^\w+$/i
+   preg_match($regex, 'whatever');
+   ereg_match($regex, 'whatever'); // wouldn't work... maybe need $regex->test()
+
+Motivation
+==========
+
+-  Regex are integral to modern info processing
+-  Quoting them inside strings is hard: you have the quote character to
+   deal with, plus the fence post
+-  Other languages have re built in
+
+Goals
+=====
+
+-  Reduce effort of code authors to quote regex properly
+-  Compile time verification of regex (benefit?)
+
+Non-goals
+=========
+
+-  Adding a new regex class, with methods like $re->test('whatever')
+
+Similar implementations
+=======================
+
+-  Javascript:
+   http://mrrena.blogspot.com/2012/07/regular-expressions-in-javascript.html
+-  Python: https://docs.python.org/3/howto/regex.html
+-  Comparison: http://hyperpolyglot.org/scripting
+
+Discussions
+===========
+
+-  https://news.ycombinator.com/item?id=7889923
+-  http://stackoverflow.com/questions/25310999/what-is-the-maximum-length-of-a-regular-expression
+
+--------------
+
+This is a suggested template for PHP Request for Comments (RFCs). Change
+this template to suit your RFC. Not all RFCs need to be tightly
+specified. Not all RFCs need all the sections below. Read
+https://wiki.php.net/rfc/howto carefully!
+
+Quoting `Rasmus <http://news.php.net/php.internals/71525>`__:
+
+   PHP is and should remain:
+   1) a pragmatic web-focused language
+   2) a loosely typed language
+   3) a language which caters to the skill-levels and platforms of a
+   wide range of users
+
+Your RFC should move PHP forward following his vision. As `said by Zeev
+Suraski <http://news.php.net/php.internals/66065>`__ "Consider only
+features which have significant traction to a large chunk of our
+userbase, and not something that could be useful in some extremely
+specialized edge cases [...] Make sure you think about the full context,
+the huge audience out there, the consequences of making the learning
+curve steeper with every new feature, and the scope of the goodness that
+those new features bring."
+
+.. _introduction-1:
+
+Introduction
+------------
+
+The elevator pitch for the RFC. The first paragraph in this section will
+be slightly larger to give it emphasis; please write a good
+introduction.
+
+Proposal
+--------
+
+All the features and examples of the proposal.
+
+To `paraphrase Zeev
+Suraski <http://news.php.net/php.internals/66051>`__, explain hows the
+proposal brings substantial value to be considered for inclusion in one
+of the world's most popular programming languages.
+
+Remember that the RFC contents should be easily reusable in the PHP
+Documentation.
+
+Backward Incompatible Changes
+-----------------------------
+
+What breaks, and what is the justification for it?
+
+Proposed PHP Version(s)
+-----------------------
+
+List the proposed PHP versions that the feature will be included in. Use
+relative versions such as "next PHP 5.x" or "next PHP 5.x.y".
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+Describe the impact to CLI, Development web server, embedded PHP etc.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Will existing extensions be affected?
+
+To Opcache
+~~~~~~~~~~
+
+It is necessary to develop RFC's with opcache in mind, since opcache is
+a core extension distributed with PHP.
+
+Please explain how you have verified your RFC's compatibility with
+opcache.
+
+New Constants
+~~~~~~~~~~~~~
+
+Describe any new constants so they can be accurately and comprehensively
+explained in the PHP documentation.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+If there are any php.ini settings then list:
+
+-  hardcoded default values
+-  php.ini-development values
+-  php.ini-production values
+
+Open Issues
+-----------
+
+Make sure there are no open issues when the vote starts!
+
+Unaffected PHP Functionality
+----------------------------
+
+List existing areas/features of PHP that will not be changed by the RFC.
+
+This helps avoid any ambiguity, shows that you have thought deeply about
+the RFC's impact, and helps reduces mail list noise.
+
+Future Scope
+------------
+
+This sections details areas where the feature might be improved in
+future, but that are not currently proposed in this RFC.
+
+Proposed Voting Choices
+-----------------------
+
+Include these so readers know where you are heading and can discuss the
+proposed voting options.
+
+State whether this project requires a 2/3 or 50%+1 majority (see
+`voting <voting>`__)
+
+Patches and Tests
+-----------------
+
+Links to any external patches and tests go here.
+
+If there is no patch, make it clear who will create a patch, or whether
+a volunteer to help with implementation is needed.
+
+Make it clear if the patch is intended to be the final patch, or is just
+a prototype.
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged to
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+
+References
+----------
+
+Links to external references, discussions or RFCs
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+.. [1]
+   Compared with `16 million
+   instances <https://github.com/search?q=language%3Aphp+str_replace+OR+explode+OR+strpos&type=Code>`__
+   of the ``explode()``, ``strpos()``, and ``str_replace()`` related
+   functions.
+
+.. [2]
+   This RFC does not consider the deprecated POSIX regular expressions
+   to be an active part of PHP and any implementation of this RFC will
+   focus solely upon PCRE regular expressions.
+
+.. [3]
+   PCRE wizards might rightly scold me for using that example, as it
+   doesn't actually work as described for unbalanced quotation marks or
+   escaped quotation marks, and that a realistic working example would
+   be ``(["'])(?:\\?+.)*?\1``, thus needing only one single quote
+   escaped. I agree, but I generated this example to illustrate a point.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Bishop Bettini, bishop@php.net
+:Slug: native_regular_expressions
+:Wiki URL: https://wiki.php.net/rfc/native_regular_expressions
