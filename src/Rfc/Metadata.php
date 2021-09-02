@@ -11,10 +11,17 @@ class Metadata
 {
     private const EMAIL_REGEX = '#([\w.\-]+(@| at |\.at\.|\#at\#)[\w.\-]+(( dot | \. )[\w.\-]+)*)#sm';
 
+    private const TYPE_INFORMATIONAL = 'Informational';
+    private const TYPE_PROCESS = 'Process';
+    private const TYPE_STANDARDS_TRACK = 'Standards Track';
+    private const TYPE_UNKNOWN = 'Unknown';
+
     private const STATUS_ACCEPTED = 'Accepted';
+    private const STATUS_ACTIVE = 'Active';
     private const STATUS_DECLINED = 'Declined';
     private const STATUS_DRAFT = 'Draft';
     private const STATUS_IMPLEMENTED = 'Implemented';
+    private const STATUS_SUPERSEDED = 'Superseded';
     private const STATUS_UNKNOWN = 'Unknown';
     private const STATUS_VOTING = 'Voting';
     private const STATUS_WITHDRAWN = 'Withdrawn';
@@ -50,7 +57,42 @@ class Metadata
         '#^(Abandoned|Closed|Dead|Inactive|Obsolete|Superseded|Suspended|Wid?thdrawn?)#i' => self::STATUS_WITHDRAWN,
     ];
 
-    private array $rawMetadata;
+    private const SECTION_STATUS_MAP = [
+        'Declined' => self::STATUS_DECLINED,
+        'In Draft' => self::STATUS_DRAFT,
+        'Inactive' => self::STATUS_WITHDRAWN,
+        'Obsolete' => self::STATUS_WITHDRAWN,
+        'PHP 5.3' => self::STATUS_IMPLEMENTED,
+        'PHP 5.4' => self::STATUS_IMPLEMENTED,
+        'PHP 5.5' => self::STATUS_IMPLEMENTED,
+        'PHP 5.6' => self::STATUS_IMPLEMENTED,
+        'PHP 7.0' => self::STATUS_IMPLEMENTED,
+        'PHP 7.1' => self::STATUS_IMPLEMENTED,
+        'PHP 7.2' => self::STATUS_IMPLEMENTED,
+        'PHP 7.3' => self::STATUS_IMPLEMENTED,
+        'PHP 7.4' => self::STATUS_IMPLEMENTED,
+        'PHP 8.0' => self::STATUS_IMPLEMENTED,
+        'PHP 8.1' => self::STATUS_IMPLEMENTED,
+        'Pending Implementation / Landing' => self::STATUS_ACCEPTED,
+        'Process and Policy' => self::STATUS_ACTIVE,
+        'Under Discussion' => self::STATUS_DRAFT,
+        'Withdrawn' => self::STATUS_WITHDRAWN,
+    ];
+
+    private const SECTION_TYPE_MAP = [
+        'PHP 5.3' => self::TYPE_STANDARDS_TRACK,
+        'PHP 5.4' => self::TYPE_STANDARDS_TRACK,
+        'PHP 5.5' => self::TYPE_STANDARDS_TRACK,
+        'PHP 5.6' => self::TYPE_STANDARDS_TRACK,
+        'PHP 7.0' => self::TYPE_STANDARDS_TRACK,
+        'PHP 7.1' => self::TYPE_STANDARDS_TRACK,
+        'PHP 7.2' => self::TYPE_STANDARDS_TRACK,
+        'PHP 7.3' => self::TYPE_STANDARDS_TRACK,
+        'PHP 7.4' => self::TYPE_STANDARDS_TRACK,
+        'PHP 8.0' => self::TYPE_STANDARDS_TRACK,
+        'PHP 8.1' => self::TYPE_STANDARDS_TRACK,
+        'Process and Policy' => self::TYPE_PROCESS,
+    ];
 
     public function __construct(
         private ProcessFactory $processFactory,
@@ -135,18 +177,13 @@ class Metadata
             $cleanValue = match ($cleanKey) {
                 'authors', 'contributors', 'original authors', 'maintainers' => $this->parseAuthors($rawValue),
                 'date' => $this->parseDates($rawValue),
-                'status' => $this->normalizeStatus($rawValue),
+                'status' => $this->normalizeStatus($rawValue, $raw['section'] ?? null),
                 'title' => $this->cleanTitle($rawValue),
                 'version', 'PHP version' => $this->parseVersion($rawValue),
                 default => $rawValue,
             };
 
             $clean[ucwords($cleanKey)] = $cleanValue;
-
-            // Retain these original values, for historical purposes.
-            if (in_array($cleanKey, ['status', 'date', 'version']) && $cleanValue !== $rawValue) {
-                $clean[ucwords('original ' . $cleanKey)] = $rawValue;
-            }
         }
 
         // Some RFC pages do not have a Date property. Use the earliest commit
@@ -157,6 +194,27 @@ class Metadata
 
         if (!array_key_exists('Status', $clean)) {
             $clean['Status'] = 'Unknown';
+        }
+
+        $clean['Type'] = $this->determineType($clean['Section'] ?? null);
+        $clean['PHP Version'] = $this->determinePhpVersion(
+            $clean['PHP Version'] ?? '',
+            $clean['Section'] ?? null,
+        );
+
+        // Drop the Section property.
+        unset($clean['Section']);
+
+        if (array_key_exists('PHP Version', $clean) && $clean['PHP Version'] === null) {
+            unset($clean['PHP Version']);
+        }
+
+        if (array_key_exists('PHP Version', $clean) && $clean['Type'] === self::TYPE_UNKNOWN) {
+            $clean['Type'] = self::TYPE_STANDARDS_TRACK;
+        }
+
+        if (!array_key_exists('Version', $clean) || $clean['Version'] === null) {
+            $clean['Version'] = '1.0';
         }
 
         ksort($clean, SORT_NATURAL);
@@ -260,17 +318,36 @@ class Metadata
         return '0000-00-00';
     }
 
-    private function parseVersion(string $version): string
+    private function determinePhpVersion(string $version, ?string $section): ?string
+    {
+        return $this->parseVersion((string) $section) ?? $this->parseVersion($version);
+    }
+
+    private function parseVersion(string $version): ?string
     {
         if (preg_match('#(\d*\.?\d*\.?\d+)#', $version, $matches)) {
             return $matches[1];
         }
 
-        return '1.0';
+        return null;
     }
 
-    private function normalizeStatus(string $status): string
+    private function determineType(?string $section): string
     {
+        if (array_key_exists($section, self::SECTION_TYPE_MAP)) {
+            return self::SECTION_TYPE_MAP[$section];
+        }
+
+        return self::TYPE_UNKNOWN;
+    }
+
+    private function normalizeStatus(string $status, ?string $section): string
+    {
+        // Prefer the status obtained from the sections of the RFC index.
+        if (array_key_exists($section, self::SECTION_STATUS_MAP)) {
+            return self::SECTION_STATUS_MAP[$section];
+        }
+
         foreach (self::STATUS_NORMALIZING_EXPRESSIONS as $expression => $normalizedStatus) {
             if (preg_match($expression, $status)) {
                 return $normalizedStatus;
