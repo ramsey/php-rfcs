@@ -168,7 +168,7 @@ class Metadata
             }
 
             $cleanKey = match ($rawKey) {
-                'author', 'author of rfc and creator of pr' => 'authors',
+                'author', 'author of rfc and creator of pr', 'revived author' => 'authors',
                 'contributor' => 'contributors',
                 'maintainer' => 'maintainers',
                 'original author', 'based on previous rfc by', 'author of original patch' => 'original authors',
@@ -187,6 +187,17 @@ class Metadata
             };
 
             $clean[ucwords($cleanKey)] = $cleanValue;
+
+            if (
+                in_array($cleanKey, ['authors', 'date', 'status', 'version', 'PHP version'])
+                && $rawValue !== $cleanValue
+            ) {
+                if (!isset($clean[ucwords("original $cleanKey")])) {
+                    $clean[ucwords("original $cleanKey")] = $rawValue;
+                } else {
+                    $clean[ucwords("original $rawKey")] = $rawValue;
+                }
+            }
         }
 
         // Some RFC pages do not have a Date property. Use the earliest commit
