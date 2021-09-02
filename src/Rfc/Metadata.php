@@ -151,6 +151,8 @@ class Metadata
             }
         });
 
+        ksort($cleanWithOverrides, SORT_NATURAL);
+
         return $cleanWithOverrides;
     }
 

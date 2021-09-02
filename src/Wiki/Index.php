@@ -25,7 +25,7 @@ class Index
     }
 
     /**
-     * @return array{slug: string, section: string, url: string}
+     * @return array<array{slug: string, section: string, url: string}>
      */
     public function getIndex(): array
     {
