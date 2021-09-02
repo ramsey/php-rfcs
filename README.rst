@@ -133,6 +133,20 @@ following:
 
   Withdrawn RFCs include historically inactive and abandoned draft RFCs.
 
+Interesting jq Queries
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: shell
+
+    # List all unique statuses in the raw metadata
+    cat resources/metadata-raw.json| jq '[.[] | .status] | unique'
+
+    # List all unique index sections in the raw metadata
+    cat resources/metadata-raw.json| jq '[.[] | .section] | unique'
+
+    # List all drafts that have the type "Unknown" in the cleaned metadata
+    cat resources/metadata-clean.json| jq '[.[] | select(.Status == "Draft" and .Type == "Unknown")]'
+
 Importing History
 ~~~~~~~~~~~~~~~~~
 
