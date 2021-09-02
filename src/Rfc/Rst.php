@@ -42,6 +42,11 @@ class Rst
         return $this->postProcess($rstContents, $this->getCleanMetadata($rfcSlug, $cleanMetadataFile));
     }
 
+    public function setCleanMetadata(array $cleanMetadata): void
+    {
+        $this->cleanMetadata = $cleanMetadata;
+    }
+
     private function getCleanMetadata(string $rfcSlug, ?string $cleanMetadataFile): array
     {
         if ($this->cleanMetadata === null && $cleanMetadataFile !== null) {
@@ -164,11 +169,9 @@ class Rst
         $content .= "\n\n";
 
         $adornment = '=';
-        if (!preg_match(self::FILE_HEADER_REGEX, $content, $matches)) {
-            throw new RuntimeException('Unable to parse file header');
-        }
+        $headerFound = preg_match(self::FILE_HEADER_REGEX, $content, $matches);
 
-        if (count($matches) > 0) {
+        if (is_array($matches) && count($matches) > 0) {
             $adornment = $matches[1];
         }
 
@@ -211,6 +214,7 @@ class Rst
             $metadata['Status'],
             $metadata['Type'],
             $metadata['Date'],
+            $metadata['PHP-RFC'],
             $metadata['PHP Version'],
             $metadata['Version'],
         );
@@ -218,7 +222,11 @@ class Rst
         $footer = [];
         foreach ($metadata as $property => $value) {
             if (is_array($value)) {
-                $value = implode(', ', $value);
+                $gluedValue = '';
+                array_walk_recursive($value, function ($v) use (&$gluedValue) {
+                    $gluedValue .= ', ' . $v;
+                });
+                $value = $gluedValue;
             }
 
             $footer[] = ":$property: $value";
@@ -226,7 +234,9 @@ class Rst
 
         // Remove the existing header and replace it with the new one.
         // We do several trimming steps here to keep the output clean.
-        $content = preg_replace(self::FILE_HEADER_REGEX, '', $content);
+        if ($headerFound > 0) {
+            $content = preg_replace(self::FILE_HEADER_REGEX, '', $content);
+        }
         $content = trim($content);
         $content = trim(implode("\n", $header)) . "\n\n" . $content;
         $content = trim($content);

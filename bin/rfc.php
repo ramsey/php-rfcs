@@ -9,6 +9,7 @@ use Http\Factory\Guzzle\RequestFactory;
 use Http\Factory\Guzzle\UriFactory;
 use PhpRfcs\Rfc\Metadata as RfcMetadata;
 use PhpRfcs\Rfc\Rst;
+use PhpRfcs\Rfc\Update;
 use PhpRfcs\Wiki\Crawler;
 use PhpRfcs\Wiki\Download;
 use PhpRfcs\Wiki\History;
@@ -52,6 +53,14 @@ $rfcMetadata = new RfcMetadata(
 );
 
 $rfcRst = new Rst($processFactory, $rfcMetadata, $config['paths']['import']);
+
+$rfcUpdate = new Update(
+    $rfcMetadata,
+    $rfcRst,
+    $config['paths']['cleanRfcs'],
+    $config['paths']['overrides'],
+    $config['json'],
+);
 
 $app = new Application('PHP RFC Tools');
 
@@ -228,6 +237,23 @@ $app
         'Print an RFC as reStructured Text',
         [
             'rfc' => 'The RFC string slug',
+            '--clean-metadata' => 'A pre-generated file of clean metadata to use'
+        ],
+    );
+
+$app
+    ->command(
+        'rfc:update [rfc] [--clean-metadata=]',
+        function (?string $rfc, ?string $cleanMetadata, SymfonyStyle $io) use ($rfcUpdate): int {
+            $rfcUpdate->updateRfcs($io, $rfc, $cleanMetadata);
+
+            return 0;
+        },
+    )
+    ->descriptions(
+        'Update (and create) final RFC files with the latest imported changes',
+        [
+            'rfc' => 'If provided, only update or create the RFC with this slug',
             '--clean-metadata' => 'A pre-generated file of clean metadata to use'
         ],
     );

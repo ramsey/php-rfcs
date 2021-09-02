@@ -7,5 +7,6 @@ return [
         'repository' => realpath(__DIR__ . '/..'),
         'import' => realpath(__DIR__ . '/../resources/imported-rfcs'),
         'overrides' => realpath(__DIR__ . '/../resources/metadata-overrides'),
+        'cleanRfcs' => realpath(__DIR__ . '/../rfcs'),
     ],
 ];
