@@ -26,15 +26,6 @@ I plan to expand on these tools to convert the RFCs into Markdown or
 reStructuredText. My goal is to automate these conversions to keep them
 up-to-date with the latest changes to the wiki.
 
-Usage
------
-
-Run ``composer install`` and then check out the commands available:
-
-.. code:: shell
-
-    php bin/rfc.php
-
 Requirements
 ------------
 
@@ -44,6 +35,54 @@ Requirements, other than those listed in ``composer.json``, are:
 * `Pandoc <https://pandoc.org>`_ 2.14 or later
 * `jq <https://stedolan.github.io/jq/>`_ is *recommended* for querying the
   ``resources/metadata-*.json`` data files from the console
+
+Usage
+-----
+
+Run ``composer install`` and then check out the commands available:
+
+.. code:: shell
+
+    ./rfc list
+
+Importing Updates to RFCs
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For regular imports of RFC updates on the wiki:
+
+.. code:: shell
+
+    ./rfc wiki:crawl
+    ./rfc wiki:metadata > resources/metadata-raw.json
+    ./rfc rfc:metadata --raw-metadata=resources/metadata-raw.json > resources/metadata-clean.json
+    ./rfc rfc:update --clean-metadata=resources/metadata-clean.json
+
+Note that ``wiki:crawl`` will auto-commit any changes to the wiki it finds, but
+you will need to manually commit any changes to ``metadata-raw.json``,
+``metadata-clean.json``, or any of the files in ``rfcs/``. Review the changes
+before committing them to make sure they look correct.
+
+.. NOTE::
+
+    If any new RFCs are detected by ``wiki:crawl``, when running ``rfc:update``,
+    the tool will pick the next available RFC number to apply to the RFC. It
+    will then add that RFC number to the JSON file for the RFC in
+    ``resources/metadata-overrides/`` to reserve it. If you wish to use a
+    different RFC number, please update the override file.
+
+Overriding RFC Metadata
+~~~~~~~~~~~~~~~~~~~~~~~
+
+To override metadata for an RFC (i.e., title, date, authors, etc.):
+
+1. Edit the appropriate JSON file in ``resources/metadata-overrides/``. If the
+   file does not exist, create it.
+2. Regenerate the clean metadata file with the command
+   ``./rfc rfc:metadata --raw-metadata=resources/metadata-raw.json > resources/metadata-clean.json``.
+   This will apply your overrides to the metadata.
+3. Update the RFCs with the command
+   ``./rfc rfc:update --clean-metadata=resources/metadata-clean.json``
+4. Review the changes made and commit them.
 
 Notes
 -----
@@ -158,7 +197,7 @@ put them in the correct order, here is the process I followed:
 
     # This was the initial command to crawl Dokuwiki and import all
     # of the RFCS, including their histories as separate commits.
-    php bin/rfc.php wiki:crawl
+    ./rfc wiki:crawl
 
     # These are the commands I ran to put the commits in the correct
     # order in the repository.

@@ -27,7 +27,7 @@ class Rst
         if (!file_exists($rawRfcFile)) {
             throw new RuntimeException(
                 "Could not find raw file for $rfcSlug; "
-                . "perhaps you need to run: php bin/rfc.php wiki:save $rfcSlug"
+                . "perhaps you need to run: ./rfc wiki:save $rfcSlug"
             );
         }
 
