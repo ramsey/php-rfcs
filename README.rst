@@ -84,6 +84,23 @@ To override metadata for an RFC (i.e., title, date, authors, etc.):
    ``./rfc rfc:update --clean-metadata=resources/metadata-clean.json``
 4. Review the changes made and commit them.
 
+Importing RFCs Not Detected During the Crawl
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you find a page that needs to be imported that isn't picked up with
+``wiki:crawl``, you can import it using:
+
+.. code:: shell
+
+    ./rfc.php wiki:save subnamespace:page-name
+
+This command will auto-commit the RFC's entire history.
+
+Use a colon as a separator instead of the forward slash that might appear in
+URLs for the page. For example, if the page is at
+https://wiki.php.net/rfc/php8/merge_member_symbol_tables, then use
+``php8:merge_member_symbol_tables``.
+
 Notes
 -----
 
