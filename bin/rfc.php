@@ -159,13 +159,13 @@ $app
 
 $app
     ->command(
-        'wiki:crawl [--dry-run]',
-        function (bool $dryRun, SymfonyStyle $io) use ($wikiCrawler): int {
+        'wiki:crawl [--dry-run] [--force]',
+        function (bool $dryRun, bool $force, SymfonyStyle $io) use ($wikiCrawler): int {
             if ($dryRun) {
                 $io->warning('Executing in DRY RUN mode');
             } else {
                 $io->warning('You are not executing in DRY RUN mode.');
-                if (!$io->confirm('Please confirm you wish to make changes.', false)) {
+                if (!$force && !$io->confirm('Please confirm you wish to make changes.', false)) {
                     return 1;
                 }
             }
@@ -183,6 +183,7 @@ $app
         'Crawl the wiki, finding new RFCs and/or history and saving it to the repo',
         [
             '--dry-run' => 'If set, the crawler does not commit any changes',
+            '--force' => 'Do not prompt for confirmation, when not in dry-run mode',
         ],
     );
 

@@ -23,7 +23,7 @@ cd "${__dir__}/../" || exit 1
 
 git checkout -b "${branch_prefix}${current_date}"
 
-./rfc wiki:crawl
+./rfc wiki:crawl --force
 
 has_changes=$(git rev-list main..@ --count)
 
