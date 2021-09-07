@@ -1,0 +1,94 @@
+====== PHP RFC: $this return type ======
+  * Date: 2021-09-07
+  * Author: Nikita Popov
+  * Status: Draft
+  * Target Version: PHP 8.2
+  * Implementation: https://github.com/php/php-src/pull/7470
+
+===== Introduction =====
+
+The [[rfc:static_return_type|static return type]] introduced in PHP 8.0 allows specifying that a method must return an instance of the late-static-binding (LSB) scope, which is usually the case for named constructors, wither methods and fluent APIs. However, fluent APIs have a more specific contract that requires returning ''$this''. This RFC introduces a ''$this'' return type for this purpose.
+
+The ''$this'' return type follows an established convention from PHPDoc, where ''@return $this'' is commonly used in place of ''@return static'' where it comes to fluent interfaces. On a dataset of 2k composer packages, ''@return $this'' occurs 29k times, while ''@return static'' is used 38k times.
+
+The ''$this'' return type is arguably not a type, in that enforces not just the type of the return value (which is the same as ''static''), but also its object identity (that of ''$this''). The object identity is important to the usage of the API, because it determines whether the return value can be safely discarded:
+
+<PHP>
+// Definitely valid if methods return $this type (fluent API).
+// May not be valid if they only return static (may be wither API).
+$obj->method1()
+    ->method2()
+    ->method3();
+
+// Definitely valid if methods return $this or static type (fluent/wither irrelevant).
+$obj = $obj->method1()
+           ->method2()
+           ->method3();
+</PHP>
+
+As such, even if a method uses a native ''static'' return type, it currently may still have to specify ''@return $this'' in addition to clarify the API contract. This is especially relevant for interfaces, where this not only determines valid usage, but also valid implementation.
+
+For example, Symfony's cache [[https://github.com/symfony/symfony/blob/8828d94796b8af4160cfc2d78565e8510835d76a/src/Symfony/Contracts/Cache/ItemInterface.php|ItemInterface]] specifies:
+
+<PHP>
+interface ItemInterface extends CacheItemInterface {
+    // Other APIs omitted.
+
+    /**
+     * @return $this
+     */
+    public function tag(string|iterable $tags): static;
+}
+</PHP>
+
+Under this RFC, it would become:
+
+<PHP>
+interface ItemInterface extends CacheItemInterface {
+    public function tag(string|iterable $tags): $this;
+}
+</PHP>
+
+===== Proposal =====
+
+The new ''$this'' type can only be used as a return type, not as a property or parameter type, same as ''static''. Additionally, it can only be applied in cases where an instance scope (potentially) exists, which is instance methods and non-static closures. It cannot be applied to free functions, static methods and static closures, as these can never have a ''$this'' value.
+
+A method with ''$this'' return type is required to return ''$this'', though it does not need to do so literally. The following is legal code:
+
+<PHP>
+class Test {
+    public function method(): $this {
+        $that = $this;
+        return $that;
+    }
+}
+</PHP>
+
+The ''$this'' type is a subtype of ''static''. As such, it is possible to restrict a ''static'' type to ''$this'' in a subclass (but not the other way around):
+
+<PHP>
+class A {
+    public function method1(): static {}
+    public function method2(): $this {}
+}
+
+class B extends A {
+    // This override is legal.
+    public function method1(): $this {}
+
+    // This override is illegal.
+    public function method2(): static {}
+}
+</PHP>
+
+In reflection, the ''$this'' type is represented as a ''ReflectionNamedType'' with ''isBuiltin() == true'' and ''%%getName() == "$this"%%''.
+
+===== Backward Incompatible Changes =====
+
+There are no backwards-compatible changes, as ''$this'' is not a valid class name and could not be used in type position previously.
+
+Code using ''ReflectionType'' may need to be updated to support the new ''$this'' type.
+
+===== Vote =====
+
+Yes/No.
