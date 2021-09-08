@@ -18,6 +18,7 @@ use PhpRfcs\Wiki\Metadata as WikiMetadata;
 use PhpRfcs\Wiki\Save;
 use Silly\Application;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Throwable;
 use Tidy;
 
 require_once __DIR__ . '/../vendor/autoload.php';
@@ -191,8 +192,14 @@ $app
     ->command(
         'wiki:metadata [rfc]',
         function (?string $rfc, SymfonyStyle $io) use ($wikiMetadata, $config): int {
-            $metadata = $wikiMetadata->gatherMetadata($rfc);
-            $io->writeln(json_encode($metadata, $config['json']));
+            try {
+                $metadata = $wikiMetadata->gatherMetadata($rfc);
+                $io->writeln(json_encode($metadata, $config['json']));
+            } catch (Throwable $throwable) {
+                $io->error($throwable->getMessage());
+
+                return 1;
+            }
 
             return 0;
         },

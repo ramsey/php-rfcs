@@ -8,6 +8,7 @@ use DOMDocument;
 use DOMElement;
 use DOMXPath;
 use PhpRfcs\ProcessFactory;
+use Symfony\Component\Console\Style\SymfonyStyle;
 
 class Metadata
 {
@@ -34,8 +35,11 @@ class Metadata
 
         $metadata = [];
 
+        fwrite(STDERR, "Gathering metadata from raw files...\n\n");
+
         foreach (glob($this->rawPath . '/*.txt') as $rawFile) {
             $slug = basename($rawFile, '.txt');
+            fwrite(STDERR, "- Gathering raw metadata for '$slug'\n");
             $metadata[$slug] = $this->parseMetadataFromFile($slug, $rawFile);
         }
 
