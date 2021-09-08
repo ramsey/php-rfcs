@@ -15,13 +15,14 @@ branch_prefix="auto-rfcs/"
 commit_message="auto-rfcs: Update RFCs"
 current_date=$(date +"%Y-%m-%d")
 remote_repo="https://${GITHUB_ACTOR}:${INPUT_GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git/"
+branch_name="${branch_prefix}${current_date}"
 
 # Find the directory where this script is located (not where it's called from).
 __dir__="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 cd "${__dir__}/../" || exit 1
 
-git checkout -b "${branch_prefix}${current_date}"
+git checkout -b "${branch_name}"
 
 ./rfc wiki:crawl --force
 
@@ -45,4 +46,4 @@ if ! git diff-index --quiet HEAD; then
     git commit -m "${commit_message}" --author="${author_name} <${author_email}>" --no-gpg-sign
 fi
 
-git push "${remote_repo}" HEAD
+git push "${remote_repo}" "${branch_name}"
