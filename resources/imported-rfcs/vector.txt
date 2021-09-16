@@ -1,0 +1,301 @@
+====== PHP RFC: final class Vector ======
+  * Version: 0.1
+  * Date: 2021-09-16
+  * Author: Tyson Andre, tandre@php.net
+  * Status: Draft
+  * Implementation: https://github.com/php/php-src/pull/7488
+  * First Published at: http://wiki.php.net/rfc/vector
+
+===== Introduction =====
+
+PHP's native ''array'' type is rare among programming language in that it is used as an associative map of values, but also needs to support lists of values.
+In order to support both use cases, additional memory is needed to track keys (around twice as much as is needed to just store the values, for non-reference counted values) (https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html).
+It would be useful to have a variable-length container in the standard library to (1) guarantee to application authors that the values really are a list without gaps, (2) save memory in applications or libraries that may need to store many lists of values, and (3) provide an alternative to ''SplFixedArray'' that is variable sized.
+
+===== Proposal =====
+This proposes to add the class ''Vector'' to PHP.
+
+Similarly to vectors in other languages, this is backed by a memory-efficient representation (raw C array of values with a size and capacity) and provides constant amortized-time push/pop operations.
+
+<code php>
+final class Vector implements IteratorAggregate, Countable, JsonSerializable, ArrayAccess
+{
+    /**
+     * Construct a Vector from an iterable.
+     *
+     * When $preserveKeys is false, the values will be reindexed without gaps starting from 0
+     * When $preserveKeys is true, any gaps in the keys of the iterable will be filled in with null,
+     * and negative indices or non-integer indices will be rejected and cause an Exception.
+     */
+    public function __construct(iterable $iterator = [], bool $preserveKeys = true) {}
+    public function getIterator(): InternalIterator {}
+    public function count(): int {}
+    public function capacity(): int {}
+    public function shrinkToFit(): void {}
+    public function clear(): void {}
+    public function setSize(int $size): void {}
+
+    public function __serialize(): array {}
+    public function __unserialize(array $data): void {}
+    public static function __set_state(array $array): Vector {}
+
+    public function push(mixed $value): void {}
+    public function pop(): mixed {}
+
+    public function toArray(): array {}
+    // Strictly typed, unlike offsetGet/offsetSet
+    public function valueAt(int $offset): mixed {}
+    public function setValueAt(int $offset, mixed $value): void {}
+
+    public function offsetGet(mixed $offset): mixed {}
+    public function offsetExists(mixed $offset): bool {}
+    public function offsetSet(mixed $offset, mixed $value): void {}
+    // Throws because unset and null are different things, unlike SplFixedArray
+    public function offsetUnset(mixed $offset): void {}
+
+    public function indexOf(mixed $value): int|false {}
+    public function contains(mixed $value): bool {}
+
+    public function map(callable $callback): Vector {}
+    /**
+     * Returns the subset of elements of the Vector satisfying the predicate.
+     *
+     * If the value returned by the callback is truthy
+     * (e.g. true, non-zero number, non-empty array, truthy object, etc.),
+     * this is treated as satisfying the predicate.
+     *
+     * @param null|callable(mixed):mixed $callback
+     */
+    public function filter(?callable $callback = null): Vector {}
+
+    public function jsonSerialize(): array {}
+}
+</code>
+
+===== Backward Incompatible Changes =====
+The class name ''\\Vector'' is now used by PHP, and it will be a compilation error to declare it in the global namespace since the class already exists.
+
+===== Proposed PHP Version(s) =====
+8.2
+
+===== RFC Impact =====
+==== To Opcache ====
+None
+
+===== Unaffected PHP Functionality =====
+PHP's type system remains unchanged (e.g. ''array'') - ''final class Vector'' is a class and instances are ordinary objects.
+
+===== Benchmarks =====
+
+This is a contrived benchmark for estimating the performance of building/reading variable-sized arrays of different sizes, when the final size would be unknown (it is known here).
+
+Read time is counted separately from create+destroy time. This is a total over all iterations, and the instrumentation adds to the time needed.
+
+''SplFixedArray'' doesn't have a push method (conceptually, it hasn't made sense for a data structure described as a fixed size array), and this benchmark would be faster if it did.
+''SplStack'' uses ''foreach'' for read benchmarking because the random access of ''SplStack'' is ''O(n)'' (linear time) in a linked list.
+
+''Vector'' is faster than the other object data structures currently available in the SPL.
+
+<code none>
+Results for php 8.2.0-dev debug=false with opcache enabled=true
+
+Appending to array:         n=       1 iterations= 8000000 memory=     376 bytes, create+destroy time=0.645 read time = 0.308 result=0
+Appending to Vector:        n=       1 iterations= 8000000 memory=     128 bytes, create+destroy time=1.003 read time = 0.355 result=0
+Appending to SplStack:      n=       1 iterations= 8000000 memory=     184 bytes, create+destroy time=1.737 read time = 0.742 result=0
+Appending to SplFixedArray: n=       1 iterations= 8000000 memory=      80 bytes, create+destroy time=1.810 read time = 0.428 result=0
+
+
+Appending to array:         n=       4 iterations= 2000000 memory=     376 bytes, create+destroy time=0.222 read time = 0.114 result=12000000
+Appending to Vector:        n=       4 iterations= 2000000 memory=     128 bytes, create+destroy time=0.323 read time = 0.164 result=12000000
+Appending to SplStack:      n=       4 iterations= 2000000 memory=     280 bytes, create+destroy time=0.739 read time = 0.301 result=12000000
+Appending to SplFixedArray: n=       4 iterations= 2000000 memory=     128 bytes, create+destroy time=1.164 read time = 0.233 result=12000000
+
+
+Appending to array:         n=       8 iterations= 1000000 memory=     376 bytes, create+destroy time=0.154 read time = 0.084 result=28000000
+Appending to Vector:        n=       8 iterations= 1000000 memory=     192 bytes, create+destroy time=0.227 read time = 0.148 result=28000000
+Appending to SplStack:      n=       8 iterations= 1000000 memory=     408 bytes, create+destroy time=0.530 read time = 0.240 result=28000000
+Appending to SplFixedArray: n=       8 iterations= 1000000 memory=     192 bytes, create+destroy time=1.026 read time = 0.205 result=28000000
+
+
+Appending to array:         n= 1048576 iterations=      20 memory=33558608 bytes, create+destroy time=0.699 read time = 0.151 result=10995105792000
+Appending to Vector:        n= 1048576 iterations=      20 memory=16777304 bytes, create+destroy time=0.483 read time = 0.271 result=10995105792000
+Appending to SplStack:      n= 1048576 iterations=      20 memory=33554584 bytes, create+destroy time=0.865 read time = 0.410 result=10995105792000
+Appending to SplFixedArray: n= 1048576 iterations=      20 memory=16777304 bytes, create+destroy time=2.431 read time = 0.404 result=10995105792000
+</code>
+
+<code php>
+<?php
+
+function bench_array(int $n, int $iterations) {
+    $totalReadTime = 0.0;
+    $startTime = hrtime(true);
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = [];
+        for ($i = 0; $i < $n; $i++) {
+            $values[] = $i;
+        }
+        $startReadTime = hrtime(true);
+        for ($i = 0; $i < $n; $i++) {
+            $total += $values[$i];
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to array:         n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+function bench_vector(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new Vector();
+        for ($i = 0; $i < $n; $i++) {
+            $values[] = $i;
+        }
+
+        $startReadTime = hrtime(true);
+        for ($i = 0; $i < $n; $i++) {
+            $total += $values[$i];
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to Vector:        n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+// SplStack is a subclass of SplDoublyLinkedList, so it is a linked list that takes more memory than needed.
+// Access to values in the middle of the SplStack is also less efficient.
+function bench_spl_stack(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new SplStack();
+        for ($i = 0; $i < $n; $i++) {
+            $values->push($i);
+        }
+        $startReadTime = hrtime(true);
+        // Random access is linear time in a linked list, so use foreach instead
+        foreach ($values as $value) {
+            $total += $value;
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to SplStack:      n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+function bench_spl_fixed_array(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new SplFixedArray();
+        for ($i = 0; $i < $n; $i++) {
+            // Imitate how push() would be implemented in a situation
+            // where the number of elements wasn't actually known ahead of time.
+            // erealloc() tends to extend the existing array when possible.
+            $size = $values->getSize();
+            $values->setSize($size + 1);
+            $values->offsetSet($size, $i);
+        }
+        $startReadTime = hrtime(true);
+        for ($i = 0; $i < $n; $i++) {
+            $total += $values[$i];
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to SplFixedArray: n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+$n = 2**20;
+$iterations = 10;
+$sizes = [
+    [1, 8000000],
+    [4, 2000000],
+    [8, 1000000],
+    [2**20, 20],
+];
+printf(
+    "Results for php %s debug=%s with opcache enabled=%s\n\n",
+    PHP_VERSION,
+    PHP_DEBUG ? 'true' : 'false',
+    json_encode(function_exists('opcache_get_status') && (opcache_get_status(false)['opcache_enabled'] ?? false))
+);
+
+foreach ($sizes as [$n, $iterations]) {
+    bench_array($n, $iterations);
+    bench_vector($n, $iterations);
+    bench_spl_stack($n, $iterations);
+    bench_spl_fixed_array($n, $iterations);
+    echo "\n";
+}
+</code>
+
+===== Future Scope =====
+In the future, additional methods may be added to ''\\Vector''
+
+===== Proposed Voting Choices =====
+Yes/No vote, requiring a 2/3 majority
+
+
+===== References =====
+
+- https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html
+
+===== Rejected Features =====
+
+==== Adding a native type instead (is_vec) ====
+
+<blockquote>
+Yes, sorry – Hack introduced the vec type (with value semantics) in 2016
+after they'd experimented first with Vector (object semantics). Use of
+Vector is now discouraged.
+
+Details here: https://github.com/facebook/hhvm/issues/6451
+
+FB/Hack appears to be in the multi-year process of moving all PHP arrays to
+one of [vec/dict/keyset]. *That's likely not an option for PHP itself,* but
+having the option of a vec equivalent (in this proposal "list") would
+make sense, I think.
+</blockquote>
+
+Adding a new type to php as a non-class is a massive undertaking for php-src itself and extension authors. It would not work with a lot of existing code that handled arrays and objects - I expect that ''is_vec'' would be a separate check from ''is_object'' and ''is_array'', etc. This is part of why PHP 8.1 enum classes are an object type rather than a distinct type
+
+See https://www.npopov.com/2015/05/05/Internal-value-representation-in-PHP-7-part-1.html for how php represents values internally.
+
+That would also require a lot more familiarity than I have with opcache and the JIT assembly compiler, and (I expect it would) be more controversial due to not working with existing code.
+For a language such as Hack where feature development is done by one company(Facebook), major language redesigns and breaking changes would be much easier than for PHP, with users/developers from many different backgrounds (and a focus on backward compatibility).
+Additionally, adding a class doesn't prevent adding a vec/list in the future - for example, HHVM has both vec and https://docs.hhvm.com/hack/reference/class/HH.Vector/ and ''HH\Vector'' remains usable, PHP has both array and ArrayObject, etc.
+
+Also, even if that were done, vec and array would be distinct types - a vec couldn't be passed to a parameter that expected an array reference (or returned in a return value), because later adding a string array key (in the parameter or return value) would be a runtime error.
