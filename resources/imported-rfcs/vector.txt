@@ -9,13 +9,21 @@
 ===== Introduction =====
 
 PHP's native ''array'' type is rare among programming language in that it is used as an associative map of values, but also needs to support lists of values.
-In order to support both use cases, additional memory is needed to track keys (around twice as much as is needed to just store the values, for non-reference counted values) (https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html).
-It would be useful to have an efficient variable-length container in the standard library to (1) guarantee to application authors that the values really are a list without gaps, (2) save memory in applications or libraries that may need to store many lists of values, and (3) provide an alternative to ''SplFixedArray'' that is variable sized.
+In order to support both use cases, additional memory is needed to track keys ([[https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html|around twice as much as is needed to just store the values]], for non-reference counted values) .
+
+
+It would be useful to have an efficient variable-length container in the standard library for the following reasons: 
+
+  - To guarantee to application authors that the values really are a list without gaps,
+  - To save memory in applications or libraries that may need to store many lists of values (both in userland and in native code written in php-src/PECLs), and
+  - To provide a better alternative to ''ArrayObject'' and ''SplFixedArray'' for use cases that require variable sized list collections that can be passed by value.
 
 ===== Proposal =====
-This proposes to add the class ''Vector'' to PHP.
+This proposes to add the class ''final class Vector'' to PHP.
 
 Similarly to vectors in other languages, this is backed by a memory-efficient representation (raw C array of values with a size and capacity) and provides constant amortized-time push/pop operations.
+
+Similarly to ''ArrayObject'', the ''$x[] = $value'' shorthand for appending to the Vector is supported in addition to ''ArrayAccess'' functionality.
 
 <code php>
 final class Vector implements IteratorAggregate, Countable, JsonSerializable, ArrayAccess
@@ -72,8 +80,43 @@ final class Vector implements IteratorAggregate, Countable, JsonSerializable, Ar
 }
 </code>
 
+===== Implementation Choices =====
+
+==== Global Namespace ====
+
+This maintains consistency with the namespace used for general-purpose collections already in the SPL (as well as relatively recent additions such as ''WeakReference'' and ''WeakMap''). Other recent additions to PHP such as ''ReflectionIntersectionType'' in PHP 8.1 have also continued to use the global namespace when adding classes with functionality related to other classes.
+
+==== Lack of Name Prefix ====
+
+    - Short names are more convenient to remember/use.
+    - Possible future additions such as a Deque/Queue based on a efficient C array representation rather than a linked list wouold conflict with existing Spl names such as ''SplQueue'', ''SplStack'', etc.
+
+==== Accepting an iterable ====
+
+This is similar to the way the existing classes ''ArrayObject::__construct'' and ''SplFixedArray::fromArray''.
+
+End users may be surprised if integer keys are not the same as the ones passed in by default (e.g. if keys were unset or inserted out of order), which is why ''$preserve_keys = true'' is the default.
+
+Unlike ''SplFixedArray'', this is not a fixed size, which is why this accepts an iterable instead of a size. Accepting a mix of different types (''iterable|int'') is not done because it would make code harder to reason about when types are missing or inaccurate.
+
+''setSize'' can be used to create a vector of a certain size after instantiating an empty vector. Array library helpers such as ''array_fill'' or ''range'' may also be useful.
+
+==== Final Class ====
+
+If this were extensible, this would have the following drawbacks
+
+    - Not have as strong guarantees to readers of code (or even opcache, if optimizations were added targeting opcache) that elements were actually a vector or that certain methods would/wouldn't throw certain exceptions.
+    - Require more memory and runtime checks to check if this was the original class or a subclass.
+    - [[https://bugs.php.net/search.php?search_for=SplFixedArray&boolean=0&limit=30&order_by=&direction=DESC&cmd=display&status=All&bug_type=All&project=All&php_os=&phpver=&cve_id=&assign=&author_email=&bug_age=0&bug_updated=0&commented_by=|Be more likely to have discovered or undiscovered bugs]] due to userland extensions of ''Vector''
+
+==== push/pop ====
+
+This is consistent with the name used for ''array_push()''/''array_pop()''
+
+Other naming choices were chosen to be consistent with existing functionality in ''SplFixedArray''/''ArrayObject'' where reasonable.
+
 ===== Backward Incompatible Changes =====
-The class name ''\Vector'' is now used by PHP, and it will be a compilation error to declare it in the global namespace since the class already exists.
+The class name ''\Vector'' is now used by PHP, and it will be a compilation error to declare classlikes of the same name in the global namespace since the class already exists.
 
 ===== Proposed PHP Version(s) =====
 8.2
@@ -87,7 +130,7 @@ PHP's type system remains unchanged (e.g. ''array'') - ''final class Vector'' is
 
 ===== Benchmarks =====
 
-This is a contrived benchmark for estimating the performance of building/reading variable-sized arrays of different sizes, when the final size would be unknown (it is known here).
+This is a contrived benchmark for estimating the performance of building/reading variable-sized arrays of different sizes, when the final size would be unknown on 64-bit PHP (it is known here).
 
 Read time is counted separately from create+destroy time. This is a total over all iterations, and the instrumentation adds to the time needed.
 
@@ -277,6 +320,8 @@ Yes/No vote, requiring a 2/3 majority
 
 ==== Adding a native type instead (is_vec) ====
 
+https://externals.io/message/109760#109812
+
 <blockquote>
 Yes, sorry – Hack introduced the vec type (with value semantics) in 2016
 after they'd experimented first with Vector (object semantics). Use of
@@ -294,8 +339,8 @@ Adding a new type to php as a non-class is a massive undertaking for php-src its
 
 See https://www.npopov.com/2015/05/05/Internal-value-representation-in-PHP-7-part-1.html for how php represents values internally.
 
-That would also require a lot more familiarity than I have with opcache and the JIT assembly compiler, and (I expect it would) be more controversial due to not working with existing code.
+That would also require a lot more familiarity than I have with opcache and the JIT assembly compiler, and I expect it would be more controversial due to not working with existing code.
 For a language such as Hack where feature development is done by one company(Facebook), major language redesigns and breaking changes would be much easier than for PHP, with users/developers from many different backgrounds (and a focus on backward compatibility).
 Additionally, adding a class doesn't prevent adding a vec/list in the future - for example, HHVM has both vec and https://docs.hhvm.com/hack/reference/class/HH.Vector/ and ''HH\Vector'' remains usable, PHP has both array and ArrayObject, etc.
 
-Also, even if that were done, vec and array would be distinct types - a vec couldn't be passed to a parameter that expected an array reference (or returned in a return value), because later adding a string array key (in the parameter or return value) would be a runtime error.
+Also, even if a type ''vec'' or ''array'' were added, ''vec'' and ''array'' would be distinct types - a vec couldn't be passed to a parameter that expected an array reference (or returned in a return value), because later adding a string array key (in the parameter or return value) would be a runtime error.
