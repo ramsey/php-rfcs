@@ -8,24 +8,30 @@
 
 ===== Introduction =====
 
-PHP's native ''array'' type is rare among programming language in that it is used as an associative map of values, but also needs to support lists of values.
-In order to support both use cases, additional memory is needed to track keys ([[https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html|around twice as much as is needed to just store the values]], for non-reference counted values) .
 
-Additionally, while it is possible to efficiently remove elements from the start of an ''array'' (in terms of insertion order), it is very inefficient to prepend elements to the start of a large ''array'' due to needing to either copy the array or move all elements in the internal array representation.
 
-While ''SplDoublyLinkedList'' and its subclass ''SplQueue''/''SplStack'' exists, it has several drawbacks:
+While ''SplDoublyLinkedList'' and its subclass ''SplQueue''/''SplStack'' exist in the SPL, they have several drawbacks (that are addressed by this RFC to add a ''Deque'' class):
 
     - ''SplDoublyLinkedList'' is internally represented by a doubly linked list, making it use roughly twice as much memory as the proposed ''Deque''
     - ''push''/''pop''/''unshift''/''shift'' from ''SplDoublyLinkedList'' are slower due to needing to allocate or free the linked list nodes.
     - Reading values in the middle of the ''SplDoublyLinkedList'' is proportional to the length of the list, due to needing to traverse the linked list nodes.
     - Iteration behavior cannot be understood without knowing what constructed the ''SplDoublyLinked'' instance or set the flags.
 
-It would be useful to have an efficient Deque container in the standard library for the following reasons: 
+It would be useful to have an efficient ''Deque'' container in the standard library to provide an alternative without those drawbacks, as well as for the following reasons: 
 
     - To save memory in applications or libraries that may need to store many lists of values or run for long periods of time. Notably, PHP's ''array'' type will never release allocated capacity - see https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html
-    - To provide a better alternative to ''SplDoublyLinkedList'' for use cases that require variable sized collections (For lists of values) that can be passed by value to be modified.
-    - As a more efficient option than ''array'' and ''SplDoublyLinkedList'' as a queue or ''Deque'', especially for ''unshift''
+    - To provide a better alternative to ''SplDoublyLinkedList'', ''SplStack'', and ''SplQueue'' for use cases that require stacks or queues.
+    - As a more efficient option than ''array'' and ''SplDoublyLinkedList'' as a queue or ''Deque'', especially for ''unshift''.
 
+A ''Deque'' is more efficient than an ''array'' when used as a queue, more readable, and easier to use correctly. While it is possible to efficiently remove elements from the start of an ''array'' (in terms of insertion order), it is very inefficient to prepend elements to the start of a large ''array'' due to needing to either copy the array or move all elements in the internal array representation, and an ''array'' would use much more memory than a ''Deque'' when used that way (and be slower).
+
+There are also several pitfalls to using an array as a queue for larger queue sizes, some of which are not obvious and discovered while writing the benchmarks. Having a better (double-ended) queue datastructure (''Deque'') would avoid these pitfalls:
+
+    - ''array_key_first()'' takes time proportional to the number of elements ''unset'' from the start of an array, causing it to unexpectedly be [[https://en.wikipedia.org/wiki/Time_complexity#Table_of_common_time_complexities|extremely slow (quadratic time)]] after unsetting many elements at the start of the queue. (when the array infrequently runs out of capacity, buckets are moved to the front)
+    - ''reset()'' or ''end()'' will convert a variable to a reference, and php is significantly less efficient at reading or writing to reference. Opcache is also less efficient at optimizing uses of variables using references.
+    - More obviously, ''array_unshift'' and ''array_shift'' will take time proportional to the number of elements in the array (to reindex and move existing/remaining elements).
+
+ 
 
 ===== Proposal =====
 This proposes to add the class ''final class Deque'' to PHP.
@@ -150,6 +156,7 @@ Even users that don't write code using ''Deque'' may still benefit from its incl
     - Faster than using array for queue-like workloads (e.g. around 13%-37% less time to add to the end and remove from the front depending on ''Deque'' size and access pattern)
     - It is impossible to prepend to an ''array'' (i.e. to be first in insertion order) in constant time. ''array_unshift'' takes time proportional to the length of an array.
     - ''Deque'' uses much less memory than an ''array'' when used as a queue, especially since that will eventually convert an array to an associative array. See https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html and benchmarks
+    - Modifying an object by value can be faster than modifying an array by reference. Sometime, it is necessary for a library to modify a passed in collection/array in place (e.g. as an internal implementation detail) (e.g. appending to a list of errors and returning a boolean, converting a binary tree to a list of nodes where some predicate applies). The only way for a method to modify a passed in array parameter is by reference, and opcache is not able to optimize reference parameters/variables because their type at runtime cannot be guaranteed, passing in an object by value can be much faster than passing an ''array'' by reference. \\ \\ (Other approaches may end up copying arrays repeatedly, and take quadratic time instead of linear time, causing performance issues for large inputs). \\ \\ (Right now, some libraries do pass arrays by reference, because of how inefficient ''SplDoublyLinkedList'' is expected to be to create, modify, and read)
 
 ===== Usage =====
 
