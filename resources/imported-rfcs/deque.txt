@@ -133,6 +133,8 @@ PHP's type system remains unchanged (e.g. ''array'') - ''final class Deque'' is 
 
 ===== Benchmarks =====
 
+==== Two cycles of appending n values then shifting them from the front ====
+
 Note that it is possible to have constant time removal from the front of a PHP ''array'' efficiently (as long as ''key'' stays at the front of the array), but it is not possible to have constant time prepending (`unshift`) to the front of an array. ''array_unshift'' is a linear time operation (takes time proportional to the current array size).
 So ''unshift'' is not included in these benchmarks.
 
@@ -184,6 +186,49 @@ Results for php 8.2.0-dev debug=false with opcache enabled=true
 => max memory=33554584 bytes, create+destroy time=1.627 shift time = 1.081 total time = 2.708 result=21990211584000
 </code>
 
+==== Only appending to a Deque and reading elements without removal ====
+
+Note that the proposed ''Deque'' as well as the existing ''SplDoublyLinkedList''/''SplStack'' are expected to perform equally well at shifting to (adding to) or unshifting from(removing from) the front of an array
+
+**For this benchmark, Deque can be created and read from faster than the fastest methods of reading ''SplStack'' or ''SplFixedArray''.**
+
+    * Note that a ''foreach'' is used instead of random access for ''SplStack'' - ''SplStack'' random access time is proportional to the number of linked list nodes that need to be iterated over to read a value.
+    * ''SplFixedArray'' would be faster to append to if it had a ''push()'' method, but there isn't one.
+
+Major notes:
+
+    * ''Deque'' and ''SplFixedArray'' use less memory than other available options.
+    * ''Deque'' is faster than object data structures currently available in the SPL.
+    * ''array'' is always faster at reading data but currently uses more memory.
+
+//(Note that this benchmarks will have to be redone for the time and ''array'' if other proposed optimizations to array succeed)//
+
+<code none>
+Results for php 8.2.0-dev debug=false with opcache enabled=true
+
+Appending to array:         n=       1 iterations= 8000000 memory=     376 bytes, create+destroy time=0.599 read time = 0.285 result=0
+Appending to Deque:         n=       1 iterations= 8000000 memory=     144 bytes, create+destroy time=0.957 read time = 0.337 result=0
+Appending to SplStack:      n=       1 iterations= 8000000 memory=     184 bytes, create+destroy time=1.614 read time = 0.696 result=0
+Appending to SplFixedArray: n=       1 iterations= 8000000 memory=      80 bytes, create+destroy time=1.685 read time = 0.392 result=0
+
+
+Appending to array:         n=       4 iterations= 2000000 memory=     376 bytes, create+destroy time=0.210 read time = 0.108 result=12000000
+Appending to Deque:         n=       4 iterations= 2000000 memory=     144 bytes, create+destroy time=0.309 read time = 0.169 result=12000000
+Appending to SplStack:      n=       4 iterations= 2000000 memory=     280 bytes, create+destroy time=0.669 read time = 0.283 result=12000000
+Appending to SplFixedArray: n=       4 iterations= 2000000 memory=     128 bytes, create+destroy time=1.063 read time = 0.209 result=12000000
+
+
+Appending to array:         n=       8 iterations= 1000000 memory=     376 bytes, create+destroy time=0.146 read time = 0.079 result=28000000
+Appending to Deque:         n=       8 iterations= 1000000 memory=     208 bytes, create+destroy time=0.210 read time = 0.143 result=28000000
+Appending to SplStack:      n=       8 iterations= 1000000 memory=     408 bytes, create+destroy time=0.483 read time = 0.224 result=28000000
+Appending to SplFixedArray: n=       8 iterations= 1000000 memory=     192 bytes, create+destroy time=0.955 read time = 0.183 result=28000000
+
+
+Appending to array:         n= 1048576 iterations=      20 memory=33558608 bytes, create+destroy time=0.713 read time = 0.146 result=10995105792000
+Appending to Deque:         n= 1048576 iterations=      20 memory=16777320 bytes, create+destroy time=0.454 read time = 0.263 result=10995105792000
+Appending to SplStack:      n= 1048576 iterations=      20 memory=33554584 bytes, create+destroy time=0.826 read time = 0.394 result=10995105792000
+Appending to SplFixedArray: n= 1048576 iterations=      20 memory=16777304 bytes, create+destroy time=2.369 read time = 0.358 result=10995105792000
+</code>
 ===== Future Scope =====
 If ''\Deque'' is added, there would be plenty of time for myself or others to propose additional methods before PHP 8.2's feature freeze (probably in July 2022)
 
@@ -206,6 +251,8 @@ https://externals.io/message/116048#116054
 ===== Appendix =====
 
 ==== Benchmark Source Code ====
+
+=== Benchmarking repeated push and shift operations ===
 
 <code php>
 <?php
@@ -331,6 +378,147 @@ foreach ($sizes as [$n, $iterations]) {
     bench_array($n, $iterations);
     bench_deque($n, $iterations);
     bench_spl_dll($n, $iterations);
+    echo "\n";
+}
+</code>
+
+=== Benchmarking only appending to a Deque and reading elements without removal ===
+
+<code php>
+<?php
+
+function bench_array(int $n, int $iterations) {
+    $totalReadTime = 0.0;
+    $startTime = hrtime(true);
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = [];
+        for ($i = 0; $i < $n; $i++) {
+            $values[] = $i;
+        }
+        $startReadTime = hrtime(true);
+        for ($i = 0; $i < $n; $i++) {
+            $total += $values[$i];
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to array:         n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+function bench_deque(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new Deque();
+        for ($i = 0; $i < $n; $i++) {
+            $values[] = $i;
+        }
+
+        $startReadTime = hrtime(true);
+        for ($i = 0; $i < $n; $i++) {
+            $total += $values[$i];
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to Deque:         n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+// SplStack is a subclass of SplDoublyLinkedList, so it is a linked list that takes more memory than needed.
+// Access to values in the middle of the SplStack is also less efficient.
+function bench_spl_stack(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new SplStack();
+        for ($i = 0; $i < $n; $i++) {
+            $values->push($i);
+        }
+        $startReadTime = hrtime(true);
+        // Random access is linear time in a linked list, so use foreach instead
+        foreach ($values as $value) {
+            $total += $value;
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to SplStack:      n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+function bench_spl_fixed_array(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new SplFixedArray();
+        for ($i = 0; $i < $n; $i++) {
+            // Imitate how push() would be implemented in a situation
+            // where the number of elements wasn't actually known ahead of time.
+            // erealloc() tends to extend the existing array when possible.
+            $size = $values->getSize();
+            $values->setSize($size + 1);
+            $values->offsetSet($size, $i);
+        }
+        $startReadTime = hrtime(true);
+        for ($i = 0; $i < $n; $i++) {
+            $total += $values[$i];
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to SplFixedArray: n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+$n = 2**20;
+$iterations = 10;
+$sizes = [
+    [1, 8000000],
+    [4, 2000000],
+    [8, 1000000],
+    [2**20, 20],
+];
+printf(
+    "Results for php %s debug=%s with opcache enabled=%s\n\n",
+    PHP_VERSION,
+    PHP_DEBUG ? 'true' : 'false',
+    json_encode(function_exists('opcache_get_status') && (opcache_get_status(false)['opcache_enabled'] ?? false))
+);
+
+foreach ($sizes as [$n, $iterations]) {
+    bench_array($n, $iterations);
+    bench_deque($n, $iterations);
+    bench_spl_stack($n, $iterations);
+    bench_spl_fixed_array($n, $iterations);
     echo "\n";
 }
 </code>
