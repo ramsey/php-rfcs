@@ -1,0 +1,124 @@
+====== PHP RFC: final class Deque ======
+  * Version: 0.1
+  * Date: 2021-09-16
+  * Author: Tyson Andre, tandre@php.net
+  * Status: Draft
+  * Implementation: https://github.com/php/php-src/pull/7500
+  * First Published at: http://wiki.php.net/rfc/deque
+
+===== Introduction =====
+
+PHP's native ''array'' type is rare among programming language in that it is used as an associative map of values, but also needs to support lists of values.
+In order to support both use cases, additional memory is needed to track keys ([[https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html|around twice as much as is needed to just store the values]], for non-reference counted values) .
+
+Additionally, while it is possible to efficiently remove elements from the start of an ''array'' (in terms of insertion order), it is very inefficient to prepend elements to the start of a large ''array'' due to needing to either copy the array or move all elements in the internal array representation.
+
+While ''SplDoublyLinkedList'' and its subclass ''SplQueue''/''SplStack'' exists, it has several drawbacks:
+
+    - ''SplDoublyLinkedList'' is internally represented by a doubly linked list, making it use roughly twice as much memory as the proposed ''Deque''
+    - ''push''/''pop''/''unshift''/''shift'' from ''SplDoublyLinkedList'' are slower due to needing to allocate or free the linked list nodes.
+    - Reading values in the middle of the ''SplDoublyLinkedList'' is proportional to the length of the list, due to needing to traverse the linked list nodes.
+    - Iteration behavior cannot be understood without knowing what constructed the ''SplDoublyLinked'' instance or set the flags.
+
+It would be useful to have an efficient Deque container in the standard library for the following reasons: 
+
+    - To save memory in applications or libraries that may need to store many lists of values or run for long periods of time. Notably, PHP's ''array'' type will never release allocated capacity - see https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html
+    - To provide a better alternative to ''SplDoublyLinkedList'' for use cases that require variable sized collections (For lists of values) that can be passed by value to be modified.
+    - As a more efficient option than ''array'' and ''SplDoublyLinkedList'' as a queue or ''Deque'', especially for ''unshift''
+
+
+===== Proposal =====
+This proposes to add the class ''final class Deque'' to PHP.
+
+Similarly to deques in other languages, this is backed by a memory-efficient representation with good cache locality and provides constant amortized-time push/pop/shift/unshift operations. (this implementation is a circular buffer represented as a raw C array of values with a size, offset, and capacity)
+
+This reclaims memory that is no longer used  (when less than a quarter of the capacity is used), unlike ''array''
+
+Similarly to ''ArrayObject'' and ''SplDoublyLinkedList'', the ''$x[] = $value'' shorthand for appending to the ''Deque'' is supported in addition to ''ArrayAccess'' functionality.
+
+<code php>
+
+</code>
+
+
+===== Arguments for using this =====
+
+==== Why use this instead of SplDoublyLinkedList ====
+
+    - Pushing/popping/shifting/unshifting takes roughly 30% less time.
+    - ''Deque'' typically uses less memory than ''SplDoublyLinkedList''.
+    - Iteration order is predictable, unlike ''SplDoublyLinkedList'', where it can be modified with flags
+
+==== Why use this instead of array ====
+
+    - Faster than using array for queue-like workloads (around 13%-37% less time depending on ''Deque'' size and access pattern)
+    - It is impossible to prepend to an ''array'' (i.e. to be first in insertion order) in constant time. ''array_unshift'' takes time proportional to the length of an array.
+    - ''Deque'' uses much less memory than an ''array'' when used as a queue, especially since that will eventually convert an array to an associative array. See https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html and benchmarks
+
+===== Implementation Choices =====
+
+==== Global Namespace ====
+
+This maintains consistency with the namespace used for general-purpose collections already in the SPL (as well as relatively recent additions such as ''WeakReference'' and ''WeakMap''). Other recent additions to PHP such as ''ReflectionIntersectionType'' in PHP 8.1 have also continued to use the global namespace when adding classes with functionality related to other classes.
+
+==== Lack of Name Prefix ====
+
+    - Short names are more convenient to remember/use.
+    - Possible future additions such as a ''Queue''/''Stack'' based on a efficient C array representation rather than a linked list would conflict with existing Spl names such as ''SplQueue'', ''SplStack'', etc.
+    - There is already an addition to the spl without a prefix - ''ArrayObject''. Because ''array'' was already a type its name could not reasonably be any shorter.
+
+==== Accepting an iterable ====
+
+This accepts the values of the iterable in the order of iteration. Keys of the ''iterable'' are ignored (or a ''Deque'', adding placeholders would not make sense if there were gaps in the array.)
+
+End users may be surprised if integer keys are not the same as the ones passed in by default (e.g. if keys were unset or inserted out of order), which is why ''$preserve_keys = true'' is the default.
+
+==== Final Class ====
+
+If this were extensible, this would have the following drawbacks
+
+    - Not have as strong guarantees to readers of code (or even opcache, if optimizations were added targeting opcache) that elements were actually a vector or that certain methods would/wouldn't throw certain exceptions, or that iteration would be possible.
+    - Require more memory and runtime checks to check if this was the original class or a subclass when fetching a value
+    - [[https://bugs.php.net/search.php?search_for=SplFixedArray&boolean=0&limit=30&order_by=&direction=DESC&cmd=display&status=All&bug_type=All&project=All&php_os=&phpver=&cve_id=&assign=&author_email=&bug_age=0&bug_updated=0&commented_by=|Be more likely to have discovered or undiscovered bugs]] due to userland extensions of ''Deque''
+
+==== push/pop/shift/unshift (and top()/bottom()) ====
+
+This is consistent with the name used for ''array_push()''/''array_pop()''/''array_shift()''/''array_unshift()'', as well as names used for ''DoublyLinkedList''
+
+===== Backward Incompatible Changes =====
+The class name ''\Deque'' is now used by PHP, and it will be a compilation error to declare classlikes of the same name in the global namespace since the class already exists.
+
+===== Proposed PHP Version(s) =====
+8.2
+
+===== RFC Impact =====
+==== To Opcache ====
+None
+
+===== Unaffected PHP Functionality =====
+PHP's type system remains unchanged (e.g. ''array'') - ''final class Deque'' is a class and instances are ordinary objects.
+
+===== Benchmarks =====
+
+TODO
+
+
+===== Future Scope =====
+If ''\Deque'' is added, there would be plenty of time for myself or others to propose additional methods before PHP 8.2's feature freeze (probably in July 2022)
+
+Future additions to https://github.com/TysonAndre/pecl-teds that are general purpose enough may be possible as well.
+
+===== Proposed Voting Choices =====
+Yes/No vote, requiring a 2/3 majority
+
+===== References =====
+
+- https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html
+- https://github.com/TysonAndre/pecl-teds (implementations of multiple data structures, including ''Teds\Deque'', based originally on the ''SplFixedArray'' documentation and my past RFCs)
+- https://externals.io/message/112639#112641
+
+===== Rejected Features =====
+
+==== Why not use php-ds instead? ====
+
+https://externals.io/message/116048#116054
