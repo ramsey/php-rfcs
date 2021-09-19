@@ -36,10 +36,6 @@ This reclaims memory that is no longer used  (when less than a quarter of the ca
 
 Similarly to ''ArrayObject'' and ''SplDoublyLinkedList'', the ''$x[] = $value'' shorthand for appending to the ''Deque'' is supported in addition to ''ArrayAccess'' functionality.
 
-<code php>
-
-</code>
-
 
 ===== Arguments for using this =====
 
@@ -47,11 +43,12 @@ Similarly to ''ArrayObject'' and ''SplDoublyLinkedList'', the ''$x[] = $value'' 
 
     - Pushing/popping/shifting/unshifting takes roughly 30% less time.
     - ''Deque'' typically uses less memory than ''SplDoublyLinkedList''.
-    - Iteration order is predictable, unlike ''SplDoublyLinkedList'', where it can be modified with flags
+    - The iteration order is predictable, unlike ''SplDoublyLinkedList'', where it can be modified with flags
+    - Constant-time access for reading or modifying elements at any position in the ''Deque'', unlike ''SplDoublyLinkedList'' where that would require walking the linked list.
 
 ==== Why use this instead of array ====
 
-    - Faster than using array for queue-like workloads (around 13%-37% less time depending on ''Deque'' size and access pattern)
+    - Faster than using array for queue-like workloads (e.g. around 13%-37% less time to add to the end and remove from the front depending on ''Deque'' size and access pattern)
     - It is impossible to prepend to an ''array'' (i.e. to be first in insertion order) in constant time. ''array_unshift'' takes time proportional to the length of an array.
     - ''Deque'' uses much less memory than an ''array'' when used as a queue, especially since that will eventually convert an array to an associative array. See https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html and benchmarks
 
@@ -66,10 +63,12 @@ This maintains consistency with the namespace used for general-purpose collectio
     - Short names are more convenient to remember/use.
     - Possible future additions such as a ''Queue''/''Stack'' based on a efficient C array representation rather than a linked list would conflict with existing Spl names such as ''SplQueue'', ''SplStack'', etc.
     - There is already an addition to the spl without a prefix - ''ArrayObject''. Because ''array'' was already a type its name could not reasonably be any shorter.
+    - Functionality has been historically moved from the ''spl'' to core in the past, e.g. ''Iterator'' started out in ''spl''.
+    - New generic data structures that are always enabled have not had the ''Spl'' prefix, e.g. https://www.php.net/WeakMap is a recent addition that is final and not prefixed.
 
 ==== Accepting an iterable ====
 
-This accepts the values of the iterable in the order of iteration. Keys of the ''iterable'' are ignored (or a ''Deque'', adding placeholders would not make sense if there were gaps in the array.)
+This accepts the values of the iterable in the order of iteration. Keys of the ''iterable'' are ignored (Because this is meant to be a double-ended queue, adding placeholders would not make sense if there were gaps in the array.)
 
 End users may be surprised if integer keys are not the same as the ones passed in by default (e.g. if keys were unset or inserted out of order), which is why ''$preserve_keys = true'' is the default.
 
@@ -100,8 +99,56 @@ PHP's type system remains unchanged (e.g. ''array'') - ''final class Deque'' is 
 
 ===== Benchmarks =====
 
-TODO
+Note that it is possible to have constant time removal from the front of a PHP ''array'' efficiently (as long as ''key'' stays at the front of the array), but it is not possible to have constant time prepending (`unshift`) to the front of an array. ''array_unshift'' is a linear time operation (takes time proportional to the current array size).
+So ''unshift'' is not included in these benchmarks.
 
+Because there's a second cycle in this benchmark, array becomes an associative array and uses more memory than a packed array (https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html). (At the time of writing, a packed array uses double the memory of a ''Deque'', though there is an unrelated change in review proposing reducing the memory usage of packed arrays). 
+
+memory_get_usage is not counting the memory overhead of tracking the allocations of a lot of small objects, so the memory usage of ''SplDoublyLinkedList'' is under-reported. ''SplQueue'' is a subclass of ''SplDoublyLinkedList'' and I expect it would have the same performance.
+
+''Deque'' and ''array'' both always capacities that are powers of 2. This benchmark tests the best-case memory usage for ''Deque'' and ''array''
+
+**''Deque'' is faster than ''SplDoublyLinkedList'' at all sizes, and faster than ''array'' at medium and large sizes. The maximum memory usage is also noticeably lower than both ''array'' and ''SplDoublyLinkedList''**
+
+<code none>
+Test creating a collection, then two cycles of push+shift (adding n values to the end of collections then shifting all of them from front of collection)
+Results for php 8.2.0-dev debug=false with opcache enabled=true
+
+2x Push then shift from array:               n=       1 iterations= 8000000
+=> max memory=     376 bytes, create+destroy time=1.115 shift time = 1.008 total time = 2.123 result=0
+2x Push then shift from Deque:               n=       1 iterations= 8000000
+=> max memory=     144 bytes, create+destroy time=1.584 shift time = 0.844 total time = 2.428 result=0
+2x Push then shift from SplDoublyLinkedList: n=       1 iterations= 8000000
+=> max memory=     184 bytes, create+destroy time=2.055 shift time = 0.941 total time = 2.996 result=0
+
+2x Push then shift from array:               n=       4 iterations= 2000000
+=> max memory=     376 bytes, create+destroy time=0.413 shift time = 0.681 total time = 1.094 result=24000000
+2x Push then shift from Deque:               n=       4 iterations= 2000000
+=> max memory=     144 bytes, create+destroy time=0.522 shift time = 0.444 total time = 0.966 result=24000000
+2x Push then shift from SplDoublyLinkedList: n=       4 iterations= 2000000
+=> max memory=     280 bytes, create+destroy time=1.033 shift time = 0.511 total time = 1.544 result=24000000
+
+2x Push then shift from array:               n=       8 iterations= 1000000
+=> max memory=     376 bytes, create+destroy time=0.307 shift time = 0.621 total time = 0.928 result=56000000
+2x Push then shift from Deque:               n=       8 iterations= 1000000
+=> max memory=     208 bytes, create+destroy time=0.388 shift time = 0.438 total time = 0.825 result=56000000
+2x Push then shift from SplDoublyLinkedList: n=       8 iterations= 1000000
+=> max memory=     408 bytes, create+destroy time=0.799 shift time = 0.480 total time = 1.278 result=56000000
+
+2x Push then shift from array:               n=    1024 iterations=   20000
+=> max memory=   41016 bytes, create+destroy time=0.452 shift time = 1.445 total time = 1.897 result=20951040000
+2x Push then shift from Deque:               n=    1024 iterations=   20000
+=> max memory=   16464 bytes, create+destroy time=0.408 shift time = 0.803 total time = 1.211 result=20951040000
+2x Push then shift from SplDoublyLinkedList: n=    1024 iterations=   20000
+=> max memory=   32920 bytes, create+destroy time=1.432 shift time = 0.945 total time = 2.377 result=20951040000
+
+2x Push then shift from array:               n= 1048576 iterations=      20
+=> max memory=41943120 bytes, create+destroy time=1.166 shift time = 1.499 total time = 2.665 result=21990211584000
+2x Push then shift from Deque:               n= 1048576 iterations=      20
+=> max memory=16777320 bytes, create+destroy time=0.830 shift time = 0.912 total time = 1.742 result=21990211584000
+2x Push then shift from SplDoublyLinkedList: n= 1048576 iterations=      20
+=> max memory=33554584 bytes, create+destroy time=1.627 shift time = 1.081 total time = 2.708 result=21990211584000
+</code>
 
 ===== Future Scope =====
 If ''\Deque'' is added, there would be plenty of time for myself or others to propose additional methods before PHP 8.2's feature freeze (probably in July 2022)
@@ -122,3 +169,135 @@ Yes/No vote, requiring a 2/3 majority
 ==== Why not use php-ds instead? ====
 
 https://externals.io/message/116048#116054
+
+===== Appendix =====
+
+==== Benchmark Source Code ====
+
+<code php>
+<?php
+
+const PUSH_SHIFT_CYCLES = 2;
+
+function bench_array(int $n, int $iterations) {
+    $totalReadTime = 0.0;
+    $startTime = hrtime(true);
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = [];
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                $values[] = $i;
+            }
+            $maxMemory = memory_get_usage();
+            $startReadTime = hrtime(true);
+            while (count($values) > 0) {
+                // Pretend we don't know the actual position of the first array key for this simulated benchmark
+                // array_shift is not used because it is linear time (to move all other elements)
+                // rather than constant time.
+                //
+                // This approach is simple at the cost of memory - it converts a packed array to a non-packed array
+                // NOTE: Adding a call to reset() is not necessary in this case, and would result in worse performance.
+                // NOTE: array_key_first results in quadratic performance for this synthetic benchmark.
+                // $key = array_key_first($values);
+                $key = key($values);
+                $total += $values[$key];
+                unset($values[$key]);
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+
+        unset($values);
+    }
+    $endTime = hrtime(true);
+
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Push then shift from array:               n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+function bench_deque(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new Deque();
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                $values[] = $i;
+            }
+            $maxMemory = memory_get_usage();
+
+            $startReadTime = hrtime(true);
+            while (count($values) > 0) {
+                $total += $values->shift();
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Push then shift from Deque:               n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+// SplDoublyLinkedList is a linked list that takes more memory than needed.
+// Access to values in the middle of the SplDoublyLinkedList is also less efficient.
+function bench_spl_dll(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new SplDoublyLinkedList();
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                $values->push($i);
+            }
+            $maxMemory = memory_get_usage();
+            $startReadTime = hrtime(true);
+            // Random access is linear time in a linked list, so use foreach instead
+            while (count($values) > 0) {
+                $total += $values->shift();
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Push then shift from SplDoublyLinkedList: n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+$n = 2**20;
+$iterations = 10;
+$sizes = [
+    [1, 8000000],
+    [4, 2000000],
+    [8, 1000000],
+    [1024, 20000],
+    [2**20, 20],
+];
+echo "Test creating a collection, then two cycles of push+shift (adding n values to the end of collections then shifting all of them from front of collection)\n";
+printf(
+    "Results for php %s debug=%s with opcache enabled=%s\n\n",
+    PHP_VERSION,
+    PHP_DEBUG ? 'true' : 'false',
+    json_encode(function_exists('opcache_get_status') && (opcache_get_status(false)['opcache_enabled'] ?? false))
+);
+
+foreach ($sizes as [$n, $iterations]) {
+    bench_array($n, $iterations);
+    bench_deque($n, $iterations);
+    bench_spl_dll($n, $iterations);
+    echo "\n";
+}
+</code>
