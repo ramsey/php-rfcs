@@ -1,0 +1,736 @@
+====== PHP RFC: final class Deque ======
+  * Version: 0.2
+  * Date: 2021-09-16
+  * Author: Tyson Andre, tandre@php.net
+  * Status: Under discussion
+  * Implementation: https://github.com/php/php-src/pull/7500
+  * First Published at: http://wiki.php.net/rfc/deque
+
+===== Introduction =====
+
+
+
+While ''SplDoublyLinkedList'' and its subclass ''SplQueue''/''SplStack'' exist in the SPL, they have several drawbacks (that are addressed by this RFC to add a ''Deque'' class):
+
+    - ''SplDoublyLinkedList'' is internally represented by a doubly linked list, making it use roughly twice as much memory as the proposed ''Deque''
+    - ''push''/''pop''/''unshift''/''shift'' from ''SplDoublyLinkedList'' are slower due to needing to allocate or free the linked list nodes.
+    - Reading values in the middle of the ''SplDoublyLinkedList'' is proportional to the length of the list, due to needing to traverse the linked list nodes.
+    - ''foreach'' iteration behavior cannot be understood without knowing what most recently constructed the ''SplDoublyLinkedList'' instance or set the flags.
+
+It would be useful to have an efficient ''Deque'' container in the standard library to provide an alternative without those drawbacks, as well as for the following reasons: 
+
+    - To save memory in applications or libraries that may need to store many lists of values or run for long periods of time. Notably, PHP's ''array'' type will never release allocated capacity - see https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html
+    - To provide a better alternative to ''SplDoublyLinkedList'', ''SplStack'', and ''SplQueue'' for use cases that require stacks or queues.
+    - As a more efficient option than ''array'' and ''SplDoublyLinkedList'' as a queue or ''Deque'', especially for ''unshift''.
+
+A ''Deque'' is more efficient than an ''array'' when used as a queue, more readable, and easier to use correctly. While it is possible to efficiently remove elements from the start of an ''array'' (in terms of insertion order), it is very inefficient to prepend elements to the start of a large ''array'' due to needing to either copy the array or move all elements in the internal array representation, and an ''array'' would use much more memory than a ''Deque'' when used that way (and be slower).
+
+There are also several pitfalls to using an array as a queue for larger queue sizes,
+some of which are not obvious and discovered while writing the benchmarks.
+(Having a better (double-ended) queue datastructure (''Deque'') than the ''SplDoublyLinkedList''
+would save users from needing to write code with these pitfalls):
+
+    - ''array_key_first()'' takes time proportional to the number of elements ''unset'' from the start of an array, causing it to unexpectedly be [[https://en.wikipedia.org/wiki/Time_complexity#Table_of_common_time_complexities|extremely slow (quadratic time)]] after unsetting many elements at the start of the queue. (when the array infrequently runs out of capacity, buckets are moved to the front)
+    - ''reset()'' or ''end()'' will convert a variable to a reference, and php is significantly less efficient at reading or writing to reference. Opcache is also less efficient at optimizing uses of variables using references.
+    - More obviously, ''array_unshift'' and ''array_shift'' will take time proportional to the number of elements in the array (to reindex and move existing/remaining elements).
+
+ 
+
+===== Proposal =====
+This proposes to add the class ''final class Deque'' to PHP. From [[https://en.m.wikipedia.org/wiki/Double-ended_queue|the Wikipedia article for the Double-Ended Queue]]:
+
+<blockquote>
+In computer science, a **double-ended queue** (abbreviated to **deque**, pronounced deck, like "cheque") is an abstract data type that generalizes a queue, for which elements can be added to or removed from either the front (head) or back (tail).
+
+(omitted sections, see article)
+
+The dynamic array approach uses a variant of a dynamic array that can grow from both ends, sometimes called array deques. These array deques **have all the properties of a dynamic array,** such as constant-time random access, good [[https://en.m.wikipedia.org/wiki/Locality_of_reference|locality of reference]], and inefficient insertion/removal in the middle, **with the addition of amortized constant-time insertion/removal at both ends, instead of just one end.** Three common implementations include:
+
+    - Storing deque contents in a circular buffer, and only resizing when the buffer becomes full. This decreases the frequency of resizings.
+    - (omitted, see article)
+</blockquote>
+
+Similarly to deques in other languages (such as [[https://docs.python.org/3/library/collections.html#deque-objects|Python collections.deque), [[https://cplusplus.com/reference/deque/deque/|C++ std::deque]], [[https://doc.rust-lang.org/std/collections/struct.VecDeque.html|Rust std::collections::VecDeque]], etc.) this is backed by a memory-efficient representation with good cache locality and provides constant amortized-time push/pop/shift/unshift operations. (this RFC's implementation is a circular buffer represented as a raw C array of values with a size, offset, and capacity)
+
+This reclaims memory that is no longer used  (when less than a quarter of the capacity is used), unlike ''array''
+
+Similarly to ''ArrayObject'' and ''SplDoublyLinkedList'', the ''$x[] = $value'' shorthand for appending to the ''Deque'' is supported in addition to ''ArrayAccess'' functionality.
+
+The proposed API is:
+
+<code php>
+/**
+ * A double-ended queue represented internally as a circular buffer.
+ * This has much lower memory usage than SplDoublyLinkedList or its subclasses (SplStack, SplStack),
+ * and operations are significantly faster than SplDoublyLinkedList.
+ *
+ * This supports amortized constant time pushing and popping onto the front or back of the array.
+ *
+ * Naming is based on https://www.php.net/spldoublylinkedlist
+ * and on array_push/pop/unshift/shift.
+ */
+final class Deque implements IteratorAggregate, Countable, JsonSerializable, ArrayAccess
+{
+    /** Construct the Deque from the values of the Traversable/array, ignoring keys */
+    public function __construct(iterable $iterator = []) {}
+    /**
+     * The final version of getIterator will iterate over a copy of the Deque's values
+     * taken at the time getIterator was called.
+     * The iteration keys will be the offsets of the copy(0, 1, ...),
+     * and the values will be the values from front to back.
+     *
+     * i.e. `foreach($deque as $k => $v)` and `foreach($deque->toArray() as $k => $v)`
+     * will iterate over the same elements.
+     *
+     * This will be done to avoid surprises in case pushFront/popFront/clear are called.
+     *
+     * To access the current version of the Deque without making a copy,
+     * use `for ($i = 0; $i < count($deque); $i++) { process($deque[$i]); }`.
+     */
+    public function getIterator(): InternalIterator {}
+    /** Returns the number of elements in the Deque. */
+    public function count(): int {}
+    /** Returns true if there are 0 elements in the Deque. */
+    public function isEmpty(): bool {}
+    /** Removes all elements from the Deque. */
+    public function clear(): void {}
+
+    public function __serialize(): array {}
+    public function __unserialize(array $data): void {}
+    /** Construct the Deque from the values of the array, ignoring keys */
+    public static function __set_state(array $array): Deque {}
+
+    /** Appends a value to the end of the Deque. */
+    public function push(mixed $value): void {}
+    /** Prepends a value to the start of the Deque. */
+    public function unshift(mixed $value): void {}
+    /** Pops a value from the end of the Deque. */
+    public function pop(): mixed {}
+    /** Shifts a value from the front of the Deque. */
+    public function shift(): mixed {}
+
+    /** Peeks at the value at the start of the Deque, throws if empty */
+    public function bottom(): mixed {}
+    /** Peeks at the value at the end of the Deque, throws if empty */
+    public function top(): mixed {}
+
+    /** Returns a list of the elements from front to back. */
+    public function toArray(): array {}
+    /* Get and set are strictly typed, unlike offsetGet/offsetSet. */
+    public function get(int $offset): mixed {}
+    public function set(int $offset, mixed $value): void {}
+    // Must be mixed for compatibility with ArrayAccess
+    public function offsetGet(mixed $offset): mixed {}
+    public function offsetExists(mixed $offset): bool {}
+    public function offsetSet(mixed $offset, mixed $value): void {}
+    /** Throws unconditionally */
+    public function offsetUnset(mixed $offset): void {}
+
+    /** This is JSON serialized as a JSON array with elements from front to back */
+    public function jsonSerialize(): array {}
+}
+</code>
+ 
+===== Arguments for using this =====
+
+==== What applications would benefit from Deque? ====
+
+As mentioned in [[https://en.wikipedia.org/wiki/Queue_(abstract_data_type)]]
+
+<blockquote>
+Queues provide services in computer science, transport, and operations research where various entities such as data, objects, persons, or events are stored and held to be processed later. In these contexts, the queue performs the function of a [[https://en.wikipedia.org/wiki/Buffer_(computer_science)|buffer]]. Another usage of queues is in the implementation of [[https://en.wikipedia.org/wiki/Breadth-first_search|breadth-first search]].
+</blockquote>
+
+Some examples of how queues are used in php applications and libraries are below:
+
+    - **Composer**: https://github.com/composer/composer/blob/2.1.8/src/Composer/DependencyResolver/RuleSetGenerator.php#L157-L203 uses a ''SplQueue'' internally as a work queue in its dependency resolution logic.
+    - **Event-Driven frameworks**: https://github.com/reactphp/event-loop/blob/v1.2.0/src/Tick/FutureTickQueue.php uses ''SplQueue'' internally to hold callback functions to call later in the order they were added.
+    - **Networking code**: [[https://github.com/predis/predis|Predis]], a userland client for the Redis database, currently uses SplQueue to [[https://en.wikipedia.org/wiki/Protocol_pipelining|build a pipeline of commands and associate pipelined outgoing requests with their incoming responses]] in the order the requests were sent. https://github.com/predis/predis/blob/v1.1.7/src/Pipeline/Pipeline.php#L121-L150
+
+Once applications and libraries such as those were able to use ''Deque'' (e.g. when the minimum PHP version requirement was raised), they would benefit from the speedup and reduced memory that ''Deque'' has over ''SplDoublyLinkedList''/''SplQueue''.
+
+Looking at the [[#benchmarks]] section, ''SplQueue''(and the parent class ''SplDoublyLinkedList'') is typically slower than ''array'' (though ''array'' has higher reported memory usage). By introducing a data structure ''Deque'' that's even faster and more memory usage than an ''array'' for use as a double-ended queue, even more applications would benefit from it.
+
+    * Additionally, ''Deque'' would allow some code to be refactored or written in a more readable way in cases where php developers would previously be avoiding using ''SplDoublyLinkedList'' (or ''SplStack''/''SplQueue'') due to older datastructures having time and memory usage inefficiencies.
+
+
+https://www.php.net/manual/en/class.splqueue.php#116422 is another example
+
+<blockquote>
+You can use shift/unshift and push/pop to dequeue/undequeue and queue/unqueue respectively. Really handy for those applications that use sockets where you might not know you can't send data until you attempt to.
+
+for example, this is a function for an application that will un-dequeue the remainder of the data if socket_write indicated it did not write the entire contents of the provided data.
+
+(omitted code snippet from https://www.php.net/manual/en/class.splqueue.php#116422)
+</blockquote>
+
+Even users that don't write code using ''Deque'' may still benefit from its inclusion, due to improved performance and reduced memory usage in the applications and libraries that do adopt it.
+
+==== Why use this instead of SplDoublyLinkedList? ====
+
+    - Pushing/popping/shifting/unshifting takes roughly 30% less time.
+    - ''Deque'' typically uses less memory than ''SplDoublyLinkedList''.
+    - The iteration order is predictable, unlike ''SplDoublyLinkedList'', where it can be modified with flags
+    - Constant-time access for reading or modifying elements at any position in the ''Deque'', unlike ''SplDoublyLinkedList'' where that would require walking the linked list.
+
+==== Why use this instead of array? ====
+
+    - Faster than using array for queue-like workloads (e.g. around 13%-37% less time to add to the end and remove from the front depending on ''Deque'' size and access pattern)
+    - It is impossible to prepend to an ''array'' (i.e. to be first in insertion order) in constant time. ''array_unshift'' takes time proportional to the length of an array.
+    - ''Deque'' uses much less memory than an ''array'' when used as a queue, especially since that will eventually convert an array to an associative array. See https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html and benchmarks
+    - Modifying an object by value can be faster than modifying an array by reference. Sometime, it is necessary for a library to modify a passed in collection/array in place (e.g. as an internal implementation detail) (e.g. appending to a list of errors and returning a boolean, converting a binary tree to a list of nodes where some predicate applies). The only way for a method to modify a passed in array parameter is by reference, and opcache is not able to optimize reference parameters/variables because their type at runtime cannot be guaranteed, passing in an object by value can be much faster than passing an ''array'' by reference. \\ \\ (Other approaches may end up copying arrays repeatedly, and take quadratic time instead of linear time, causing performance issues for large inputs). \\ \\ (Right now, some libraries do pass arrays by reference, because of how inefficient ''SplDoublyLinkedList'' is expected to be to create, modify, and read)
+
+Also see [[#introduction|the RFC introduction]] for pitfalls with trying to use a PHP ''array'' like a queue.
+
+===== Usage =====
+
+Examples of how each of these methods in ''Deque'' can be used can be found at https://www.php.net/spldoublylinkedlist - in most cases this can be used as a substitute for ''SplDoublyLinkedList''.
+
+See [[#implementation|Implementation]] for the public API of ''Deque''.
+ 
+===== Implementation Choices =====
+
+==== Global Namespace ====
+
+This maintains consistency with the namespace used for general-purpose collections already in the SPL (as well as relatively recent additions such as ''WeakReference'' (PHP 7.4) and ''WeakMap'' (PHP 8.0)). Other recent additions to PHP such as ''ReflectionIntersectionType'' in PHP 8.1 have also continued to use the global namespace when adding classes with functionality related to other classes.
+
+Additionally, prior polls for namespacing choices of other datastructure functionality showed preferences for namespacing and not namespacing were evenly split [[rfc:cachediterable_straw_poll#namespace_choices|in a straw poll for a new iterable type]].
+
+Introducing a new namespace for data structures would also raise the question of whether existing datastructures should be moved to that new namespace (for consistency), and that process would:
+
+    - Raise the amount of work needed for end users or library/framework/application authors to migrate to new PHP versions.
+    - Cause confusion and inconvenience for years about which namespace can or should be used in an application (''SplObjectStorage'' vs ''Xyz\SplObjectStorage''), especially for developers working on projects supporting different php version ranges.
+    - Prevent applications/libraries from easily supporting as wide of a range of php versions.
+    - Cause serialization/unserialization issues when migrating to different php versions, if the old or new class name in the serialized data did not exist in the other php version and was not aliased. For example, if the older PHP version could not ''unserialize()'' ''Xyz\SplObjectStorage'' and would silently create a [[https://www.php.net/manual/en/language.oop5.serialization.php#language.oop5.serialization|__PHP_Incomplete_Class_Name]] without any warnings or notices.
+
+==== Lack of Name Prefix ====
+
+    - Short names are more convenient to remember/use.
+    - Possible future additions such as a ''Queue''/''Stack'' based on a efficient C array representation rather than a linked list would conflict with existing Spl names such as ''SplQueue'', ''SplStack'', etc.
+    - There is already an addition to the spl without a prefix - ''ArrayObject''. Because ''array'' was already a type its name could not reasonably be any shorter.
+    - Functionality has been historically moved from the ''spl'' to core in the past, e.g. ''Iterator'' started out in ''spl''.
+    - New generic data structures that are always enabled have not had the ''Spl'' prefix, e.g. https://www.php.net/WeakMap is a recent addition that is final and not prefixed.
+
+==== Accepting an iterable ====
+
+This accepts the values of the iterable in the order of iteration. Keys of the ''iterable'' are ignored (Because this is meant to be a double-ended queue, adding placeholders would not make sense if there were gaps in the array.)
+
+==== Final Class ====
+
+If this were overridable, this would have the following drawbacks:
+
+    - There would not be as strong guarantees to readers of PHP code using ''Deque'' (or even opcache, if optimizations were added targeting objects) that elements were actually a vector or that certain methods would/wouldn't throw certain exceptions, or that iteration would be possible. (if getIterator, ArrayAccess methods, etc. were overridable)
+    - More memory and runtime checks would be required to check if this was the original class or a subclass when fetching a value
+    - More memory would be required to mitigate any unexpected issues seen in the way subclasses overrid or used the base class.
+    - [[https://bugs.php.net/search.php?search_for=SplFixedArray&boolean=0&limit=30&order_by=&direction=DESC&cmd=display&status=All&bug_type=All&project=All&php_os=&phpver=&cve_id=&assign=&author_email=&bug_age=0&bug_updated=0&commented_by=|There would be a larger chance the implementation would have discovered or undiscovered bugs]] due to userland subclasses of ''Deque'', in serialization/unserialization, reads or writes, resizing, future functionality added to PHP, opcache (if opcache optimizations were added), or future methods added to ''Deque'', or causes that were not even thought of yet.
+
+Making all functionality ''final'' turns out to be the same approach that the PECL project https://github.com/php-ds/ext-ds used for its datastructures. The php-ds's maintainers reasons are mentioned in https://medium.com/@rtheunissen/efficient-data-structures-for-php-7-9dda7af674cd and summarized or quoted below
+
+    * "Prefer composition over inheritance"
+    * "Inheritance would also introduce unnecessary internal complexity"
+    * Avoid multiple methods doing the same thing (e.g. ''SplDeque'' has a redundant ''enqueue'' methods to add to the end of an array because the base class already had ''push()'')
+    * "They are designed to be self-contained, much like an ''array''. You can't extend an ''array'', so we design our own APIs around it by using an internal ''array'' to store the actual data."
+
+==== push/pop/shift/unshift (and top()/bottom()) ====
+
+This is consistent with the name used for ''array_push()''/''array_pop()''/''array_shift()''/''array_unshift()'', as well as names used for ''SplDoublyLinkedList''
+
+===== Backward Incompatible Changes =====
+The class name ''\Deque'' is now used by PHP, and it will be a compilation error to declare classlikes of the same name in the global namespace since the class already exists.
+
+===== Proposed PHP Version(s) =====
+8.2
+
+===== RFC Impact =====
+==== To Opcache ====
+None
+
+===== Unaffected PHP Functionality =====
+PHP's type system remains unchanged (e.g. ''array'') - ''final class Deque'' is a class and instances are ordinary objects.
+
+===== Benchmarks =====
+
+==== Two cycles of appending n values then shifting them from the front ====
+
+Note that it is possible to have constant time removal from the front of a PHP ''array'' efficiently (as long as ''key'' stays at the front of the array), but it is not possible to have constant time prepending (`unshift`) to the front of an array. ''array_unshift'' is a linear time operation (takes time proportional to the current array size).
+So ''unshift'' is not included in these benchmarks.
+
+Because there's a second cycle in this benchmark, array becomes an associative array and uses more memory than a packed array (https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html). (At the time of writing, a packed array uses double the memory of a ''Deque'', though there is an unrelated change in review proposing reducing the memory usage of packed arrays). 
+
+memory_get_usage is not counting the memory overhead of tracking the allocations of a lot of small objects, so the memory usage of ''SplDoublyLinkedList'' is under-reported. ''SplQueue'' is a subclass of ''SplDoublyLinkedList'' and I expect it would have the same performance.
+
+''Deque'' and ''array'' both always capacities that are powers of 2. This benchmark tests the best-case memory usage for ''Deque'' and ''array''
+
+**''Deque'' is faster than ''SplDoublyLinkedList'' at all sizes, and faster than ''array'' at medium and large sizes. The maximum memory usage is also noticeably lower than both ''array'' and ''SplDoublyLinkedList''**
+
+<code none>
+Test creating a collection, then two cycles of push+shift (adding n values to the end of collections then shifting all of them from front of collection)
+Results for php 8.2.0-dev debug=false with opcache enabled=true
+
+2x Push then shift from array:               n=       1 iterations= 8000000
+=> max memory=     376 bytes, create+destroy time=1.115 shift time = 1.008 total time = 2.123 result=0
+2x Push then shift from Deque:               n=       1 iterations= 8000000
+=> max memory=     144 bytes, create+destroy time=1.584 shift time = 0.844 total time = 2.428 result=0
+2x Push then shift from SplDoublyLinkedList: n=       1 iterations= 8000000
+=> max memory=     184 bytes, create+destroy time=2.055 shift time = 0.941 total time = 2.996 result=0
+
+2x Push then shift from array:               n=       4 iterations= 2000000
+=> max memory=     376 bytes, create+destroy time=0.413 shift time = 0.681 total time = 1.094 result=24000000
+2x Push then shift from Deque:               n=       4 iterations= 2000000
+=> max memory=     144 bytes, create+destroy time=0.522 shift time = 0.444 total time = 0.966 result=24000000
+2x Push then shift from SplDoublyLinkedList: n=       4 iterations= 2000000
+=> max memory=     280 bytes, create+destroy time=1.033 shift time = 0.511 total time = 1.544 result=24000000
+
+2x Push then shift from array:               n=       8 iterations= 1000000
+=> max memory=     376 bytes, create+destroy time=0.307 shift time = 0.621 total time = 0.928 result=56000000
+2x Push then shift from Deque:               n=       8 iterations= 1000000
+=> max memory=     208 bytes, create+destroy time=0.388 shift time = 0.438 total time = 0.825 result=56000000
+2x Push then shift from SplDoublyLinkedList: n=       8 iterations= 1000000
+=> max memory=     408 bytes, create+destroy time=0.799 shift time = 0.480 total time = 1.278 result=56000000
+
+2x Push then shift from array:               n=    1024 iterations=   20000
+=> max memory=   41016 bytes, create+destroy time=0.452 shift time = 1.445 total time = 1.897 result=20951040000
+2x Push then shift from Deque:               n=    1024 iterations=   20000
+=> max memory=   16464 bytes, create+destroy time=0.408 shift time = 0.803 total time = 1.211 result=20951040000
+2x Push then shift from SplDoublyLinkedList: n=    1024 iterations=   20000
+=> max memory=   32920 bytes, create+destroy time=1.432 shift time = 0.945 total time = 2.377 result=20951040000
+
+2x Push then shift from array:               n= 1048576 iterations=      20
+=> max memory=41943120 bytes, create+destroy time=1.166 shift time = 1.499 total time = 2.665 result=21990211584000
+2x Push then shift from Deque:               n= 1048576 iterations=      20
+=> max memory=16777320 bytes, create+destroy time=0.830 shift time = 0.912 total time = 1.742 result=21990211584000
+2x Push then shift from SplDoublyLinkedList: n= 1048576 iterations=      20
+=> max memory=33554584 bytes, create+destroy time=1.627 shift time = 1.081 total time = 2.708 result=21990211584000
+</code>
+
+==== Only appending to a Deque and reading elements without removal ====
+
+Note that the proposed ''Deque'' as well as the existing ''SplDoublyLinkedList''/''SplStack'' are expected to perform equally well at shifting to (adding to) or unshifting from(removing from) the front of an array
+
+**For this benchmark, Deque can be created and read from faster than the fastest methods of reading ''SplStack'' or ''SplFixedArray''.**
+
+    * Note that a ''foreach'' is used instead of random access for ''SplStack'' - ''SplStack'' random access time is proportional to the number of linked list nodes that need to be iterated over to read a value.
+    * ''SplFixedArray'' would be faster to append to if it had a ''push()'' method, but there isn't one.
+
+Major notes:
+
+    * ''Deque'' and ''SplFixedArray'' use less memory than other available options.
+    * ''Deque'' is faster than object data structures currently available in the SPL.
+    * ''array'' is always faster at reading data but currently uses more memory.
+
+//(Note that this benchmarks will have to be redone for the time and ''array'' if other proposed optimizations to array succeed)//
+
+<code none>
+Results for php 8.2.0-dev debug=false with opcache enabled=true
+
+Appending to array:         n=       1 iterations= 8000000 memory=     376 bytes, create+destroy time=0.599 read time = 0.285 result=0
+Appending to Deque:         n=       1 iterations= 8000000 memory=     144 bytes, create+destroy time=0.957 read time = 0.337 result=0
+Appending to SplStack:      n=       1 iterations= 8000000 memory=     184 bytes, create+destroy time=1.614 read time = 0.696 result=0
+Appending to SplFixedArray: n=       1 iterations= 8000000 memory=      80 bytes, create+destroy time=1.685 read time = 0.392 result=0
+
+
+Appending to array:         n=       4 iterations= 2000000 memory=     376 bytes, create+destroy time=0.210 read time = 0.108 result=12000000
+Appending to Deque:         n=       4 iterations= 2000000 memory=     144 bytes, create+destroy time=0.309 read time = 0.169 result=12000000
+Appending to SplStack:      n=       4 iterations= 2000000 memory=     280 bytes, create+destroy time=0.669 read time = 0.283 result=12000000
+Appending to SplFixedArray: n=       4 iterations= 2000000 memory=     128 bytes, create+destroy time=1.063 read time = 0.209 result=12000000
+
+
+Appending to array:         n=       8 iterations= 1000000 memory=     376 bytes, create+destroy time=0.146 read time = 0.079 result=28000000
+Appending to Deque:         n=       8 iterations= 1000000 memory=     208 bytes, create+destroy time=0.210 read time = 0.143 result=28000000
+Appending to SplStack:      n=       8 iterations= 1000000 memory=     408 bytes, create+destroy time=0.483 read time = 0.224 result=28000000
+Appending to SplFixedArray: n=       8 iterations= 1000000 memory=     192 bytes, create+destroy time=0.955 read time = 0.183 result=28000000
+
+
+Appending to array:         n= 1048576 iterations=      20 memory=33558608 bytes, create+destroy time=0.713 read time = 0.146 result=10995105792000
+Appending to Deque:         n= 1048576 iterations=      20 memory=16777320 bytes, create+destroy time=0.454 read time = 0.263 result=10995105792000
+Appending to SplStack:      n= 1048576 iterations=      20 memory=33554584 bytes, create+destroy time=0.826 read time = 0.394 result=10995105792000
+Appending to SplFixedArray: n= 1048576 iterations=      20 memory=16777304 bytes, create+destroy time=2.369 read time = 0.358 result=10995105792000
+</code>
+===== Future Scope =====
+If ''\Deque'' is added, there would be plenty of time for myself or others to propose additional methods before PHP 8.2's feature freeze (probably in July 2022)
+
+Future additions to https://github.com/TysonAndre/pecl-teds that are general purpose enough may be possible as well.
+
+===== Proposed Voting Choices =====
+Yes/No vote, requiring a 2/3 majority
+
+===== References =====
+
+    * https://en.m.wikipedia.org/wiki/Double-ended_queue
+    * https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html
+    * https://github.com/TysonAndre/pecl-teds (implementations of multiple data structures, including ''Teds\Deque'', based originally on the ''SplFixedArray'' documentation and my past RFCs)
+    * https://externals.io/message/116100 RFC: Adding ''final class Deque'' to core
+    * https://externals.io/message/116048 RFC: Adding ''final class Vector'' to core
+
+===== Rejected Features =====
+
+==== Why not use php-ds/ext-ds instead? ====
+
+    - No matter how useful or popular a PECL is, datastructures available in PHP's core will have much, much wider adoption in applications and libraries that are available in PECLs, allowing those applications and libraries to write faster and/or more memory efficient code.
+    - End users can make much stronger assumptions about the backwards compatibility and long-term availability of data structures that are included in core.
+    - The php-ds maintainers do not plan to merge the extension into php-src (see quote for full context)
+    - Opcache may be able to make stronger optimizations of internal classes found in php-src than any third party PECL. (e.g. because ''Deque::push()'' or ''Vector::push()'' would never throw or emit notices, it may be possible to optimize it to be even faster than appending to an array in the Opcache JIT compiler)
+
+=== Perceived issues and uncertainties about php-ds distribution plans ===
+
+This has been asked about multiple times in threads on unrelated proposals (https://externals.io/message/112639#112641 and https://externals.io/message/93301#93301 years ago) throughout the years,
+but the maintainer of php-ds had a long term goal of developing the separately from php's release cycle (and was still focusing on the PECL when I'd asked on the GitHub issue in the link in September 2020).
+
+To quote the maintainer on the GitHub [[https://github.com/php-ds/ext-ds/issues/156|issue]] on php-ds/ext-ds I'd opened the last time someone suggested using php-ds (emphasis on the below quote mine)
+
+<blockquote>
+**//My long-term intention has been to not merge this extension into php-src.// I would like to see it become available as a default extension at the distribution level. Unfortunately I have no influence or understanding of that process.** Having an independent release and development cycle is a good thing, in my opinion.
+
+If those plans change, **I would like to hold off until a 2.0 release** - I've learnt a lot over the last 4 years and would like to revisit some of the design decisions I made then, such as a significant reduction of the interfaces or perhaps more interfaces with greater specificity. Functions like ''map'', ''filter'', ''reduce'' can be delegated to other libraries that operate on ''iterable'' instead of having these as first-class members of the interface. **There is a 2.0 branch with some ideas but I haven't looked at that in a while.**
+
+I have been working on a research project to design persistent data structures for immutability, so there is a lot of work that I have set for myself for this project over the next 6 months or so. I have no intention to push for distribution changes in the short-term but I am open to the suggestion.
+</blockquote>
+
+<blockquote>
+> > Do you mean OS distribution level (Windows, Ubuntu, CentOS, HomeBrew for mac, etc.?)
+
+> He meant distribution with PHP core (on all platforms where PHP is available)
+
+Whichever is more viable - simply not merged into core, but distributed and enabled by default alongside it.0
+</blockquote>
+
+There have been no proposals from the maintainer themselves so far to add php-ds to core or distribute it alongside core in any form.
+That was just what the maintainer mentioned as a long term plan.
+
+The model of distributing an extension separately from core has never been done before, and even if approved would raise multiple concerns:
+
+    * I personally doubt having it developed separately from php's release cycle would be accepted by voters (e.g. if unpopular decisions couldn't be voted against or vetoed, or if RFCs passed by the community for additions of datastructures (or additions of methods to datastructures) could be overturned by the php-ds maintainers)
+    * This may limit what features could be added by the community: For example, introducing the ''map()'' or ''filter()'' functionality to a ''Vector'' if the php-ds maintainers removed that function in a simplified 2.0.
+    * I'm not certain how backwards compatibility would be handled in that model, e.g. if the maintainers of ext-ds wanted to drop support for a method after it was released.
+    * This may cause delays in publishing php releases, e.g. if the maintainers were unable to quickly review patches for crashes, incompatibilities or compile errors introduced in new php versions, etc.
+    * and other concerns (e.g. API debates such as https://externals.io/message/93301#93301)
+
+With php-ds itself getting merged anytime soon (if the maintainers continue to plan to distribute php-ds that way) seeming unlikely to me, I decided to start independently working on efficient data structure implementations.
+I don't see dragging it in (against the maintainer's wishes) as a viable option for many, many, many reasons.
+But having efficient datastructures in PHP's core is still useful.
+
+The timeline for php-ds 2.0 is also something I am uncertain about.
+
+<del>Additionally, while there may be some uses for immutable datastructures, I would believe there are more uses for mutable datastructures, especially for programmers with imperative programming backgrounds such as C/C++, and would propose these mutable datastructures regardless of those plans. Having these mutable datastructures in core is still useful to immutable programmers and functional programmers, because it provides another tool to write the internal, private implementation details in a memory-efficient way.</del>
+
+    * //EDIT: I misread the maintainer's response as being about the project php-ds 2.0 - I'm now pretty sure the "research project to design persistent data structures for immutability" is a different project from ext-ds and possibly in a different programming language.// \\ \\(Leaving in this comment in because immutable datastructures were brought up by others in the RFC discussion)
+
+While PECL development outside of php has its benefits for development and ability to make new features available in older php releases,
+it's less likely that application and
+library authors will start making use of those data structures because many users won't have any given PECL already installed.
+(though php-ds also publishes a polyfill, it would not have the cpu and memory savings, and add its own overhead)
+
+Additionally, users (and organizations using PHP) can often make stronger assumptions on
+backwards compatibility and long-term availability of functionality that is merged into PHP's core.
+
+So the choice of feature set, some names, signatures, and internal implementation details are different, because this is reimplementing a common datastructure found in different forms in many languages.
+It's definitely a mature project, but I personally feel like reimplementing this (without referring to the php-ds source code and without copying the entire api as-is) is the best choice to add efficient data structures to core while respecting the maintainer's work on the php-ds project and their wish to maintain control over the php-ds project.
+
+As a result, I've been working on implementing data structures such as ''Deque'' based on php-src's data structure implementations (mostly ''SplFixedArray'' and ''ArrayObject'') instead (and based on my past PECL/RFC experience, e.g. with ''runkit7''/''igbinary'')
+
+=== Minor differences in API design goals ===
+
+Traditionally, PHP has been a very batteries included language. Existing functionality such as [[https://www.php.net/manual/en/ref.strings.php|strings]] and [[https://www.php.net/manual/en/ref.array.php|arrays]] have very large standard libraries. This makes it easier to write code without depending on too many third party composer libraries, and knowledge of the standard library can transfer to any codebase a developer works on.
+
+My hopes for ease of use, readability, speed, and static analysis in future data structures such as ''Vector'' are similar to those mentioned by Benjamin Morel in the GitHub issue:
+
+<blockquote>
+<blockquote>Functions like map, filter, reduce can be delegated to other libraries that operate on iterable instead of having these as first-class members of the interface.</blockquote>
+
+Again, I understand the rationale behind this decision, like reducing duplication and keeping only the core functionality in DS. However, sometimes you have to take into consideration ease of use vs purity of the code.
+
+Ease of use / DX / readability: it seems more logical to me to do:
+
+''$map->filter(fn(...) => ...);''
+
+Rather than:
+
+''Some\filter($map, fn(...) => ...);''
+
+Speed: as you said, internal iteration is faster. And speed is one of the selling points of DS vs arrays.
+
+Static analysis: I love the fact that ''Map::filter()'' can be strictly typed as returning ''Map<TKey, TValue>'' in Psalm, for example. If you rely on a generic ''filter()'' function, I'm not sure such strict typing will be easy or even possible.
+
+Thank you for your work on DS anyway, I already use the extension in my closed-source project, in particular Map. I would love to use data structures in my open-source projects, one day! 🤞
+</blockquote>
+
+Additionally, it may be inconvenient for end users (e.g. new contributors to projects) to remember specifics of multiple libraries or utility classes when working on different codebases, to deal with dependency conflicts after major version upgrades, or to deal with libraries dropping support for older php versions, getting abandoned, etc.
+
+===== Appendix =====
+
+==== Benchmark Source Code ====
+
+=== Benchmarking repeated push and shift operations ===
+
+<code php>
+<?php
+
+const PUSH_SHIFT_CYCLES = 2;
+
+function bench_array(int $n, int $iterations) {
+    $totalReadTime = 0.0;
+    $startTime = hrtime(true);
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = [];
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                $values[] = $i;
+            }
+            $maxMemory = memory_get_usage();
+            $startReadTime = hrtime(true);
+            while (count($values) > 0) {
+                // Pretend we don't know the actual position of the first array key for this simulated benchmark
+                // array_shift is not used because it is linear time (to move all other elements)
+                // rather than constant time.
+                //
+                // This approach is simple at the cost of memory - it converts a packed array to a non-packed array
+                // NOTE: Adding a call to reset() is not necessary in this case, and would result in worse performance.
+                // NOTE: array_key_first results in quadratic performance for this synthetic benchmark.
+                // $key = array_key_first($values);
+                $key = key($values);
+                $total += $values[$key];
+                unset($values[$key]);
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+
+        unset($values);
+    }
+    $endTime = hrtime(true);
+
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Push then shift from array:               n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+function bench_deque(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new Deque();
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                $values[] = $i;
+            }
+            $maxMemory = memory_get_usage();
+
+            $startReadTime = hrtime(true);
+            while (count($values) > 0) {
+                $total += $values->shift();
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Push then shift from Deque:               n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+// SplDoublyLinkedList is a linked list that takes more memory than needed.
+// Access to values in the middle of the SplDoublyLinkedList is also less efficient.
+function bench_spl_dll(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new SplDoublyLinkedList();
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                $values->push($i);
+            }
+            $maxMemory = memory_get_usage();
+            $startReadTime = hrtime(true);
+            // Random access is linear time in a linked list, so use foreach instead
+            while (count($values) > 0) {
+                $total += $values->shift();
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Push then shift from SplDoublyLinkedList: n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+$n = 2**20;
+$iterations = 10;
+$sizes = [
+    [1, 8000000],
+    [4, 2000000],
+    [8, 1000000],
+    [1024, 20000],
+    [2**20, 20],
+];
+echo "Test creating a collection, then two cycles of push+shift (adding n values to the end of collections then shifting all of them from front of collection)\n";
+printf(
+    "Results for php %s debug=%s with opcache enabled=%s\n\n",
+    PHP_VERSION,
+    PHP_DEBUG ? 'true' : 'false',
+    json_encode(function_exists('opcache_get_status') && (opcache_get_status(false)['opcache_enabled'] ?? false))
+);
+
+foreach ($sizes as [$n, $iterations]) {
+    bench_array($n, $iterations);
+    bench_deque($n, $iterations);
+    bench_spl_dll($n, $iterations);
+    echo "\n";
+}
+</code>
+
+=== Benchmarking only appending to a Deque and reading elements without removal ===
+
+<code php>
+<?php
+
+function bench_array(int $n, int $iterations) {
+    $totalReadTime = 0.0;
+    $startTime = hrtime(true);
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = [];
+        for ($i = 0; $i < $n; $i++) {
+            $values[] = $i;
+        }
+        $startReadTime = hrtime(true);
+        for ($i = 0; $i < $n; $i++) {
+            $total += $values[$i];
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to array:         n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+function bench_deque(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new Deque();
+        for ($i = 0; $i < $n; $i++) {
+            $values[] = $i;
+        }
+
+        $startReadTime = hrtime(true);
+        for ($i = 0; $i < $n; $i++) {
+            $total += $values[$i];
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to Deque:         n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+// SplStack is a subclass of SplDoublyLinkedList, so it is a linked list that takes more memory than needed.
+// Access to values in the middle of the SplStack is also less efficient.
+function bench_spl_stack(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new SplStack();
+        for ($i = 0; $i < $n; $i++) {
+            $values->push($i);
+        }
+        $startReadTime = hrtime(true);
+        // Random access is linear time in a linked list, so use foreach instead
+        foreach ($values as $value) {
+            $total += $value;
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to SplStack:      n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+function bench_spl_fixed_array(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new SplFixedArray();
+        for ($i = 0; $i < $n; $i++) {
+            // Imitate how push() would be implemented in a situation
+            // where the number of elements wasn't actually known ahead of time.
+            // erealloc() tends to extend the existing array when possible.
+            $size = $values->getSize();
+            $values->setSize($size + 1);
+            $values->offsetSet($size, $i);
+        }
+        $startReadTime = hrtime(true);
+        for ($i = 0; $i < $n; $i++) {
+            $total += $values[$i];
+        }
+        $endReadTime = hrtime(true);
+        $totalReadTime += $endReadTime - $startReadTime;
+        $endMemory = memory_get_usage();
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("Appending to SplFixedArray: n=%8d iterations=%8d memory=%8d bytes, create+destroy time=%.3f read time = %.3f result=%d\n\n",
+        $n, $iterations, $endMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $total);
+}
+$n = 2**20;
+$iterations = 10;
+$sizes = [
+    [1, 8000000],
+    [4, 2000000],
+    [8, 1000000],
+    [2**20, 20],
+];
+printf(
+    "Results for php %s debug=%s with opcache enabled=%s\n\n",
+    PHP_VERSION,
+    PHP_DEBUG ? 'true' : 'false',
+    json_encode(function_exists('opcache_get_status') && (opcache_get_status(false)['opcache_enabled'] ?? false))
+);
+
+foreach ($sizes as [$n, $iterations]) {
+    bench_array($n, $iterations);
+    bench_deque($n, $iterations);
+    bench_spl_stack($n, $iterations);
+    bench_spl_fixed_array($n, $iterations);
+    echo "\n";
+}
+</code>
+
+===== Changelog =====
+
+0.2: Link to definition of Deque. 
