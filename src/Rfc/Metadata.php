@@ -246,6 +246,14 @@ class Metadata
             $title = trim(substr($title, 8));
         }
 
+        if (str_starts_with(strtolower($title), 'php rfc -')) {
+            $title = trim(substr($title, 9));
+        }
+
+        if (str_starts_with(strtolower($title), 'rfc:')) {
+            $title = trim(substr($title, 4));
+        }
+
         return ucwords($title);
     }
 
