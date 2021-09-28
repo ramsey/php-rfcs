@@ -1,6 +1,8 @@
 PHP Requests for Comments (RFCs)
 ================================
 
+- `Index of PHP-RFCs <rfcs/0000.rst>`_
+
 About
 -----
 
