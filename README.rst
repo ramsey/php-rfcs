@@ -63,6 +63,7 @@ For regular imports of RFC updates on the wiki:
     ./rfc wiki:metadata > resources/metadata-raw.json
     ./rfc rfc:metadata --raw-metadata=resources/metadata-raw.json > resources/metadata-clean.json
     ./rfc rfc:update --clean-metadata=resources/metadata-clean.json
+    ./rfc rfc:index --clean-metadata=resources/metadata-clean.json > rfcs/0000.rst
 
 Note that ``wiki:crawl`` will auto-commit any changes to the wiki it finds, but
 you will need to manually commit any changes to ``metadata-raw.json``,
