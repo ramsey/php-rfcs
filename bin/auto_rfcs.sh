@@ -36,6 +36,7 @@ fi
 ./rfc wiki:metadata > resources/metadata-raw.json
 ./rfc rfc:metadata --raw-metadata=resources/metadata-raw.json > resources/metadata-clean.json
 ./rfc rfc:update --clean-metadata=resources/metadata-clean.json
+./rfc rfc:index --clean-metadata=resources/metadata-clean.json > rfcs/0000.rst
 
 git add .
 

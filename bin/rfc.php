@@ -7,19 +7,22 @@ namespace PhpRfcs;
 use GuzzleHttp\Client;
 use Http\Factory\Guzzle\RequestFactory;
 use Http\Factory\Guzzle\UriFactory;
+use PhpRfcs\Rfc\Index as RfcIndex;
 use PhpRfcs\Rfc\Metadata as RfcMetadata;
 use PhpRfcs\Rfc\Rst;
 use PhpRfcs\Rfc\Update;
 use PhpRfcs\Wiki\Crawler;
 use PhpRfcs\Wiki\Download;
 use PhpRfcs\Wiki\History;
-use PhpRfcs\Wiki\Index;
+use PhpRfcs\Wiki\Index as WikiIndex;
 use PhpRfcs\Wiki\Metadata as WikiMetadata;
 use PhpRfcs\Wiki\Save;
 use Silly\Application;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Throwable;
 use Tidy;
+use Twig\Environment;
+use Twig\Loader\FilesystemLoader;
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
@@ -30,8 +33,15 @@ $client = new Client();
 $requestFactory = new RequestFactory();
 $uriFactory = new UriFactory();
 $processFactory = new ProcessFactory();
+$twigEnvironment = new Environment(
+    new FilesystemLoader(
+        $config['paths']['twigTemplates'],
+        __DIR__ . '/..',
+    ),
+    $config['twig'],
+);
 
-$wikiIndex = new Index($client, $requestFactory, $tidy);
+$wikiIndex = new WikiIndex($client, $requestFactory, $tidy);
 $wikiHistory = new History($client, $requestFactory, $uriFactory, $tidy);
 $wikiDownload = new Download($client, $requestFactory, $uriFactory);
 
@@ -62,6 +72,8 @@ $rfcUpdate = new Update(
     $config['paths']['overrides'],
     $config['json'],
 );
+
+$rfcIndex = new RfcIndex($rfcMetadata, $twigEnvironment);
 
 $app = new Application('PHP RFC Tools');
 
@@ -262,6 +274,22 @@ $app
         'Update (and create) final RFC files with the latest imported changes',
         [
             'rfc' => 'If provided, only update or create the RFC with this slug',
+            '--clean-metadata' => 'A pre-generated file of clean metadata to use'
+        ],
+    );
+
+$app
+    ->command(
+        'rfc:index [--clean-metadata=]',
+        function (?string $cleanMetadata, SymfonyStyle $io) use ($rfcIndex): int {
+            $rfcIndex->generateIndex($io, $cleanMetadata);
+
+            return 0;
+        },
+    )
+    ->descriptions(
+        'Print the full PHP-RFC index in reStructuredText format',
+        [
             '--clean-metadata' => 'A pre-generated file of clean metadata to use'
         ],
     );

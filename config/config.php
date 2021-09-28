@@ -8,5 +8,10 @@ return [
         'import' => realpath(__DIR__ . '/../resources/imported-rfcs'),
         'overrides' => realpath(__DIR__ . '/../resources/metadata-overrides'),
         'cleanRfcs' => realpath(__DIR__ . '/../rfcs'),
+        'twigTemplates' => realpath(__DIR__ . '/../resources/templates'),
+    ],
+    'twig' => [
+        'cache' => false,
+        'autoescape' => false,
     ],
 ];
