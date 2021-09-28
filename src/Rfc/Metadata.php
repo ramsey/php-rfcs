@@ -210,7 +210,7 @@ class Metadata
             $clean['Status'] = 'Unknown';
         }
 
-        $clean['Type'] = $this->determineType($clean['Section'] ?? null);
+        $clean['Type'] = $this->determineType($clean['Section'] ?? null, $clean['Title'] ?? null);
         $clean['PHP Version'] = $this->determinePhpVersion(
             $clean['PHP Version'] ?? '',
             $clean['Section'] ?? null,
@@ -346,10 +346,20 @@ class Metadata
         return null;
     }
 
-    private function determineType(?string $section): string
+    private function determineType(?string $section, ?string $title): string
     {
         if (array_key_exists($section, self::SECTION_TYPE_MAP)) {
             return self::SECTION_TYPE_MAP[$section];
+        }
+
+        if (
+            $title !== null
+            && (
+                str_starts_with(strtolower($title), 'straw poll:')
+                || str_starts_with(strtolower($title), 'poll:')
+            )
+        ) {
+            return self::TYPE_INFORMATIONAL;
         }
 
         return self::TYPE_UNKNOWN;

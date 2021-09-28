@@ -175,7 +175,7 @@ class Rst
             $adornment = $matches[1];
         }
 
-        $title = $metadata['Title'] ?? 'Title Error';
+        $title = $metadata['Title'] ?? '' ?: 'No Title';
         $titleAdornment = str_repeat($adornment, strlen($title));
 
         $authors = [];
