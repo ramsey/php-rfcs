@@ -9,14 +9,11 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 class Update
 {
     private ?array $cleanMetadata = null;
-    private ?array $rfcNumbers = null;
 
     public function __construct(
         private Metadata $rfcMetadata,
         private Rst $rst,
         private string $cleanRfcsPath,
-        private string $overridesPath,
-        private int $jsonFlags,
     ) {
     }
 
@@ -53,59 +50,9 @@ class Update
         return $this->cleanMetadata;
     }
 
-    private function getNumberForRfc(string $rfcSlug): string
-    {
-        if (isset($this->cleanMetadata[$rfcSlug]['PHP-RFC'])) {
-            return $this->cleanMetadata[$rfcSlug]['PHP-RFC'];
-        }
-
-        $nextRfcNumber = $this->getNextRfcNumber();
-        $this->cleanMetadata[$rfcSlug]['PHP-RFC'] = $nextRfcNumber;
-        $this->rst->setCleanMetadata($this->cleanMetadata);
-        $this->saveNumberForRfc($rfcSlug, $nextRfcNumber);
-
-        return $nextRfcNumber;
-    }
-
-    private function getNextRfcNumber(): string
-    {
-        if ($this->rfcNumbers === null) {
-            $this->rfcNumbers = array_column($this->cleanMetadata, 'PHP-RFC');
-            sort($this->rfcNumbers, SORT_NATURAL);
-
-            if (count($this->rfcNumbers) === 0) {
-                $this->rfcNumbers[] = '0000';
-            }
-        }
-
-        // Determine the next number and format it.
-        $next = (int) $this->rfcNumbers[count($this->rfcNumbers) - 1] + 1;
-        $next = sprintf('%04d', $next);
-
-        // Reserve the number.
-        $this->rfcNumbers[] = $next;
-
-        return $next;
-    }
-
-    private function saveNumberForRfc(string $rfcSlug, string $rfcNumber): void
-    {
-        $overridesFile = $this->overridesPath . '/' . $rfcSlug . '.json';
-        $overrides = [];
-
-        if (file_exists($overridesFile)) {
-            $overrides = json_decode(file_get_contents($overridesFile), true);
-        }
-
-        $overrides['PHP-RFC'] = $rfcNumber;
-        ksort($overrides);
-
-        file_put_contents($overridesFile, json_encode($overrides, $this->jsonFlags));
-    }
-
     private function updateRfc(string $rfcSlug, array $metadata): string
     {
-        $rfcNumber = $this->getNumberForRfc($rfcSlug);
+        $rfcNumber = $metadata['PHP-RFC'];
         $rstContents = $this->rst->generateRst($rfcSlug, null);
 
         $cleanRfcFile = $this->cleanRfcsPath . '/' . $rfcNumber . '.rst';

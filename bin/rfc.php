@@ -61,6 +61,7 @@ $rfcMetadata = new RfcMetadata(
     $wikiMetadata,
     $config['paths']['import'],
     $config['paths']['overrides'],
+    $config['json'],
 );
 
 $rfcRst = new Rst($processFactory, $rfcMetadata, $config['paths']['import']);
@@ -69,8 +70,6 @@ $rfcUpdate = new Update(
     $rfcMetadata,
     $rfcRst,
     $config['paths']['cleanRfcs'],
-    $config['paths']['overrides'],
-    $config['json'],
 );
 
 $rfcIndex = new RfcIndex($rfcMetadata, $twigEnvironment);

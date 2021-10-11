@@ -95,29 +95,34 @@ class Metadata
         'Process and Policy' => self::TYPE_PROCESS,
     ];
 
+    private array $cleanMetadata = [];
+    private array $rfcNumbers = [];
+
     public function __construct(
         private ProcessFactory $processFactory,
         private WikiMetadata $wikiMetadata,
         private string $rawPath,
         private string $overridesPath,
+        private int $jsonFlags,
     ) {
     }
 
     public function getMetadata(?string $rfcSlug, ?string $rawMetadataFile): array
     {
         $rawData = $this->getRawMetadata($rfcSlug, $rawMetadataFile);
-        $cleanData = [];
 
         foreach ($rawData as $slug => $rfcData) {
-            $cleanData[$slug] = $this->applyDataOverrides(
-                $this->cleanAndSanitizeMetadata($rfcData),
+            $this->cleanMetadata[$slug] = $this->calculateRfcNumber(
+                $this->applyDataOverrides(
+                    $this->cleanAndSanitizeMetadata($rfcData),
+                ),
             );
         }
 
-        // Sort the RFCs by date.
-        array_multisort(array_column($cleanData, 'Date'), SORT_ASC, $cleanData);
+        // Sort the RFCs by PHP-RFC number.
+        array_multisort(array_column($this->cleanMetadata, 'PHP-RFC'), SORT_ASC, $this->cleanMetadata);
 
-        return $cleanData;
+        return $this->cleanMetadata;
     }
 
     private function getRawMetadata(?string $rfcSlug, ?string $rawMetadataFile): array
@@ -429,5 +434,54 @@ class Metadata
                 $callback($v, $k, $array);
             }
         }
+    }
+
+    private function calculateRfcNumber(array $cleanData): array
+    {
+        if (isset($cleanData['PHP-RFC'])) {
+            // We already have this RFC number, so add it to the array of numbers.
+            $this->rfcNumbers[] = $cleanData['PHP-RFC'];
+
+            return $cleanData;
+        }
+
+        $nextRfcNumber = $this->getNextRfcNumber();
+        $cleanData['PHP-RFC'] = $nextRfcNumber;
+        $this->saveNumberForRfc($cleanData['Slug'], $nextRfcNumber);
+
+        return $cleanData;
+    }
+
+    private function getNextRfcNumber(): string
+    {
+        sort($this->rfcNumbers, SORT_NATURAL);
+
+        if (count($this->rfcNumbers) === 0) {
+            $this->rfcNumbers[] = '0000';
+        }
+
+        // Determine the next number and format it.
+        $next = (int) $this->rfcNumbers[count($this->rfcNumbers) - 1] + 1;
+        $next = sprintf('%04d', $next);
+
+        // Reserve the number.
+        $this->rfcNumbers[] = $next;
+
+        return $next;
+    }
+
+    private function saveNumberForRfc(string $rfcSlug, string $rfcNumber): void
+    {
+        $overridesFile = $this->overridesPath . '/' . $rfcSlug . '.json';
+        $overrides = [];
+
+        if (file_exists($overridesFile)) {
+            $overrides = json_decode(file_get_contents($overridesFile), true);
+        }
+
+        $overrides['PHP-RFC'] = $rfcNumber;
+        ksort($overrides);
+
+        file_put_contents($overridesFile, json_encode($overrides, $this->jsonFlags));
     }
 }
