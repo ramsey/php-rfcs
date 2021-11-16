@@ -1,5 +1,5 @@
 ====== PHP RFC: final class Deque ======
-  * Version: 0.3
+  * Version: 0.4
   * Date: 2021-09-16
   * Author: Tyson Andre, tandre@php.net
   * Status: Under discussion
@@ -19,9 +19,10 @@ While ''SplDoublyLinkedList'' and its subclass ''SplQueue''/''SplStack'' exist i
 
 It would be useful to have an efficient ''Deque'' container in the standard library to provide an alternative without those drawbacks, as well as for the following reasons: 
 
-    - To save memory in applications or libraries that may need to store many lists of values or run for long periods of time. Notably, PHP's ''array'' type will never release allocated capacity - see https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html
     - To provide a better alternative to ''SplDoublyLinkedList'', ''SplStack'', and ''SplQueue'' for use cases that require stacks or queues.
-    - As a more efficient option than ''array'' and ''SplDoublyLinkedList'' as a queue or ''Deque'', especially for ''unshift''.
+    - As a more efficient option than ''array'' and ''SplDoublyLinkedList'' as a queue or ''Deque'', for workflows requiring ''shift'' or ''unshift''.
+    - To be able to reclaim memory in applications that run for long periods of time. Notably, PHP's ''array'' type will never release allocated capacity.
+
 
 A ''Deque'' is more efficient than an ''array'' when used as a queue, more readable, and easier to use correctly. While it is possible to efficiently remove elements from the start of an ''array'' (in terms of insertion order), it is very inefficient to prepend elements to the start of a large ''array'' due to needing to either copy the array or move all elements in the internal array representation, and an ''array'' would use much more memory than a ''Deque'' when used that way (and be slower).
 
@@ -175,12 +176,16 @@ Even users that don't write code using ''Deque'' may still benefit from its incl
 
 ==== Why use this instead of array? ====
 
-    - Faster than using array for queue-like workloads (e.g. around 13%-37% less time to add to the end and remove from the front depending on ''Deque'' size and access pattern)
+    - Faster than using array for **queue-like** workloads (e.g. around 13%-37% less time to add to the end and remove from the front depending on ''Deque'' size and access pattern).
     - It is impossible to prepend to an ''array'' (i.e. to be first in insertion order) in constant time. ''array_unshift'' takes time proportional to the length of an array.
-    - ''Deque'' uses much less memory than an ''array'' when used as a queue, especially since that will eventually convert an array to an associative array. See https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html and benchmarks
+    - ''Deque'' uses much less memory than an ''array'' **when used as a queue,** especially since that will eventually convert an array to an associative array. See https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html and benchmarks. Note that starting in php 8.2, ''array'' 
     - Modifying an object by value can be faster than modifying an array by reference. Sometime, it is necessary for a library to modify a passed in collection/array in place (e.g. as an internal implementation detail) (e.g. appending to a list of errors and returning a boolean, converting a binary tree to a list of nodes where some predicate applies). The only way for a method to modify a passed in array parameter is by reference, and opcache is not able to optimize reference parameters/variables because their type at runtime cannot be guaranteed, passing in an object by value can be much faster than passing an ''array'' by reference. \\ \\ (Other approaches may end up copying arrays repeatedly, and take quadratic time instead of linear time, causing performance issues for large inputs). \\ \\ (Right now, some libraries do pass arrays by reference, because of how inefficient ''SplDoublyLinkedList'' is expected to be to create, modify, and read)
 
 Also see [[#introduction|the RFC introduction]] for pitfalls with trying to use a PHP ''array'' like a queue.
+
+=== Caveats ===
+
+For stack-like workflows that only require pushing and popping from the end of a data structure, ''array'' uses roughly the same amount of memory as ''Deque'' and is faster than ''Deque'' due to [[https://github.com/php/php-src/pull/7491|Use more compact representation for packed arrays.]] being merged into PHP 8.2
 
 ===== Usage =====
 
@@ -268,44 +273,44 @@ Test creating a collection, then two cycles of push+shift (adding n values to th
 Results for php 8.2.0-dev debug=false with opcache enabled=true
 
 2x Push then shift from array:               n=       1 iterations= 8000000
-=> max memory=     376 bytes, create+destroy time=1.115 shift time = 1.008 total time = 2.123 result=0
+=> max memory=     216 bytes, create+destroy time=1.127 shift time = 1.019 total time = 2.146 result=0
 2x Push then shift from Deque:               n=       1 iterations= 8000000
-=> max memory=     144 bytes, create+destroy time=1.584 shift time = 0.844 total time = 2.428 result=0
+=> max memory=     144 bytes, create+destroy time=1.580 shift time = 0.893 total time = 2.473 result=0
 2x Push then shift from SplDoublyLinkedList: n=       1 iterations= 8000000
-=> max memory=     184 bytes, create+destroy time=2.055 shift time = 0.941 total time = 2.996 result=0
+=> max memory=     184 bytes, create+destroy time=1.972 shift time = 0.994 total time = 2.967 result=0
 
 2x Push then shift from array:               n=       4 iterations= 2000000
-=> max memory=     376 bytes, create+destroy time=0.413 shift time = 0.681 total time = 1.094 result=24000000
+=> max memory=     216 bytes, create+destroy time=0.398 shift time = 0.692 total time = 1.090 result=24000000
 2x Push then shift from Deque:               n=       4 iterations= 2000000
-=> max memory=     144 bytes, create+destroy time=0.522 shift time = 0.444 total time = 0.966 result=24000000
+=> max memory=     144 bytes, create+destroy time=0.518 shift time = 0.455 total time = 0.973 result=24000000
 2x Push then shift from SplDoublyLinkedList: n=       4 iterations= 2000000
-=> max memory=     280 bytes, create+destroy time=1.033 shift time = 0.511 total time = 1.544 result=24000000
+=> max memory=     280 bytes, create+destroy time=0.925 shift time = 0.548 total time = 1.473 result=24000000
 
 2x Push then shift from array:               n=       8 iterations= 1000000
-=> max memory=     376 bytes, create+destroy time=0.307 shift time = 0.621 total time = 0.928 result=56000000
+=> max memory=     376 bytes, create+destroy time=0.309 shift time = 0.617 total time = 0.926 result=56000000
 2x Push then shift from Deque:               n=       8 iterations= 1000000
-=> max memory=     208 bytes, create+destroy time=0.388 shift time = 0.438 total time = 0.825 result=56000000
+=> max memory=     208 bytes, create+destroy time=0.386 shift time = 0.452 total time = 0.837 result=56000000
 2x Push then shift from SplDoublyLinkedList: n=       8 iterations= 1000000
-=> max memory=     408 bytes, create+destroy time=0.799 shift time = 0.480 total time = 1.278 result=56000000
+=> max memory=     408 bytes, create+destroy time=0.750 shift time = 0.498 total time = 1.248 result=56000000
 
 2x Push then shift from array:               n=    1024 iterations=   20000
-=> max memory=   41016 bytes, create+destroy time=0.452 shift time = 1.445 total time = 1.897 result=20951040000
+=> max memory=   41016 bytes, create+destroy time=0.442 shift time = 1.397 total time = 1.839 result=20951040000
 2x Push then shift from Deque:               n=    1024 iterations=   20000
-=> max memory=   16464 bytes, create+destroy time=0.408 shift time = 0.803 total time = 1.211 result=20951040000
+=> max memory=   16464 bytes, create+destroy time=0.452 shift time = 0.848 total time = 1.300 result=20951040000
 2x Push then shift from SplDoublyLinkedList: n=    1024 iterations=   20000
-=> max memory=   32920 bytes, create+destroy time=1.432 shift time = 0.945 total time = 2.377 result=20951040000
+=> max memory=   32920 bytes, create+destroy time=1.346 shift time = 1.035 total time = 2.381 result=20951040000
 
 2x Push then shift from array:               n= 1048576 iterations=      20
-=> max memory=41943120 bytes, create+destroy time=1.166 shift time = 1.499 total time = 2.665 result=21990211584000
+=> max memory=41943120 bytes, create+destroy time=0.904 shift time = 1.443 total time = 2.347 result=21990211584000
 2x Push then shift from Deque:               n= 1048576 iterations=      20
-=> max memory=16777320 bytes, create+destroy time=0.830 shift time = 0.912 total time = 1.742 result=21990211584000
+=> max memory=16777320 bytes, create+destroy time=0.894 shift time = 0.957 total time = 1.851 result=21990211584000
 2x Push then shift from SplDoublyLinkedList: n= 1048576 iterations=      20
-=> max memory=33554584 bytes, create+destroy time=1.627 shift time = 1.081 total time = 2.708 result=21990211584000
+=> max memory=33554584 bytes, create+destroy time=1.431 shift time = 1.069 total time = 2.500 result=21990211584000
 </code>
 
 ==== Only appending to a Deque and reading elements without removal ====
 
-Note that the proposed ''Deque'' as well as the existing ''SplDoublyLinkedList''/''SplStack'' are expected to perform equally well at shifting to (adding to) or unshifting from(removing from) the front of an array
+Note that the proposed ''Deque'' as well as the existing ''SplDoublyLinkedList''/''SplStack'' are expected to perform equally well at shifting to (adding to) or unshifting from(removing from) the front of an array. (Shifting or unshifting (or unsetting) the front is inefficient for arrays)
 
 **For this benchmark, Deque can be created and read from faster than the fastest methods of reading ''SplStack'' or ''SplFixedArray''.**
 
@@ -316,9 +321,7 @@ Major notes:
 
     * ''Deque'' and ''SplFixedArray'' use less memory than other available options.
     * ''Deque'' is faster than object data structures currently available in the SPL.
-    * ''array'' is always faster at reading data but currently uses more memory.
-
-//(Note that this benchmarks will have to be redone for the time and ''array'' if other proposed optimizations to array succeed)//
+    * In php 8.2+, ''array'' is faster than all object data structures, and memory usage of large packed arrays is half of what would be used in 8.1 due to https://github.com/php/php-src/pull/7491 
 
 <code none>
 Results for php 8.2.0-dev debug=false with opcache enabled=true
@@ -751,5 +754,6 @@ foreach ($sizes as [$n, $iterations]) {
 
 ===== Changelog =====
 
-   * 0.2: Link to definition of Deque. 
+   * 0.2: Link to definition of Deque.
    * 0.3: Add php-ds maintainer's response clarifications
+   * 0.4: Update benchmarks after https://github.com/php/php-src/pull/7491 memory and time optimizations for packed arrays were merged into PHP 8.2
