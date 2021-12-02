@@ -14,6 +14,267 @@ This RFC is an intentionally limited set of operators, avoiding operators that w
 
 This RFC aims to provide basic operator overloading within PHP for objects.
 
+===== Proposal =====
+
+==== Supported Operators ====
+
+In this RFC only a subset of the operators in PHP are supported for operator overloading. The proposed operators are:
+
+^ Operator ^ Method Name ^
+| ''+'' | ''%%__add()%%'' |
+| ''-'' | ''%%__sub()%%'' |
+| ''*'' | ''%%__mul()%%'' |
+| ''/'' | ''%%__div()%%'' |
+| ''%'' | ''%%__mod()%%'' |
+| ''&'' | ''%%__bitwiseAnd()%%'' |
+| ''%%|%%'' | ''%%__bitwiseOr()%%'' |
+| ''^'' | ''%%__bitwiseXor()%%'' |
+| ''~'' | ''%%__bitwiseNot()%%'' |
+| ''<<'' | ''%%__bitwiseShiftLeft()%%'' |
+| ''>>'' | ''%%__bitwiseShiftRight()%%'' |
+| ''%%**%%'' | ''%%__pow()%%'' |
+| ''=='' | ''%%__equals()%%'' |
+| ''<=>'' | ''%%__compareTo()%%'' |
+
+**Implied Operators**
+
+The following operators are supported due to optimizations and substitutions that occur within the PHP engine.
+
+^ Operator ^ Implied As ^ Method ^
+| ''%%$a += $b%%'' | ''%%$a = $a + $b%%'' | ''%%__add()%%'' |
+| ''%%$a -= $b%%'' | ''%%$a = $a - $b%%'' | ''%%__sub()%%'' |
+| ''%%$a *= $b%%'' | ''%%$a = $a * $b%%'' | ''%%__mul()%%'' |
+| ''%%$a /= $b%%'' | ''%%$a = $a / $b%%'' | ''%%__div()%%'' |
+| ''%%$a %= $b%%'' | ''%%$a = $a % $b%%'' | ''%%__mod()%%'' |
+| ''%%$a **= $b%%'' | ''%%$a = $a ** $b%%'' | ''%%__pow()%%'' |
+| ''%%$a &= $b%%'' | ''%%$a = $a & $b%%'' | ''%%__bitwiseAnd()%%'' |
+| ''%%$a |= $b%%'' | ''%%$a = $a | $b%%'' | ''%%__bitwiseOr()%%'' |
+| ''%%$a ^= $b%%'' | ''%%$a = $a ^ $b%%'' | ''%%__bitwiseXor()%%'' |
+| ''%%$a <<= $b%%'' | ''%%$a = $a << $b%%'' | ''%%__bitwiseShiftLeft()%%'' |
+| ''%%$a >>= $b%%'' | ''%%$a = $a >> $b%%'' | ''%%__bitwiseShiftRight()%%'' |
+| ''%%$a != $b%%'' | ''%%!($a == $b)%%'' | ''%%__equals()%%'' |
+| ''%%$a < $b%%'' | ''%%($a <=> $b) == -1%%'' | ''%%__compareTo()%%'' |
+| ''%%$a <= $b%%'' | ''%%($a <=> $b) < 1%%'' | ''%%__compareTo()%%'' |
+| ''%%$a > $b%%'' | ''%%($a <=> $b) == 1%%'' | ''%%__compareTo()%%'' |
+| ''%%$a >= $b%%'' | ''%%($a <=> $b) > -1%%'' | ''%%__compareTo()%%'' |
+| ''%%++$a%%'' | ''%%$a = $a + 1%%'' | ''%%__add()%%'' |
+| ''%%$a++%%'' | ''%%$a = $a + 1%%'' | ''%%__add()%%'' |
+| ''%%--$a%%'' | ''%%$a = $a - 1%%'' | ''%%__sub()%%'' |
+| ''%%$a--%%'' | ''%%$a = $a - 1%%'' | ''%%__sub()%%'' |
+| ''%%-$a%%'' | ''%%$a = -1 * $a%%'' | ''%%__mul()%%'' |
+
+==== New Throwable: InvalidOperator ====
+A new throwable is provided and used with this feature, the ''InvalidOperator'' error, which extends ''Error''.
+
+==== Typed Arguments ====
+Contrary to previous proposals, type errors due to argument type mismatches are not suppressed or translated to a different value, and instead allowed to function as exceptions or errors normally would. To facilitate this, the operand is forced to type its implementations explicitly, causing the developer using this feature to evaluate which types their object can interact with for a given operator.
+
+Note that type errors will not occur with scalar types due to casting unless the ''declare(strict_types=1)'' option is used when casting can be done, just like all other such typing behavior in PHP.
+
+==== Unimplemented Operator Methods ====
+If an operator is used with an object which does not have an implementation of the method for that operator, an ''InvalidOperator'' error is thrown. This is true for all classes except for two cases detailed below in **Existing PHP Functionality**.
+
+==== Binary Operator Methods ====
+This RFC proposes adding magic methods to PHP to control operator overloading for a limited set of operators. All but one operator, the bitwise not operator ''~'', are binary. As such, nearly all the magic methods fit a single general format:
+
+<code php>
+<?php
+
+class A {
+  
+  public function __op(mixed $other, bool $left): mixed;
+  
+}
+</code>
+
+The second operand is always passed as ''$other'' regardless of whether the called object is the left or right operand. If the called object is the left operand, then ''$left'' is ''true''. If the called object is the right operand, then ''$left'' is ''false''.
+
+A new throwable error, ''InvalidOperator'', is also provided for users to throw within the operator magic methods if for any reason the operation is invalid due to type constraints, value constraints, or other factors.
+
+The allowed types for ''$other'' and the return are ''mixed'', to allow user code to further narrow the type as appropriate for their application.
+
+==== Unary Operator Methods ====
+There is only a single directly supported unary operator, the bitwise not operator ''~''. This operator has the following signature:
+
+<code php>
+<?php
+
+class A {
+
+  public function __bitwiseNot(): mixed;
+  
+}
+</code>
+
+==== Comparison Operator Methods ====
+Partial support for comparison operators is also part of this RFC. While comparison operators in Python **do not** restrict the return to a boolean value, and there may be many use cases for overloading the comparison operators in a way that does not return a boolean, in the interest of promoting consistency with existing code, the magic methods for the comparison operators have the additional restriction of returning ''bool'' or ''int'' instead of ''mixed''.
+
+Additionally, since comparisons have a reflection relationship instead of a commutative one, the ''$left'' argument is omitted as it doesn't make sense. They can also still throw exceptions, including the ''InvalidOperator'' error.
+
+<code php>
+<?php
+
+class A {
+
+  public function __equals(mixed $other): bool;
+
+}
+</code>
+
+The spaceship operator (''<=>''), used to determine sort hierarchy and encompassing all comparisons for numeric values, is also supported. However, its definition is slightly different:
+
+<code php>
+<?php
+
+class A {
+
+  public function __compareTo(mixed $other): int;
+
+}
+</code>
+
+^ Left Operand Method ^ Right Operand Method ^
+| ''%%__compareTo()%%'' | ''%%__compareTo() * -1%%'' |
+
+Any return value larger than 0 will be normalized to 1, and any return value smaller than 0 will be normalized to -1.
+
+Unlike binary operators, **comparison operators do not throw the ''InvalidOperator'' error when unimplemented**. Instead, the PHP engine falls back to existing comparison logic in the absence of an override for a given class. 
+
+This means that if ''%%__equals()%%'' is unimplemented but ''%%__compareTo()%%'' is implemented, the expression ''$obj == 6'' would be evaluated as ''$obj <=> 6 === 0''. As such, for objects which are both equatable and comparable, such as arbitrary precision numbers, it is only necessary to implement ''%%__compareTo()%%''. However, for objects that are equatable but not comparable such as complex numbers, both would need an implementation with the ''%%__compareTo()%%'' explicitly throwing an exception or error.
+
+==== Interfaces ====
+While interfaces make sense for certain applications, in this case no interfaces will be provided. The magic methods work as hooks for engine behavior, and the interfaces would not be able to be properly typed outside of something like the [[rfc:never_for_parameter_types|Never For Parameter Types]] RFC.
+
+More importantly, the interface wouldn't convey something meaningful. For example, a Matrix and a Money class could both implement a Multiplyable interface, but they wouldn't necessarily be able to multiply each other. Therefore, it makes more sense for such interfaces to be part of userland libraries and standards.
+
+==== Existing PHP Functionality ====
+
+=== Comparisons ===
+As detailed in the section on comparison operators, objects which do not have an implementation of the ''%%__equals()%%'' or ''%%__compareTo()%%'' methods will fall back to existing comparison logic within the PHP engine instead of throwing the ''InvalidOperator'' error.
+
+This preserves the ability of extensions, such as ext-date, to provide classes that have their own handlers for compare, and also reduces the backwards compatibility concerns of this RFC.
+
+=== Greater Than Opcode ===
+Currently, the greater than (''>'') and greater than or equal to (''>='') operators are not compiled as ''ZEND_AST_BINARY_OP'' like other comparisons. Instead, they are compiled as ''ZEND_AST_GREATER'' and then computed as a ''ZEND_IS_SMALLER'' opcode with swapped operands.
+
+This is not feasible once operator overloads for object comparisons are supported. The reason for this can be seen if you consider what methods would be called in various situations:
+
+<code php>
+<?php
+
+$foo = new Foo;
+$bar = new Bar;
+
+$foo < $bar; // This would result in: $foo->__compareTo($bar) < 0
+$foo > $bar; // This would result in: $bar->__compareTo($foo) < 0
+</code>
+
+This would make the greater than operators the only operators which have a right-to-left precedence for the operands, which would be confusing and error prone. Swapping the comparison operator would result in a completely different implementation of the overload being called, which would be an easy way to introduce accidental and unexpected bugs.
+
+This would only be an issue when two objects are being compared to each other, which would further make the behavior even more confusing and inconsistent.
+
+To resolve this, the greater than operators are being given their own opcodes as part of this RFC. To ensure that this change doesn't affect existing behavior in other parts of the language, the opcode is being implemented as a mirror of the less than operator implementations.
+
+===== Design Considerations =====
+There are several deliberate design considerations that were made to mitigate possible issues and risks that operator overloads present.
+
+==== The Identity Operator Is Not Overloadable ====
+For a variety of reasons it would be problematic to allow operator overloading of the identity operator. This operator is supposed to guarantee type, and further with objects it guarantees the zval pointer, and that property would be lost the moment it was possible to overload the operator. Consider the following:
+
+<code php>
+<?php
+
+class A {
+  public int $value;
+  
+  public __equals(int|float|A $other, bool $left): bool
+  {
+    if ($other instanceof A) {
+      return $this->value == $other->value;
+    }
+    
+    return $this->value == $other;
+  }
+}
+
+$notInt = new A();
+$notInt->value = 100;
+
+if ($notInt == 100) {
+  echo "Equivalent to (int)100";
+}
+
+if ($notInt === 100) {
+  echo "Identical to (int)100";
+}
+</code>
+
+An object can be equivalent to other types, and that equivalence is something that the application itself should define. However an object cannot be identical to anything except itself, and allowing such an overload would enable objects to "lie" in ways that would be unintuitive to most programmers while not really enabling any new functionality.
+
+==== Logical Operators Are Not Overloadable ====
+This was another deliberate design choice. The logical operators ''&&'', ''||'', ''and'', ''or'', and ''xor'' have a critical and specific meaning within PHP. These operators refer to a specific kind of math operation, boolean algebra, and their usage is reserved for that purpose only. It would be far more disruptive and ambiguous to overload these operators than most other operators.
+
+Most behavior that users would want to control with overloads to these operators can in fact be accomplished by allowing an object to control its casting to a boolean value. That is not part of this RFC, but the RFC author views that as a better way to address these operators than allowing arbitrary overloads.
+
+==== Retry Attempts vs. Errors ====
+While such behavior may be desired in some cases, the general idea behind this feature is that the engine should make as few assumptions as possible about the nature of the operation being performed. This is because the engine will have limited ability to infer the purpose intended of an operator overload, while the objects in question will have a full understanding of object state, program state, and context.
+
+Because of this, the general position of this RFC, which covers both commutativity and associativity, is that magic should not be performed in order to minimize errors. Instead, using operator overloads should produce errors any time the operation cannot be completed //and// the engine must make assumptions about the program in order to avoid the error.
+
+Taking this position means that errors resulting from associativity and commutativity issues should not be avoided. Instead, they should be thrown as early as possible to help the PHP developer avoid as much poor usage of the feature as possible.
+
+The exception to this position is when an object doesn't implement the operator. The engine //will// retry the operation if the left operand doesn't support the operation in question at all by not implementing the relevant method. In such a case, it will check the right operand for an implementation of the relevant method. This will ensure commutativity for cases of the type:
+
+<code php>
+<?php
+
+$num = new Number(5);
+
+$val1 = $num + 1;
+$val2 = 1 + $num;
+</code>
+
+This will help keep object interaction with scalars consistent after this RFC is implemented.
+
+=== Error Early Where Possible ===
+The proposed implementation errors as early as possible to help developers who use operators in unsupported ways. This is covered in the **Backwards Compatibility** section as well, but part of this is that //all objects will error when used with one of the overloadable operators unless they implement the corresponding overload//. The forced use of typing for the arguments will also ensure that unhandled types error immediately with a ''TypeError''.
+
+=== Retry vs. TypeError ===
+In the case that a TypeError is thrown by the left operand, a retry attempt is not made. This is done in line with the general philosophy of this RFC to make as few assumptions about program context as possible and error as early as possible to aid in proper usage of the feature.
+
+<code php>
+class A {
+    public function __construct(public int $value) {}
+    
+    public function __add(int $other, bool $left): self {
+        return new A($this->value + $other);
+    }
+}
+
+class B {
+    public function __construct(public int $value) {}
+    
+    public function __add(int|A|B $other, bool $left): self {
+        if (is_int($other)) {
+            return new B($this->value + $other);
+        } else {
+            return new B($this->value + $other->value);
+        }
+    }
+}
+
+$objA = new A(5);
+$objB = new B(3);
+
+$val1 = $objB + $objA; // Object of class B with value of 8
+$val2 = $objA + $objB; // TypeError: Argument #1 ($other) must be of type int, B given
+</code>
+
+==== Static vs. Dynamic Methods ====
+With the presence of static properties, a static method on an object does not guarantee immutability. However, having static methods for operator overloads might communicate to developers that these are intended to be used immutably. On the other hand, having the overload be static would make it more difficult to use operator overloads with protected or private class properties. In order to accomplish this, both operands would need to be passed to the implemented method.
+
+As it seems that mutable behavior from operator overloads would be widely seen by PHP developers as a bug in most circumstances, and the reassignment operators are not given independent overload methods, this RFC proposes using dynamic methods to make use of protected and private properties easier and more intuitive. Further, dynamic methods correctly indicate to the developer that the method will only ever be called on instances of the object, instead of statically without object state.
+
 ===== Background =====
 Operator overloading is a well explored concept in programming that enables a programmer to control the behavior of their code when combined with an infix, or operator. Some languages such as R allow for defining custom operators in addition to overloading existing operators. Some languages such as Python allow for overloading nearly all existing operators, but not for defining new operators. Some languages such as Java and PHP do not allow for custom operator overloading at all, though have operator overloading like behavior built into the language.
 
@@ -225,15 +486,6 @@ enum Permissions {
 ==== Scalar Objects & Scalar Expansions ====
 The availability of the math operators will enable scalar object implementations in user code that actually act like scalars in most circumstances. This is further discussed in the benefits and future scope sections.
 
-==== Collections ====
-Collection objects could use the ''+'' and ''/'' operators as union and partition operators. The union behavior is already supported for arrays natively, and would allow collection objects to benefit from it as well.
-
-==== Resource Control Objects ====
-Some objects which represent a resource might use operator overloading as well. For instance, using the ''+'' operator to append a string to a file. This usage would be prone to errors and instability, but in the interests of being complete, it is a foreseeable usage.
-
-==== Queues ====
-Much like collections, queues could use operator overloads to control adding and removing items from the queue.
-
 ===== Benefits =====
 
 There are several benefits for objects using operators over named method calls where it makes sense to do so.
@@ -312,67 +564,9 @@ Competing implementations of the same concept may implement different operators 
 
 The main risk is that changing a class definition prior would only have an effect on method calls (in most circumstances). This isn't 100% true, as demonstrated in the previous section, since existing magic methods provide ways for objects to mutate or affect behavior of non-method-call lines. This risk would be reduced by this RFC through three main strategies:
 
-  - An object used with an operator that is not defined on the class will result in an ''InvalidOperator'' error immediately, preventing the issue from being deferred until a later and helping the problem be caught early.
+  - An object used with an operator that is not defined on the class will result in an ''InvalidOperator'' error immediately, preventing the issue from being deferred until a later point and helping the problem be caught early.
   - While previously expressions such as ''$val = $obj + 2'' would silently cast, through correctly typing the arguments users can be provided with early and explicit type errors and exceptions that make it easier to spot such issues. NOTE: PHP 8.0 removed object casting in circumstances such as this, further reducing the risk of BC issues.
   - By allowing typed arguments for the operator overload methods, non-sensical object combinations can be avoided. Since this is controlled mainly through typing, it forces the developer to white list the classes that the operator works with.
-
-==== Operators Can Hide Non-Equivalent Substitutions ====
-
-While commutativity is addressed at much greater length in the next section, it is possible for the following lines to be non-equivalent:
-
-<code php>
-<?php
-
-$int = new Number(5);
-$dec = new Decimal(6.0);
-
-$val1 = $int + $dec;
-$val2 = $dec + $int;
-</code>
-
-In may not be entirely clear that these two lines are not equivalent. Assuming that both classes have the method defined, the first line will result in:
-
-<code php>
-$val1 = $int->__add($dec, true);
-</code>
-
-While the second line will result in:
-
-<code php>
-$val2 = $dec->__add($int, true);
-</code>
-
-Ultimately this is an issue mostly for the ''+'' and ''*'' operators, since the other math operators are already non-commutative. If the developer does not understand that using objects can make the ''+'' and ''*'' operators non-commutative as well, bugs may be introduced that are not caught early.
-
-This can again be mitigated through good argument typing and design. A class can simply only accept other classes as arguments that it can ensure commutativity for. Or in some cases, such commutativity violations are actually part of the feature, such as with matrices.
-
-==== Use With Structured Representations ====
-
-Though some people will surely see this as a benefit, objects which represent things such as **Collections** or **Resources** will likely take advantage of some operator overloads. These are mentioned in the **Use Cases** section as it would be naive to think that they won't happen.
-
-This risk is mitigated in this RFC by limiting the operators which can be overloaded and by having //Implied Overloads//. These are overloads that occur due to engine and compiler optimizations. For instance, a Queue might decide it wants to use the ''-'' operator to pull things from the queue, perhaps with the convention of pulling ''int'' items from the queue in the format ''$queue - int''.
-
-This would work fine for a normal usage of this operator, but would create the odd circumstance of the queue being reassigned when used with ''-=''. This behavior would be unavoidable with the proposed implementation, and would thus discourage non-reflexive usages of operator overloads:
-
-<code php>
-<?php
-
-$queue = new Queue();
-
-$queue += new Item(); // With the + overload used to push
-$queue += new Item();
-
-$first = $queue - 1; // With the - overload used to pop
-$queue -= 1; // This would be evaluated as $queue = $queue - 1
-             // Support for this would be unavoidable for the queue
-             // Discouraging usage of the operator in this manner
-</code>
-
-In the above example, the intent of the implementing Queue class is for ''$queue - 1'' to return the item which is removed from the queue and mutate the queue silently. This is an example of mutable usage of the operator. However, while this would work when you can assign the result to separate variable, the entire queue variable would be reassigned to the returned item instead when a reassignment operator is used.
-
-This is an example of poor usage of the operator. It implements the ''%%__sub()%%'' method mutably, and in a way that is unintuitive making the intent of the code unclear without looking at the implementation. However, this poor implementation would face serious issues with the reassignment case outlined above.
-
-Additionally, this unavoidable relationship between the implemented and implied operator overloads would mean that if an operator overload was used in this way despite it being a poor design, the implementer would need to communicate the dangers of the overload very explicitly and loudly, which promotes building community behavior around safe usage of operator overloads by promoting community standards.
 
 ===== Properties of Operators in General =====
 
@@ -483,268 +677,10 @@ Java does not support user-defined operator overloads at all, but has built-in b
 
 In Java, the ''+'' operator can be used to join strings in a way similar to the PHP operator ''.'' and is sometimes described as a "built-in operator overload" by Java developers.
 
-===== Design Considerations =====
-There are several deliberate design considerations that were made to mitigate possible issues and risks that operator overloads present.
-
-==== The Identity Operator Is Not Overloadable ====
-For a variety of reasons it would be problematic to allow operator overloading of the identity operator. This operator is supposed to guarantee type, and further with objects it guarantees the zval pointer, and that property would be lost the moment it was possible to overload the operator. Consider the following:
-
-<code php>
-<?php
-
-class A {
-  public int $value;
-  
-  public __equals(int|float|A $other, bool $left): bool
-  {
-    if ($other instanceof A) {
-      return $this->value == $other->value;
-    }
-    
-    return $this->value == $other;
-  }
-}
-
-$notInt = new A();
-$notInt->value = 100;
-
-if ($notInt == 100) {
-  echo "Equivalent to (int)100";
-}
-
-if ($notInt === 100) {
-  echo "Identical to (int)100";
-}
-</code>
-
-An object can be equivalent to other types, and that equivalence is something that the application itself should define. However an object cannot be identical to anything except itself, and allowing such an overload would enable objects to "lie" in ways that would be unintuitive to most programmers while not really enabling any new functionality.
-
-==== Logical Operators Are Not Overloadable ====
-This was another deliberate design choice. The logical operators ''&&'', ''||'', ''and'', ''or'', and ''xor'' have a critical and specific meaning within PHP. These operators refer to a specific kind of math operation, boolean algebra, and their usage is reserved for that purpose only. It would be far more disruptive and ambiguous to overload these operators than most other operators.
-
-Most behavior that users would want to control with overloads to these operators can in fact be accomplished by allowing an object to control its casting to a boolean value. That is not part of this RFC, but the RFC author views that as a better way to address these operators than allowing arbitrary overloads.
-
-==== Retry Attempts vs. Errors ====
-While such behavior may be desired in some cases, the general idea behind this feature is that the engine should make as few assumptions as possible about the nature of the operation being performed. This is because the engine will have limited ability to infer the purpose intended of an operator overload, while the objects in question will have a full understanding of object state, program state, and context.
-
-Because of this, the general position of this RFC, which covers both commutativity and associativity, is that magic should not be performed in order to minimize errors. Instead, using operator overloads should produce errors any time the operation cannot be completed //and// the engine must make assumptions about the program in order to avoid the error.
-
-Taking this position means that errors resulting from associativity and commutativity issues should not be avoided. Instead, they should be thrown as early as possible to help the PHP developer avoid as much poor usage of the feature as possible.
-
-The exception to this position is when an object doesn't implement the operator. The engine //will// retry the operation if the left operand doesn't support the operation in question at all by not implementing the relevant method. In such a case, it will check the right operand for an implementation of the relevant method. This will ensure commutativity for cases of the type:
-
-<code php>
-<?php
-
-$num = new Number(5);
-
-$val1 = $num + 1;
-$val2 = 1 + $num;
-</code>
-
-This will help keep object interaction with scalars consistent after this RFC is implemented.
-
-=== Error Early Where Possible ===
-The proposed implementation errors as early as possible to help developers who use operators in unsupported ways. This is covered in the **Backwards Compatibility** section as well, but part of this is that //all objects will error when used with one of the overloadable operators unless they implement the corresponding overload//. The forced use of typing for the arguments will also ensure that unhandled types error immediately with a ''TypeError''.
-
-=== Retry vs. TypeError ===
-In the case that a TypeError is thrown by the left operand, a retry attempt is not made. This is done in line with the general philosophy of this RFC to make as few assumptions about program context as possible and error as early as possible to aid in proper usage of the feature.
-
-<code php>
-class A {
-    public function __construct(public int $value) {}
-    
-    public function __add(int $other, bool $left): self {
-        return new A($this->value + $other);
-    }
-}
-
-class B {
-    public function __construct(public int $value) {}
-    
-    public function __add(int|A|B $other, bool $left): self {
-        if (is_int($other)) {
-            return new B($this->value + $other);
-        } else {
-            return new B($this->value + $other->value);
-        }
-    }
-}
-
-$objA = new A(5);
-$objB = new B(3);
-
-$val1 = $objB + $objA; // Object of class B with value of 8
-$val2 = $objA + $objB; // TypeError: Argument #1 ($other) must be of type int, B given
-</code>
-
-==== Static vs. Dynamic Methods ====
-With the presence of static properties, a static method on an object does not guarantee immutability. However, having static methods for operator overloads might communicate to developers that these are intended to be used immutably. On the other hand, having the overload be static would make it much more difficult to use operator overloads with protected or private class properties.
-
-As it seems that mutable behavior from operator overloads would be widely seen by PHP developers as a bug in most circumstances, and the reassignment operators are not given independent overload methods, this RFC proposes using dynamic methods to make use of protected and private properties easier and more intuitive.
-
-===== Proposal =====
-==== New Throwable: InvalidOperator ====
-A new throwable is provided and used with this feature, the ''InvalidOperator'' error, which extends ''Error''.
-
-==== Typed Arguments ====
-Contrary to previous proposals, type errors due to argument type mismatches are not suppressed or translated to a different value, and instead allowed to function as exceptions or errors normally would. To facilitate this, the operand is forced to type its implementations explicitly, causing the developer using this feature to evaluate which types their object can interact with for a given operator.
-
-Note that type errors will not occur with scalar types due to casting unless the ''declare(strict_types=1)'' option is used when casting can be done, just like all other such typing behavior in PHP.
-
-==== Unimplemented Operator Methods ====
-If an operator is used with an object which does not have an implementation of the method for that operator, an ''InvalidOperator'' error is thrown. This is true for all classes except for two cases detailed below in **Existing PHP Functionality**.
-
-==== Binary Operator Methods ====
-This RFC proposes adding magic methods to PHP to control operator overloading for a limited set of operators. All but one operator, the bitwise not operator ''~'', are binary. As such, nearly all the magic methods fit a single general format:
-
-<code php>
-<?php
-
-class A {
-  
-  public function __op(mixed $other, bool $left): mixed;
-  
-}
-</code>
-
-The second operand is always passed as ''$other'' regardless of whether the called object is the left or right operand. If the called object is the left operand, then ''$left'' is ''true''. If the called object is the right operand, then ''$left'' is ''false''.
-
-A new throwable error, ''InvalidOperator'', is also provided for users to throw within the operator magic methods if for any reason the operation is invalid due to type constraints, value constraints, or other factors.
-
-The allowed types for ''$other'' and the return are ''mixed'', to allow user code to further narrow the type as appropriate for their application.
-
-==== Unary Operator Methods ====
-There is only a single directly supported unary operator, the bitwise not operator ''~''. This operator has the following signature:
-
-<code php>
-<?php
-
-class A {
-
-  public function __bitwiseNot(): mixed;
-  
-}
-</code>
-
-==== Comparison Operator Methods ====
-Partial support for comparison operators is also part of this RFC. While comparison operators in Python **do not** restrict the return to a boolean value, and there may be many use cases for overloading the comparison operators in a way that does not return a boolean, in the interest of promoting consistency with existing code, the magic methods for the comparison operators have the additional restriction of returning ''bool'' or ''int'' instead of ''mixed''.
-
-Additionally, since comparisons have a reflection relationship instead of a commutative one, the ''$left'' argument is omitted as it doesn't make sense. They can also still throw exceptions, including the ''InvalidOperator'' error.
-
-<code php>
-<?php
-
-class A {
-
-  public function __equals(mixed $other): bool;
-
-}
-</code>
-
-The spaceship operator (''<=>''), used to determine sort hierarchy and encompassing all comparisons for numeric values, is also supported. However, its definition is slightly different:
-
-<code php>
-<?php
-
-class A {
-
-  public function __compareTo(mixed $other): int;
-
-}
-</code>
-
-^ Left Operand Method ^ Right Operand Method ^
-| ''%%__compareTo()%%'' | ''%%__compareTo() * -1%%'' |
-
-Any return value larger than 0 will be normalized to 1, and any return value smaller than 0 will be normalized to -1.
-
-Unlike binary operators, **comparison operators do not throw the ''InvalidOperator'' error when unimplemented**. Instead, the PHP engine falls back to existing comparison logic in the absence of an override for a given class. 
-
-This means that if ''%%__equals()%%'' is unimplemented but ''%%__compareTo()%%'' is implemented, the expression ''$obj == 6'' would be evaluated as ''$obj <=> 6 === 0''. As such, for objects what are both equatable and comparable, such as arbitrary precision numbers, it is only necessary to implement ''%%__compareTo()%%''. However, for objects that are equatable but not comparable such as complex numbers, both would need an implementation with the ''%%__compareTo()%%'' explicitly throwing an exception or error.
-
-==== Supported Operators ====
-
-In this RFC only a subset of the operators in PHP are supported for operator overloading. The proposed operators are:
-
-^ Operator ^ Method Name ^
-| ''+'' | ''%%__add()%%'' |
-| ''-'' | ''%%__sub()%%'' |
-| ''*'' | ''%%__mul()%%'' |
-| ''/'' | ''%%__div()%%'' |
-| ''%'' | ''%%__mod()%%'' |
-| ''&'' | ''%%__bitwiseAnd()%%'' |
-| ''%%|%%'' | ''%%__bitwiseOr()%%'' |
-| ''^'' | ''%%__bitwiseXor()%%'' |
-| ''~'' | ''%%__bitwiseNot()%%'' |
-| ''<<'' | ''%%__bitwiseShiftLeft()%%'' |
-| ''>>'' | ''%%__bitwiseShiftRight()%%'' |
-| ''%%**%%'' | ''%%__pow()%%'' |
-| ''=='' | ''%%__equals()%%'' |
-| ''<=>'' | ''%%__compareTo()%%'' |
-
-**Implied Operators**
-
-The following operators are supported due to optimizations and substitutions that occur within the PHP engine.
-
-^ Operator ^ Implied As ^ Method ^
-| ''%%$a += $b%%'' | ''%%$a = $a + $b%%'' | ''%%__add()%%'' |
-| ''%%$a -= $b%%'' | ''%%$a = $a - $b%%'' | ''%%__sub()%%'' |
-| ''%%$a *= $b%%'' | ''%%$a = $a * $b%%'' | ''%%__mul()%%'' |
-| ''%%$a /= $b%%'' | ''%%$a = $a / $b%%'' | ''%%__div()%%'' |
-| ''%%$a %= $b%%'' | ''%%$a = $a % $b%%'' | ''%%__mod()%%'' |
-| ''%%$a **= $b%%'' | ''%%$a = $a ** $b%%'' | ''%%__pow()%%'' |
-| ''%%$a &= $b%%'' | ''%%$a = $a & $b%%'' | ''%%__bitwiseAnd()%%'' |
-| ''%%$a |= $b%%'' | ''%%$a = $a | $b%%'' | ''%%__bitwiseOr()%%'' |
-| ''%%$a ^= $b%%'' | ''%%$a = $a ^ $b%%'' | ''%%__bitwiseXor()%%'' |
-| ''%%$a <<= $b%%'' | ''%%$a = $a << $b%%'' | ''%%__bitwiseShiftLeft()%%'' |
-| ''%%$a >>= $b%%'' | ''%%$a = $a >> $b%%'' | ''%%__bitwiseShiftRight()%%'' |
-| ''%%$a != $b%%'' | ''%%!($a == $b)%%'' | ''%%__equals()%%'' |
-| ''%%$a < $b%%'' | ''%%($a <=> $b) == -1%%'' | ''%%__compareTo()%%'' |
-| ''%%$a <= $b%%'' | ''%%($a <=> $b) < 1%%'' | ''%%__compareTo()%%'' |
-| ''%%$a > $b%%'' | ''%%($a <=> $b) == 1%%'' | ''%%__compareTo()%%'' |
-| ''%%$a >= $b%%'' | ''%%($a <=> $b) > -1%%'' | ''%%__compareTo()%%'' |
-| ''%%++$a%%'' | ''%%$a = $a + 1%%'' | ''%%__add()%%'' |
-| ''%%$a++%%'' | ''%%$a = $a + 1%%'' | ''%%__add()%%'' |
-| ''%%--$a%%'' | ''%%$a = $a - 1%%'' | ''%%__sub()%%'' |
-| ''%%$a--%%'' | ''%%$a = $a - 1%%'' | ''%%__sub()%%'' |
-| ''%%-$a%%'' | ''%%$a = -1 * $a%%'' | ''%%__mul()%%'' |
-
-==== Interfaces ====
-While interfaces make sense for certain applications, in this case no interfaces will be provided. The magic methods work as hooks for engine behavior, and the interfaces would not be able to be properly typed outside of something like the [[rfc:never_for_parameter_types|Never For Parameter Types]] RFC.
-
-More importantly, the interface wouldn't convey something meaningful. For example, a Matrix and a Money class could both implement a Multiplyable interface, but they wouldn't necessarily be able to multiply each other. Therefore, it makes more sense for such interfaces to be part of userland libraries and standards.
-
-==== Existing PHP Functionality ====
-
-=== Comparisons ===
-As detailed in the section on comparison operators, objects which do not have an implementation of the ''%%__equals()%%'' or ''%%__compareTo()%%'' methods will fall back to existing comparison logic within the PHP engine instead of throwing the ''InvalidOperator'' error.
-
-This preserves the ability of extensions, such as ext-date, to provide classes that have their own handlers for compare, and also reduces the backwards compatibility concerns of this RFC.
-
-=== Greater Than Opcode ===
-Currently, the greater than (''>'') and greater than or equal to (''>='') operators are not compiled as ''ZEND_AST_BINARY_OP'' like other comparisons. Instead, they are compiled as ''ZEND_AST_GREATER'' and then computed as a ''ZEND_IS_SMALLER'' opcode with swapped operands.
-
-This is not feasible once operator overloads for object comparisons are supported. The reason for this can be seen if you consider what methods would be called in various situations:
-
-<code php>
-<?php
-
-$foo = new Foo;
-$bar = new Bar;
-
-$foo < $bar; // This would result in: $foo->__compareTo($bar) < 0
-$foo > $bar; // This would result in: $bar->__compareTo($foo) < 0
-</code>
-
-This would make the greater than operators the only operators which have a right-to-left precedence for the operands, which would be confusing and error prone. Swapping the comparison operator would result in a completely different implementation of the overload being called, which would be an easy way to introduce accidental and unexpected bugs.
-
-This would only be an issue when two objects are being compared to each other, which would further make the behavior even more confusing and inconsistent.
-
-To resolve this, the greater than operators are being given their own opcodes as part of this RFC. To ensure that this change doesn't affect existing behavior in other parts of the language, the opcode is being implemented as a mirror of the less than operator implementations.
-
 ===== Backward Incompatible Changes =====
-Objects used with operators will now error if the operator method is not implemented on the object or objects in question. Since expressions involving objects and these operators prior have been mostly nonsensical before, the anticipated impact of this is minimal.
+Since PHP 8.0, automatic casting of objects in the context of operators has resulted in an error. Due to this, and the fact that the comparison function falls back to existing comparison handlers if the method is unimplemented, there is virtually no backward incompatible changes. 
+
+The sole change is that objects used with operators will no longer result in a thrown ''Error'', but instead a thrown ''InvalidOperator'' which extends ''Error''.
 
 ===== Proposed PHP Version(s) =====
 This change is proposed for PHP 8.2
@@ -754,10 +690,18 @@ This change is proposed for PHP 8.2
 None
 
 ==== To Existing Extensions ====
-Existing extensions can continue to define their own operator overloads by providing a `do_operation` call for their classes, however classes which are open to be extended may benefit from being updated so that their overloads can be extended by implementing the necessary methods.
+Existing extensions can continue to define their own operator overloads by providing a ''do_operation'' call for their classes, however classes which are open to be extended may benefit from being updated so that their overloads can be extended by implementing the necessary methods. In order to accomplish this, the extension class would need to call ''zend_std_call_op_override'' at the start of its ''do_operation'' handler. The operator override handler will not throw the ''InvalidOperator'' error if the class entry has the type ''ZEND_INTERNAL_CLASS''. Instead, it will return the value ''FAILURE'' of type ''zend_result''. 
+
+Thus, the following code at start of any extension's ''do_operation'' handler would be the minimal sufficient addition:
+
+<code c>
+if (zend_std_call_op_override(opcode, &result, &op1, &op2) == SUCCESS) {
+    return SUCCESS;
+}
+</code>
 
 ==== To Opcache ====
-TBD.
+The addition of the opcodes ZEND_IS_LARGER and ZEND_IS_LARGER_OR_EQUAL to the ZEND_AST_BINARY_OP requires several updates to the optimizer and to Opcache. This includes optimizations which are present in JIT for the other binary opcodes.
 
 ==== New Constants ====
 None
