@@ -67,10 +67,10 @@ By representing the implementations by the symbols themselves, this RFC avoids f
 <code php>
 class Collection {
     // This function unions, it does not add
-    function __add(Collection $other, bool $left) {}
+    function __add(Collection $other, OperandPosition $operandPos) {}
     
     // Now the implementation doesn't suggest something incorrect
-    operator +(Collection $other, bool $left) {}
+    operator +(Collection $other, OperandPosition $operandPos) {}
 }
 </code>
 
@@ -84,7 +84,7 @@ For example, suppose in the future it was desired to allow operators to be "gree
 
 <code php>
 class Number {
-    public greedy operator +(Number $other, bool $left): Number {}
+    public greedy operator +(Number $other, OperandPosition $operandPos): Number {}
 }
 </code>
 
@@ -113,15 +113,26 @@ $value = $obj + 3;
 
 Currently, this throws a TypeError.
 
+==== Add OperandPosition Enum ====
+
+As detailed later in the RFC, letting the operator overload know which operand it is, the left operand or right operand, is critical for intelligent commutativity breaking. This is a requirement for operands such a division. To enable this a new enum has been provided, ''OperandPosition''.
+
+<code php>
+enum OperandPosition {
+    case LeftSide;
+    case RightSide;
+}
+</code>
+
 ==== Add Support For Operators ====
 
-For most operators, the methods have the form ''operator op($other, bool $left)'' and so an implementation to support the multiply (*) operator might look like:
+For most operators, the methods have the form ''operator op($other, OperandPosition $operandPos)'' and so an implementation to support the multiply (*) operator might look like:
 
 <code php>
 class ComplexNumber {
     public function __construct(public float $realPart, public float $imaginaryPart) {}
     
-    operator *(int|float|ComplexNumber $other, bool $left): ComplexNumber
+    operator *(int|float|ComplexNumber $other, OperandPosition $operandPos): ComplexNumber
     {
         if ($other instanceof ComplexNumber) {
             $newRealPart = ($this->realPart * $other->realPart) 
@@ -156,7 +167,7 @@ The operator implementations are resolved left-to-right. If the left operand doe
 class Number {
     function __construct(int $value) {}
 
-    operator +(Number|int $other, bool $left): Number
+    operator +(Number|int $other, OperandPosition $operandPos): Number
     {
         if (is_int($other)) {
             return new Number($this->value + $other);
@@ -177,15 +188,15 @@ $val2 = 1 + $num;
 // $val2 = $num->'+'(1, false);
 </code>
 
-If the called object is the left operand, then $left is true. If the called object is the right operand, then $left is false.
+If the called object is the left operand, then $operandPos is ''OperandPosition::LeftSide''. If the called object is the right operand, then $operandPos is ''OperandPosition::RightSide''.
 
 <code php>
 class Number {
     public __construct(readonly public float $value) {}
     
-    public operator /(int|float $other, bool $left): Number 
+    public operator /(int|float $other, OperandPosition $operandPos): Number 
     {
-        if ($left) {
+        if ($operandPos == OperandPosition::LeftSide) {
             $numerator = $this->value;
             $denominator = $other;
         } else {
@@ -211,18 +222,18 @@ This RFC proposes only a subset of the operators in PHP be supported for operato
 The list of supported operations and their signatures are:
 
 ^ Operator ^ Signature ^
-| ''+'' | ''%%operator +($other, bool $left): mixed%%'' |
-| ''-'' | ''%%operator -($other, bool $left): mixed%%'' |
-| ''*'' | ''%%operator *($other, bool $left): mixed%%'' |
-| ''/'' | ''%%operator /($other, bool $left): mixed%%'' |
-| ''%'' | ''%%operator %($other, bool $left): mixed%%'' |
-| ''%%**%%'' | ''%%operator **($other, bool $left): mixed%%'' |
-| ''&'' | ''%%operator &($other, bool $left): mixed%%'' |
-| ''%%|%%'' | ''%%operator |($other, bool $left): mixed)%%'' |
-| ''^'' | ''%%operator ^($other, bool $left): mixed%%'' |
+| ''+'' | ''%%operator +($other, OperandPosition $operandPos): mixed%%'' |
+| ''-'' | ''%%operator -($other, OperandPosition $operandPos): mixed%%'' |
+| ''*'' | ''%%operator *($other, OperandPosition $operandPos): mixed%%'' |
+| ''/'' | ''%%operator /($other, OperandPosition $operandPos): mixed%%'' |
+| ''%'' | ''%%operator %($other, OperandPosition $operandPos): mixed%%'' |
+| ''%%**%%'' | ''%%operator **($other, OperandPosition $operandPos): mixed%%'' |
+| ''&'' | ''%%operator &($other, OperandPosition $operandPos): mixed%%'' |
+| ''%%|%%'' | ''%%operator |($other, OperandPosition $operandPos): mixed)%%'' |
+| ''^'' | ''%%operator ^($other, OperandPosition $operandPos): mixed%%'' |
 | ''~'' | ''%%operator ~(): mixed%%'' |
-| ''<<'' | ''%%operator <<($other, bool $left): mixed%%'' |
-| ''>>'' | ''%%operator >>($other, bool $left): mixed%%'' |
+| ''<<'' | ''%%operator <<($other, OperandPosition $operandPos): mixed%%'' |
+| ''>>'' | ''%%operator >>($other, OperandPosition $operandPos): mixed%%'' |
 | ''=='' | ''%%operator ==($other): bool%%'' |
 | ''<=>'' | ''%%operator <=>($other): int%%'' |
 
@@ -241,7 +252,7 @@ class BigNumber {
         }
     }
     
-    public operator +(int|float|string|BigNumber $other, bool $left): self
+    public operator +(int|float|string|BigNumber $other, OperandPosition $operandPos): self
     {
         if ($other instanceof BigNumber) {
             $otherVal = $other->value;
@@ -305,7 +316,7 @@ Since the implementations for a given operator will always be called when an ope
 
 ==== Notable Operators ====
 
-Most of the operators follow the form ''operator op($other, bool $left): mixed'' and those all behave in the same way. There are a few operators that will have a different signature, and/or behave differently.
+Most of the operators follow the form ''operator op($other, OperandPosition $operandPos): mixed'' and those all behave in the same way. There are a few operators that will have a different signature, and/or behave differently.
 
 === Bitwise Not Operator (~) ===
 
@@ -313,7 +324,7 @@ The bitwise not operator is unary (acts on a single operand) and so has the sign
 
 === Equals Operator (==) ===
 
-Because comparisons have a reflection relationship instead of a commutative one, the $left argument is omitted as it could only be used for evil (making ''$obj == 5'' have a different result than ''5 == $obj'').
+Because comparisons have a reflection relationship instead of a commutative one, the $operandPos argument is omitted as it could only be used for evil (making ''$obj == 5'' have a different result than ''5 == $obj'').
 
 Comparison operators do not throw the ''InvalidOperatorError'' when unimplemented. Instead, the PHP engine falls back to existing comparison logic in the absence of an override for a given class.
 
@@ -329,7 +340,7 @@ operator <=>(mixed $other): int
 
 Any return value larger than 0 will be normalized to 1, and any return value smaller than 0 will be normalized to -1.
 
-The $left argument is omitted as it could only be used for evil e.g. implementing different comparison logic depending on which side its on. Instead of passing $left the engine will multiply the result of the call by (-1) where appropriate:
+The $operandPos argument is omitted as it could only be used for evil e.g. implementing different comparison logic depending on which side its on. Instead of passing $operandPos the engine will multiply the result of the call by (-1) where appropriate:
 
 <code php>
 class Number
@@ -373,7 +384,7 @@ The definitions for operators are required to explicitly type their parameters. 
 
 <code php>
 class Matrix {
-    operator +($other, bool $left): Matrix {}
+    operator +($other, OperandPosition $operandPos): Matrix {}
 }
 
 // Fatal Error: Matrix::+(): Parameter #1 ($other) must explicitly define a type
@@ -399,7 +410,7 @@ For all valid names X that evoke a common conception, somebody will name somethi
 
 Language design shouldn't focus on preventing people from doing things you disagree with, at the expense of blocking appropriate usage of a feature.
 
-==== When will $left be useful? ====
+==== When will $operandPos be useful? ====
 
 Not all operators are commutative. The most trivial example of this is with subtraction:
 
@@ -407,9 +418,9 @@ Not all operators are commutative. The most trivial example of this is with subt
 class Number {
     public function __construct(readonly public int|float $value) {}
     
-    public operator -(int|float $other, bool $left): Number
+    public operator -(int|float $other, OperandPosition $operandPos): Number
     {
-        if ($left) {
+        if ($operandPos == OperandPosition::LeftSide) {
             return new Number($this->value - $other);
         } else {
             return new Number($other - $this->value);
@@ -424,9 +435,9 @@ However, there are more complicated examples with some possible usages. For exam
 class Matrix {
     public function __construct(readonly public array $value) {}
     
-    public operator *(Matrix $other, bool $left): Number
+    public operator *(Matrix $other, OperandPosition $operandPos): Number
     {
-        if ($left) {
+        if ($operandPos == OperandPosition::LeftSide) {
             // Count of my columns needs to match
             // count of $other rows
         } else {
@@ -446,7 +457,7 @@ For example, a Vector2d and a Money class could both implement an ''Addable'' in
 <code php>
 interface Addable
 {
-    operator +(mixed $other, bool $left): mixed
+    operator +(mixed $other, OperandPosition $operandPos): mixed
 }
 
 class Money implements Addable {}
@@ -485,7 +496,7 @@ This can also be caught by typing the arguments to the operator implementations 
 
 <code php>
 class Money {
-    operator +(Money $other, bool $left): Money {}
+    operator +(Money $other, OperandPosition $operandPos): Money {}
 }
 
 $result = new Money(5, 'USD') + new Vextor2d(5, 10);
@@ -524,7 +535,7 @@ By having a different keyword, this hypothetical RFC could instead be implemente
 <code php>
 // Parses just fine and implements behavior
 class SomeClass {
-    public local operator +(mixed $other, bool $left): SomeClass {}
+    public local operator +(mixed $other, OperandPosition $operandPos): SomeClass {}
 }
 
 // Generates an error at parse time
@@ -618,3 +629,4 @@ After the project is implemented, this section should contain
   * 0.3: Added support for bitwise operators
   * 0.4: Added section on opcode changes
   * 0.5: Simplified and cleaned up RFC; moved to ''operator op()'' format
+  * 0.6: Added OperandPosition Enum
