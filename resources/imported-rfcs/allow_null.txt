@@ -73,13 +73,14 @@ Suggestions and pull requests welcome.
 
 Does the parameter work with //NULL//, in the same way it would with an empty string? e.g.
 
-  - //preg_match()// should continue to deprecate //NULL// for //$pattern//, whereas //$subject// should accept //NULL//.
-  - //hash_file()// should continue to deprecate //NULL// for the //$filename//.
-  - //hash()// should accept //NULL// for //$data//.
-  - //substr_count()// requires a non-empty string //$needle// (continue to deprecate //NULL//).
-  - //mb_convert_encoding()// requires a valid encoding for //$to_encoding// (continue to deprecate //NULL//).
+  - //preg_match()// should **deprecate** //NULL// for //$pattern// ("empty regular expression" warning).
+  - //preg_match()// should **accept** //NULL// for //$subject// (checking user input).
+  - //hash_file()// should **deprecate** //NULL// for the //$filename//.
+  - //hash()// should **accept** //NULL// for //$data//.
+  - //substr_count()// should **deprecate** //NULL// for //$needle// ("$needle cannot be empty" error).
+  - //mb_convert_encoding()// should **deprecate** //NULL// for //$to_encoding// (requires a valid encoding).
 
-You could argue some function parameters should not accept an empty string (e.g. //strrpos()// accepting an empty string for //$needle//), but those should be addressed in a future RFC, involving a discussion on any backwards compatibility issues for every change (there is no point complaining about //NULL// now, and then going though this process again if the developer simply uses //strval()// to get an empty string).
+You could argue some parameters should not accept an empty string (e.g. //strrpos()// accepting an empty string for //$needle//), but those should be addressed in a future RFC, involving a discussion on any backwards compatibility issues for every change (there is no point complaining about //NULL// now, and then going though this process again if the developer simply uses //strval()// to get an empty string).
 
 One set of candidates that could be removed are functions like //sodium_crypto_box_open()// where a blank //$ciphertext// will always return //false// (for failure).
 
