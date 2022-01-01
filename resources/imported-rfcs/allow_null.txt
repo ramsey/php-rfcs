@@ -13,7 +13,7 @@
 
 ===== Introduction =====
 
-PHP 8.1 introduced "Deprecate passing null to non-nullable arguments of internal functions" ([[https://externals.io/message/112327|short discussion]]), which is making it difficult for developers to upgrade.
+PHP 8.1 introduced "Deprecate passing null to non-nullable arguments of internal functions" ([[https://externals.io/message/112327|short discussion]]), which is making it difficult (time consuming) for developers to upgrade.
 
 Often //NULL// is used for undefined //GET/////POST/////COOKIE// variables:
 
@@ -49,11 +49,17 @@ socket_write($socket, $name);
 xmlwriter_text($writer, $name);
 </code>
 
-This includes developers explicitly using //NULL// to skip certain parameters, e.g. //$additional_headers// in //mail()//.
+Another example is when PHP provides //NULL// for undefined variables, e.g.
 
-Currently this affects those using PHP 8.1 with //E_DEPRECATED//, but it implies everyone will need to modify their code in the future.
+<code php>
+locale_accept_from_http($_SERVER['HTTP_ACCEPT_LANGUAGE']);
+</code>
 
-It also applies even if the developer is not using //strict_types=1//.
+Or when developers explicitly use //NULL// to skip certain parameters, e.g. //$additional_headers// in //mail()//.
+
+Currently this only affects those using PHP 8.1 with //E_DEPRECATED//, but it implies everyone will need to modify their code in the future.
+
+It also applies to those developers not using //strict_types=1//.
 
 And while the individual changes are easy - there are many of them, they are difficult to find, and often pointless (e.g. //urlencode(strval($name))//).
 
@@ -69,20 +75,18 @@ Only the parameters in **bold** would be changed.
 
 Suggestions and pull requests welcome.
 
+There is also a [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-maybe.md|Maybe List]], where the more questionable arguments end with a "!". For example, //strrpos()// accepting an empty string for //$needle// is wired in itself, and //sodium_crypto_box_open()// should never receive a blank //$ciphertext//.
+
 ===== Decision Process =====
 
 Does the parameter work with //NULL//, in the same way it would with an empty string? e.g.
 
   - //preg_match()// should **deprecate** //NULL// for //$pattern// ("empty regular expression" warning).
-  - //preg_match()// should **accept** //NULL// for //$subject// (checking user input).
+  - //preg_match()// should **accept** //NULL// for //$subject// (e.g. checking user input).
   - //hash_file()// should **deprecate** //NULL// for the //$filename//.
   - //hash()// should **accept** //NULL// for //$data//.
   - //substr_count()// should **deprecate** //NULL// for //$needle// ("$needle cannot be empty" error).
   - //mb_convert_encoding()// should **deprecate** //NULL// for //$to_encoding// (requires a valid encoding).
-
-You could argue some parameters should not accept an empty string (e.g. //strrpos()// accepting an empty string for //$needle//), but those should be addressed in a future RFC, involving a discussion on any backwards compatibility issues for every change (there is no point complaining about //NULL// now, and then going though this process again if the developer simply uses //strval()// to get an empty string).
-
-One set of candidates that could be removed are functions like //sodium_crypto_box_open()// where a blank //$ciphertext// will always return //false// (for failure).
 
 ===== Backward Incompatible Changes =====
 
