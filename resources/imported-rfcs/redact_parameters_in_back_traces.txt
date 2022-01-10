@@ -1,0 +1,265 @@
+====== PHP RFC: Redacting parameters in back traces ======
+  * Version: 0.9
+  * Date: 2022-01-10
+  * Author: Tim Düsterhus, duesterhus@woltlab.com
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/redact_parameters_in_back_traces
+
+===== Introduction =====
+
+PHP's stack traces in exceptions are very useful for debugging, because they include the original parameters for each stack frame, allowing the developer to see exactly what data is passed to a function call. Unfortunately sometimes this verbosity is a drawback. Specifically when sensitive values, such as credentials, are passed to a function and some other function deep down the call stack throws an Exception.
+
+One common "offender" is PDO which takes the database password as a constructor parameter and immediately attempts to connect to the database within the constructor, instead of having a pure constructor and a separate <php>->connect()</php> method. Thus when the database connection fails the stack trace will include the database password:
+
+<HTML>
+PDOException: SQLSTATE[HY000] [2002] No such file or directory in /var/www/html/test.php:3
+Stack trace:
+#0 /var/www/html/test.php(3): PDO->__construct('mysql:host=loca...', 'root', 'password')
+#1 {main}
+</HTML>
+
+This will lead to these sensitive parameters being logged within the application's error log and they might also be shipped to an external error tracking service if the application includes such an exception handler.
+
+Ultimately, this might even leak an user's password in plain text if the password verification throws an Exception, violating privacy laws and putting the user at risk.
+
+===== Proposal =====
+
+To prevent these sensitive parameters from appearing within a stack trace this RFC proposes a new <php>\SensitiveParameter</php> attribute that can be applied to a function's parameter to indicate that the parameter contains sensitive information that must not appear in back traces.
+
+To reliably apply this protection for all types of back traces and all types of exception and error handlers, the redaction should happen when collecting the parameter values during back trace generation. Specifically the back trace collection should be updated to use an object of class <php>\SensitiveParameter</php> as the value for all parameters that are marked with the <php>\SensitiveParameter</php> attribute. This allows userland code to reliably detect the difference between an actual value and a parameter that was redacted by using an <php>$foo instanceof \SensitiveParameter</php> check.
+
+==== Example ====
+
+Simple example with a single sensitive parameter:
+
+<PHP>
+<?php
+
+function test(
+	$foo,
+	#[\SensitiveParameter] $bar,
+	$baz
+) {
+	throw new \Exception('Error');
+}
+
+test('foo', 'bar', 'baz');
+
+/*
+Fatal error: Uncaught Exception: Error in test.php:8
+Stack trace:
+#0 test.php(11): test('foo', Object(SensitiveParameter), 'baz')
+#1 {main}
+  thrown in test.php on line 8
+*/
+</PHP>
+
+Named parameters:
+
+<PHP>
+<?php
+
+function test(
+	$foo = null,
+	#[\SensitiveParameter] $bar = null,
+	$baz = null
+) {
+	throw new \Exception('Error');
+}
+
+test(
+	baz: 'baz',
+	bar: 'bar',
+);
+
+/*
+Fatal error: Uncaught Exception: Error in test.php:8
+Stack trace:
+#0 test.php(13): test(NULL, Object(SensitiveParameter), 'baz')
+#1 {main}
+  thrown in test.php on line 8
+*/
+</PHP>
+
+Omitted default parameter:
+<PHP>
+<?php
+
+function test(
+	$foo = null,
+	#[\SensitiveParameter] $bar = null,
+	$baz = null
+) {
+	throw new \Exception('Error');
+}
+
+test(baz: 'baz');
+
+/*
+Fatal error: Uncaught Exception: Error in test.php:8
+Stack trace:
+#0 test.php(11): test(NULL, Object(SensitiveParameter), 'baz')
+#1 {main}
+  thrown in test.php on line 8
+*/
+</PHP>
+
+Variadic parameters:
+
+<PHP>
+<?php
+
+function test(
+	$foo,
+	#[\SensitiveParameter] ...$bar
+) {
+	throw new \Exception('Error');
+}
+
+test('foo', 'bar1', 'bar2', 'bar3');
+
+/*
+Fatal error: Uncaught Exception: Error in test.php:7
+Stack trace:
+#0 test.php(10): test('foo', Object(SensitiveParameter), Object(SensitiveParameter), Object(SensitiveParameter))
+#1 {main}
+  thrown in test.php on line 7
+*/
+</PHP>
+
+Nested function calls:
+
+<PHP>
+<?php
+
+function test(
+	$foo,
+	#[\SensitiveParameter] $bar,
+	$baz
+) {
+	throw new \Exception('Error');
+}
+
+function test2(
+	#[\SensitiveParameter] $foo,
+	$bar,
+	$baz
+) {
+	test($foo, $bar, $baz);
+}
+
+test2('foo', 'bar', 'baz');
+
+/*
+Fatal error: Uncaught Exception: Error in test.php:8
+Stack trace:
+#0 test.php(16): test('foo', Object(SensitiveParameter), 'baz')
+#1 test.php(19): test2(Object(SensitiveParameter), 'bar', 'baz')
+#2 {main}
+  thrown in test.php on line 8
+*/
+</PHP>
+
+Processing Stack Traces:
+
+<PHP>
+<?php
+
+function test(
+	$foo,
+	#[\SensitiveParameter] $bar,
+	$baz
+) {
+	throw new \Exception('Error');
+}
+
+try {
+	test('foo', 'bar', 'baz');
+	echo 'Not reached';
+} catch (\Exception $e) {
+	echo $e->getMessage();
+	$testFrame = $e->getTrace()[0];
+	\assert($testFrame['function'] === 'test');
+	\assert($testFrame['args'][0] === 'foo');
+	\assert($testFrame['args'][1] instanceof \SensitiveParameter);
+	\assert($testFrame['args'][2] === 'baz');
+}
+
+/*
+Error
+*/
+</PHP>
+
+
+===== Backward Incompatible Changes =====
+
+1. The <php>\SensitiveParameter</php> class name will no longer be available to userland code.
+
+This is very unlikely to break existing code. The class name is fairly specific and GitHub's search for <php>\SensitiveParameter</php> in PHP code only returns 6 results, all of them strings:
+
+https://github.com/search?l=PHP&q=SensitiveParameter&type=Code
+
+2. Custom exception handlers might see objects of class <php>\SensitiveParameter</php>, despite the parameter having a different type within the method's signature.
+
+Clearly indicating any redacted parameters is considered to outweight this minor BC break. It is unlikely that an exception handler would use reflection to learn about the parameter type and then validate the passed value. In any case updating the exception handler to include an <php>$foo instanceof \SensitiveParameter</php> check is considered trivial and will not break compatibility with older PHP versions.
+
+===== Proposed PHP Version(s) =====
+
+Next PHP 8.x.
+
+===== RFC Impact =====
+
+==== To SAPIs ====
+
+None.
+
+==== To Existing Extensions ====
+
+Extensions should verify any existing parameters and add the <php>\SensitiveParameter</php> attribute for parameters deemed sensitive.
+
+==== To Opcache ====
+
+Probably none? [to be discussed]
+
+==== New Constants ====
+
+None.
+
+==== php.ini Defaults ====
+
+None.
+
+===== Open Issues =====
+
+  - The prototype patch does not yet add the <php>\SensitiveParameter</php> attribute to any internal functions.
+
+===== Unaffected PHP Functionality =====
+
+This RFC only affects the collected arguments within a back trace. Unless the back trace is processed programmatically, the only change is that a developer will notice is that some error messages show <html>Object(SensitiveParameter)</html> in place of a real parameter.
+
+===== Future Scope =====
+
+None.
+
+===== Proposed Voting Choices =====
+
+Add the <php>\SensitiveParameter</php> attribute and redact values in back traces for parameters having this attribute?
+
+===== Patches and Tests =====
+
+Prototype patch: https://github.com/php/php-src/pull/7921
+
+We would need assistance by a more experienced developer in cleaning up the implementation and adding this attribute to existing functions.
+
+===== Implementation =====
+
+n/a
+
+===== References =====
+
+  * Pre-RFC: https://externals.io/message/116847
+  * Existing user-land implementation: https://github.com/WoltLab/WCF/blob/c4d4b97448213a1f806e3b7b7af8d50d68034b02/wcfsetup/install/files/lib/core.functions.php#L720-L741
+
+===== Rejected Features =====
+
+None.
