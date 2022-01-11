@@ -1,5 +1,5 @@
 ====== PHP RFC: Redacting parameters in back traces ======
-  * Version: 1.0
+  * Version: 1.1
   * Date: 2022-01-10
   * Author: Tim Düsterhus, duesterhus@woltlab.com
   * Status: Under Discussion
@@ -26,9 +26,17 @@ Ultimately, this might even leak an user's password in plain text if the passwor
 
 To prevent these sensitive parameters from appearing within a stack trace this RFC proposes a new <php>\SensitiveParameter</php> attribute that can be applied to a function's parameter to indicate that the parameter contains sensitive information that must not appear in back traces.
 
-To reliably apply this protection for all types of back traces and all types of exception and error handlers, the redaction should happen when collecting the parameter values during back trace generation. Specifically the back trace collection should be updated to use an object of class <php>\SensitiveParameter</php> as the value for all parameters that are marked with the <php>\SensitiveParameter</php> attribute. This allows userland code to reliably detect the difference between an actual value and a parameter that was redacted by using an <php>$foo instanceof \SensitiveParameter</php> check.
+To reliably apply this protection for all types of back traces and all types of exception and error handlers, the redaction should happen when collecting the parameter values during back trace generation. Specifically when the backtrace is generated, any parameter that has a <php>\SensitiveParameter</php> attribute will not have its value stored in the backtrace, but instead will be replaced with a <php>\SensitiveParameter</php> object.
 
-==== Example ====
+==== Choice of replacement value ====
+
+This RFC proposes a <php>\SensitiveParameter</php> object as the replacement value, instead of something simpler such as a <php>'[redacted]'</php> string.
+
+While strings are likely the most commonly encountered type of sensitive parameter, some sensitive values might also be passed as an object that might get serialized and then shipped to a logging service (e.g. a <php>Keypair</php> object) within an exception handler. For parameters that are type-hinted to take a specific argument it is generally not possible to generically construct a replacement value that does not violate the type-hint.
+
+For this reason, the replacement value will need to violate the type-hint for at least some of the parameters the attribute is applied to. Using a <php>\SensitiveParameter</php> object will almost certainly violate a type hint, but it allows userland code to reliably detect the difference between a real value and a parameter that was redacted by using an <php>$foo instanceof \SensitiveParameter</php> check.
+
+==== Examples ====
 
 Simple example with a single sensitive parameter:
 
@@ -160,6 +168,30 @@ Stack trace:
 */
 </PHP>
 
+Closures:
+
+<PHP>
+<?php
+
+$test = function (
+    $foo,
+    #[\SensitiveParameter] $bar,
+    $baz
+) {
+    throw new \Exception('Error');
+};
+
+$test('foo', 'bar', 'baz');
+
+/*
+Fatal error: Uncaught Exception: Error in test.php:8
+Stack trace:
+#0 test.php(11): {closure}('foo', Object(SensitiveParameter), 'baz')
+#1 {main}
+  thrown in test.php on line 8
+*/
+</PHP>
+
 Processing Stack Traces:
 
 <PHP>
@@ -187,6 +219,109 @@ try {
 
 /*
 Error
+*/
+</PHP>
+
+Non-string arguments:
+
+<PHP>
+<?php
+
+class Keypair { 
+    private $publicKey;
+    private $privateKey;
+
+    public function __construct($publicKey, $privateKey)
+    {
+        $this->publicKey = $publicKey;
+        $this->privateKey = $privateKey;
+    }
+}
+
+function test(
+    Keypair $foo,
+    #[\SensitiveParameter] Keypair $bar
+) {
+    throw new \Exception('Error');
+};
+
+try {
+    test(
+        new Keypair('public1', 'private1'),
+        new Keypair('public2', 'private2')
+    );
+} catch (\Exception $e) {
+    // Send the exception to a logging service.
+    echo serialize($e->getTrace());
+}
+
+/*
+(Formatting for readability)
+a:1:{
+    i:0;
+        a:4:{
+            s:4:"file";
+                s:8:"test.php";
+            s:4:"line";
+                i:24;
+            s:8:"function";
+                s:4:"test";
+            s:4:"args";
+                a:2:{
+                    i:0;
+                        O:7:"Keypair":2:{
+                            s:18:"KeypairpublicKey";
+                                s:7:"public1";
+                            s:19:"KeypairprivateKey";
+                                s:8:"private1";
+                        }
+                    i:1;
+                        O:18:"SensitiveParameter":0:{}
+                }
+        }
+}
+*/
+</PHP>
+
+debug_print_backtrace / debug_backtrace:
+
+<PHP>
+<?php
+
+function test(
+    $foo,
+    #[\SensitiveParameter] $bar,
+    $baz
+) {
+    debug_print_backtrace();
+    var_dump(debug_backtrace());
+}
+
+test('foo', 'bar', 'baz');
+
+/*
+#0 test.php(12): test('foo', Object(SensitiveParameter), 'baz')
+array(1) {
+  [0]=>
+  array(4) {
+    ["file"]=>
+    string(8) "test.php"
+    ["line"]=>
+    int(12)
+    ["function"]=>
+    string(4) "test"
+    ["args"]=>
+    array(3) {
+      [0]=>
+      string(3) "foo"
+      [1]=>
+      object(SensitiveParameter)#1 (0) {
+      }
+      [2]=>
+      string(3) "baz"
+    }
+  }
+}
 */
 </PHP>
 
@@ -278,3 +413,7 @@ n/a
 ===== Rejected Features =====
 
 None.
+
+===== Changelog =====
+
+  * 1.1: Clarified language, justifying the choice of replacement value, Closure example, Keypair example, debug_backtrace example.
