@@ -57,9 +57,9 @@ locale_accept_from_http($_SERVER['HTTP_ACCEPT_LANGUAGE']);
 
 Or when developers explicitly use //NULL// to skip certain parameters, e.g. //$additional_headers// in //mail()//.
 
-Currently this only affects those using PHP 8.1 with //E_DEPRECATED//, but it implies everyone will need to modify their code in the future.
+Currently this only affects those using PHP 8.1 with //E_DEPRECATED//, but it implies everyone will need to modify their code in the future - presumably this will be a **fatal error** in PHP 9.0, with a //TypeError// exception?
 
-It also applies to those developers not using //strict_types=1//.
+This also applies to those developers not using //strict_types=1//, which is excessive.
 
 And while the individual changes are easy - there are many of them, they are difficult to find, and often pointless (e.g. //urlencode(strval($name))//).
 
@@ -67,7 +67,9 @@ Without the changes below, developers will need to either - use these deprecatio
 
 ===== Proposal =====
 
-Update **some** internal function parameters to accept //NULL//, to reduce the burden for developers upgrading.
+Update **some** internal function parameters to accept (be tolerant to) //NULL//.
+
+This needs to be done before the eventual end of the deprecation period, and //TypeError// exceptions are thrown, which would create an unnecessary burden for developers to upgrade.
 
 While this is in Draft, the [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-change.md|list of functions are hosted on GitHub]].
 
