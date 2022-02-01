@@ -31,8 +31,8 @@ some of which are not obvious and discovered while writing the benchmarks.
 (Having a better (double-ended) queue datastructure (''Collections\Deque'') than the ''SplDoublyLinkedList''
 would save users from needing to write code with these pitfalls):
 
-    - ''array_key_first()'' takes time proportional to the number of elements ''unset'' from the start of an array, causing it to unexpectedly be [[https://en.wikipedia.org/wiki/Time_complexity#Table_of_common_time_complexities|extremely slow (linear to remove an element, and quadratic time to remove all elements)]] after unsetting many elements at the start of the queue. (when the array infrequently runs out of capacity, buckets are moved to the front)
-    - ''reset()'' also takes time proportional to the number of elements ''unset'' from the start of an array, taking longer if many elements are removed from the front.
+    - ''array_key_first()'' takes time proportional to the number of elements ''unset'' from the start of an array, causing it to unexpectedly be [[https://en.wikipedia.org/wiki/Time_complexity#Table_of_common_time_complexities|extremely slow (linear to remove an element, and quadratic time to remove all elements)]] after unsetting many elements at the start of the queue. (when the array infrequently runs out of capacity, buckets are moved to the beginning of the array)
+    - ''reset()'' also takes time proportional to the number of elements ''unset'' from the start of an array, taking longer if many elements are removed from the beginning of the array.
     - ''reset()'' or ''end()'' will convert a variable to a reference, adding some performance overhead and making opcache less efficient at optimizing uses of variables using references.
     - More obviously, ''array_unshift'' and ''array_shift'' will take time proportional to the number of elements in the array (to reindex and move existing/remaining elements) (linear time), compared to amortized constant time for ''Collections\Deque''.
 
@@ -72,7 +72,8 @@ namespace Collections;
  *
  * See https://en.wikipedia.org/wiki/Double-ended_queue
  *
- * This supports amortized constant time pushing and popping onto the front or back of the array.
+ * This supports amortized constant time pushing and popping onto the start(i.e. bottom, front)
+ * or back(i.e. end, top) of the Deque.
  *
  * Method naming is based on https://www.php.net/spldoublylinkedlist
  * and on array_push/pop/unshift/shift.
@@ -82,10 +83,10 @@ final class Deque implements IteratorAggregate, Countable, JsonSerializable, Arr
     /** Construct the Deque from the values of the Traversable/array, ignoring keys */
     public function __construct(iterable $iterator = []) {}
     /**
-     * Returns an iterator that accounts for calls to shift/unshift tracking the position of the front of the Deque.
+     * Returns an iterator that accounts for calls to shift/unshift tracking the position of the start of the Deque.
      * Calls to shift/unshift will do the following:
      * - Increase/Decrease the value returned by the iterator's key()
-     *   by the number of elements added/removed to/from the front of the Deque.
+     *   by the number of elements added/removed to/from the start of the Deque.
      *   (`$deque[$iteratorKey] === $iteratorValue` at the time the key and value are returned).
      * - Repeated calls to shift will cause valid() to return false if the iterator's
      *   position ends up before the start of the Deque at the time iteration resumes.
@@ -114,7 +115,7 @@ final class Deque implements IteratorAggregate, Countable, JsonSerializable, Arr
      */
     public function pop(): mixed {}
     /**
-     * Shifts a value from the front of the Deque.
+     * Shifts a value from the start of the Deque.
      * @throws UnderflowException if the Deque is empty
      */
     public function shift(): mixed {}
@@ -124,7 +125,7 @@ final class Deque implements IteratorAggregate, Countable, JsonSerializable, Arr
     /** Peeks at the value at the end of the Deque, throws if empty */
     public function top(): mixed {}
 
-    /** Returns a list of the elements from front to back. */
+    /** Returns a list of the elements from the start to the end. */
     public function toArray(): array {}
 
     // Must be mixed for compatibility with ArrayAccess
@@ -147,7 +148,7 @@ final class Deque implements IteratorAggregate, Countable, JsonSerializable, Arr
      */
     public function offsetUnset(mixed $offset): void {}
 
-    /** This is JSON serialized as a JSON array with elements from front to back */
+    /** This is JSON serialized as a JSON array with elements from the start to the end. */
     public function jsonSerialize(): array {}
 }
 </code>
@@ -244,7 +245,7 @@ Even users that don't write code using ''Deque'' may still benefit from its incl
 
 ==== Why use this instead of array? ====
 
-    - Faster than using array for **queue-like** workloads (e.g. around 13%-37% less time to add to the end and remove from the front depending on ''Deque'' size and access pattern in an array implementation that **correctly** avoids linear-time operations).
+    - Faster than using array for **queue-like** workloads (e.g. around 13%-37% less time to add to the end and remove from the start depending on ''Deque'' size and access pattern in an array implementation that **correctly** avoids linear-time operations).
     - It is impossible to prepend to an ''array'' (i.e. to be first in insertion order) in constant time. ''array_unshift'' takes time proportional to the length of an array.
     - ''Deque'' uses much less memory than an ''array'' **when used as a queue,** especially since that will eventually convert an array to an associative array. See https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html and benchmarks. Note that starting in php 8.2, [[https://github.com/php/php-src/pull/7491|arrays that are lists (with no/few gaps) are represented in a more memory efficient way than associative arrays.]]
     - Modifying an object by value can be faster than modifying an array by reference. Sometime, it is necessary for a library to modify a passed in collection/array in place (e.g. as an internal implementation detail) (e.g. appending to a list of errors and returning a boolean, converting a binary tree to a list of nodes where some predicate applies). The only way for a method to modify a passed in array parameter is by reference, and opcache is not able to optimize reference parameters/variables because their type at runtime cannot be guaranteed, passing in an object by value can be much faster than passing an ''array'' by reference. \\ \\ (Other approaches may end up copying arrays repeatedly, and take quadratic time instead of linear time, causing performance issues for large inputs). \\ \\ (Right now, some libraries do pass arrays by reference, because of how inefficient ''SplDoublyLinkedList'' is expected to be to create, modify, and read)
@@ -309,9 +310,9 @@ PHP's type system remains unchanged (e.g. ''array'') - ''final class Collections
 
 ===== Benchmarks =====
 
-==== Two cycles of appending n values then shifting them from the front ====
+==== Two cycles of appending n values then shifting them from the start ====
 
-Note that it is possible to have constant time removal from the front of a PHP ''array'' efficiently (as long as ''key'' stays at the front of the array), but it is not possible to have constant time prepending (`unshift`) to the front of an array. ''array_unshift'' is a linear time operation (takes time proportional to the current array size).
+Note that it is possible to have constant time removal from the start of a PHP ''array'' efficiently (as long as ''key'' stays at the start of the array), but it is not possible to have constant time prepending (`unshift`) to the start of an array. ''array_unshift'' is a linear time operation (takes time proportional to the current array size).
 So ''unshift'' is not included in these benchmarks.
 
 Because there's a second cycle in this benchmark, array becomes an associative array and uses more memory than a packed array (https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html). (At the time of writing, a packed array uses double the memory of a ''Deque'', though there is an unrelated change in review proposing reducing the memory usage of packed arrays). 
@@ -330,7 +331,7 @@ Caveats for comparison with [https://github.com/php-ds/ext-ds](Ds\Deque PECL):
     * Having the extra step of installing a PECL may discourage application/library authors from writing code using a PECL or discourage some users from using those applications/libraries. While php-ds has a polyfill, the polyfill would be slower than native solutions - https://github.com/php-ds/ext-ds#compatibility
 
 <code none>
-Test creating a collection, then two cycles of push+shift (adding n values to the end of collections then shifting all of them from front of collection)
+Test creating a collection, then two cycles of push+shift (adding n values to the end of collections then shifting all of them from the start of the collection)
 Results for php 8.2.0-dev debug=false with opcache enabled=true
 
 2x Push then shift from array:               n=       1 iterations= 8000000
@@ -381,7 +382,7 @@ Results for php 8.2.0-dev debug=false with opcache enabled=true
 
 ==== Only appending to a Deque and reading elements without removal ====
 
-Note that the proposed ''Deque'' as well as the existing ''SplDoublyLinkedList''/''SplStack'' are expected to perform equally well at shifting to (adding to) or unshifting from(removing from) the front of an array. (Shifting or unshifting (or unsetting) the front is inefficient for arrays)
+Note that the proposed ''Deque'' as well as the existing ''SplDoublyLinkedList''/''SplStack'' are expected to perform equally well at shifting to (adding to) or unshifting from(removing from) the start(first elements) of an array. (Shifting or unshifting (or unsetting) the start is inefficient for arrays)
 
 **For this benchmark, Deque can be created and read from faster than the fastest methods of reading ''SplStack'' or ''SplFixedArray''.**
 
@@ -670,7 +671,7 @@ $sizes = [
     [1024, 20000],
     [2**20, 20],
 ];
-echo "Test creating a collection, then two cycles of push+shift (adding n values to the end of collections then shifting all of them from front of collection)\n";
+echo "Test creating a collection, then two cycles of push+shift (adding n values to the end of collections then shifting all of them from the start of the collection)\n";
 printf(
     "Results for php %s debug=%s with opcache enabled=%s\n\n",
     PHP_VERSION,
