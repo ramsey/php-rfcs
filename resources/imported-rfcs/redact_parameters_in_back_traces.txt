@@ -1,5 +1,5 @@
 ====== PHP RFC: Redacting parameters in back traces ======
-  * Version: 1.4
+  * Version: 1.5
   * Date: 2022-01-10
   * Author: Tim Düsterhus, duesterhus@woltlab.com
   * Status: Under Discussion
@@ -37,6 +37,32 @@ This RFC proposes a <php>\SensitiveParameterValue</php> object as the replacemen
 While strings are likely the most commonly encountered type of sensitive parameter, some sensitive values might also be passed as an object that might get serialized and then shipped to a logging service (e.g. a <php>Keypair</php> object) within an exception handler. For parameters that are type-hinted to take a specific argument it is generally not possible to generically construct a replacement value that does not violate the type-hint.
 
 For this reason, the replacement value will need to violate the type-hint for at least some of the parameters the attribute is applied to. Using a <php>\SensitiveParameterValue</php> object will almost certainly violate a type hint, but it allows userland code to reliably detect the difference between a real value and a parameter that was redacted by using an <php>$foo instanceof \SensitiveParameterValue</php> check.
+
+Furthermore the replacement object will store the original value, allowing it to retrieve it on explicit request, while making it hard to accidentally expose it.
+
+The userland equivalent of the <php>\SensitiveParameterValue</php> class is:
+
+<PHP>
+<?php
+
+final class SensitiveParameterValue
+{
+    public function __construct(private readonly mixed $value) {}
+
+    public function getValue(): mixed { return $value; }
+
+    /* Hide the value from var_dump(). */
+    public function __debugInfo(): array { return []; }
+
+    /* Hide the value from serialization. */
+    public function __serialize(): array { return []; }
+
+    /* Prevent unserialization, as the stored value cannot round-trip. */
+    public function __unserialize(array $data): void {
+        throw new \Exception('...');
+    }
+}
+</PHP>
 
 ==== Examples ====
 
@@ -216,6 +242,8 @@ try {
     \assert($testFrame['function'] === 'test');
     \assert($testFrame['args'][0] === 'foo');
     \assert($testFrame['args'][1] instanceof \SensitiveParameterValue);
+    // Explicitly retrieve the original value.
+    \assert($testFrame['args'][1]->getValue() === 'bar');
     \assert($testFrame['args'][2] === 'baz');
 }
 
@@ -397,11 +425,11 @@ This RFC only affects the collected arguments within a back trace. Unless the ba
 
 ===== Future Scope =====
 
-  * Storing the original value within the replacement value. Care needs to be taken that this does not easily expose the original value, e.g. when serializing.
+None.
 
 ===== Proposed Voting Choices =====
 
-Add the <php>\SensitiveParameter</php> attribute and redact values in back traces for parameters having this attribute?
+Add the <php>\SensitiveParameter</php> attribute and replace parameters having this attribute in back traces by <php>\SensitiveParameterValue</php>?
 
 ===== Patches and Tests =====
 
@@ -425,6 +453,7 @@ n/a
 
 ===== Changelog =====
 
+  * 1.5: Store the original value.
   * 1.4: Use SensitiveParameterValue as the replacement value.
   * 1.3: "Creating a wrapper class" section, resolved open issues/questions, future scope.
   * 1.2: Expanded Introduction: Clarify that secrets are not limited to database passwords. Clarify that they might result in error tracking services.
