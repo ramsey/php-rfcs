@@ -11,7 +11,7 @@
 
 While ''SplDoublyLinkedList'' and its subclass ''SplQueue''/''SplStack'' exist in the SPL, they have several drawbacks (that are addressed by this RFC to add a [[https://en.m.wikipedia.org/wiki/Double-ended_queue|Deque]] class):
 
-    - ''SplDoublyLinkedList'' is internally represented by a doubly linked list, making it use roughly twice as much memory as the proposed ''Deque''
+    - ''SplDoublyLinkedList'' is internally represented by a doubly linked list, making it use roughly twice as much memory as the proposed ''Deque'' (in typical 64-bit php builds)
     - ''SplDoublyLinkedList'' is an ''Iterator'', not an ''IteratorAggregate'', so different parts of the code can't independently iterate over the same ''SplDoublyLinkedList'' instance while iteration is in progress.
     - ''push''/''pop''/''unshift''/''shift'' from ''SplDoublyLinkedList'' are slower due to needing to allocate or free the linked list nodes.
     - Reading values in the middle of the ''SplDoublyLinkedList'' is proportional to the length of the list, due to needing to traverse the linked list nodes.
@@ -20,7 +20,7 @@ While ''SplDoublyLinkedList'' and its subclass ''SplQueue''/''SplStack'' exist i
 It would be useful to have an efficient ''Deque'' container in the standard library to provide an alternative without those drawbacks, as well as for the following reasons: 
 
     - To provide a better alternative to ''SplDoublyLinkedList'', ''SplStack'', and ''SplQueue'' for use cases that require stacks or queues.
-    - As a more efficient option than ''array'' and ''SplDoublyLinkedList'' as a queue or ''Deque'', for workflows requiring ''shift'' or ''unshift''.
+    - As a more efficient option than ''array'' and ''SplDoublyLinkedList'' as a queue or ''Deque'', for workflows requiring ''shift'' or ''unshift''. Repeatedly shifting/unshifting from the front of an array is slow, because each shift/unshift requires moving every element of the array.
     - To be able to reclaim memory in applications that run for long periods of time. Notably, PHP's ''array'' type will currently never release allocated capacity.
 
 
@@ -256,8 +256,8 @@ Even users that don't write code using ''Deque'' may still benefit from its incl
 ==== Why use this instead of array? ====
 
     - Faster than using array for **queue-like** workloads (e.g. around 13%-37% less time to add to the end and remove from the start depending on ''Deque'' size and access pattern in an array implementation that **correctly** avoids linear-time operations).
-    - It is impossible to prepend to an ''array'' (i.e. to be first in insertion order) in constant time. ''array_unshift'' takes time proportional to the length of an array.
-    - ''Deque'' uses much less memory than an ''array'' **when used as a queue,** especially since that will eventually convert an array to an associative array. See https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html and benchmarks. Note that starting in php 8.2, [[https://github.com/php/php-src/pull/7491|arrays that are lists (with no/few gaps) are represented in a more memory efficient way than associative arrays.]]
+    - It is impossible to prepend to an ''array'' (i.e. to be first in insertion order) in constant time. ''array_unshift'' takes time proportional to the length of an array. See [[#unshifting_n_values_to_the_start_then_shifting_n_values_from_the_start|Benchmarks: Unshifting n values to the start then shifting n values from the start]]
+    - ''Deque'' uses much less memory than an ''array'' **when used as a queue (by unsetting),** especially since that will eventually convert an array to an associative array. See https://www.npopov.com/2014/12/22/PHPs-new-hashtable-implementation.html and benchmarks. Note that starting in php 8.2, [[https://github.com/php/php-src/pull/7491|arrays that are lists (with no/few gaps) are represented in a more memory efficient way than associative arrays.]]
     - Modifying an object by value can be faster than modifying an array by reference. Sometime, it is necessary for a library to modify a passed in collection/array in place (e.g. as an internal implementation detail) (e.g. appending to a list of errors and returning a boolean, converting a binary tree to a list of nodes where some predicate applies). The only way for a method to modify a passed in array parameter is by reference, and opcache is not able to optimize reference parameters/variables because their type at runtime cannot be guaranteed, passing in an object by value can be much faster than passing an ''array'' by reference. \\ \\ (Other approaches may end up copying arrays repeatedly, and take quadratic time instead of linear time, causing performance issues for large inputs). \\ \\ (Right now, some libraries do pass arrays by reference, because of how inefficient ''SplDoublyLinkedList'' is expected to be to create, modify, and read)
 
 Also see [[#introduction|the RFC introduction]] for pitfalls with trying to use a PHP ''array'' like a queue.
@@ -319,6 +319,84 @@ None
 PHP's type system remains unchanged (e.g. ''array'') - ''final class Collections\Deque'' is a class, and instances of ''Collections\Deque'' are ordinary objects.
 
 ===== Benchmarks =====
+
+==== Unshifting n values to the start then shifting n values from the start ====
+
+This benchmark uses ''array_unshift''/''array_shift'' to test the most natural way of removing from the start of an array, not the most optimized. Subsequent benchmarks use a less obvious but more time-optimized way to remove elements from the start of an array. ''key()'' and do not renumber for removing from the start of an array.
+
+**This takes quadratic time for an array - at ''n=1000'', ''array'' takes 15.030 seconds, and ''Collections\Deque'' takes 0.126 seconds for the 2000 iterations (''Deque'' is 120 times faster for ''n=1000'').**
+
+<code>
+Test creating a collection, then two cycles of push+shift (unshifting n values to the start of collections then shifting all of them from front of collection)
+Moving the front of an array requires moving all elements to their new position, so the total time for array is quadratic
+Results for php 8.2.0-dev debug=false with opcache enabled=true
+
+2x Unshift then shift from start of array:               n=       1 iterations= 8000000
+=> max memory=     248 bytes, create+destroy time=1.560 shift time = 0.916 total time = 2.475 result=0
+2x Unshift then shift from start of Collections\Deque:   n=       1 iterations= 8000000
+=> max memory=     144 bytes, create+destroy time=1.516 shift time = 0.801 total time = 2.316 result=0
+2x Unshift then shift from start of Ds\Deque:            n=       1 iterations= 8000000
+=> max memory=     216 bytes, create+destroy time=2.245 shift time = 0.916 total time = 3.161 result=0
+2x Unshift then shift from start of SplDoublyLinkedList: n=       1 iterations= 8000000
+=> max memory=     184 bytes, create+destroy time=1.893 shift time = 0.905 total time = 2.798 result=0
+
+2x Unshift then shift from start of array:               n=       4 iterations= 2000000
+=> max memory=     248 bytes, create+destroy time=0.938 shift time = 0.631 total time = 1.569 result=24000000
+2x Unshift then shift from start of Collections\Deque:   n=       4 iterations= 2000000
+=> max memory=     144 bytes, create+destroy time=0.578 shift time = 0.500 total time = 1.078 result=24000000
+2x Unshift then shift from start of Ds\Deque:            n=       4 iterations= 2000000
+=> max memory=     216 bytes, create+destroy time=1.069 shift time = 0.528 total time = 1.598 result=24000000
+2x Unshift then shift from start of SplDoublyLinkedList: n=       4 iterations= 2000000
+=> max memory=     280 bytes, create+destroy time=0.927 shift time = 0.513 total time = 1.440 result=24000000
+
+2x Unshift then shift from start of array:               n=       8 iterations= 1000000
+=> max memory=     248 bytes, create+destroy time=0.942 shift time = 0.595 total time = 1.537 result=56000000
+2x Unshift then shift from start of Collections\Deque:   n=       8 iterations= 1000000
+=> max memory=     208 bytes, create+destroy time=0.376 shift time = 0.444 total time = 0.820 result=56000000
+2x Unshift then shift from start of Ds\Deque:            n=       8 iterations= 1000000
+=> max memory=     216 bytes, create+destroy time=0.797 shift time = 0.469 total time = 1.266 result=56000000
+2x Unshift then shift from start of SplDoublyLinkedList: n=       8 iterations= 1000000
+=> max memory=     408 bytes, create+destroy time=0.754 shift time = 0.472 total time = 1.226 result=56000000
+
+2x Unshift then shift from start of array:               n=      64 iterations=  100000
+=> max memory=    1368 bytes, create+destroy time=2.628 shift time = 1.093 total time = 3.721 result=403200000
+2x Unshift then shift from start of Collections\Deque:   n=      64 iterations=  100000
+=> max memory=    1104 bytes, create+destroy time=0.167 shift time = 0.292 total time = 0.459 result=403200000
+2x Unshift then shift from start of Ds\Deque:            n=      64 iterations=  100000
+=> max memory=    1112 bytes, create+destroy time=0.507 shift time = 0.334 total time = 0.841 result=403200000
+2x Unshift then shift from start of SplDoublyLinkedList: n=      64 iterations=  100000
+=> max memory=    2200 bytes, create+destroy time=0.448 shift time = 0.307 total time = 0.755 result=403200000
+
+2x Unshift then shift from start of array:               n=     128 iterations=   50000
+=> max memory=    2648 bytes, create+destroy time=4.772 shift time = 1.790 total time = 6.562 result=812800000
+2x Unshift then shift from start of Collections\Deque:   n=     128 iterations=   50000
+=> max memory=    2128 bytes, create+destroy time=0.161 shift time = 0.290 total time = 0.451 result=812800000
+2x Unshift then shift from start of Ds\Deque:            n=     128 iterations=   50000
+=> max memory=    2136 bytes, create+destroy time=0.497 shift time = 0.325 total time = 0.822 result=812800000
+2x Unshift then shift from start of SplDoublyLinkedList: n=     128 iterations=   50000
+=> max memory=    4248 bytes, create+destroy time=0.440 shift time = 0.302 total time = 0.743 result=812800000
+
+2x Unshift then shift from start of array:               n=    1024 iterations=    2000
+=> max memory=   20568 bytes, create+destroy time=11.368 shift time = 3.662 total time = 15.030 result=2095104000
+2x Unshift then shift from start of Collections\Deque:   n=    1024 iterations=    2000
+=> max memory=   16464 bytes, create+destroy time=0.042 shift time = 0.084 total time = 0.126 result=2095104000
+2x Unshift then shift from start of Ds\Deque:            n=    1024 iterations=    2000
+=> max memory=   16472 bytes, create+destroy time=0.145 shift time = 0.095 total time = 0.240 result=2095104000
+2x Unshift then shift from start of SplDoublyLinkedList: n=    1024 iterations=    2000
+=> max memory=   32920 bytes, create+destroy time=0.137 shift time = 0.093 total time = 0.230 result=2095104000
+
+****** Skip array n=1048576 iterations=20 quadratic time too slow ******
+2x Unshift then shift from start of Collections\Deque:   n= 1048576 iterations=      20
+=> max memory=16777320 bytes, create+destroy time=0.835 shift time = 0.954 total time = 1.789 result=21990211584000
+2x Unshift then shift from start of Ds\Deque:            n= 1048576 iterations=      20
+=> max memory=16777328 bytes, create+destroy time=1.891 shift time = 0.990 total time = 2.881 result=21990211584000
+2x Unshift then shift from start of SplDoublyLinkedList: n= 1048576 iterations=      20
+=> max memory=33554584 bytes, create+destroy time=1.465 shift time = 0.978 total time = 2.443 result=21990211584000
+</code>
+
+
+
+
 
 ==== Two cycles of appending n values then shifting them from the start ====
 
@@ -533,6 +611,110 @@ I am currently traveling and have not followed this discussion in detail on the 
 I'm still awaiting some clarifications on how they they were willing to assist before updating the remainder of this RFC.
 
 Additionally, there may be differences in design goals, as noted in the above section.
+
+===== Discussion =====
+
+==== Returning values other than void ====
+
+The Deque::shift() and Deque::push() methods currently return void.
+Larry Garfield suggests in https://externals.io/message/116100#116967
+
+<blockquote>
+Request:
+
+push() and unshift() currently return void. That's not helpful. It would be vastly more useful if they both returned $this. Not as much for chaining, but more so that you can add a value to a queue and pass it as an argument to another call (often recursive, but not necessarily) in a single operation.
+
+Example: I was doing last year's Advent of Code in functional PHP, and had a stack walker that looked like this:
+
+<code php>
+function parse(string $line, $pos = 0, array $stack = []): Result|string
+{
+    $next = $line[$pos] ?? null;
+    $head = $stack[0] ?? null;
+
+    return match ($next) {
+        // Opening brace, push an "expected" onto the stack.
+        '{' => parse($line, $pos + 1, ['}', ...$stack]),
+        '<' => parse($line, $pos + 1, ['>', ...$stack]),
+        '(' => parse($line, $pos + 1, [')', ...$stack]),
+        '[' => parse($line, $pos + 1, [']', ...$stack]),
+        '}', '>', ')', ']' => $next === $head ? parse($line, $pos + 1, array_slice($stack, 1)) : $next,
+        null => count($stack) ? Result::Incomplete : Result::OK,
+    };
+}
+</code>
+
+The interesting part is the ''['<', ...$stack]'', to pass on a modified version of an array-as-stack. That's of course annoyingly slow with arrays right now, and a Deque would be better, but only if it could be "modified and passed" like that. If not, it would be incompatible with single-expression usages (match statements, short lambdas, etc.)
+
+Returning $this would resolve that, I think. (Making it return a new, immutable copy of the Deque would be even nicer, but I realize that's probably not an argument I'm going to win at this point on this RFC.)
+</blockquote>
+
+My personal preference is against making this fluent and continuing to use ''void'' like we're already doing for other methods.
+I'd rather expose an efficient datastructure that's consistent with the rest of PHP's functionality to the extent possible,
+which userland can use to write their own fluent/non-fluent classes.
+There's drawbacks to returning $this, including:
+
+**Also, this isn't a request specifically about ''Collections\Deque'' or collections in general, but rather about the general design of classes in php**
+
+1. Inconsistency with existing APIs making remembering what does what harder. Barely anything in php that I remember returns $this.
+
+https://www.php.net/manual/en/arrayobject.append.php returns void.
+
+https://www.php.net/manual/en/function.array-push returns an int.
+
+2. Inconsistency with possible new datastructures/methods
+
+If a Map/Set function were to be added, then methods for add/remove would return booleans (or the old value), not $this
+
+3. Slight additional performance overhead for functionality I assume will be used relatively infrequently
+
+(php has to increment reference counts and opcache can't eliminate the opcode to decrease reference counts and possibly free the return value of ''$deque->shift()'' with the return type info being an object)
+
+4. Returning ''$this'' makes code easier to write at some cost to readability (for users new to PHP or this class, though it may help readability to developers deeply familiar with the standard library) - Developers new to php or using ''Collections\Deque'' for the first time would not immediately know what the code they're reading is doing.
+(less of a problem with a good IDE, typechecker, and a typed codebase, but this isn't universal)
+Having it return void, return ''$deque->push()'' would be less common and this would force the meaning to be clear.
+
+Developers might have several guesses/assumptions based on their experience with other methods in php/elsewhere
+
+    * It returns the new count (JavaScript Array.push, array_push)
+    * It returns ''$this'' (Ruby)
+    * It returns a lazy copy, like you'd wanted, not modifying the original
+    * It's returning void and the code in question is shorthand for return null.
+(Python, C++ https://www.cplusplus.com/reference/vector/vector/push_back/ , offsetSet and spl push()/shift() methods)
+
+Adding ''RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));'' and a different method with the '': Deque'' return type, fluent(return $this) was around 6-8% slower for me for push operations than push (aside: method calls in php have a high overhead, the engine is better at optimizing ''[]='' if specialized handlers exist):
+
+<code>
+Results for php 8.2.0-dev debug=false with opcache enabled=true
+
+Appending to Collections\Deque []=   : n=       4 iterations=10000000, create+destroy time=1.204 result=0
+Appending to Collections\Deque push  : n=       4 iterations=10000000, create+destroy time=1.551 result=0
+Appending to Collections\Deque fluent: n=       4 iterations=10000000, create+destroy time=1.640 result=0
+Appending to Collections\Deque []=   : n=       4 iterations=10000000, create+destroy time=1.213 result=0
+Appending to Collections\Deque push  : n=       4 iterations=10000000, create+destroy time=1.549 result=0
+Appending to Collections\Deque fluent: n=       4 iterations=10000000, create+destroy time=1.636 result=0
+
+Appending to Collections\Deque []=   : n=       8 iterations= 5000000, create+destroy time=0.923 result=0
+Appending to Collections\Deque push  : n=       8 iterations= 5000000, create+destroy time=1.263 result=0
+Appending to Collections\Deque fluent: n=       8 iterations= 5000000, create+destroy time=1.335 result=0
+Appending to Collections\Deque []=   : n=       8 iterations= 5000000, create+destroy time=0.921 result=0
+Appending to Collections\Deque push  : n=       8 iterations= 5000000, create+destroy time=1.261 result=0
+Appending to Collections\Deque fluent: n=       8 iterations= 5000000, create+destroy time=1.335 result=0
+
+Appending to Collections\Deque []=   : n=    1024 iterations=  100000, create+destroy time=1.246 result=0
+Appending to Collections\Deque push  : n=    1024 iterations=  100000, create+destroy time=1.972 result=0
+Appending to Collections\Deque fluent: n=    1024 iterations=  100000, create+destroy time=2.150 result=0
+Appending to Collections\Deque []=   : n=    1024 iterations=  100000, create+destroy time=1.251 result=0
+Appending to Collections\Deque push  : n=    1024 iterations=  100000, create+destroy time=1.969 result=0
+Appending to Collections\Deque fluent: n=    1024 iterations=  100000, create+destroy time=2.146 result=0
+
+Appending to Collections\Deque []=   : n= 1048576 iterations=     100, create+destroy time=2.450 result=0
+Appending to Collections\Deque push  : n= 1048576 iterations=     100, create+destroy time=3.172 result=0
+Appending to Collections\Deque fluent: n= 1048576 iterations=     100, create+destroy time=3.371 result=0
+Appending to Collections\Deque []=   : n= 1048576 iterations=     100, create+destroy time=2.455 result=0
+Appending to Collections\Deque push  : n= 1048576 iterations=     100, create+destroy time=3.183 result=0
+Appending to Collections\Deque fluent: n= 1048576 iterations=     100, create+destroy time=3.376 result=0
+</code>
 
 ===== Appendix =====
 
@@ -863,6 +1045,164 @@ foreach ($sizes as [$n, $iterations]) {
     bench_ds_deque($n, $iterations);
     bench_spl_stack($n, $iterations);
     bench_spl_fixed_array($n, $iterations);
+    echo "\n";
+}
+</code>
+
+=== Benchmark adding to the front then removing from the front ===
+
+
+<code php>
+<?php
+
+const PUSH_SHIFT_CYCLES = 2;
+
+function bench_array(int $n, int $iterations) {
+    $totalReadTime = 0.0;
+    $startTime = hrtime(true);
+    $total = 0;
+    if ($n > 1024) {
+        echo "****** Skip array n=$n iterations=$iterations quadratic time too slow ******\n";
+        return;
+    }
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = [];
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                array_unshift($values, $i);
+            }
+            $maxMemory = memory_get_usage();
+            $startReadTime = hrtime(true);
+            while (count($values) > 0) {
+                $total += array_shift($values);
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+
+        unset($values);
+    }
+    $endTime = hrtime(true);
+
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Unshift then shift from start of array:               n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+function bench_deque(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new Collections\Deque();
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                $values[] = $i;
+            }
+            $maxMemory = memory_get_usage();
+
+            $startReadTime = hrtime(true);
+            while (count($values) > 0) {
+                $total += $values->shift();
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Unshift then shift from start of Collections\Deque:   n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+function bench_ds_deque(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new Ds\Deque();
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                $values->unshift($i);
+            }
+            $maxMemory = memory_get_usage();
+
+            $startReadTime = hrtime(true);
+            while (count($values) > 0) {
+                $total += $values->shift();
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Unshift then shift from start of Ds\Deque:            n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+// SplDoublyLinkedList is a linked list that takes more memory than needed.
+// Access to values in the middle of the SplDoublyLinkedList is also less efficient.
+function bench_spl_dll(int $n, int $iterations) {
+    $startTime = hrtime(true);
+    $totalReadTime = 0.0;
+    $total = 0;
+    for ($j = 0; $j < $iterations; $j++) {
+        $startMemory = memory_get_usage();
+        $values = new SplDoublyLinkedList();
+        for ($times = 0; $times < PUSH_SHIFT_CYCLES; $times++) {
+            for ($i = 0; $i < $n; $i++) {
+                $values->unshift($i);
+            }
+            $maxMemory = memory_get_usage();
+            $startReadTime = hrtime(true);
+            // Random access is linear time in a linked list, so use foreach instead
+            while (count($values) > 0) {
+                $total += $values->shift();
+            }
+            $endReadTime = hrtime(true);
+            $totalReadTime += $endReadTime - $startReadTime;
+        }
+        unset($values);
+    }
+    $endTime = hrtime(true);
+    $totalTime = ($endTime - $startTime) / 1000000000;
+    $totalReadTimeSeconds = $totalReadTime / 1000000000;
+    printf("2x Unshift then shift from start of SplDoublyLinkedList: n=%8d iterations=%8d\n=> max memory=%8d bytes, create+destroy time=%.3f shift time = %.3f total time = %.3f result=%d\n",
+        $n, $iterations, $maxMemory - $startMemory, $totalTime - $totalReadTimeSeconds, $totalReadTimeSeconds, $totalTime, $total);
+}
+$n = 2**20;
+$iterations = 10;
+$sizes = [
+    [1, 8000000],
+    [4, 2000000],
+    [8, 1000000],
+    [64, 100000],
+    [128, 50000],
+    [1024, 2000],
+    [2**20, 20],
+];
+echo "Test creating a collection, then two cycles of push+shift (unshifting n values to the start of collections then shifting all of them from front of collection)\n";
+echo "Moving the front of an array requires moving all elements to their new position, so the total time for array is quadratic\n";
+printf(
+    "Results for php %s debug=%s with opcache enabled=%s\n\n",
+    PHP_VERSION,
+    PHP_DEBUG ? 'true' : 'false',
+    json_encode(function_exists('opcache_get_status') && (opcache_get_status(false)['opcache_enabled'] ?? false))
+);
+
+foreach ($sizes as [$n, $iterations]) {
+    bench_array($n, $iterations);
+    bench_deque($n, $iterations);
+    bench_ds_deque($n, $iterations);
+    bench_spl_dll($n, $iterations);
     echo "\n";
 }
 </code>
