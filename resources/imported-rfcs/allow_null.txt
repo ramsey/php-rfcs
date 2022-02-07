@@ -132,7 +132,13 @@ To get and **Test** the list of functions, I wrote a script to //get_defined_fun
 
 ===== Implementation =====
 
-TODO
+https://github.com/craigfrancis/php-src/compare/master...allow-null
+
+This patch currently defines //Z_PARAM_STR_ALLOW_NULL//.
+
+It works a bit like //Z_PARAM_STR_OR_NULL//, but it will return an empty string instead of //NULL//.
+
+It's a fairly easy drop in replacement for //Z_PARAM_STR//, which is used by functions like [[https://github.com/php/php-src/blob/7b90ebeb3f954123915f6d62fb7b2cd3fdf3c6ec/ext/standard/html.c#L1324|htmlspecialchars()]].
 
 ===== Rejected Features =====
 
