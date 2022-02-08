@@ -61,7 +61,11 @@ Currently this only affects those using PHP 8.1 with //E_DEPRECATED//, but it im
 
 This also applies to those developers not using //strict_types=1//, which is excessive.
 
-And while the individual changes are easy - there are many of them, they are difficult to find, and often pointless (e.g. //urlencode(strval($name))//).
+While individual changes are easy, there are many of them, difficult to find, and often pointless, e.g.
+
+  * urlencode(strval($name));
+  * urlencode((string) $name);
+  * urlencode($name ?? '');
 
 Without the changes below, developers will need to either - use these deprecation notices, or use very strict Static Analysis (one that can determine when a variable can be //NULL//; e.g. Psalm at [[https://psalm.dev/docs/running_psalm/error_levels/|level 3]], with no baseline).
 
