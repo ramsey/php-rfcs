@@ -409,13 +409,19 @@ This allows you to "introspect classes, interfaces, functions, methods and exten
 
 ===== Previous Examples =====
 
-**Go** programs can use "ScriptFromConstant" to express the concept of a "compile time constant" ([[https://blogtitle.github.io/go-safe-html/|more details]]).
+**Go** can use an "[[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/others/go/index.go|un-exported string type]]", a technique which is used by [[https://blogtitle.github.io/go-safe-html/|go-safe-html]].
 
-**Java** can use [[https://errorprone.info/|Error Prone]] with [[https://errorprone.info/bugpattern/CompileTimeConstant|@CompileTimeConstant]] to ensure method parameters can only use "compile-time constant expressions".
+**C++** can use a "[[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/others/cpp/index.cpp|consteval annotation]]".
+
+**Rust** can use a "[[https://github.com/craigfrancis/php-is-literal-rfc/tree/main/others/rust|procedural macro]]", to check the provided value is a literal at compile time (a bit complicated).
+
+**Java** can use a "[[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/others/java/src/main/java/com/example/isliteral/index.java|@CompileTimeConstant annotation]]" from [[https://errorprone.info/bugpattern/CompileTimeConstant|Error Prone]] to ensure method parameters can only use "compile-time constant expressions".
+
+**Node** has the [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/others/npm/index.js|is-template-object polyfill]], which checks a tag function was provided a "tagged template literal" (this technique is used in [[https://www.npmjs.com/package/safesql|safesql]], via [[https://www.npmjs.com/package/template-tag-common|template-tag-common]]). Alternatively Node developers can use [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/others/npm-closure-library/index.js|goog.string.Const]] from Google's Closure Library.
 
 **JavaScript** is getting [[https://github.com/tc39/proposal-array-is-template-object|isTemplateObject]], for "Distinguishing strings from a trusted developer from strings that may be attacker controlled" (intended to be [[https://github.com/mikewest/tc39-proposal-literals|used with Trusted Types]]).
 
-**Perl** has a [[https://perldoc.perl.org/perlsec#Taint-mode|Taint Mode]], via the -T flag, where all input is marked as "tainted", and cannot be used by some methods (like commands that modify files), unless you use a regular expression to match and return known-good values (where regular expressions are easy to get wrong).
+**Perl** has a [[https://perldoc.perl.org/perlsec#Taint-mode|Taint Mode]], via the -T flag, where all input is marked as "tainted", and cannot be used by some methods (like commands that modify files), unless you use a regular expression to match and return known-good values (regular expressions are easy to get wrong).
 
 There is a [[https://github.com/laruence/taint|Taint extension for PHP]] by Xinchen Hui, and [[https://wiki.php.net/rfc/taint|a previous RFC proposing it be added to the language]] by Wietse Venema.
 
