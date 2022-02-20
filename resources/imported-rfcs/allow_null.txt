@@ -1,10 +1,10 @@
 ====== PHP RFC: Allow NULL ======
 
-  * Version: 1.2
+  * Version: 1.3
   * Voting Start: ?
   * Voting End: ?
   * RFC Started: 2021-12-23
-  * RFC Updated: 2021-12-31
+  * RFC Updated: 2022-02-20
   * Author: Craig Francis, craig#at#craigfrancis.co.uk
   * Status: Draft
   * First Published at: https://wiki.php.net/rfc/allow_null
@@ -14,6 +14,8 @@
 ===== Introduction =====
 
 PHP 8.1 introduced "Deprecate passing null to non-nullable arguments of internal functions" ([[https://externals.io/message/112327|short discussion]]), which is making it difficult (time consuming) for developers to upgrade.
+
+This has introduced an inconstancy when not using //strict_types=1//, because most variables types (e.g. integers) can be coerced to the relevant type, but //NULL// has been deprecated.
 
 In PHP //NULL// is often used to represent something; e.g. when a //GET/////POST/////COOKIE// variable is undefined:
 
@@ -49,15 +51,15 @@ socket_write($socket, $name);
 xmlwriter_text($writer, $name);
 </code>
 
-Where //NULL// has the advantage of falling back to being treated like an empty string.
-
 Developers also use //NULL// to skip certain parameters, e.g. //$additional_headers// in //mail()//.
+
+Where //NULL// has always been coerced into an empty string, the integer 0, the boolean false, etc.
 
 Currently the deprecation notices only affect those using PHP 8.1 with //E_DEPRECATED//, but it implies everyone will need to modify their code to avoid **Fatal Errors** in PHP 9.0.
 
-Developers using //strict_types=1// may find some value in this, but it's excessive for everyone else.
+Developers using //strict_types=1// may find some value in this, but it's excessive and inconstant for everyone else.
 
-And while individual changes are easy, there are many of them, are difficult to find, and often pointless, e.g.
+And while individual changes are easy, there are many of them (time consuming), difficult to find, and often pointless, e.g.
 
   * urlencode(strval($name));
   * urlencode((string) $name);
@@ -65,17 +67,19 @@ And while individual changes are easy, there are many of them, are difficult to 
 
 To find these issues, developers need to either - use these deprecation notices, or use very strict Static Analysis (one that can determine when a variable can be //NULL//; e.g. Psalm at [[https://psalm.dev/docs/running_psalm/error_levels/|level 3]], with no baseline).
 
+It's worth noting that some parameters, like //$separator// in //explode()//, already have a "cannot be empty" Fatal Error. So it might be useful to have a separate RFC to update some of these parameters to consistently reject NULL **or** Empty Strings, e.g. //$needle// in //strpos()// and //$json// in //json_decode()//.
+
 ===== Proposal =====
 
-Update **some** internal function parameters to accept (or be tolerant to) //NULL//.
+There are 3 possible approaches:
 
-This needs to be done before the eventual end of the deprecation period, and //TypeError// exceptions are thrown - which would create an unnecessary burden for developers to upgrade.
+  - NULL triggers a Fatal Error with strict_types=1, otherwise allow coercion (like how integers can be coerced to a string).
+  - NULL triggers a Fatal Error for everyone, but update some parameters to explicitly allow NULL (e.g. //?string//).
+  - NULL triggers a Fatal Error for everyone (forget about backwards compatibility).
 
-While this is in Draft, the [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-change.md|list of functions are hosted on GitHub]].
+This needs to be done before the eventual end of the deprecation period, and //TypeError// exceptions are thrown.
 
-Only the parameters in **bold** would be changed.
-
-[[https://github.com/craigfrancis/php-allow-null-rfc/issues|Suggestions]] and [[https://github.com/craigfrancis/php-allow-null-rfc/pulls|pull requests]] welcome.
+If we choose to "update some parameters to explicitly allow NULL", there is a [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-change.md|draft list of functions]], where the **bold** are being proposed (currently only includes string parameters). [[https://github.com/craigfrancis/php-allow-null-rfc/issues|Suggestions]] and [[https://github.com/craigfrancis/php-allow-null-rfc/pulls|Pull Requests]] welcome.
 
 There is also a [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-maybe.md|Maybe List]], where the more questionable arguments end with a "!". For example, //strrpos()// accepting an empty string for //$needle// is wired in itself, and //sodium_crypto_box_open()// should never receive a blank //$ciphertext//. And there is an [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-other.md|Other List]], which can be ignored.
 
@@ -118,7 +122,7 @@ Is the [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-
 
 ===== Future Scope =====
 
-Some function parameters could be updated to complain when an Empty String or //NULL// is provided; e.g. //$method// in //method_exists()//, or //$characters// in //trim()//.
+Some function parameters could be updated to complain when an //NULL// **or** //Empty String// is provided; e.g. //$method// in //method_exists()//, or //$characters// in //trim()//.
 
 ===== Voting =====
 
