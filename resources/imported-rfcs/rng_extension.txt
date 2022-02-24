@@ -1,6 +1,6 @@
-====== PHP RFC: Random Extension 4.0 ======
-  * Version: 4.2.0
-  * Date: 2022-02-14
+====== PHP RFC: Random Extension 5.x ======
+  * Version: 5.0.0
+  * Date: 2022-02-24
   * Author: Go Kudo <zeriyoshi@gmail.com> <g-kudo@colopl.co.jp>
   * Status: Under Discussion
   * Implementation: https://github.com/php/php-src/pull/8094
@@ -8,101 +8,446 @@
 
 ===== Introduction =====
 
-PHP implements several useful RNGs. However, they are currently only available in the global scope.
+PHP comes with a number of useful PRNGs (Pseudo Random Number Generator).
 
-Mersenne Twister, PHP's default RNG, provides a function mt_srand() to initialize with a user-specified seed value, but the scope is global, which may cause unintended user behavior.
-
-When a user executes mt_srand(), one would expect it to only affect result of mt_rand(), however, the following functions implicitly affect the result of mt_rand()
-
-  * shuffle()
-  * str_shuffle()
-  * array_rand()
-
-For example, in the following code, the result of the second mt_rand() is not reproducible. This is because shuffle() uses a MT RNG internally, which changes the state.
-
+Mersenne Twister (a.k.a MT19937), the default RNG included in PHP, has a very long period of 2^19937-1 and generates high quality random numbers. To take advantage of this, you can do the following
 <code php>
-mt_srand(1234);
-$next = mt_rand();
+<?php
+// Generate a 31-bit random number
+echo mt_rand() . "\n";
+echo mt_rand() . "\n";
 
-mt_srand(1234);
-$arr = range(0, 9);
-shuffle($arr);
-$next2 = mt_rand();
-
-die("next: ${next}, next2: ${next2}"); // next: 411284887, next2: 1848274264
+// Generate a number in range
+echo mt_rand(5, 15);
 </code>
 
-These behaviors were unintuitive and often led to unintended execution results, but were not that problematic for general web application use.
+It is also possible to specify a seed value so that the same result is always reproduced. This can be useful for testing functions that use random numbers, or for recreating game situations.
 
-However, in more complex and repeatable applications (such as games), this can be a problem.
+<code php>
+<?php
+mt_srand(1234);
+echo mt_rand(); // result: 411284887
 
-There is also the issue of state management difficulties with Fiber, which was added in PHP 8.1. Nikita had this to say:
+$array = range(0, 9);
+mt_srand(1234);
+shuffle($array); // result: list{7, 1, 8, 0, 4, 2, 9, 6, 3, 5}
 
-https://externals.io/message/115918#115959
+mt_srand(1234);
+str_shuffle('foobar'); // result: afroob
+</code>
 
-In addition, the Mersenne Twister, can only generate 32-bit values.
-In recent years, many of the environments where PHP runs have been migrating to 64-bit platforms.
-In order to generate more secure values, an RNG that can generate 64-bit wide values should be provided by the language.
+However, at present, Mersenne Twister is facing several challenges.
+
+The first one is that the state is global. The state of Mersenne Twister is implicitly stored in a global area of PHP, and there is no way for the user to access it. This means that code like the following can easily be unrepeatable The shuffle(), str_shuffle(), and array_rand() functions implicitly use the internal Mersenne Twister state to advance the random number table.
+
+<code php>
+<?php
+
+function foo(): void {
+    // It was added later.
+    $foo = str_suffle('foobar');
+}
+
+mt_srand(1234);
+foo();
+mt_rand(1, 100); // result: 76 -> 65
+</code>
+
+This problem can be avoided if you have full ownership of the code, but if you have external packages in place, such as Composer, it is difficult to keep it.
+
+One solution is to implement the PRNG in userland. The following code implements XorShift128+ PRNG in Pure PHP.
+
+<code php>
+class XorShift128Plus
+{
+    /* constants */
+    protected const MASK_S5 = 0x07ffffffffffffff;
+    protected const MASK_S18 = 0x00003fffffffffff;
+    protected const MASK_S27 = 0x0000001fffffffff;
+    protected const MASK_S30 = 0x00000003ffffffff;
+    protected const MASK_S31 = 0x00000001ffffffff;
+    protected const MASK_LO = 0x00000000ffffffff;
+
+    protected const ADD_HI = 0x9e3779b9;
+    protected const ADD_LO = 0x7f4a7c15;
+    protected const MUL1_HILO = 0x476d;
+    protected const MUL1_HIHI = 0xbf58;
+    protected const MUL1_LO = 0x1ce4e5b9;
+    protected const MUL2_HIHI = 0x94d0;
+    protected const MUL2_HILO = 0x49bb;
+    protected const MUL2_LO = 0x133111eb;
+
+    /* states */
+    protected int $s0;
+    protected int $s1;
+
+    public function __construct(int $seed)
+    {
+        $s = $seed;
+        $this->s0 = $this->splitmix64($s);
+        $this->s1 = $this->splitmix64($s);
+    }
+
+    public function generate(): int
+    {
+        $s1 = $this->s0;
+        $s0 = $this->s1;
+
+        $s0h = ($s0 >> 32) & self::MASK_LO;
+        $s0l = $s0 & self::MASK_LO;
+        $s1h = ($s1 >> 32) & self::MASK_LO;
+        $s1l = $s1 & self::MASK_LO;
+        $zl = $s0l + $s1l;
+        $zh = $s0h + $s1h + ($zl >> 32);
+        $z = ($zh << 32) | ($zl & self::MASK_LO);
+
+        $this->s0 = $s0;
+        $s1 ^= $s1 << 23;
+        $this->s1 = $s1 ^ $s0 ^ (($s1 >> 18) & self::MASK_S18) ^ (($s0 >> 5) & self::MASK_S5);
+
+        return $z;
+    }
+
+    protected function splitmix64(int &$s): int
+    {
+        // $s + 0x9e3779b97f4a7c15
+        $zl = $s & self::MASK_LO;
+        $zh = ($s >> 32) & self::MASK_LO;
+        $carry = $zl + self::ADD_LO;
+        $z = $s = (($zh + self::ADD_HI + ($carry >> 32)) << 32) | ($carry & self::MASK_LO);
+
+        $z ^= ($z >> 30) & self::MASK_S30;
+        $zl = $z & self::MASK_LO;
+        $zh = ($z >> 32) & self::MASK_LO;
+        $lo = self::MUL1_LO * $zl;
+        $zll = $zl & 0xffff;
+        $zlh = $zl >> 16;
+        $mul1l = $zll * self::MUL1_HILO;
+        $mul1h = $zll * self::MUL1_HIHI + $zlh * self::MUL1_HILO + (($mul1l >> 16) & 0xffff);
+        $mul1 = (($mul1h & 0xffff) << 16) | ($mul1l & 0xffff);
+        $mul2 = ((self::MUL1_LO * $zh) & self::MASK_LO);
+        $carry = (($lo >> 32) & self::MASK_LO);
+        $hi = $mul1 + $mul2 + $carry;
+        $z = ($hi << 32) | ($lo & self::MASK_LO);
+
+        $z ^= ($z >> 27) & self::MASK_S27;
+        $zl = $z & self::MASK_LO;
+        $zh = ($z >> 32) & self::MASK_LO;
+        $lo = self::MUL2_LO * $zl;
+
+        $zll = $zl & 0xffff;
+        $zlh = $zl >> 16;
+        $mul1l = $zll * self::MUL2_HILO;
+        $mul1h = $zll * self::MUL2_HIHI + $zlh * self::MUL2_HILO + (($mul1l >> 16) & 0xffff);
+        $mul1 = (($mul1h & 0xffff) << 16) | ($mul1l & 0xffff);
+
+        $mul2 = (self::MUL2_LO * $zh) & self::MASK_LO;
+        $carry = ($lo >> 32) & self::MASK_LO;
+        $hi = $mul1 + $mul2 + $carry;
+        $z = ($hi << 32) | ($lo & self::MASK_LO);
+
+        return $z ^ (($z >> 31) & self::MASK_S31);
+    }
+}
+
+$xs128pp = new \XorShift128Plus(1234);
+
+// Benchmarking
+for ($i = 0; $i < 1000000000; $i++) {
+    $xs128pp->generate();
+}
+</code>
+
+There are also third-party PRNG implementations. The following libraries provide XorShift and Mersenne Twister as PRNG algorithms.
+
+https://github.com/savvot/random
+
+However, they all have some performance issues in common. The following is the speed of the various implementations when running under PHP 8.1.
+
+|                                ^ XorShift128+ (iter:1000000000) ^ MtRand (savvot/random) (iter: 10000000) ^ Native MT (iter: 10000000) ^
+^ PHP 8.1                | 0m3.218s                                            | 0m4.161s                                                           | 0m0.160s                                 |
+^ PHP 8.1 with JIT  | 0m1.836s (64M buffer)                    | 0m2.184s (64M buffer)                                    | 0m0.184s (64M buffer)         |
+
+JIT can help significantly in improving speed, but the difference is still significant compared to native implementations.
+PHP has not language features suitable for numeric computations such as unsigned integers, and PRNG implementations require a variety of workarounds.
+
+Next, Mersenne Twister (MT19937) can only generate 32-bit integers (31-bit in user space). In recent years, most server environments running PHP have a 64-bit architecture. However, the Mersenne Twister implementation is only 32 bits wide internally and 31 bits wide in userland.
+
+And next, PRNG / CSPRNG implementation in PHP is disjointed. Each of these implementations is implemented separately in a single ext/standard huge extension. The correspondence between them is as follows
+
+|                            ^ extension ^ header              ^ source      ^
+^ Combined LCG  | standard    | php_lcg.h           | lcg.c           |
+^ libc rand*           | standard    | php_rand.h        | rand.c        |
+^ MT19937          | standard    | php_mt_rand.h | mt_rand.c |
+^ CSPRNG             | standard    | php_random.h   | random.c   |
+
+<blockquote>*libc rand is already an alias for MT19937</blockquote>
+
+The current situation is difficult to use for extension developers who want to use PHPAPI, and it is not very good from a maintenance point of view. Implementing a new RNG in PHP, for example, would require even more files.
 
 ===== Proposal =====
 
-Implement the XorShift128Plus and Xoshiro256StarStar algorithm for generating new 64-bit wide random numbers, along with a random extension that includes an object scope RNG, and bundle it with PHP.
+Separate the RNG implementation into ext/random and implement various RNG classes with class-level scope.
 
-XorShift128Plus is a fast, high-quality RNG that is proven in major web browsers. 
+First, all RNG implementations in ext/standard will be migrated to the new ext/random. To maintain compatibility of the extensions, the various ext/standard header files will be kept as reading ext/random header files. Since ext/random will always be bundled, there will be no compatibility impact on userland.
 
-Xoshiro256StarStar is a fast, high-quality RNG that was adopted in .NET 6.0.
+For example, ext/standard/php_rand.h would look like this
 
-Many of the major hardware architectures are now 64-bit, so it makes sense to use this RNG.
+<code c>
+#include "ext/random/php_random.h"
+</code>
 
-In addition to the new algorithm, the following classes will be added to fix the global scope issue.
+This will allow the extension to maintain compatibility.
 
-  * class Random\Engine\CombinedLCG
-  * class Random\Engine\MersenneTwister
-  * class Random\Engine\Secure (aka php_random_bytes())
-  * class Random\Engine\XorShift128Plus
-  * class Random\Engine\Xoshiro256StarStar
+The next step is to change the internal PHP implementation to handle random numbers in object scope. This will allow the classes and methods shown in the following stub to be used.
 
-These classes will hold independent RNG state and will not affect the global scope.
+<code php>
+<?php
 
-RNGs other than XorShift128Plus and Xoshiro256StarStar are based on the RNGs currently implemented in PHP.
+/** @generate-class-entries */
 
-XorShift128Plus or Xoshiro256StarStar is special in that it accepts a string as a constructor argument. Normally, they takes a number as its seed value and uses the SplitMix64 algorithm to generate a 128 / 256 bit internal state, but you can use a user-defined internal state for the full 128 / 256 bit by specifying string.
+namespace {
+    function lcg_value(): float {}
+
+    function mt_srand(int $seed = 0, int $mode = MT_RAND_MT19937): void {}
+
+    /** @alias mt_srand */
+    function srand(int $seed = 0, int $mode = MT_RAND_MT19937): void {}
+
+    function rand(int $min = UNKNOWN, int $max = UNKNOWN): int {}
+
+    function mt_rand(int $min = UNKNOWN, int $max = UNKNOWN): int {}
+
+    function mt_getrandmax(): int {}
+
+    /** @alias mt_getrandmax */
+    function getrandmax(): int {}
+
+    /** @refcount 1 */
+    function random_bytes(int $length): string {}
+
+    function random_int(int $min, int $max): int {}
+}
+
+namespace Random\Engine
+{
+    class CombinedLCG implements Random\SeedableEngine, Random\SerializableEngine
+    {
+        public function __construct(int|null $seed = null) {}
+
+        public function generate(): string {}
+
+        public function __serialize(): array {}
+
+        public function __unserialize(array $data): void {}
+
+        public function __debugInfo(): array {}
+    }
+
+    class MersenneTwister implements Random\SeedableEngine, Random\SerializableEngine
+    {
+        public function __construct(int|null $seed = null, int $mode = MT_RAND_MT19937) {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::generate */
+        public function generate(): string {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__serialize */
+        public function __serialize(): array {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__unserialize */
+        public function __unserialize(array $data): void {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__debugInfo */
+        public function __debugInfo(): array {}
+    }
+
+    /** @not-serializable */
+    class Secure implements Random\CryptoSafeEngine
+    {
+        /** @implementation-alias Random\Engine\CombinedLCG::generate */
+        public function generate(): string {}
+    }
+    
+    class PCG64 implements Random\SeedableEngine, Random\SerializableEngine
+    {
+        public function __construct(int|null $seed = null) {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::generate */
+        public function generate(): string {}
+        
+        public function jump(int $iteration) {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__serialize */
+        public function __serialize(): array {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__unserialize */
+        public function __unserialize(array $data): void {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__debugInfo */
+        public function __debugInfo(): array {}
+    }
+
+    class XorShift128Plus implements Random\SeedableEngine, Random\SerializableEngine
+    {
+        public function __construct(string|int|null $seed = null) {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::generate */
+        public function generate(): string {}
+
+        public function jump(): void {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__serialize */
+        public function __serialize(): array {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__unserialize */
+        public function __unserialize(array $data): void {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__debugInfo */
+        public function __debugInfo(): array {}
+    }
+
+    class Xoshiro256StarStar implements Random\SeedableEngine, Random\SerializableEngine
+    {
+        public function __construct(string|int|null $seed = null) {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::generate */
+        public function generate(): string {}
+
+        public function jump(): void {}
+
+        public function jumpLong(): void {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__serialize */
+        public function __serialize(): array {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__unserialize */
+        public function __unserialize(array $data): void {}
+
+        /** @implementation-alias Random\Engine\CombinedLCG::__debugInfo */
+        public function __debugInfo(): array {}
+    }
+}
+
+namespace Random
+{
+    interface Engine
+    {
+        public function generate(): string;
+    }
+
+    interface CryptoSafeEngine extends Engine
+    {
+    }
+
+    interface SeedableEngine extends Engine
+    {
+    }
+
+    interface SerializableEngine extends Engine
+    {
+        public function __serialize(): array {}
+
+        public function __unserialize(array $data): void {}
+
+        public function __debugInfo(): array {}
+    }
+
+    final class Randomizer
+    {
+        public readonly Engine $engine;
+
+        public function __construct(?Engine $engine = null) {}
+
+        public function getInt(int $min = UNKNOWN, int $max = UNKNOWN): int {}
+
+        public function getBytes(int $legnth): string {}
+
+        public function shuffleArray(array $array): array {}
+
+        public function shuffleString(string $string): string {}
+
+        public function __serialize(): array {}
+
+        public function __unserialize(array $data): void {}
+    }
+}
+</code>
+
+The Random\Engine provides an interface to implement a random number generator. This interface is also available from userland and allows for the implementation of RNGs in PHP. This interface has a single generate(): string method, which should return a random number value as a binary string.
+
+implemented of:
+
+  * Random\Engine\CombinedLCG
+  * Random\Engine\MersenneTwister
+  * Random\Engine\PCG64
+  * Random\Engine\Secure
+  * Random\Engine\XorShift128Plus
+  * Random\Engine\Xoshiro256StarStar
+
+Random\CryptoSafeEngine is an interface implemented by the CSPRNG (Cryptographically Secure Random Number Generator).
+
+implemented of:
+
+  * Random\Engine\Secure
+
+Random\SeedableEngine is an interface implemented by RNG that guarantees reproducibility by providing a user-defined seed value.
+
+implemented of:
+
+  * Random\Engine\CombinedLCG
+  * Random\Engine\PCG64
+  * Random\Engine\MersenneTwister
+  * Random\Engine\XorShift128Plus
+  * Random\Engine\Xoshiro256StarStar
+
+Random\Engine\CombinedLCG, Random\Engine\MersenneTwister, Random\Engine\XorShift128Plus, and Random\Engine\XorShift128Plus each provide a native implementation of the RNG of the same name. native implementations of the RNGs of the same name. If null is passed as the seed value argument in the constructor argument, the seed value is generated using a mechanism equivalent to the random_bytes() function.
+
+<code php>
+$mt = new \Random\Engine\Mersenne(1234); // OK
+$xorshift128plus = new \Random\Engine\XorShift128Plus(1234); // OK
+$xoshiro256starstar = new \Random\Engine\Xoshiro256StarStar(1234); // OK
+
+$mt = new \Random\Engine\Mersenne(); // OK
+$xorshift128plus = new \Random\Engine\XorShift128Plus(); // OK
+$xoshiro256starstar = new \Random\Engine\Xoshiro256StarStar(); // OK
+</code>
+
+Random\Engine\CombinedLCG provides a simple implementation of Combined LCG. The width that this algorithm can generate is 32-bit, and the quality of the random numbers is not very high.
+
+Random\Engine\MersenneTwister provides an implementation of Mersenne Twister that can be used in PHP. The width this algorithm can generate is 32-bit and the quality of the random numbers is high. The constructor has the same signature as mt_srand(). This means that you can still use PHP's broken Mersenne Twister by specifying MT_RAND_PHP as the second argument.
+
+<code php>
+$mt = new \Random\Engine\Mersenne(1234, MT_RAND_MT19937);
+$mt = new \Random\Engine\Mersenne(1234, MT_RAND_PHP);
+</code>
+
+Random\Engine\PCG64 is an implementation of the Permuted congruential generator. It is based on PCG64 (pcg_state_setseq_128 XSL-RR-RR). Along with Xoshiro256StarStar, it is a commonly used PRNG, such as Rust and Python (NumPy). This algorithm has a jump() method that can arbitrarily advance the state of the RNG. The size of the state of this RNG is 128-bits, so it cannot be fully seeded by simply passing a number as the seed value. If a numeric value is passed, the RNG internally uses the PCG64 mechanism to generate 128-bit internal state. However, it is possible to seed with completely user-defined data by passing a 128-bit string to the constructor.
+
+Random\Engine\Secure provides the functionality of CSPRNG. It is almost exactly the same as the random_int() and random_bytes() functions.
+
+Random\Engine\XorShift128Plus provides an implementation of XorShift128+, which is currently implemented in modern browsers. The width this algorithm can generate is 64-bit, and the quality of the random numbers is normal, but the speed is excellent. The algorithm has a jump() method that can advance the state of the RNG. The size of the state of this RNG is 128-bits, so it cannot be fully seeded by simply passing a number as the seed value. If a numeric value is passed, the RNG internally generates 128-bit internal state using the SplitMix64 algorithm. However, by passing a 128-bit string to the constructor, it is possible to seed with completely user-defined data.
 
 <code php>
 $xorshift128plus = new \Random\Engine\XorShift128Plus(1234); // OK (use SplitMix64 internally)
 $xorshift128plus = new \Random\Engine\XorShift128Plus(\random_bytes(16)); // OK (fully user-defined state)
 $xorshift128plus = new \Random\Engine\XorShift128Plus('foobar'); // NG (thrown ValueError)
+</code>
 
+Random\Engine\Xoshiro256StarStar provides an implementation of Xoshiro256** that is an improved version of XorShift, which was adopted as standard in . NET 6.0. The algorithm is capable of generating 64-bit widths, has high random number quality, and outperforms MT19937 in terms of speed and memory saving. The algorithm has a jump() method that advances the state of the RNG, and a jumpLong() method that advances the state more significantly. The size of the state of this RNG is 256-bits, so it cannot be fully seeded by simply passing a number as the seed value. If a numeric value is passed, the RNG internally generates 256-bit internal state using the SplitMix64 algorithm. However, by passing a 256-bit string to the constructor, it is possible to seed with completely user-defined data.
+
+<code php>
 $xoshiro256starstar = new \Random\Engine\Xoshiro256StarStar(1234); // OK (use SplitMix64 internally)
 $xoshiro256starstar = new \Random\Engine\Xoshiro256StarStar(\random_bytes(32)); // OK (fully user-defined state)
 $xoshiro256starstar = new \Random\Engine\Xoshiro256StarStar(\random_bytes(16)); // NG (thrown ValueError)
 </code>
 
-To avoid misuse, however, string must be a 128-bit / 256-bit string (16 / 32 bytes). Otherwise, an ValueError will be thrown.
+The Random\Randomizer class provides various methods for manipulating values based on the class that implements the Random\Engine interface. It throws a RuntimeException if the Randomizer fails to generate a random number internally.
 
-An interface Random\Engine is also added and are implmeneted by the classes above. 
+The Random\Randomizer class provides various methods for manipulating values based on the class that implements the Random\Engine interface. It throws a \RuntimeException if the Randomizer fails to generate a random number internally.
 
-The random number generated by Random\Engine::generate() must be a binary string.
+Random\Randomizer::getInt() has the same signature as mt_rand() and returns a number in the range if the argument is specified, or a 1-bit left-shifted value of the RNG-generated value if it is not.
 
-Theoretically, the width of random number generation can be specified from 1 byte to an unlimited bytes, but for internal implementation reasons, it is limited to 8 bytes (64-bit).
-
-Random\Randomizer class will be added to manipulate data using these RNGs. 
-
-This class provides the following methods:
-
-  * __constructor(\Random\Engine $generator = null) [defaults to XorShift128Plus if null]
-  * getInt(int $min, int $max): int [replacement for mt_rand() / rand()]
-  * getBytes(int $length): string [replacement for random_bytes()]
-  * shuffleArray(array $array): array [replacement for shuffle()]
-  * shuffleString(string $string): string [replacement for str_shuffle()]
-
-Randomizer::getInt() can omit arguments as well as mt_rand(). If it is omitted, it returns the generated value directly right-shifted by 1 bit.
-
-Method equivalent to array_rand() was not implemented at this time because the implementation is complex and can be easily implemented in userland if necessary.
-
-The stubs of functionality provided by this extension are as follows:
-
-https://github.com/colopl/php-src/blob/upstream_rfc/scoped_rng_for_pr/ext/random/random.stub.php
+Random\Randomizer::getBytes() has the same signature as random_bytes() and generates a binary string of the specified length. If the binary string produced by the RNG is shorter than the specified length, it will repeat internally to produce the specified length. However, if the generated length exceeds the specified length, the value is simply discarded. In other words, if you were to run getBytes(7) with a 64-bit wide (8-byte) RNG, the last byte would be discarded.
 
 Examples of these uses are as follows:
 
@@ -138,42 +483,6 @@ foobar();
 $next = $randomizer->getInt();
 </code>
 
-As a side effect of this RFC, the following PHP functions have been moved to the new ext/random extension
-
-This is because ext/standard/random.c reserves the name RANDOM and cannot be used by the extension.
-In addition, all RNG-related implementations will be moved to the new random extension in order to standardize the RNG implementation.
-
-  * lcg_value()
-  * srand()
-  * rand()
-  * mt_srand()
-  * mt_rand()
-  * random_int()
-  * random_bytes()
-
-The following internal APIs will also be moved to the ext/random extension:
-
-  * php_random_int_throw()
-  * php_random_int_silent()
-  * php_combined_lcg()
-  * php_mt_srand()
-  * php_mt_rand()
-  * php_mt_rand_range()
-  * php_mt_rand_common()
-  * php_srand()
-  * php_rand()
-  * php_random_bytes()
-  * php_random_int()
-
-All of these features are available from the extension by simply including a single ext/random/php_random.h
-
-The following header files are left in for extension compatibility. The contents all include ext/random/php_random.h.
-
-  * ext/standard/php_lcg.h
-  * ext/standard/php_rand.h
-  * ext/standard/php_mt_rand.h
-  * ext/standard/php_random.h
-
 ===== Future Scope =====
 
 These are not within the scope of this RFC, but are worth considering in the future:
@@ -189,6 +498,7 @@ The following names have been reserved and will no longer be available
   * "Random\Engine"
   * "Random\Engine\CombinedLCG"
   * "Random\Engine\MersenneTwister"
+  * "Random\Engine\PCG64"
   * "Random\Engine\Secure"
   * "Random\Engine\XorShift128Plus"
   * "Random\Engine\Xoshiro256StarStar"
