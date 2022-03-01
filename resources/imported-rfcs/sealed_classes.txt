@@ -2,6 +2,7 @@
   * Date: 2021-04-24
   * Author: Saif Eddin Gmati <azjezz@protonmail.com>, Joe Watkins
   * Status: Draft
+  * Target Version: PHP 8.2
   * First Published at: https://wiki.php.net/rfc/sealed_classes
 
 ===== Introduction =====
@@ -20,13 +21,12 @@ Currently PHP has a special case for `Throwable`, and what this RFC is proposing
 Support for sealed classes is added through a new modifier `sealed`, and a new `permits` clause that takes place after `extends`, and `implements`.
 
 <code php>
-sealed class Shape permits Circle, Square, Rectangle {}
+sealed interface Option permits Some, None {}
 
-final class Circle extends Shape {} // ok
-final class Square extends Shape {} // ok
-final class Rectangle extends Shape {} // ok
+interface Some extends Option {} // ok
+interface None extends Option {} // ok
 
-final class Triangle extends Shape {} // Fatal error: Class Triangle cannot extend sealed class Shape.
+interface Maybe extends Option {} // Fatal error: Interface Maybe cannot extend sealed interface Option.
 </code>
 
 An interface that is sealed can be implemented directly only by the classes named in the `permits` clause.
@@ -35,16 +35,16 @@ An interface that is sealed can be implemented directly only by the classes name
 namespace Psl\Result {
   sealed interface ResultInterface permits Success, Failure { ... }
 
-  final class Success implements ResultInterface { ... }
-  final class Failure implements ResultInterface { ... }
-  
+  class Success implements ResultInterface { ... }
+  class Failure implements ResultInterface { ... }
+
   function wrap(callable $callback): ResultInterface { ... }
   
   function unwrap(ResultInterface $result): mixed
   {    
-    return match($result::class) {
-      Result\Success::class => $result->value(),
-      Result\Failure::class => throw $result->error(),
+    return match(true) {
+      Result\Success => $result->value(),
+      $result instanceof Result\Failure => throw $result->error(),
     }; // no need for default, it's not possible.
   }
 
@@ -61,49 +61,83 @@ namespace App {
 Similarly, a trait that is sealed can only be used by the classes named in the `permits` clause.
 
 <blockquote>
-This is an example taken from the [[https://github.com/symfony/symfony/blob/bb1e1e58aea5318e96d1c22cc8a91668ed7baaaa/src/Symfony/Component/Cache|Symfony Cache component]]
+This is an example taken from the [[https://github.com/azjezz/psl/blob/9f8657cb37be971862f2de013cbd16469f48e53e/src/Psl/Channel/Internal/ChannelSideTrait.php|PSL Channel component]]
 </blockquote>
 
 <code php>
-namespace Symfony\Component\Cache\Traits {
-  use Symfony\Component\Cache\Adapter\FilesystemAdapter;
-  use Symfony\Component\Cache\Adapter\FilesystemTagAwareAdapter;
-  use Symfony\Component\Cache\Adapter\PhpFilesAdapter;
+namespace Psl\Channel\Internal {
+  use Psl\Channel\ReceiverInterface;
   
-  sealed trait FilesystemCommonTrait permits FilesystemTrait, PhpFilesAdapter { ... }
-  sealed trait FilesystemTrait permits FilesystemAdapter, FilesystemTagAwareAdapter {
-   use FilesystemCommonTrait; // ok
-   ...
+  sealed trait ChannelSideTrait permits BoundedReceiver, BoundedSender, UnboundedReceiver, UnboundedSender
+  {
+    // ...
+  }
+
+  // OK
+  final class BoundedReceiver implements ReceiverInterface
+  {
+    use ChannelSideTrait;
+
+    // ...
+  }
+
+  // OK
+  final class UnboundedReceiver implements ReceiverInterface
+  {
+    use ChannelSideTrait;
+
+    // ...
   }
 }
 
-namespace Symfony\Component\Cache\Adapter {
-   use Symfony\Component\Cache\Traits\FilesystemTrait;
-
-   final class FilesystemAdapter {
-     use FilesystemTrait; // ok
-     ...
-   }
-
-   final class FilesystemTagAwareAdapter {
-     use FilesystemTrait; // ok
-     ...
-   }
-}
-
-namespace App\Cache {
-    use Symfony\Component\Cache\Traits\FilesystemTrait;
+namespace App\Channel {
+    use Psl\Channel\Internal\ChannelSideTrait;
    
-    // Error: Class App\Cache\MyFilesystemCache may not use sealed trait (Symfony\Component\Cache\Traits\FilesystemTrait)
-    final class MyFilesystemAdapter {
-      use FilesystemTrait;
+    // Fatal error: Class App\Channel\MyReceiver may not use sealed trait Psl\Channel\Internal\ChannelSideTrait.
+    final class MyReceiver {
+      use ChannelSideTrait;
+      
+      // ...
     }
 
-    // Error: Trait App\Cache\MyFilesystemTrait may not use sealed trait (Symfony\Component\Cache\Traits\FilesystemTrait)
-    trait MyFilesystemTrait {
-      use FilesystemTrait;
+    // Fatal error: Trait App\Channel\MyReceiver may not use sealed trait Psl\Channel\Internal\ChannelSideTrait.
+    trait MyChannelSideTrait {
+      use ChannelSideTrait;
+      
+      // ...
     }
 }
+</code>
+
+When a sealed class, trait, or an interface permits a specific interface, any class can use it as long as that interface exists in it's inheritance tree, as follows:
+
+
+<blockquote>
+This also applies when sealing to a specific class, or a trait.
+</blockquote>
+
+<code php>
+interface Foo {}
+
+sealed interface Bar permits Foo {}
+
+class FooImpl implements Foo {}
+
+class Baz extends FooImpl {}
+
+// `BarImpl` is allowed to implement `Bar` because it extends `Baz`, which
+// extends `FooImpl`, which implement `Foo`, making `BarImpl` an instance of `Foo`.
+class BarImpl extends Baz implements Bar {}
+</code>
+
+Sealed classes with no `permits` clause, or with an empty `permits` clause will result in a parse error, as follows:
+
+<code php>
+// Parse error: syntax error, unexpected '{', expecting permits (T_PERMITS) in ...
+sealed class Bar { }
+
+// Parse error: syntax error, unexpected '{', expecting identifier (T_STRING) or namespace (T_NAMESPACE) or \\ (T_NS_SEPARATOR) in ...
+sealed class Bar permits { }
 </code>
 
 ===== Syntax =====
@@ -145,11 +179,11 @@ trait Corge for Grault, Garply {}
 
 ===== Backward Incompatible Changes =====
 
-`sealed` and `permits` become reserved keywords in PHP 8.1
+`sealed` and `permits` become reserved keywords in PHP 8.2
 
 ===== Proposed PHP Version(s) =====
 
-PHP 8.1
+PHP 8.2
 
 ===== RFC Impact =====
 
