@@ -46,9 +46,7 @@ $statement = $db->prepare($sql);
 $statement->bind_param('sss', $name, $type1, $type2);
 $statement->execute();
 
-$result = $statement->get_result();
-
-while ($row = $result->fetch_assoc()) {
+foreach ($statement->get_result() as $row) {
     print_r($row);
 }
 </code>
@@ -59,20 +57,37 @@ Since PHP 8.1, we no longer have problems with binding by reference, or needing 
 $statement = $db->prepare($sql);
 $statement->execute([$name, $type1, $type2]);
 
-$result = $statement->get_result();
-
-while ($row = $result->fetch_assoc()) {
+foreach ($statement->get_result() as $row) {
     print_r($row);
 }
 </code>
 
-The proposed function will simply this even further, by allowing developers to write:
+The proposed function will simplify this even further, by allowing developers to write this in a one line foreach:
 
 <code php>
-$result = $db->execute_query($sql, [$name, $type1, $type2]);
-
-while ($row = $result->fetch_assoc()) {
+foreach ($db->execute_query($sql, [$name, $type1, $type2]) as $row) {
     print_r($row);
+}
+</code>
+
+In pseudo-code it's basically:
+
+<code php>
+function mysqli_execute_query(mysqli $mysqli, string $sql, array $params = null)
+{
+    $driver = new mysqli_driver();
+
+    $stmt = $mysqli->prepare($sql);
+    if (!($driver->report_mode & MYSQLI_REPORT_STRICT) && $mysqli->error) {
+        return false;
+    }
+
+    $stmt->execute($params);
+    if (!($driver->report_mode & MYSQLI_REPORT_STRICT) && $stmt->error) {
+        return false;
+    }
+
+    return $stmt->get_result();
 }
 </code>
 
