@@ -11,6 +11,12 @@
   * GitHub Repo: https://github.com/craigfrancis/php-allow-null-rfc
   * Implementation: ?
 
+----
+
+This RFC has been superseded by [[https://wiki.php.net/rfc/null_coercion_consistency|NULL Coercion Consistency]]
+
+----
+
 ===== Introduction =====
 
 PHP 8.1 introduced "Deprecate passing null to non-nullable arguments of internal functions" ([[https://externals.io/message/112327|short discussion]]), which is making it difficult (time consuming) for developers to upgrade.
