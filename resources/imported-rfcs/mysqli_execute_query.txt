@@ -9,7 +9,7 @@
   * Status: Draft
   * First Published at: https://wiki.php.net/rfc/mysqli_execute_query
   * GitHub Repo: https://github.com/craigfrancis/php-mysqli-execute-query-rfc
-  * Implementation: [[https://github.com/php/php-src/compare/master...kamil-tekiela:execute_query|From Kamil Tekiela]]
+  * Implementation: [[https://github.com/php/php-src/compare/master...kamil-tekiela:execute_query|From Kamil Tekiela]] (proof of concept)
 
 ===== Introduction =====
 
@@ -155,7 +155,7 @@ Currently //$mysqli->affected_rows// and //mysqli_affected_rows($mysqli)// retur
 
 Because [[https://www.php.net/manual/en/class.mysqli-stmt.php|mysqli_stmt]] is not returned, it's not possible to use its properties:
 
-  - int|string **$affected_rows**
+  - int|string **$affected_rows** - see above
   - int|string **$insert_id** - can use //$mysqli->insert_id// or //mysqli_insert_id($mysqli)//
   - int|string **$num_rows** - also available on //mysqli_result//
   - int **$param_count**
@@ -182,7 +182,7 @@ TODO
 
 ===== Implementation =====
 
-[[https://github.com/php/php-src/compare/master...kamil-tekiela:execute_query|From Kamil Tekiela]]
+[[https://github.com/php/php-src/compare/master...kamil-tekiela:execute_query|From Kamil Tekiela]] (proof of concept)
 
 ===== References =====
 
