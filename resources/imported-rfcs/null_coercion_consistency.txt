@@ -17,7 +17,9 @@ PHP 8.1 introduced [[https://wiki.php.net/rfc/deprecate_null_to_scalar_internal_
 
 This RFC does **not** change anything for scripts using //strict_types=1//, as type checks are useful in that context. For example, developers who view NULL as a missing/invalid value (not as a value in itself), consider passing NULL to a function like //htmlspecialchars()// as something that indicates a problem for them.
 
-Roughly **85%** scripts do not use //strict_types=1// - This was calculated using [[https://grep.app/|grep.app]], to "search across a half million git repos", were each result is a script (not a count of matches,  [[https://grep.app/search?q=defuse/php-encryption&filter[lang][0]=PHP|example]]). We can see [[https://grep.app/search?q=strict_types&filter[lang][0]=PHP|269,701]] scripts using //strict_types=1//, out of [[https://grep.app/search?q=php&filter[lang][0]=PHP|1,830,411]]. And keep in mind that [[https://grep.app/search?q=class%20wpdb%20%7B&filter[lang][0]=PHP|WordPress only really appears once]], it is [[https://make.wordpress.org/core/2022/01/10/wordpress-5-9-and-php-8-0-8-1/#php-8-1-deprecation-passing-null-to-non-nullable-php-native-functions-parameters|affected by this deprecation]], and is installed/used by many.
+Roughly **85%** scripts do not use //strict_types=1// (calculation below).
+
+Roughly **33%** of developers use static analysis (optimistic, details below).
 
 There was a [[https://externals.io/message/112327|short discussion]] about the original RFC, but with the exception of Craig Duncan, there was no consideration for the problems this creates with existing code (or the inconsistency of NULL coercion compared to string/int/float/bool coercion).
 
@@ -27,13 +29,10 @@ According to the documentation, when **not** using //strict_types=1//, "PHP will
 
 Where coercion from NULL is well defined:
 
-[[https://www.php.net/manual/en/language.types.string.php|To String]]: "null is always converted to an empty string."
-
-[[https://www.php.net/manual/en/language.types.integer.php|To Integer]]: "null is always converted to zero (0)."
-
-[[https://www.php.net/manual/en/language.types.float.php|To Float]]: "For values of other types, the conversion is performed by converting the value to int first and then to float"
-
-[[https://www.php.net/manual/en/language.types.boolean.php|To Boolean]]: "When converting to bool, the following values are considered false [...] the special type NULL"
+  - [[https://www.php.net/manual/en/language.types.string.php|To String]]: "null is always converted to an empty string."
+  - [[https://www.php.net/manual/en/language.types.integer.php|To Integer]]: "null is always converted to zero (0)."
+  - [[https://www.php.net/manual/en/language.types.float.php|To Float]]: "For values of other types, the conversion is performed by converting the value to int first and then to float"
+  - [[https://www.php.net/manual/en/language.types.boolean.php|To Boolean]]: "When converting to bool, the following values are considered false [...] the special type NULL"
 
 For example:
 
@@ -75,7 +74,7 @@ String/Int/Float/Bool can be coerced.
 NULL can usually be coerced, but...
 
   - PHP 7.0 introduced the ability for user-defined functions to specify parameter types via the [[https://wiki.php.net/rfc/scalar_type_hints_v5#behaviour_of_weak_type_checks|Scalar Type Declarations RFC]], where the focus was on //strict_types=1//. But the implementation caused a Type Error when coercing NULL for everyone (even when not using //strict_types=1//), this seems more of an over-sight, with developers not using //strict_types=1// being unlikely to notice (as they won't specify types in their user defined functions).
-  - PHP 8.1 continued this inconsistency with internal function.
+  - PHP 8.1 continued this inconsistency with internal functions.
 
 ===== Examples =====
 
@@ -132,15 +131,15 @@ mail('nobody@example.com', 'subject', 'message', NULL, '-fwebmaster@example.com'
 
 There are approximately [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-change.md|335 parameters affected by this deprecation]].
 
-As an aside, there are also roughly [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-maybe.md|104 questionable]] and [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-other.md|558 problematic]] parameters which probably should not accept NULL **or** an Empty String. For example, //$separator// in //explode()// already has a "cannot be empty" Fatal Error. For these parameters, a different RFC could consider updating them to reject both NULL and Empty Strings, e.g. $needle in strpos(), and $json in json_decode().
+As an aside, there are also roughly [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-maybe.md|104 questionable]] and [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-other.md|558 problematic]] parameters which probably shouldn't accept NULL **or** an Empty String. For example, //$separator// in //explode()// already has a "cannot be empty" Fatal Error. For these parameters, a different RFC could consider updating them to reject both NULL and Empty Strings, e.g. $needle in strpos(), and $json in json_decode().
 
 ===== Finding =====
 
-The only realistic way for developers to find these issues is to use the deprecation notices (not ideal).
+The only realistic way for developers to find when NULL is passed to these internal functions is to use the deprecation notices (not ideal).
 
-And while it's possible to use very strict Static Analysis, which follows every variable from source to sink (to check if a variable can be //NULL//), most developers are not in a position to do this.
+It is possible to use very strict Static Analysis, to follow every variable from source to sink (to check if a variable could be //NULL//), but most developers are not in a position to do this.
 
-In the last JetBrains developer survey, with 67% of the responses regularly using Laravel, **only 33% used Static Analysis** ([[https://www.jetbrains.com/lp/devecosystem-2021/php/#PHP_do-you-use-static-analysis|source]]).
+In the last JetBrains developer survey, with 67% of the responses regularly using Laravel, **only 33% used Static Analysis** ([[https://www.jetbrains.com/lp/devecosystem-2021/php/#PHP_do-you-use-static-analysis|source]]); where it's fair to say many still would not identify these possible NULL values.
 
 As an example, take this simple script:
 
@@ -243,9 +242,9 @@ set_error_handler('ignore_null_coercion', E_DEPRECATED);
 
 And some developers are simply [[https://externals.io/message/116519#116559|patching php-src]] (risky).
 
-===== Fixing =====
+===== Updating =====
 
-While individual changes are easy, they are very difficult to find, there are many of them (time consuming), and the updates used are often pointless, e.g.
+While making each change is fairly easy - they are difficult to find, there are many of them (time consuming), and the updates used are often pointless, e.g.
 
   * //urlencode(strval($name));//
   * //urlencode((string) $name);//
@@ -258,7 +257,7 @@ One example diff didn't exactly make the code easier to read:
  + $result = substr($string ?? '', 0, $length);
 </code>
 
-As noted above - PHPCompatibility, CodeSniffer, Rector, etc are unable to fix this issue.
+As noted above - PHPCompatibility, CodeSniffer, Rector, etc are unable to find or update these cases.
 
 ===== Proposal =====
 
@@ -296,11 +295,11 @@ None known
 
 "terrible idea" - I'm still waiting to hear details.
 
-"it's a bit late" - We only have a deprecation at the moment (can be ignored), it will be "too late" when PHP 9.0 uses Fatal Errors.
+"it's a bit late" - We only have a deprecation at the moment (which can be ignored), it will be "too late" when PHP 9.0 uses Fatal Errors.
 
 ===== Future Scope =====
 
-Some function parameters could be updated to complain when an //NULL// **or** an //Empty String// is provided; e.g. //$method// in //method_exists()//, or //$characters// in //trim()//.
+Some function parameters could be updated to rase a Fatal Error when //NULL// **or** //Empty String// is provided; e.g. //$method// in //method_exists()//, or //$characters// in //trim()//.
 
 ===== Voting =====
 
@@ -314,11 +313,13 @@ TODO
 
 ===== Rejected Features =====
 
-Updating some parameters to accept NULL ([[https://wiki.php.net/rfc/allow_null|details]]).
+Did consider updating some parameters to accept NULL ([[https://wiki.php.net/rfc/allow_null|details]]).
 
 ===== Notes =====
 
-In PHP 7.0, in the [[https://wiki.php.net/rfc/scalar_type_hints_v5#behaviour_of_weak_type_checks|Scalar Type Declarations]] RFC, scalar types were defined as "int, float, string and bool" - but, despite NULL also being a simple value (i.e. not an array/object/resource), it was not included in this definition.
+The **85%** of scripts that do not use //strict_types=1// was calculated using [[https://grep.app/|grep.app]], to "search across a half million git repos", were each result is a script (not a count of matches,  [[https://grep.app/search?q=defuse/php-encryption&filter[lang][0]=PHP|example]]). We can see [[https://grep.app/search?q=strict_types&filter[lang][0]=PHP|269,701]] scripts using //strict_types=1//, out of [[https://grep.app/search?q=php&filter[lang][0]=PHP|1,830,411]]. And keep in mind that [[https://grep.app/search?q=class%20wpdb%20%7B&filter[lang][0]=PHP|WordPress only really appears once]], it is [[https://make.wordpress.org/core/2022/01/10/wordpress-5-9-and-php-8-0-8-1/#php-8-1-deprecation-passing-null-to-non-nullable-php-native-functions-parameters|affected by this deprecation]], and is installed/used by many.
+
+In the [[https://wiki.php.net/rfc/scalar_type_hints_v5#behaviour_of_weak_type_checks|Scalar Type Declarations]] RFC for PHP 7.0, scalar types were defined as "int, float, string and bool" - but, despite NULL also being a simple value (i.e. not an array/object/resource), it was not included in this definition. For backwards compatibility reasons this definition is unlikely to change.
 
 Also, note the example quote from [[http://news.php.net/php.internals/71525|Rasmus]]:
 
