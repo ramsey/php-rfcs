@@ -23,6 +23,14 @@ Roughly **33%** of developers use static analysis (realistically it's less than 
 
 There was a [[https://externals.io/message/112327|short discussion]] about the original RFC, but with the exception of Craig Duncan, there was no consideration for the problems this creates with existing code (or the inconsistency of NULL coercion compared to string/int/float/bool coercion).
 
+The general direction of [[https://github.com/Girgias/unify-typing-modes-rfc|Unify PHP's typing modes]] by Girgias is correct, because automatic coercions like //substr($string, "offset")// and //htmlspecialchars(array())// are clearly problematic; but the following is common, and has been fine:
+
+<code php>
+$search = filter_input(INPUT_GET, 'q'); // Or similar examples below.
+
+echo 'Results for ' . htmlspecialchars($search);
+</code>
+
 ===== Problem =====
 
 ==== Documentation ====
@@ -322,6 +330,8 @@ None known
 "terrible idea" - I'm still waiting to hear details.
 
 "it's a bit late" - We only have a deprecation at the moment (which can and is being ignored), it will be "too late" when PHP 9.0 uses Fatal Errors.
+
+"Userland scalar types [...] did not include coercion from NULL for //very// good reasons." - The only reason mentioned in [[https://wiki.php.net/rfc/scalar_type_hints_v5|Scalar Type Declarations]] is "to be consistent with our existing type declarations" (no further details given). Talking to developers, the only reason mentioned is noted above, where NULL can be viewed as a missing/invalid value, and passing NULL to a function like //htmlspecialchars()// could indicate a problem (while that might be useful in the context of //strict_types=1//, it hasn't been the case for everyone else).
 
 ===== Future Scope =====
 
