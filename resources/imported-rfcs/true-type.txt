@@ -1,6 +1,6 @@
 ====== PHP RFC: Add true type ======
 
-  * Version: 0.1
+  * Version: 0.2
   * Date: 2022-04-7
   * Author: George Peter Banyard, <girgias@php.net>
   * Status: Under discussion
@@ -10,17 +10,60 @@
 
 ===== Introduction =====
 
-PHP now has support for [[rfc:null-false-standalone-types|''null'' and ''false'' as standalone types]].
+PHP now has support for [[rfc:null-false-standalone-types|null and false as standalone types]].
 However, ''true'' which is the natural counter part of ''false'' does not even exist as a type.
 
-The motivations are the same to previous RFC targeting the type system:
+The motivation in the [[rfc:union_types_v2|Union Types 2.0 RFC]] to include ''false'' but not ''true'' was:
 
-  * Type system completeness
-  * Providing precise type information while satisfying LSP
+<blockquote>
+While we nowadays encourage the use of null over false as an error or absence return value, for historical reasons many internal functions continue to use false instead. As shown in the statistics section, the vast majority of union return types for internal functions include false.
+
+A classical example is the <php>strpos()</php> family of functions, which returns ''int|false''.
+
+While it would be possible to model this less accurately as ''int|bool'', this gives the false impression that the function can also return a true value, which makes this type information significantly less useful to humans and static analyzers both.
+
+For this reason, support for the ''false'' pseudo-type is included in this proposal. A ''true'' pseudo-type is not part of the proposal, because similar historical reasons for its necessity do not exist.
+</blockquote>
+
+We believe there are now sufficient reasons to include support for the ''true'' type.
+
+With the introduction of <php>ValueError</php> and many <php>E_WARNING</php> being promoted to Errors/Exceptions in PHP 8.0.0,
+a large amount of internal functions which used to return ''false'' on failure/error no longer do.
+And they now always return ''true''. Ideally these function would be converted to ''void'' but doing so is a BC break.
+Moreover a ''void'' function always returns ''null'' which is a falsy value. Therefore the following code would now never hit the happy path:
+<PHP>
+if (function_which_could_fail_before()) {
+    // Do useful stuff
+} else {
+   // Bailout and handle error
+}
+</PHP>
+Marking these internal functions as having a return type of ''true'' could allow tools, such as static analysers, to mark part of this code unreachable.
+
+
+Another motivation is providing more precise type information for humans and static analysers while satisfying LSP.
+For example a child method which always returns ''true'' instead of ''bool'':
+
+<PHP>
+class User {
+    function isAdmin(): bool
+}
+
+class Admin extends User
+{
+    function isAdmin(): true
+    {
+        return true;
+    }
+}
+</PHP>
+
+Finally, being able to add a ''true'' return type would help the optimizer and also prevent manually maintaining specialized information for the optimizer.
 
 ===== Proposal =====
 
 Add support for using ''true'' as a type declaration, wherever type declarations are currently allowed.
+The ''true'' type does not allow coercions, exactly as how the ''false'' type currently behaves.
 
 <PHP>
 class Truthy {
@@ -42,7 +85,9 @@ function test(): bool|true {}
 Will emit the following error:
 <blockquote>Fatal error: Duplicate type true is redundant in %s on line %d</blockquote>
 
-A compile time error is also emitted when ''true|false'' is used instead of ''bool''.
+==== Compile time error for using true|false instead of bool ====
+
+A compile time error is also emitted when ''true|false'' (or equivalently ''false|true'') is used instead of ''bool''.
 The following function signature:
 <PHP>
 <?php
@@ -54,11 +99,19 @@ will emit the following error:
 Fatal error: Type contains both true and false, bool should be used instead in %s on line %d
 </blockquote>
 
+The rationale is that the subtyping relation between ''false|true'' and ''bool'' needs to be defined.
+As ''bool'' coerces scalar values but ''false'' and ''true'' currently do not.
+It is possible to make ''true|false'' follow the same semantics as ''bool'', however this might impact the implementation of literal types.
+Therefore the conservative approach of banning the usage of ''true|false'' is chosen. 
+
 ==== Examples ====
 
-There are many examples of functions which only return ''true''.
-Example of internal functions are all the <php>array_sort</php> functions always return ''true''.
-And examples of userland projects which can benefit of this change is Composer, which has various cases where they could use a ''true'' type.
+There are many examples of functions which only return ''true'' being internal or in userland.
+
+Some examples of internal functions which always return ''true'' are the <php>array_sort()</php> functions,
+many <php>mysqli_*()</php> functions, <php>SplFixedArray::setSize()</php>, etc.
+
+An example of a userland project which can benefit of this change is Composer, which has various cases where they could use a ''true'' type.
 [[https://github.com/composer/composer/blob/main/src/Composer/Command/DiagnoseCommand.php#L204|[1]]]
 [[https://github.com/composer/composer/blob/f509c41280768b1d3047271ec5b50da33184d98d/src/Composer/Autoload/ClassLoader.php#L425|[2]]]
 [[https://github.com/composer/composer/blob/main/src/Composer/Json/JsonFile.php#L194|[3]]]
@@ -85,7 +138,50 @@ Voting started on 2022-03-12 and will end on 2022-03-26.
    * Yes
    * No
 </doodle>
-  
+
+
+
+===== Future Scope =====
+
+The features discussed in the following are **not** part of this proposal.
+
+==== Literal Types ====
+
+The ''true'' (and previously ''false'') pseudo-type introduced in this RFC is a special case of a "literal type", such as supported by [[https://www.typescriptlang.org/docs/handbook/advanced-types.html#string-literal-types|TypeScript]]. They allow specifying enum-like types, which are limited to specific values.
+
+<code php>
+type ArrayFilterFlags = 0|ARRAY_FILTER_USE_KEY|ARRAY_FILTER_USE_BOTH;
+array_filter(array $array, callable $callback, ArrayFilterFlags $flag): array;
+</code>
+
+A benefit of using a union of literal types instead of an enum, is that it works directly with values of the underlying type, rather than an opaque enum value. As such, it is easier to retrofit without breaking backwards-compatibility.
+
+However, the opinion of the authors is that enums are superior to literal types and the reason to add ''true'' is due to the extremely low implementation complexity, as the PHP engine already treats ''true'' and ''false'' as separate types. And that only having ''false'' and not ''true'' is strange.
+
+==== Allowing usage of true|false ====
+
+To allow the usage of ''false|true'' the subtyping relation between ''false|true'' and ''bool'' will need to be defined.
+
+==== Type Aliases ====
+
+As types become increasingly complex, it may be worthwhile to allow reusing type declarations. There are two general ways in which this could work. One is a local alias, such as:
+
+<code php>
+use int|float as number;
+
+function foo(number $x) {}
+</code>
+
+In this case ''number'' is a symbol that is only visible locally and will be resolved to the original ''int|float'' type during compilation.
+
+The second possibility is an exported typedef:
+
+<code php>
+namespace Foo;
+type number = int|float;
+
+// Usable as \Foo\number from elsewhere
+</code>
 
 ===== Implementation =====
 
