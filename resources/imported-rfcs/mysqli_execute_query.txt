@@ -32,14 +32,22 @@ Using an example, assume we start with:
 <code php>
 $db = new mysqli('localhost', 'user', 'password', 'database');
 
-$sql = 'SELECT * FROM user WHERE name LIKE ? AND type IN (?, ?)';
+$sql = 'SELECT * FROM user WHERE name LIKE ? AND type_id IN (?, ?)';
 
 $name = '%a%';
-$type1 = 'admin';
-$type2 = 'editor';
+$type1 = 1; // Admin
+$type2 = 2; // Editor
 </code>
 
-Before PHP 8.1, a typical parameterised query would look like this:
+Traditionally someone might use escaping, which is [[https://github.com/craigfrancis/php-is-literal-rfc/blob/main/justification/escaping.php?ts=4|very error prone]], e.g.
+
+<code php>
+foreach ($db->query('SELECT * FROM user WHERE name LIKE "' . $db->real_escape_string($name) . '" AND type_id IN (' . $db->real_escape_string($type1) . ', ' . $db->real_escape_string($type2) . ')') as $row) { // INSECURE
+    print_r($row);
+}
+</code>
+
+To avoid mistakes, parameterised queries should be used (with a [[https://eiv.dev/|literal-string]]), but can be fairly complex:
 
 <code php>
 $statement = $db->prepare($sql);
@@ -62,7 +70,7 @@ foreach ($statement->get_result() as $row) {
 }
 </code>
 
-The proposed function will simplify this even further, by allowing developers to write this in a one line foreach:
+This proposed function will simplify this even further, by allowing developers to write this in a one line foreach:
 
 <code php>
 foreach ($db->execute_query($sql, [$name, $type1, $type2]) as $row) {
