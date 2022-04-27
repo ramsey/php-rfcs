@@ -361,6 +361,8 @@ None known
 
 "Userland scalar types [...] did not include coercion from NULL for //very// good reasons." - The only reason mentioned in [[https://wiki.php.net/rfc/scalar_type_hints_v5|Scalar Type Declarations]] is "to be consistent with our existing type declarations" (no further details given). Talking to developers, the only reason mentioned is noted above, where NULL can be viewed as a missing/invalid value, and passing NULL to a function like //htmlspecialchars()// could indicate a problem (which can a be useful check for static analysis, or in the context of //strict_types=1//).
 
+The function //mt_rand()// can be called with no arguments, or with min and max integer arguments. A developer may call //mt_rand(NULL, NULL)// and expect it to work the same as no arguments (returning a random number between 0 and //mt_getrandmax()//), but the NULL's would be coerced to 0, and //mt_rand(0, 0)// returns 0.
+
 ===== Future Scope =====
 
 Some function parameters could be updated to rase a Fatal Error when //NULL// **or** //Empty String// is provided; e.g.
