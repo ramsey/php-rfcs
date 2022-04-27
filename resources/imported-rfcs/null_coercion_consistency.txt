@@ -13,17 +13,17 @@
 
 ===== Introduction =====
 
-PHP 8.1 introduced [[https://wiki.php.net/rfc/deprecate_null_to_scalar_internal_arg|Deprecate passing null to non-nullable arguments of internal functions]]. While the consistency introduced by the RFC is welcome (user-defined vs internal functions), for those not using //strict_types=1//, the partial breaking of NULL coercion creates an upgrade problem.
+PHP 8.1 introduced [[https://wiki.php.net/rfc/deprecate_null_to_scalar_internal_arg|Deprecate passing null to non-nullable arguments of internal functions]]. While the consistency is welcome (user-defined vs internal functions), for those **not** using strict Static Analysis or //strict_types=1//, the breaking of NULL coercion creates an upgrade problem.
 
-This RFC does **not** change anything for scripts using //strict_types=1//, as type checks are useful in that context. For example, developers who view NULL as a missing/invalid value (not as a value in itself), consider passing NULL to a function like //htmlspecialchars()// as something that indicates a problem for them.
+This RFC does **not** change anything for //strict_types=1// (or strict static analysis), as strict type checks can be useful. For example, developers can view NULL as a missing/invalid value (not as a value in itself), and passing NULL to a function like //htmlspecialchars()// could indicate a problem.
 
-Roughly **85%** scripts do not use //strict_types=1// (calculation below).
+Roughly **15%** of scripts use //strict_types=1// (calculation below).
 
 Roughly **33%** of developers use static analysis (realistically it's less than this, details below).
 
-There was a [[https://externals.io/message/112327|short discussion]] about the original RFC, but with the exception of Craig Duncan, there was no consideration for the problems this creates with existing code (or the inconsistency of NULL coercion compared to string/int/float/bool coercion).
+There was a [[https://externals.io/message/112327|short discussion]] about the original RFC, but with the exception of Craig Duncan, there was no consideration for the problems this creates with existing code (or the inconsistency of NULL coercion compared to string/int/float/bool coercion; or other contexts like string concatenation, == comparisons, sprintf, etc).
 
-The general direction of [[https://github.com/Girgias/unify-typing-modes-rfc|Unify PHP's typing modes]] by Girgias is correct, because automatic coercions like //substr($string, "offset")// and //htmlspecialchars(array())// are clearly problematic; but the following is common, and has been fine:
+The intention is to also keep [[https://github.com/Girgias/unify-typing-modes-rfc|Unify PHP's typing modes]] by George Peter Banyard in mind, with coercions like //substr($string, "offset")// and //htmlspecialchars(array())// as being clearly problematic; whereas the following is common, and has been fine:
 
 <code php>
 $search = filter_input(INPUT_GET, 'q'); // Or similar (examples below)
@@ -77,7 +77,7 @@ $o[] = htmlspecialchars(false);
 $o[] = htmlspecialchars(NULL); // Deprecated in 8.1, Fatal Error in 9.0?
 </code>
 
-With user-defined functions, while this does not cause a backwards compatibility issue (details below), it still highlights the coercion inconsistency, and that some type checking is happening in an environment that does not expect type checking:
+With user-defined functions, while there hasn't been a backwards compatibility issue, it still highlights the coercion inconsistency, in an environment that does not expect type checking, despite NULL being a value that "can be coerced to the type requested by the hint without data loss and without creation of likely unintended data":
 
 <code php>
 function user_function(string $s, int $i, float $f, bool $b) {
@@ -104,12 +104,42 @@ Arrays, Resources, and Objects (without //__toString()//) cannot be coerced (for
 
 String/Int/Float/Bool can be coerced.
 
-NULL can usually be coerced, but...
+NULL can usually be coerced (e.g. string concat, == comparison, sprintf, print, array keys), but...
 
-  - PHP 7.0 introduced the ability for user-defined functions to specify parameter types via the [[https://wiki.php.net/rfc/scalar_type_hints_v5#behaviour_of_weak_type_checks|Scalar Type Declarations RFC]], where the focus was on //strict_types=1//. But the implementation also caused Type Errors when not using //strict_types=1//, which seems more of an over-sight, with coercion working for string/int/float/bool but not null (despite the documentation), and introducing a type check (for an environment that does not expect this).
-  - PHP 8.1 continued this inconsistency with internal functions.
+  - PHP 7.0 introduced the ability for user-defined functions to specify parameter types via the [[https://wiki.php.net/rfc/scalar_type_hints_v5#behaviour_of_weak_type_checks|Scalar Type Declarations RFC]], where the implementation triggered Type Errors for those using //strict_types=1//, and otherwise used coercion for string/int/float/bool, but not NULL.
+  - PHP 8.1 updated internal function parameters to work in the same way.
 
 ==== Examples ====
+
+A simple search page:
+
+<code php>
+$name = $request->get('name');
+
+if (trim($name) === '') { // Contains non-whitespace characters; so not "", " ", NULL, etc
+  $where_sql[] = 'name LIKE ?';
+  $where_val[] = $name;
+}
+
+echo '
+  <form action="./" method="get">
+    <label>
+      Search
+      <input type="search" name="name" value="' . htmlspecialchars($name) . '">
+    </label>
+    <input type="submit" value="Go">
+  </form>';
+
+if ($name !== NULL) {
+  $register_url = '/admin/accounts/add/?name=' . urlencode($name);
+  echo '
+    <p><a href="' . htmlspecialchars($register_url) . '">Add Account</a></p>';
+}
+</code>
+
+Note how line 1 cannot simply be updated to force //$name// to be non-nullable, as it would break the "Add Account" link. But does passing NULL to //htmlspecialchars()// and //trim()// justify a Fatal Type Error?
+
+I'd argue this very strict level of type checking is best done by Static Analysis, which can check if a variable can be nullable, and it can decide if this is a problem, in the same way that a string (e.g. '15') being provided to integer parameter could be seen as a problem.
 
 Common sources of NULL:
 
@@ -130,7 +160,7 @@ $value = mysqli_fetch_row($result);
 $value = json_decode($json); // Invalid JSON, or nesting limit.
 </code>
 
-Examples, often working with user input, where NULL has previously been fine:
+Examples functions, often working with user input, where NULL has been fine:
 
 <code php>
 $search_trimmed = trim($search);
@@ -174,7 +204,7 @@ The only realistic way for developers to find when NULL is passed to these inter
 
 It is possible to use very strict Static Analysis, to follow every variable from source to sink (to check if a variable could be NULL), but most developers are not in a position to do this (i.e. not using static analysis, or not at a high enough level, or they are using a baseline to ignore).
 
-In the last JetBrains developer survey, where 67% regularly used Laravel, **only 33% used Static Analysis** ([[https://www.jetbrains.com/lp/devecosystem-2021/php/#PHP_do-you-use-static-analysis|source]]); where it's fair to say many still would not identify these possible NULL values.
+In the last JetBrains developer survey (with 67% regularly using Laravel), **only 33% used Static Analysis** ([[https://www.jetbrains.com/lp/devecosystem-2021/php/#PHP_do-you-use-static-analysis|source]]); where it's fair to many still would still not be identify these possible NULL values (too low level, and/or using a baseline).
 
 As an example, take this simple script:
 
@@ -186,29 +216,7 @@ echo htmlentities($nullable);
 ?>
 </code>
 
-It's considered fine today by the relevant tools:
-
-<code cli>
-composer require --dev vimeo/psalm
-./vendor/bin/psalm --init ./src/ 4
-./vendor/bin/psalm
-No errors found!
-</code>
-Note: Psalm can detect this problem at [[https://psalm.dev/docs/running_psalm/error_levels/|levels 1, 2, and 3]] (don't use a baseline).
-
-<code cli>
-composer require --dev phpstan/phpstan
-./vendor/bin/phpstan analyse -l 9 ./src/
-[OK] No errors
-</code>
-
-<code cli>
-composer require --dev phpstan/phpstan-strict-rules
-composer require --dev phpstan/extension-installer
-./vendor/bin/phpstan analyse -l 9 ./src/
-[OK] No errors
-</code>
-Note: There are [[https://phpstan.org/config-reference#stricter-analysis|Stricter Analysis]] options for PHPStan, but they don't seem to help with this problem.
+Even that is considered fine today by the relevant tools:
 
 <code cli>
 composer require --dev rector/rector
@@ -259,6 +267,28 @@ sed -i '' -E 's/(PHPCSHelper::getConfigData)/(string) \1/g' vendor/phpcompatibil
 
 Note: Juliette (@jrfnl) has confirmed that getting PHPCompatibility to solve this problem will be "pretty darn hard to do" because it's "not reliably sniffable" ([[https://twitter.com/jrf_nl/status/1497937320766496772|source]]).
 
+<code cli>
+composer require --dev phpstan/phpstan
+./vendor/bin/phpstan analyse -l 9 ./src/
+[OK] No errors
+</code>
+
+<code cli>
+composer require --dev phpstan/phpstan-strict-rules
+composer require --dev phpstan/extension-installer
+./vendor/bin/phpstan analyse -l 9 ./src/
+[OK] No errors
+</code>
+Note: There are [[https://phpstan.org/config-reference#stricter-analysis|Stricter Analysis]] options for PHPStan, but they don't seem to help with this problem.
+
+<code cli>
+composer require --dev vimeo/psalm
+./vendor/bin/psalm --init ./src/ 4
+./vendor/bin/psalm
+No errors found!
+</code>
+Note: Psalm can detect this at [[https://psalm.dev/docs/running_psalm/error_levels/|levels 1, 2, and 3]] (don't use a baseline).
+
 ==== Temporary Solutions ====
 
 You can disable //E_DEPRECATED// (as recommended by projects like WordPress).
@@ -297,13 +327,11 @@ As noted above - PHPCompatibility, CodeSniffer, Rector, etc are unable to find o
 
 ===== Proposal =====
 
-No change for those using //strict_types=1//.
+Revert the NULL deprecation for parameters (when **not** using //strict_types=1//), so it continues to work (as NULL coercion does in other contexts), to avoid the upgrade problems (i.e. Fatal Errors in PHP 9.0).
 
-Must keep the spirit of the original RFC, and keep user-defined and internal functions consistent.
+And, in the spirit of the original RFC to keep user-defined and internal functions consistent, also change user-defined functions so NULL is coerced for non-nullable parameters (when **not** using //strict_types=1//).
 
-Revert the deprecation of NULL coercion when **not** using //strict_types=1//, to work as documented, be consistent with scalar types, and (most importantly) avoid the upgrade problems (i.e. Fatal Errors for PHP 9.0).
-
-For consistency, change user-defined functions to allow NULL to be coerced when **not** using //strict_types=1//.
+This means the type "//?int//" will allow NULL or an integer to be provided to the function; whereas the non-nullable type "//int//" would coerce NULL to 0, in the same way the string "0" would be.
 
 ===== Backward Incompatible Changes =====
 
@@ -329,11 +357,9 @@ None known
 
 ===== Open Issues =====
 
-"terrible idea" - I'm still waiting to hear details.
-
 "it's a bit late" - We only have a deprecation at the moment (which can and is being ignored), it will be "too late" when PHP 9.0 uses Fatal Errors.
 
-"Userland scalar types [...] did not include coercion from NULL for //very// good reasons." - The only reason mentioned in [[https://wiki.php.net/rfc/scalar_type_hints_v5|Scalar Type Declarations]] is "to be consistent with our existing type declarations" (no further details given). Talking to developers, the only reason mentioned is noted above, where NULL can be viewed as a missing/invalid value, and passing NULL to a function like //htmlspecialchars()// could indicate a problem (while that might be useful in the context of //strict_types=1//, it hasn't been the case for everyone else).
+"Userland scalar types [...] did not include coercion from NULL for //very// good reasons." - The only reason mentioned in [[https://wiki.php.net/rfc/scalar_type_hints_v5|Scalar Type Declarations]] is "to be consistent with our existing type declarations" (no further details given). Talking to developers, the only reason mentioned is noted above, where NULL can be viewed as a missing/invalid value, and passing NULL to a function like //htmlspecialchars()// could indicate a problem (which can a be useful check for static analysis, or in the context of //strict_types=1//).
 
 ===== Future Scope =====
 
@@ -360,7 +386,7 @@ TODO
 
 ===== Notes =====
 
-The **85%** of scripts that do not use //strict_types=1// was calculated using [[https://grep.app/|grep.app]], to "search across a half million git repos", were each result is a script (not a count of matches,  [[https://grep.app/search?q=defuse/php-encryption&filter[lang][0]=PHP|example]]). We can see [[https://grep.app/search?q=strict_types&filter[lang][0]=PHP|269,701]] scripts using //strict_types=1//, out of [[https://grep.app/search?q=php&filter[lang][0]=PHP|1,830,411]]. And keep in mind that [[https://grep.app/search?q=class%20wpdb%20%7B&filter[lang][0]=PHP|WordPress only really appears once]], it is [[https://make.wordpress.org/core/2022/01/10/wordpress-5-9-and-php-8-0-8-1/#php-8-1-deprecation-passing-null-to-non-nullable-php-native-functions-parameters|affected by this deprecation]], and is installed/used by many.
+The **15%** of scripts that do not use //strict_types=1// was calculated using [[https://grep.app/|grep.app]], to "search across a half million git repos", were each result is a script (not a count of matches,  [[https://grep.app/search?q=defuse/php-encryption&filter[lang][0]=PHP|example]]). We can see [[https://grep.app/search?q=strict_types&filter[lang][0]=PHP|272,871]] scripts using //strict_types=1//, out of [[https://grep.app/search?q=php&filter[lang][0]=PHP|1,842,666]]. And keep in mind that [[https://grep.app/search?q=class%20wpdb%20%7B&filter[lang][0]=PHP|WordPress only really appears once]], it is [[https://make.wordpress.org/core/2022/01/10/wordpress-5-9-and-php-8-0-8-1/#php-8-1-deprecation-passing-null-to-non-nullable-php-native-functions-parameters|affected by this deprecation]], and is installed/used by many.
 
 In the [[https://wiki.php.net/rfc/scalar_type_hints_v5#behaviour_of_weak_type_checks|Scalar Type Declarations]] RFC for PHP 7.0, scalar types were defined as "int, float, string and bool" - but, despite NULL also being a simple value (i.e. not an array/object/resource), it was not included in this definition. For backwards compatibility reasons this definition is unlikely to change.
 
