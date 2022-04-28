@@ -32,8 +32,6 @@ Using an example, assume we start with:
 <code php>
 $db = new mysqli('localhost', 'user', 'password', 'database');
 
-$sql = 'SELECT * FROM user WHERE name LIKE ? AND type_id IN (?, ?)';
-
 $name = '%a%';
 $type1 = 1; // Admin
 $type2 = 2; // Editor
@@ -50,8 +48,8 @@ foreach ($db->query('SELECT * FROM user WHERE name LIKE "' . $db->real_escape_st
 To avoid mistakes, parameterised queries should be used (with a [[https://eiv.dev/|literal-string]]), but can be fairly complex:
 
 <code php>
-$statement = $db->prepare($sql);
-$statement->bind_param('sss', $name, $type1, $type2);
+$statement = $db->prepare('SELECT * FROM user WHERE name LIKE ? AND type_id IN (?, ?)');
+$statement->bind_param('sii', $name, $type1, $type2);
 $statement->execute();
 
 foreach ($statement->get_result() as $row) {
@@ -62,7 +60,7 @@ foreach ($statement->get_result() as $row) {
 Since PHP 8.1, we no longer have problems with binding by reference, or needing to specify the variable types via the first argument to //bind_param()//, e.g.
 
 <code php>
-$statement = $db->prepare($sql);
+$statement = $db->prepare('SELECT * FROM user WHERE name LIKE ? AND type_id IN (?, ?)');
 $statement->execute([$name, $type1, $type2]);
 
 foreach ($statement->get_result() as $row) {
@@ -73,7 +71,7 @@ foreach ($statement->get_result() as $row) {
 This proposed function will simplify this even further, by allowing developers to write this in a one line foreach:
 
 <code php>
-foreach ($db->execute_query($sql, [$name, $type1, $type2]) as $row) {
+foreach ($db->execute_query('SELECT * FROM user WHERE name LIKE ? AND type_id IN (?, ?)', [$name, $type1, $type2]) as $row) {
     print_r($row);
 }
 </code>
