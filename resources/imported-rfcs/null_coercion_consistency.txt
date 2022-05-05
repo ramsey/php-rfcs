@@ -21,7 +21,7 @@ Roughly **15%** of scripts use //strict_types=1// (calculation below).
 
 Roughly **33%** of developers use static analysis (realistically it's less than this, details below).
 
-There was a [[https://externals.io/message/112327|short discussion]] about the original RFC, but with the exception of Craig Duncan, there was no consideration for the problems this creates with existing code (or the inconsistency of NULL coercion compared to string/int/float/bool coercion; or other contexts like string concatenation, == comparisons, sprintf, etc).
+There was a [[https://externals.io/message/112327|short discussion]] about the original RFC, but with the exception of Craig Duncan, there was no consideration for the problems this creates with existing code (or the inconsistency of NULL coercion compared to string/int/float/bool coercion; or other contexts like string concatenation, == comparisons, arithmetics, sprintf, etc).
 
 The intention is to also keep [[https://github.com/Girgias/unify-typing-modes-rfc|Unify PHP's typing modes]] by George Peter Banyard in mind, with coercions like //substr($string, "offset")// and //htmlspecialchars(array())// as being clearly problematic; whereas the following is common, and has been fine:
 
@@ -54,6 +54,9 @@ print(1);
 print(1.2);
 print(false);
 print(NULL); // Fine, coerced to empty string.
+
+var_dump(3 + '5' + NULL); // Fine, int(8)
+var_dump(NULL / 6); // Fine, int(0)
 
 $o = [];
 
@@ -106,7 +109,7 @@ Arrays, Resources, and Objects (without //__toString()//) cannot be coerced (for
 
 String/Int/Float/Bool can be coerced.
 
-NULL can usually be coerced (e.g. string concat, == comparison, sprintf, print, array keys), but...
+NULL can usually be coerced (e.g. string concatenation, == comparisons, arithmetics, sprintf, print, echo, array keys), but...
 
   - PHP 7.0 introduced the ability for user-defined functions to specify parameter types via the [[https://wiki.php.net/rfc/scalar_type_hints_v5#behaviour_of_weak_type_checks|Scalar Type Declarations RFC]], where the implementation triggered Type Errors for those using //strict_types=1//, and otherwise used coercion for string/int/float/bool, but not NULL.
   - PHP 8.1 updated internal function parameters to work in the same way.
