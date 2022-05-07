@@ -116,38 +116,6 @@ NULL can usually be coerced (e.g. string concatenation, == comparisons, arithmet
 
 ==== Examples ====
 
-A simple search page:
-
-<code php>
-$name = $request->get('name');
-
-if (trim($name) === '') { // Contains non-whitespace characters; so not "", " ", NULL, etc
-  $where_sql[] = 'name LIKE ?';
-  $where_val[] = $name;
-}
-
-echo '
-  <form action="./" method="get">
-    <label>
-      Search
-      <input type="search" name="name" value="' . htmlspecialchars($name) . '">
-    </label>
-    <input type="submit" value="Go">
-  </form>';
-
-if ($name !== NULL) {
-  $register_url = '/admin/accounts/add/?name=' . urlencode($name);
-  echo '
-    <p><a href="' . htmlspecialchars($register_url) . '">Add Account</a></p>';
-}
-</code>
-
-Regarding the source of //$name// (line 1); while frameworks could change their default to an Empty String, or an automated tool could cast the variable to a string, doing so would break the "Add Account" link.
-
-HTML Templating engines like [[https://github.com/laravel/framework/blob/ab1506091b9f166b312b3990d07b2e21d971f2e6/src/Illuminate/Support/helpers.php#L119|Laravel Blade]] will now suppress this deprecation via null-coalescing ([[https://github.com/laravel/framework/pull/36262/files#diff-15b0a3e2eb2d683222d19dfacc04c616a3db4e3d3b3517e96e196ccbf838f59eR118|patch]]); or [[https://github.com/twigphp/Twig/blob/b4d6723715da57667cca851051eba3786714290d/src/Extension/EscaperExtension.php#L195|Symphony Twig]] will preserve NULL, where it's usually passed to //echo// (despite the [[https://www.php.net/echo|echo documentation]] saying it only accepts non-nullable strings).
-
-I'd argue a very strict level of type checking (that prevents all forms of coercion) is best done by Static Analysis, which can check if a variable can be nullable, and it can decide if this is a problem, in the same way that a string (e.g. '15') being provided to integer parameter could be seen as a problem.
-
 Common sources of NULL:
 
 <code php>
@@ -200,6 +168,10 @@ substr($string, NULL, 3);
 
 mail('nobody@example.com', 'subject', 'message', NULL, '-fwebmaster@example.com');
 </code>
+
+HTML Templating engines like [[https://github.com/laravel/framework/blob/ab1506091b9f166b312b3990d07b2e21d971f2e6/src/Illuminate/Support/helpers.php#L119|Laravel Blade]] suppress this deprecation with null-coalescing ([[https://github.com/laravel/framework/pull/36262/files#diff-15b0a3e2eb2d683222d19dfacc04c616a3db4e3d3b3517e96e196ccbf838f59eR118|patch]]); or [[https://github.com/twigphp/Twig/blob/b4d6723715da57667cca851051eba3786714290d/src/Extension/EscaperExtension.php#L195|Symphony Twig]] which preserves NULL, but it's often passed to //echo// (which accepts it, despite the [[https://www.php.net/echo|echo documentation]] saying it accepts non-nullable strings).
+
+I'd argue a very strict level of type checking (that prevents all forms of coercion) is best done by Static Analysis, which can check if a variable can be nullable, and it can decide if this is a problem, in the same way that a string (e.g. '15') being provided to integer parameter could be seen as a problem.
 
 There are approximately [[https://github.com/craigfrancis/php-allow-null-rfc/blob/main/functions-change.md|335 parameters affected by this deprecation]].
 
