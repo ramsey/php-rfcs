@@ -44,7 +44,7 @@ Coercion from NULL is well defined:
   - [[https://www.php.net/manual/en/language.types.float.php|To Float]]: "For values of other types, the conversion is performed by converting the value to int first and then to float"
   - [[https://www.php.net/manual/en/language.types.boolean.php|To Boolean]]: "When converting to bool, the following values are considered false [...] the special type NULL"
 
-For example:
+==== Current State ====
 
 <code php>
 // echo(string ...$expressions): void
