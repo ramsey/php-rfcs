@@ -1,0 +1,252 @@
+Undefined Variable Error Promotion
+==================================
+
+:PHP-RFC: 0856
+:Title: Undefined Variable Error Promotion
+:Author: Mark Randall <marandall@php.net>
+:Status: Draft
+:Type: Standards Track
+:Created: 2022-02-17
+:PHP-Version: 9.0
+:Version: 1
+
+Introduction
+------------
+
+Undefined variables are those that have not yet been initialised with a
+value prior to being read. Accessing an undefined variable currently
+emits an E_WARNING "Warning: Undefined variable $varname" and treats the
+variable as if it were a null, but does not otherwise interrupt
+execution, allowing code execution to continue unabated, but likely in
+an unintended state.
+
+Although a custom error handler can already be used to raise an Error
+exception, this requires additional userland code to configure, when
+instead we should be aiming to provide a safer experience by default.
+The need to support calling a custom error handler does itself also
+introduce additional complexity into the engine, leading to
+"increasingly complex games" to keep it working (see "Benefits").
+
+**RFC History / Previous Votes**
+
+This change was last discussed during the Engine Warnings RFC
+(https://wiki.php.net/rfc/engine_warnings) where it received 56% in
+favour of making this behaviour an Error exception. It is likely that
+the only reason this vote failed to reach a supermajority at the time
+was because the condition was previously a notice, and some felt the
+jump from notice to error was too great for one version. Accessing
+undefined variables will have been a warning for 5+ years by the time
+this RFC would come into effect.
+
+Proposal
+--------
+
+This RFC proposes that accessing an undefined variable is rendered
+illegal behaviour in the next major version of PHP, and will result in
+an Error exception being thrown if it occurs.
+
+For the purposes of this RFC, accessing a variable means to use the
+variable in such a way that the engine attempts to read its value for
+use in an expression, without accounting for possibly being unset. These
+can be identified by the warning "Warning: Undefined variable $varname".
+
+isset / empty / null coalesce DO account for undefined values and such
+are not covered by this RFC.
+
+Undefined variable access can come about in one of 3 main ways:
+
+**Mechanism 1.**
+
+The variable only becomes defined when executing certain branching code
+paths, for example setting a value within an if statement, or within
+anything which might include an if statement under the hood, such as a
+loop.
+
+.. code:: php
+
+     if ($user->admin) { 
+        $restricted = false;
+     }
+     
+     if ($restricted) { 
+        die('You do not have permission to be here');
+     }
+
+**Mechanism 2.**
+
+A typo in the variable name.
+
+.. code:: php
+
+     $name = 'Joe';
+     echo 'Welcome, ' . $naame;
+
+The above example shows a typo when reading the value, but consider also
+a typo when writing the value, that led to initializing the wrong
+variable, leaving the intended one uninitialized.
+
+.. code:: php
+
+     if ($user->admin) { 
+        $restricted = false;
+     } else { 
+        $restrictedd = true;
+     }
+     
+     if ($restricted) { 
+        die('You do not have permission to be here');
+     }
+
+**Mechanism 3.**
+
+Accessing a variable for use with a post-increment operator $foo++
+sometimes used with counters (as post-increment on null is
+special-cased).
+
+.. code:: php
+
+     while ($item = $itr->next()) { 
+        /* do something */
+        $counter++; /* potential undefined variable read #1 */
+     }
+     
+     /* potential undefined variable read #2 which is the same as the 
+      * first mechanism (variable undefined due to branching logic) */
+     echo 'You scanned ' . $counter . ' items'; 
+
+Of these 3 mechanisms, the first two are almost always unintentional
+bugs, and while the third can sometimes be a deliberate action, it too
+is often the result of a coding error.
+
+If for some reason the null behaviour is desired, a simple backwards
+compatible solution is available, the author needs only to initialize
+the variable with a null prior to its use. It is expected that in many
+cases a more logical alternative would exist, such as initializing to
+zero, false, or empty string, depending on the context.
+
+.. code:: php
+
+     $restricted = true;
+     if ($user->admin) { 
+        $restricted = false;
+     }
+     
+     if ($restricted) { 
+        die('You do not have permission to be here');
+     }
+
+.. code:: php
+
+     $counter = 0;
+     while ($item = $itr->next()) { 
+        $counter++;
+     }
+     
+     echo 'You scanned ' . $counter . ' items';
+
+Benefits
+--------
+
+The primary benefit for this change is to eliminate an entire class of
+userland bugs related to the consequences of accessing and using these
+undefined variables and their fallback to their engine-provided default.
+By doing so we offer another layer of protection against PHP
+applications continuing their execution after entering a likely
+unintended state.
+
+While this alone should be enough, Nikita, author of the RFC that
+promoted access to an E_WARNING offered the following technical benefits
+to promoting to an error:
+
+    The big problem with these (from a pure implementation perspective)
+    is that we need to throw the warning and continue running. But the
+    warning might call a custom error handler, which may modify state
+    that the virtual machine does not expect to be modified. The PHP VM
+    plays increasingly complex games to prevent this, but despite all
+    that complexity, this problem cannot be fully solved while this
+    remains a warning, rather than an exception.
+
+    Same goes for other warnings in the engine of course, undefined
+    variables are just the biggest offender, because this particular
+    warning can occur as part of nearly any operation. The additional
+    complexities that arise when you combine this problem with a JIT
+    compiler are left as an exercise to the reader.
+
+    Nikita Popov (https://news-web.php.net/php.internals/116953)
+
+Backward Incompatible Changes
+-----------------------------
+
+Accessing an undefined variable will result in an Error exception being
+thrown.
+
+Although accessing undefined variables has not been considered good
+practice for a long time, and has been an E_WARNING since PHP 8 (which
+will be 5 years old by the time PHP 9 arrives) there will still be an
+amount of code out there that will experience additional errors being
+thrown as a result of this change.
+
+Proposed PHP Version(s)
+-----------------------
+
+This change is targeted for PHP 9.0.
+
+Although the target version is mandated by our traditional breaking
+changes policy, it is also the intent of this RFC to give multiple years
+of notice that this change will be coming, affording the greatest
+opportunity for developers to modify their code in anticipation of this
+change.
+
+A minor change will be included in the next minor version to alter the
+existing warning message to indicate the warning will become an error in
+9.0.
+
+Unaffected Functionality
+------------------------
+
+If the code does not currently emit a "Warning: Undefined variable
+$varname" then it is out of scope for this RFC. This RFC does NOT apply
+to array indexes.
+
+Vote
+----
+
+Vote opened 2022-03-14, vote closes 2022-03-28
+
+Question: Promote Undefined Variables to Throw an Error
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Meta vote for reasoning of voting against:
+
+Question: Main reason for voting against if you did?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Using undefined variables is a legitimate coding style
+-  Backwards compatibility breaks
+-  Would be in favour, but not in 9.0
+-  Something else
+
+References
+----------
+
+\* https://wiki.php.net/rfc/engine_warnings
+
+Additional Metadata
+-------------------
+
+:Original Authors: Mark Randall marandall@php.net
+:Original PHP Version: PHP 9.0
+:Original Status: Accepted
+:Slug: undefined_variable_error_promotion
+:Wiki URL: https://wiki.php.net/rfc/undefined_variable_error_promotion
