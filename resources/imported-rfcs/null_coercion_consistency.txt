@@ -314,7 +314,24 @@ This means the type "//?int//" will allow NULL or an integer to be provided to t
 
 ===== Backward Incompatible Changes =====
 
-None
+While the intention of this RFC is to avoid a BC break; for user defined functions to be updated to also coerce NULL (instead of throwing a Type Error), it's possible some code may rely on that behaviour, for example:
+
+<code php>
+function my_function(string $my_string) {
+  var_dump($my_string);
+}
+
+try {
+  my_function('A');   // string(1) "A"
+  my_function(1);     // string(1) "1"
+  my_function(1.2);   // string(3) "1.2"
+  my_function(true);  // string(1) "1"
+  my_function(false); // string(0) ""
+  my_function(NULL);  // Throw Type Error
+} catch (TypeError $e) {
+  // Do something important?
+}
+</code>
 
 ===== Proposed PHP Version(s) =====
 
