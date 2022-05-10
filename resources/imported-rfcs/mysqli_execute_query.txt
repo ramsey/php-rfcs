@@ -105,7 +105,24 @@ The name was inspired by [[https://www.doctrine-project.org/projects/doctrine-db
 
 ==== Returning false ====
 
-Because the implementation is effectively calling [[https://www.php.net/mysqli_stmt_get_result|mysqli_stmt_get_result()]] last, while it will return //false// on failure, it will also return //false// for queries that do not produce a result set (e.g. //UPDATE//). Historically this has been addressed by using //mysqli_errno()//, but since 8.1 the [[https://wiki.php.net/rfc/mysqli_default_errmode|Change Default mysqli Error Mode RFC]] was accepted, and Exceptions are used by default.
+The implementation is effectively calling [[https://www.php.net/mysqli_stmt_get_result|mysqli_stmt_get_result()]] last. While it will return //false// on failure, it will also return //false// for queries that do not produce a result set (e.g. //UPDATE//). Historically this has been addressed by using //mysqli_errno()//, but since 8.1 the [[https://wiki.php.net/rfc/mysqli_default_errmode|Change Default mysqli Error Mode RFC]] was accepted, and Exceptions are used by default.
+
+==== Properties ====
+
+Because [[https://www.php.net/manual/en/class.mysqli-stmt.php|mysqli_stmt]] is not returned, it's not possible to use its properties directly:
+
+  - int|string **$affected_rows** - use //$mysqli->affected_rows// or //mysqli_affected_rows($mysqli)//
+  - int|string **$insert_id** - use //$mysqli->insert_id// or //mysqli_insert_id($mysqli)//
+  - int|string **$num_rows** - also available on //mysqli_result//
+  - int **$param_count**
+  - int **$field_count** - also available on //mysqli_result//
+  - int **$errno** - use //mysqli_errno($mysqli)//, //$mysqli->errno//
+  - string **$error** - use //mysqli_error($mysqli)//, //$mysqli->error//
+  - array **$error_list** - use //mysqli_error_list($mysqli)//, //$mysqli->error_list//
+  - string **$sqlstate** - use //mysqli_sqlstate($mysqli)//, //$mysqli->sqlstate//
+  - int **$id**
+
+It's also worth noting the error property usage will hopefully reduce, as more developers use //mysqli_sql_exception// for errors (because the mysqli Error Mode now defaults to //MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT//).
 
 ==== Re-using Statements ====
 
@@ -113,7 +130,7 @@ The implementation discards the //mysqli_stmt// object immediately, so you canno
 
 ==== Updating Existing Functions ====
 
-Cannot change //mysqli_query()// because it's second argument is //$resultmode//.
+Cannot change //mysqli_query()// because its second argument is //$resultmode//.
 
 Cannot replace the deprecated //mysqli_execute()// function, which is an alias for //mysqli_stmt_execute()//, because it would create a backwards compatibility issue.
 
@@ -153,24 +170,7 @@ None
 
 ===== Open Issues =====
 
-==== Affected Rows ====
-
-Currently //$mysqli->affected_rows// and //mysqli_affected_rows($mysqli)// returns -1.
-
-==== Properties ====
-
-Because [[https://www.php.net/manual/en/class.mysqli-stmt.php|mysqli_stmt]] is not returned, it's not possible to use its properties:
-
-  - int|string **$affected_rows** - see above
-  - int|string **$insert_id** - can use //$mysqli->insert_id// or //mysqli_insert_id($mysqli)//
-  - int|string **$num_rows** - also available on //mysqli_result//
-  - int **$param_count**
-  - int **$field_count** - also available on //mysqli_result//
-  - int **$errno** - can use //mysqli_errno($mysqli)//, //$mysqli->errno//
-  - string **$error** - can use //mysqli_error($mysqli)//, //$mysqli->error//
-  - array **$error_list** - can use //mysqli_error_list($mysqli)//, //$mysqli->error_list//
-  - string **$sqlstate** - can use //mysqli_sqlstate($mysqli)//, //$mysqli->sqlstate//
-  - int **$id**
+None
 
 ===== Unaffected PHP Functionality =====
 
@@ -189,6 +189,8 @@ TODO
 ===== Implementation =====
 
 [[https://github.com/php/php-src/compare/master...kamil-tekiela:execute_query|From Kamil Tekiela]] (proof of concept)
+
+This implementation copies some details to the mysqli object, but not the affected rows. This means //mysqli_affected_rows($mysqli)// and //$mysqli->affected_rows// will currently return -1.
 
 ===== References =====
 
