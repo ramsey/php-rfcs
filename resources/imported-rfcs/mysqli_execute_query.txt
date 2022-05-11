@@ -184,7 +184,10 @@ N/A
 
 Accept the RFC
 
-TODO
+<doodle title="mysqli_execute_query" auth="craigfrancis" voteType="single" closed="false">
+   * Yes
+   * No
+</doodle>
 
 ===== Implementation =====
 
