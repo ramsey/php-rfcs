@@ -114,6 +114,30 @@ NULL can usually be coerced (e.g. string concatenation, == comparisons, arithmet
   - PHP 7.0 introduced the ability for user-defined functions to specify parameter types via the [[https://wiki.php.net/rfc/scalar_type_hints_v5#behaviour_of_weak_type_checks|Scalar Type Declarations RFC]], where the implementation triggered Type Errors for those using //strict_types=1//, and otherwise used coercion for string/int/float/bool, but not NULL.
   - PHP 8.1 updated internal function parameters to work in the same way.
 
+==== Scalar Types ====
+
+[[https://news-web.php.net/php.internals/117523|George Peter Banyard]] notes that "Userland scalar types [...] did not include coercion from NULL for //very// good reasons". The only reason mentioned in [[https://wiki.php.net/rfc/scalar_type_hints_v5|Scalar Type Declarations]] is "to be consistent with our existing type declarations" (no further details given).
+
+The RFC also says "it should be possible for existing userland libraries to add scalar type declarations without breaking compatibility", but this is not the case, because of NULL. This has made adoption of type declarations harder, as it does not work like the following:
+
+<code php>
+function my_function($s, $i, $f, $b) {
+  $s = strval($s);
+  $i = intval($i);
+  $f = floatval($f);
+  $b = boolval($b);
+  var_dump($s, $i, $f, $b);
+}
+
+function my_function(string $s, int $i, float $f, bool $b) {
+  var_dump($s, $i, $f, $b);
+}
+
+my_function(NULL, NULL, NULL, NULL);
+</code>
+
+Some developers view NULL as a missing/invalid value, and passing NULL to a function like //htmlspecialchars()// could indicate a problem (can a be useful check for static analysis, or in the context of //strict_types=1//).
+
 ==== Examples ====
 
 Common sources of NULL:
@@ -356,8 +380,6 @@ None known
 ===== Open Issues =====
 
 "it's a bit late" - We only have a deprecation at the moment (which can and is being ignored), it will be "too late" when PHP 9.0 uses Fatal Errors.
-
-"Userland scalar types [...] did not include coercion from NULL for //very// good reasons." - The only reason mentioned in [[https://wiki.php.net/rfc/scalar_type_hints_v5|Scalar Type Declarations]] is "to be consistent with our existing type declarations" (no further details given). In theory "it should be possible for existing userland libraries to add scalar type declarations without breaking compatibility", but this was not the case, because of NULL. Talking to developers, the only reason mentioned (noted above) is where NULL can be viewed as a missing/invalid value, and passing NULL to a function like //htmlspecialchars()// could indicate a problem (which can a be useful check for static analysis, or in the context of //strict_types=1//).
 
 The function //mt_rand()// can be called with no arguments, or with min and max integer arguments. A developer may call //mt_rand(NULL, NULL)// and expect it to work the same as no arguments (returning a random number between 0 and //mt_getrandmax()//), but the NULL's would be coerced to 0, so it would always return 0. That said, I cannot find any public examples of this happening ([[https://grep.app/search?q=mt_rand%28NULL&filter%5Blang%5D%5B0%5D=PHP|1]], [[https://grep.app/search?q=mt_rand%5Cs%2A%5C%28%5Cs%2ANULL&regexp=true&filter[lang][0]=PHP|2]], [[https://www.google.com/search?q=%22mt_rand+NULL+NULL%22|3]]).
 
