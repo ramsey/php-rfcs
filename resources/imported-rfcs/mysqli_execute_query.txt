@@ -1,12 +1,12 @@
 ====== PHP RFC: MySQLi Execute Query ======
 
-  * Version: 0.1
-  * Voting Start: ?
-  * Voting End: ?
+  * Version: 1
   * RFC Started: 2022-04-21
-  * RFC Updated: 2022-04-21
+  * RFC Updated: 2022-05-11
+  * Voting Start: 2022-05-11 15:00 UTC / 16:00 BST
+  * Voting End: 2022-05-25 15:00 UTC / 16:00 BST
   * Author: Kamil Tekiela, and Craig Francis [craig#at#craigfrancis.co.uk]
-  * Status: Under Discussion
+  * Status: Voting
   * First Published at: https://wiki.php.net/rfc/mysqli_execute_query
   * GitHub Repo: https://github.com/craigfrancis/php-mysqli-execute-query-rfc
   * Implementation: [[https://github.com/php/php-src/compare/master...kamil-tekiela:execute_query|From Kamil Tekiela]] (proof of concept)
