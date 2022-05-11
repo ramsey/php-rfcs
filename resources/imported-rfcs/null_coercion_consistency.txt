@@ -130,14 +130,16 @@ $search = $request->get('q'); // Symfony
 $search = $this->request->getQuery('q'); // CakePHP
 $search = $request->getGet('q'); // CodeIgniter
 
-$value = array_pop($empty_array);
 $value = mysqli_fetch_row($result);
 $value = json_decode($json); // Invalid JSON, or nesting limit.
+$value = array_pop($empty_array);
 </code>
 
 Examples functions, often working with user input, where NULL has been fine:
 
 <code php>
+$rounded_value = round($value);
+
 $search_trimmed = trim($search);
 
 $search_len = strlen($search);
