@@ -1,0 +1,200 @@
+====== PHP RFC: Expand deprecation notice scope for partially supported callables ======
+  * Version: 0.2
+  * Date: 2022-05-12
+  * Author: Juliette Reinders Folmer, <php.net_nospam@adviesenzo.nl>
+  * Status: Under Discussion
+  * First Published at: https://wiki.php.net/rfc/patially-supported-callables-expand-deprecation-notices
+
+===== Introduction =====
+This is a follow-up RFC to the previously accepted [[https://wiki.php.net/rfc/deprecate_partially_supported_callables|Deprecated partially supported callables]] RFC and proposes to add deprecation notices when passing a partially supported callable to ''is_callable()'' and when type verification is executed on the ''callable'' type.
+
+These two particular circumstances were explicitly excluded in the original RFC.
+
+
+===== Proposal =====
+The [[https://wiki.php.net/rfc/deprecate_partially_supported_callables|Deprecated partially supported callables]] RFC was accepted and implemented in October 2021.
+
+That RFC explicitly excluded the ''callable'' type and function calls to ''is_callable()'' from generating deprecation notices:
+
+> This RFC proposes to deprecate in PHP 8.2 and remove in PHP 9.0 support for these callables. A deprecation warning will be thrown by all attempts to invoke such a callable, such as via ''call_user_func()'', but also ''array_map()''.
+> 
+> The ''is_callable()'' function and ''callable'' type remain side-effect free and do not throw a deprecation warning. They will continue to accept these callables until support is removed entirely. 
+
+This RFC proposes to remove the exclusion and add deprecation notices to both the ''is_callable()'' function and the ''callable'' type.
+
+
+==== Adding a deprecation notice for ''is_callable()'' ====
+
+Current status:
+  * No deprecation notice is thrown in PHP 8.x.
+  * In PHP 9.0, passing one of the partially supported callables to the function will return ''false''.
+
+<code php>
+class Foo {
+    public function bar() {
+        // Do something conditionally if a child class has implemented a certain method.
+        if (is_callable('static::methodName')) {
+            // For valid callbacks, this call will be executed in PHP 8.x,
+            // but will no longer execute in PHP 9.x.
+            static::methodName();
+        }
+    }
+}
+
+(new Foo())->bar();
+</code>
+
+https://3v4l.org/VeVYC
+
+The above code sample will currently not lead to any deprecation notices being thrown in PHP 8.x, while for valid callbacks, the behaviour of the code will be silently reversed in PHP 9.0.
+
+This silent reversal is, in my opinion, particularly dangerous as in projects without sufficient test coverage, this will lead to an unexpected change in behaviour and to hard to debug bugs.
+
+
+==== Adding a deprecation notice for ''callable'' ====
+
+Current status:
+  * No deprecation notice is thrown in PHP 8.x.
+  * In PHP 9.0, passing one of the partially supported callables will generate a ''TypeError''.
+
+<code php>
+class Foo {
+    public function __construct() {
+        $this->callMe('self::methodName');
+    }
+
+    public function callMe(callable $callback) { // Does not generate a deprecation notice.
+        call_user_func($callback); // Generates a deprecation notice.
+    }
+    
+    public function methodName() {}
+}
+
+new Foo();
+</code>
+
+https://3v4l.org/NXrAH
+
+
+While it will be common to use the partially supported callable in a callback function call within the function with the type declaration, this may not always be the case, especially in frameworks where callbacks can be registered to be executed later in a limited set of circumstances and those circumstances may not be met by default.
+
+Without a deprecation notice, those "//limited circumstances callbacks//" may not be discovered as needing updating in time for PHP 9.0.
+
+
+===== Discussion =====
+
+==== Why is this important ? ====
+
+Both the ''callable'' type declaration as well as ''is_callable()'' have basically got three "states":
+
+  - Valid syntax, valid callback. <code php>
+$callable = is_callable('rtrim'); // returns `true`
+</code>
+  - Valid syntax, invalid callback. <code php>
+$callable = is_callable('functionwhichdoesnotexist'); // returns `false`
+</code>
+  - Invalid syntax <code php>
+$callable = is_callable('this can never be a valid callback'); // returns `false`
+</code>
+
+In PHP 9.0, for the now deprecated partially supported callables, the "state" will go from 1 or 2 (valid syntax, potentially valid callback) to 3 (invalid syntax).
+
+Even for code which has been deliberately set up to expect a ''false'' return value from ''is_callable()'', this state change is problematic as what the code was originally testing - "valid syntax, invalid callback" - is now no longer being tested, so in nearly all cases, the code would still need to be updated to allow the code to be considered equivalent in PHP 8.x and PHP 9.x.
+
+==== Can't these situations be discovered via tests ? ====
+
+While we all love to work on a code base with 100% test code coverage, we also know that in reality, that is the exception, not the rule.
+
+Additionally, open source projects typically only have limited ability of controlling when users will start to run their code on new PHP versions.
+
+Deprecation notices logged over time in error logs are often needed to discover all potential future points of failure and to fix them in time for PHP 9.0.
+
+==== Code shouldn't be written like that ====
+
+Thanks for your opinion, but the reality is that code like the above exists and can be found in a plenitude of projects.
+
+==== Why wasn't this addressed in the original RFC ? ====
+
+The original RFC was not accompanied by an impact analysis, which would have discovered these code patterns.
+
+==== How were these code patterns discovered now ? ====
+
+A limited scope impact analysis was done as part of the test cycle for a new [[https://github.com/PHPCompatibility/PHPCompatibility|PHPCompatibility]] sniff.
+
+Analysis of the code flagged by the sniff discovered the pattern described for ''is_callable()'' as a relatively common code pattern, including in at least one package in the Packagist Top 10 and in popular CI tools.
+
+Some examples:
+  * https://github.com/symfony/service-contracts/blob/bc0a2247c72d29241b5a06fb60dc1c9d9acf2a3a/ServiceSubscriberTrait.php#L39 (Fixed since)
+  * https://github.com/mockery/mockery/blob/c10a5f6e06fc2470ab1822fa13fa2a7380f8fbac/library/Mockery/Mock.php#L960 (Fixed since)
+  * https://github.com/simplepie/simplepie/blob/dacf0ed495d2e8fb306e526ca3f2a846af78a7c9/tests/oldtests/absolutize/RFC3986.5.4/base.php#L13
+
+==== is_callable() should be side-effects free ====
+
+The deprecation notices will only be thrown for the deprecated callable syntaxes, not for any other invalid syntaxes.
+
+==== Deprecation notices should not be thrown for behaviours which will not become a fatal error ====
+
+Well, for the ''callable'' type, that will become a fatal error, so that argument does not apply.
+
+As for ''is_callable()'': there is precedent in the PHP project for throwing deprecation notices to warn users about an upcoming behavioural change.
+
+Most recently, the [[https://wiki.php.net/rfc/concatenation_precedence|Change of the precedence of the concatenation operator]] introduced a deprecation notice in PHP 7.4, before the actual change to the operator precedence was implemented in PHP 8.0.
+
+Prior to that, PHP 7.3 introduced a deprecation notice for a behavioural change regarding [[https://wiki.php.net/rfc/deprecations_php_7_3#string_search_functions_with_integer_needle|String search functions with integer needles]], see: https://3v4l.org/Iqo4N
+
+And as [[https://externals.io/message/117342#117670|pointed out by Rowan Tommins]]:
+
+> Another relevant precedent, since the original RFC talked about keeping things "side-effect free", is that passing "99 red balloons" to an "int" parameter raised an E_NOTICE in PHP 7.x, so a "callable" parameter raising an ''E_DEPRECATED'' should be fine. 
+
+Also see: https://3v4l.org/spOiV
+
+As for the choice between a deprecation notice or a ''E_NOTICE''/''E_WARNING'': the original RFC is a deprecation, so a deprecation notice for these additional situations seems most appropriate.
+
+Additionally, in contrast to ''E_NOTICE'' and ''E_WARNING'' error handlers often special case ''E_DEPRECATED'' errors as an "action list to be looked at later", which is the appropriate handling for the notices being proposed in this RFC.
+
+
+
+===== Backward Incompatible Changes =====
+None. The original RFC contains the BC-break. This RFC only expands the scope where users will be warned about the upcoming BC-break in PHP 9.0.
+
+===== Proposed PHP Version(s) =====
+This change is targeted for PHP 8.2, the same version in which the original deprecation is introduced.
+
+===== RFC Impact =====
+This change will allow more deprecated partially supported callables to be discovered and fixed prior to PHP 9.0.
+
+While in some cases, this means that two deprecation notices will now be thrown instead of one, in those cases, the same fix which was originally needed anyway, will remove both deprecation notices in one go.
+
+As all deprecated partially supported callables have an equivalent which is supported PHP cross-version - see the [[https://wiki.php.net/rfc/deprecate_partially_supported_callables#backward_incompatible_changes|conversion table in the original RFC]] - these additional deprecation notices should not lead to any "unfixable" situations.
+
+===== Unaffected PHP Functionality =====
+The proposed deprecation notices will only be thrown for the deprecated callable syntaxes.
+The //behaviour// of the ''is_callable()'' function and the ''callable'' type when receiving a deprecated callable syntax will remain unchanged (until PHP 9.0).
+
+The behaviour of the ''is_callable()'' function and the ''callable'' type when receiving anything other than a deprecated callable syntax will also remain unchanged and will not yield a deprecation notice.
+
+===== Proposed Voting Choices =====
+
+As per the voting RFC a yes/no vote with a 2/3 majority is needed for this proposal to be accepted. 
+
+**Add deprecation notices to ''is_callable()'' and the ''callable'' type when one of the deprecated partially supported callables is passed to them: yes/no**
+
+
+===== Patches and Tests =====
+
+[[https://people.php.net/imsop|Rowan Tommins]] has kindly [[https://externals.io/message/117342#117670|offered to prepare a patch to implement this proposal]].
+
+
+===== Implementation =====
+Not available yet.
+
+After the project is implemented, this section should contain 
+  - the version(s) it was merged into
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+  - a link to the language specification section (if any)
+
+
+===== References =====
+  * [[https://wiki.php.net/rfc/deprecate_partially_supported_callables|RFC: Deprecate partially supported callables]]
+  * [[https://externals.io/message/117342|Prior discussion on the internals mailinglist which led to this RFC]]
