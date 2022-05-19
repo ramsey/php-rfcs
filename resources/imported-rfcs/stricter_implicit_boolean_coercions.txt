@@ -1,5 +1,5 @@
 ====== PHP RFC: Stricter implicit boolean coercions ======
-  * Version: 1.2
+  * Version: 1.3
   * Date: 2022-05-16
   * Author: Andreas Leathley, <a.leathley@gmx.net>
   * Status: Under Discussion
@@ -7,7 +7,7 @@
 
 ===== Introduction =====
 
-When not using strict_types in PHP, scalar type coercions have become less lossy/surprising in the last years - non-numbers cannot be passed to an int type (leads to a TypeError), floats (or float-strings) with a fractional part cannot be passed to an int type (leads to a deprecation notice in 8.1 and a TypeError in 9.0). The big exception so far are booleans: you can give a typed boolean any value and it will convert any non-zero (and non-empty-string) value to true.
+When not using strict_types in PHP, scalar type coercions have become less lossy/surprising in the last years - non-number-strings cannot be passed to an int type (leads to a TypeError), floats (or float-strings) with a fractional part cannot be passed to an int type (leads to a deprecation notice since 8.1 because it loses information). The big exception so far are booleans: you can give a typed boolean any value and it will convert any non-zero (and non-empty-string) value to true without any notice.
 
 Some examples where this might lead to unexpected outcomes:
 
@@ -43,13 +43,13 @@ Any other integers, floats and strings are always coerced to true (no behavior c
   * For coercions from int the deprecation notice is: Implicit conversion from int %d to true, only 0 or 1 are allowed
   * For coercions from float the deprecation notice is: Implicit conversion from float %f to true, only 0 or 1 are allowed
 
-Raise these deprecation notices to ''TypeError'' in the next major version (PHP 9.0).
+The long-term goal is to raise these deprecation notices to ''TypeError'', most likely in the next major version (PHP 9.0). That change will need to be discussed again in the PHP 9.0 development cycle, at which time there will have been multiple years of experience with these new deprecation notices, which will make it easier to decide whether raising them to a ''TypeError'' for 9.0 seems reasonable.
 
 ===== Rationale =====
 
 When assigning values to objects, methods or functions the used data often comes from outside sources (HTTP request, database query, text file, etc.) and having reasonable type juggling behavior from PHP reduces the number of unexpected and unnoticed bugs. When boolean types accept any scalar value it is easy to introduce unintended errors.
 
-When implementing this feature I even found such an unintended error in PHPs test suite (which is written in PHP) which boiled down to:
+When implementing this feature I found such an unintended error in PHPs test runner (which is written in PHP) which boiled down to:
 
 <PHP>
 function mail_qa_team(string $data, bool $status = false): bool
@@ -67,13 +67,13 @@ if ($sum_results['FAILED']) {
 mail_qa_team($failed_tests_data, $status); 
 </PHP>
 
-This lead to a deprecation notice ''Implicit conversion from string "failed" to true, only "", "0" or "1" are allowed''. Reading that notice makes it immediately obvious that converting "failed" to true cannot be the intended behavior.
+This lead to the deprecation notice ''Implicit conversion from string "failed" to true, only "", "0" or "1" are allowed'' on TravisCI. Reading that notice makes it immediately obvious that converting "failed" to true must be a mistake. In current PHP codebases there are likely a few of these unintended conversions to booleans which would be easy to fix if a developer noticed that an unusual value is converted to true.
 
-While using strict_types is an option to avoid unintended type coercions, the goal of this RFC is to make coercions less error-prone when not using strict_types. Silently coercing "hello" to true seems like an invitation to unexpected behavior. By introducing a deprecation notice users will have the chance of finding unexpected boolean coercions in their code. By the time PHP 9 is released it seems unlikely that many problematic coercions remain, as users will have had multiple years with deprecation notices.
+While using strict_types is an option to avoid unintended type coercions, the goal of this RFC is to make coercions less error-prone when not using strict_types. Silently coercing "failed" (or -37486, or 0.01) to true seems like an invitation to unexpected behavior. By introducing this deprecation notice users will have the chance of finding surprising boolean coercions in their code while the coercion behavior will remain the same.
 
 ===== Implementation notes =====
 
-As this is my first RFC and my first contribution to php-src, I mimicked the code from the "Deprecate implicit non-integer-compatible float to int conversions" RFC (https://github.com/php/php-src/pull/6661). I added some tests and made sure the existing tests still pass. There might still be changes needed for opcache/JIT, so the implementation might not 100% done. Any feedback is welcome!
+As this is my first RFC and my first contribution to php-src, I mimicked the code from the "Deprecate implicit non-integer-compatible float to int conversions" RFC (https://github.com/php/php-src/pull/6661). I added some tests and made sure the existing tests still pass. There might be some room for improvements on my implementation though, so any feedback is welcome!
 
 ===== Backward Incompatible Changes =====
 
@@ -90,8 +90,9 @@ The following shows typical ways to avoid a deprecation notice:
 <PHP>
 // Resolution 1: Check for an expected value or range
 toBool($scalar > 0);
-toBool($scalar === 5);
-toBool($scalar === 'on');
+toBool($int === 5);
+toBool($string === 'success');
+toBool(strlen($string) > 0);
  
 // Resolution 2: Check for truthiness
 toBool($scalar == true);
@@ -100,11 +101,12 @@ toBool($scalar == true);
 toBool((bool) $scalar);
 </PHP>
 
-With the many deprecation notices that appeared in PHP 8.0 and 8.1 there is some wariness if more deprecation notices will be worth the pain. These are the arguments why the RFC author thinks it will not lead to too much unnecessary pain:
+With the many deprecation notices that appeared in PHP 8.0 and 8.1 there is some wariness if more deprecation notices will be worth the pain. These are the arguments why the RFC author thinks it will be worth it without too much pain:
 
   * Each individual case is easy to fix, the easiest (but also least useful) is to loosly compare a value to true ($value == true) instead of directly giving the value to a typed bool
   * bool arguments for internal functions are usually optional, less numerous and are much more likely to be set by a constant expression than a variable
   * deprecation notices do not demand immediate attention, and the "disadvantage" of the high number of deprecation notices with 8.0 and 8.1 should be that most tooling and codebases have gotten more used to dealing with them in their own time and not see them as an immediate call to action
+  * Many of the coercions that will lead to a deprecation notice are most likely to be unintended and the information given in the notice should make it clear to a developer whether it is likely a bug or just an oversight
 
 ===== Proposed PHP Version =====
 
