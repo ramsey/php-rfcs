@@ -4,10 +4,10 @@ Deprecate ${} String Interpolation
 :PHP-RFC: 0801
 :Title: Deprecate ${} String Interpolation
 :Author: Ilija Tovilo <tovilo.ilija@gmail.com>
-:Status: Draft
+:Status: Implemented
 :Type: Standards Track
 :Created: 2021-03-13
-:PHP-Version: 8.1
+:PHP-Version: 8.2
 :Version: 1.0
 
 Proposal
@@ -16,37 +16,43 @@ Proposal
 PHP allows embedding variables in strings with double-quotes (``"``) and
 heredoc in various ways.
 
-::
+#. Directly embedding variables (``"$foo"``)
+#. Braces outside the variable (``"{$foo}"``)
+#. Braces after the dollar sign (``"${foo}"``)
+#. Variable variables (``"${expr}"``, equivalent to
+   ``(string) ${expr}``)
 
-   1. Directly embedding variables ("$foo")
-   2. Braces outside the variable ("{$foo}")
-   3. Braces after the dollar sign ("${foo}")
-   4. Dynamic variable lookup ("${expr}")
+Options 1 and 2 have their pros and cons. Options 3 and 4 are easily
+confused due to overlapping syntax, 3 is strictly less capable than 1
+and 2, and 4 has completely different semantics (`variable
+variables <https://www.php.net/manual/en/language.variables.variable.php>`__)
+that are rarely useful in string interpolation.
 
-All of these have their pros and cons, but in practice options 3 and 4
-are easily confused (both by users and the parser) due to the similar
-syntax, are strictly less capable than the first two options, and are
-rarely used in practice. Option 3 is specifically less capable than 2,
-and option 4 is built on variable-variables with all the complexity and
-weirdness that brings with it.
+This RFC proposes to deprecate options 3 and 4 in PHP 8.2 and remove
+them in PHP 9.0.
 
-This RFC proposes to deprecate options 3 and 4 in PHP 8.1 and remove
-them in PHP 9.0. That leaves only two string interpolation options:
-direct (simple variable only) and powerful (the one that does the most
-now).
+.. code:: php
+
+   var_dump("${foo}");
+   // Deprecated: Using ${} in strings is deprecated
+
+   var_dump("${(foo)}");
+   // Deprecated: Using ${} (variable variables) in strings is deprecated
+
+That leaves only two string interpolation options: direct (simple
+variable only) and powerful (the one that does the most now).
 
 Status quo
 ----------
 
-The first issue is that all four options support different subsets of
-syntax. That is needlessly confusing, both for the user and for the
-parser.
+Options 1, 2 and 3 roughly try to achieve the same thing, embedding
+simple variables or chains in a string. They all support a different
+subset of features.
 
 Simple variable interpolation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Options 1, 2, and 3 support embedding basic variables. Option 4 has no
-equivalent here.
+Options 1, 2, and 3 support embedding basic variables.
 
 .. code:: php
 
@@ -65,10 +71,14 @@ syntax is not consistent.
 .. code:: php
 
    $foo = ['bar' => 'bar'];
-   var_dump("$foo[bar]");
 
+   var_dump("$foo[bar]");
    var_dump("{$foo['bar']}");
    var_dump("${foo['bar']}");
+
+It's worth noting that options 2 and 3 support arbitrary expressions
+between ``[`` and ``]``, whereas option 1 only supports simple strings
+with no spaces or other special characters.
 
 Object property interpolation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -82,8 +92,8 @@ Only syntax 1 and 2 allow accessing properties.
    var_dump("$foo->bar");
    var_dump("{$foo->bar}");
 
-Metehod call interpolation
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Method call interpolation
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Only syntax 2 allows calling methods.
 
@@ -152,21 +162,13 @@ interpret it as option 4 which has completely different semantics.
    var_dump("${(foo)}");
    //> bar
 
-The braces switch from option 3 to 4 because braces are not allowed in
-option 3. This means ``foo`` is no longer interpreted as a variable but
-as a constant, and option 4 will then try to find a local variable by
-the name of that constant. This is incredibly unintuitive.
-
-Comparison to other languages
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-A number of other languages use ``${foo}`` style string interpolation,
-most notably bash and Javascript (in template literals). However, its
-behavior is different from that in PHP. In PHP, that syntax means
-variable-variables. In Javascript, it supports arbitrary expressions
-(making it technically a superset of PHP's existing option 2). In its
-current form, options 3 and 4 are of limited use, and confusing for
-users from other nearby languages as they behaves quite differently.
+The braces switch from option 3 to 4 because parentheses are not allowed
+in option 3. This means ``foo`` is no longer interpreted as a variable
+but as a constant, and option 4 will then try to find a local variable
+by the name of that constant. This is incredibly unintuitive. Even
+though I cannot imagine a scenario where variable variables in strings
+are useful it's worth noting that they can still be expressed with
+option 2 as ``"{${expr}}"`` with a more consistent syntax.
 
 Conclusion
 ----------
@@ -177,14 +179,68 @@ is widely used.
 Option 2 offers the most robust syntax currently supported, and is
 widely used.
 
-Option 3 offers a subset of the functionality of option 2, and is not
-widely used.
+Option 3 offers a subset of the functionality of option 1 and 2, and is
+less widely used.
 
 Option 4 offers functionality that is rarely if ever useful, and easily
 confused with option 3.
 
 For all of the reasons above this RFC proposes to deprecate option 3 and
-4 in PHP 8.1 and remove them in PHP 9.
+4 in PHP 8.2 and remove them in PHP 9.
+
+Impact
+------
+
+An analysis of the top 1000 packagist repositories yielded 267 usages of
+option 3, 0 of option 4.
+
+https://gist.github.com/iluuu1994/05427dd74100af8e41ebff3d4201742c
+
+Migration path
+~~~~~~~~~~~~~~
+
+The migration of option 3 to 2 is straight forward. Simply move the
+dollar sign.
+
+.. code:: php
+
+   "${foo}" => "{$foo}"
+   "${foo[expr]}" => "{$foo[expr]}"
+
+The migration of option 4 to 2 is also straight forward. All it needs is
+adding braces around the interpolation.
+
+.. code:: php
+
+   "${foo->bar}" => "{${foo->bar}}"
+
+The main challenge is differentiating between option 3 and 4 (which is a
+motivation of this RFC). In practice, 4 should be almost non-existent.
+Nonetheless, the deprecation message will contain the hint
+``(variable variables)`` if option 4 is encountered.
+
+I have created `a simple
+script <https://gist.github.com/iluuu1994/72e2154fc4150f2258316b0255b698f2>`__
+to automate this process.
+
+Unchanged behavior
+------------------
+
+These things caused confusion in the discussion, but will continue
+working as they are.
+
+-  Variable variables outside of strings (``$foo = ${'bar'};``)
+-  Variable variables as option 1 (``echo "$$foo";``)
+
+Comparison to other languages
+-----------------------------
+
+A number of other languages use ``${foo}`` style string interpolation,
+most notably bash and JavaScript (in template literals). However, its
+behavior is different from that in PHP. In PHP, that syntax means
+variable variables. In JavaScript, it supports arbitrary expressions 2).
+In its current form, options 3 and 4 are of limited use, and confusing
+for users from other nearby languages as they behave quite differently.
 
 Future scope
 ============
@@ -195,7 +251,7 @@ embedding arbitrary expressions into strings.
 
 .. code:: php
 
-   var_dump($"#{func()}")
+   var_dump("{$:func()}")
 
 If we decide to do that it would make sense to remove the less useful
 options first to not further add to the confusion, that's what this RFC
@@ -204,11 +260,11 @@ is trying to achieve.
 Vote
 ----
 
-Voting starts 2021-xx-x and ends 2021-xx-xx.
+Voting starts 2022-04-08 and ends 2022-04-22.
 
 As this is a language change, a 2/3 majority is required.
 
-Question: Deprecate ${} string interpolation in PHP 8.1 and remove them in PHP 9.0?
+Question: Deprecate ${} string interpolation in PHP 8.2 and remove them in PHP 9.0?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Voting Choices
@@ -220,8 +276,8 @@ Voting Choices
 Additional Metadata
 -------------------
 
-:Implementation: TBD
+:Implementation: https://github.com/php/php-src/pull/8212
 :Original Authors: Ilija Tovilo, tovilo.ilija@gmail.com
-:Original PHP Version: PHP 8.1
+:Original PHP Version: PHP 8.2
 :Slug: deprecate_dollar_brace_string_interpolation
 :Wiki URL: https://wiki.php.net/rfc/deprecate_dollar_brace_string_interpolation
