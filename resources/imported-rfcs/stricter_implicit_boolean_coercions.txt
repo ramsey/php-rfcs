@@ -1,5 +1,5 @@
 ====== PHP RFC: Stricter implicit boolean coercions ======
-  * Version: 1.3
+  * Version: 1.4
   * Date: 2022-05-16
   * Author: Andreas Leathley, <a.leathley@gmx.net>
   * Status: Under Discussion
@@ -60,33 +60,68 @@ toBool('inactive'); // Implicit conversion from string "inactive" to true, only 
 toBool('false'); // Implicit conversion from string "false" to true, only "", "0" or "1" are allowed
 </PHP>
 
-The long-term goal is to raise these deprecation notices to ''TypeError'', most likely in the next major version (PHP 9.0), but that will need to be discussed again in the PHP 9.0 development cycle. At that time there will have been multiple years of experience with these new deprecation notices, making it easier to decide whether raising them to a ''TypeError'' for 9.0 seems reasonable.
+In the long-term these deprecations should be raised to a warning or to a ''TypeError''. The earliest for that is the next major version (PHP 9.0). At that time there will have been multiple years of experience with these new deprecation notices, making it easier to decide on how to continue and the impact in the PHP ecosystem.
 
 ===== Rationale =====
 
-When assigning values to objects, methods or functions the used data often comes from outside sources (HTTP request, database query, text file, etc.) and having reasonable type juggling behavior from PHP reduces the number of unexpected and unnoticed bugs. When boolean types accept any scalar value it is easy to introduce unintended errors.
+This RFC boils down to three aspects:
 
-When implementing this feature I found such an unintended error in PHPs test runner (which is written in PHP) which boiled down to:
+  * Would you want to know when a value like -375, "false" or NaN is given to a typed boolean (and coerced to true) in a codebase?
+  * How likely is it that such a coercion is unintended?
+  * What about other boolean coercions in PHP? (this is handled in the next section)
 
-<PHP>
-function mail_qa_team(string $data, bool $status = false): bool
-{
-  // send $status within an URL, so it is coerced to a string
-}
+The main motivation for this RFC is to reduce the possibility of errors when using the boolean type in a similar way that you cannot give a typed int a non-number string - if you provide "false" or "49x" to an int argument it will result in a TypeError. It will not be silently coerced to 0 (or 49), as that loses information and can be surprising. This RFC does the same thing for boolean types:
 
-if ($sum_results['FAILED']) {
-    $status = "failed";
-} else {
-    $status = "success";
-}
+  * Avoid losing information when an unusual value is coerced to a boolean type
+  * Make the boolean type and the type juggling system safer / more consistent
+  * Setting up only 7 scalar values as unambiguous boolean values is easy to document and reason about
 
-// $status as a non-empty string is always coerced to true, and later converted to 1 within mail_qa_team
-mail_qa_team($failed_tests_data, $status); 
-</PHP>
+When implementing this feature I found two bugs in php-src tests and the test runner that are most likely typical cases:
 
-This lead to the deprecation notice ''Implicit conversion from string "failed" to true, only "", "0" or "1" are allowed''. Reading that notice makes it immediately obvious that converting "failed" to true is most likely a mistake. In current PHP codebases there are likely a few of these unintended conversions to booleans which would be easy to fix if a developer noticed that an unusual value is converted to true.
+  * In the PHP test runner the strings "success" and "failed" were given to a boolean function argument called $status. Maybe that argument was a string previously and changed to a boolean by mistake, but it clearly was a bug that has never been noticed so far.
+  * In an IMAP test a boolean argument $simpleMessages always got the string "multipart". I found out that there was another function definition which had the argument $new_mailbox at that position. This was most likely a copy-paste error or the wrong function was looked up when writing the test.
+  
+Changing the type of an argument, return or property in a codebase happens often, and because the boolean type accepts everything with no complaint it makes it easy to miss problems when changing a type to bool. In current PHP codebases there are likely a few of these unintended coercions to booleans which would be easy to fix if a developer noticed that an unusual value is coerced to true.
 
 While using strict_types is an option to avoid unintended type coercions, the goal of this RFC is to make coercions less error-prone when not using strict_types. Silently coercing "failed" (or -37486, or 0.01) to true seems like an invitation to unexpected behavior. By introducing this deprecation notice users will have the chance of finding surprising boolean coercions in their code while the coercion behavior will remain the same.
+
+===== Other boolean coercions in PHP =====  
+
+Typed booleans (arguments, returns, properties) as discussed in this RFC are not the only part of PHP people think about when you bring up implicit boolean coercions. They also occur in expressions like ''if'', the ternary operator ''?:'', or logical operators ''&&'' / ''||''.
+
+However in these expressions you can use any values and are not restricted to scalar types like with typed booleans:
+
+<PHP>
+if ($variable) {
+  // executed if $variable loosly compares to true:
+  // - true for a string if it is not empty and not '0'
+  // - true for an int if it is not zero
+  // - true for a float if it is not zero
+  // - true for an array if it is not empty
+  // - always true for a resource
+  // - always true for an object
+  // - always false for null
+}
+
+if ($array) {
+  // executed for a non-empty array
+}
+
+toBool($array); // TypeError, must be of type bool, array given
+</PHP>
+
+Typed booleans behave differently compared to these expressions because they do not accept arrays, resources, objects and null. Further restricting typed booleans is therefore not making the language inconsistent (it already is), it could be an opportunity to differentiate these two use cases from each other, as they often have different expectations already:
+
+<PHP>
+// often used to check if $string is not empty, and it is reasonably clear
+if ($string) {
+  // do something with the $string here
+}
+
+$obj->boolProperty = $string; // giving the string to a boolean property has no clear intention
+</PHP>
+
+This RFC does establish a higher standard for implicit boolean conversions only for typed booleans, because from the standpoint of the RFC author this makes sense. You are reducing an int, float or string to a boolean, possibly losing information, and you are not evaluating an expression.
 
 ===== Implementation notes =====
 
@@ -94,7 +129,7 @@ As this is my first RFC and my first contribution to php-src, I mimicked the cod
 
 ===== Backward Incompatible Changes =====
 
-The following operations will now emit an ''E_DEPRECATED'' if a non-boolean-compatible scalar value is used:
+The following operations will now emit an ''E_DEPRECATED'' if any value other than "", "0", "1", 0, 1, 0.0, 1.0 is used:
 
   * Assignment to a typed property of type ''bool'' in coercive typing mode
   * Argument for a parameter of type ''bool'' for both internal and userland functions in coercive typing mode
@@ -124,7 +159,7 @@ With the many deprecation notices that appeared in PHP 8.0 and 8.1 there is some
   * bool arguments for internal functions are usually optional, less numerous and are much more likely to be set by a constant expression than a variable
   * deprecation notices do not demand immediate attention, and the "disadvantage" of the high number of deprecation notices with 8.0 and 8.1 should be that most tooling and codebases have gotten more used to dealing with them in their own time and not see them as an immediate call to action
   * Many of the coercions that will lead to a deprecation notice are most likely to be unintended and the information given in the notice should make it reasonably clear to a developer whether it is a bug and whether it is urgent or not
-
+  
 ===== Proposed PHP Version =====
 
 Next minor version: PHP 8.2.
