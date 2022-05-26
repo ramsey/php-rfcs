@@ -1,757 +1,209 @@
-====== PHP RFC: Named Arguments ======
-  * Date: 2013-09-06, significantly updated 2020-05-05
-  * Author: Nikita Popov <nikic@php.net>
-  * Status: Implemented
-  * Target Version: PHP 8.0
-  * Implementation: https://github.com/php/php-src/pull/5357
+====== PHP RFC: Stricter implicit boolean coercions ======
+  * Version: 1.7
+  * Date: 2022-05-16
+  * Author: Andreas Leathley, <a.leathley@gmx.net>
+  * Status: Under Discussion
+  * First Published at: http://wiki.php.net/rfc/stricter_implicit_boolean_coercions
 
 ===== Introduction =====
 
-Named arguments allow passing arguments to a function based on the parameter name, rather than the parameter position. This makes the meaning of the argument self-documenting, makes the arguments order-independent, and allows skipping default values arbitrarily.
+When not using strict_types in PHP, scalar type coercions have become less lossy/surprising in the last years - non-number-strings cannot be passed to an int type (leads to a TypeError), floats (or float-strings) with a fractional part cannot be passed to an int type (leads to a deprecation notice since 8.1 because it loses information). The big exception so far are booleans: you can give a typed boolean any value and it will convert any non-zero (and non-empty-string) value to true without any notice.
 
-To give a simple example:
-
-<code php>
-// Using positional arguments:
-array_fill(0, 100, 50);
-
-// Using named arguments:
-array_fill(start_index: 0, num: 100, value: 50);
-</code>
-
-The order in which the named arguments are passed does not matter. The above example passes them in the same order as they are declared in the function signature, but any other order is possible too:
-
-<code php>
-array_fill(value: 50, num: 100, start_index: 0);
-</code>
-
-It is possible to combine named arguments with normal, positional arguments and it is also possible to specify only some of the optional arguments of a function, regardless of their order:
-
-<code php>
-htmlspecialchars($string, double_encode: false);
-// Same as
-htmlspecialchars($string, ENT_COMPAT | ENT_HTML401, 'UTF-8', false);
-</code>
-
-===== What are the benefits of named arguments? =====
-
-==== Skipping defaults ====
-
-One obvious benefit of named arguments can be seen in the last code sample (using ''htmlspecialchars''): You no longer have to specify all defaults until the one you want to change. Named arguments allow you to directly overwrite only those defaults that you wish to change.
-
-This is also possible with the [[rfc:skipparams]] RFC, but named arguments make the intended behavior clearer. Compare:
-
-<code php>
-htmlspecialchars($string, default, default, false);
-// vs
-htmlspecialchars($string, double_encode: false);
-</code>
-
-Seeing the first line you will not know what the ''false'' argument does (unless you happen to know the ''htmlspecialchars'' signature by heart), whereas the ''%%double_encode: false%%'' variant makes the intention clear.
-
-==== Self-documenting code ====
-
-The benefit of making code self-documenting applies even when you are not skipping optional arguments. For example, compare the following two lines:
-
-<code php>
-array_slice($array, $offset, $length, true);
-// vs
-array_slice($array, $offset, $length, preserve_keys: true);
-</code>
-
-If I wasn't writing this example right now, I would not know what the fourth parameter of ''array_slice'' does (or even that it exists in the first place).
-
-==== Object Initialization ====
-
-The [[rfc:constructor_promotion|Constructor Property Promotion]] RFC makes it a lot simpler to declare classes for value objects. To pick one of the examples from that RFC:
+Some examples where this might lead to unexpected outcomes:
 
 <PHP>
-// Part of PHP AST representation
-class ParamNode extends Node {
-    public function __construct(
-        public string $name,
-        public ExprNode $default = null,
-        public TypeNode $type = null,
-        public bool $byRef = false,
-        public bool $variadic = false,
-        Location $startLoc = null,
-        Location $endLoc = null,
-    ) {
-        parent::__construct($startLoc, $endLoc);
-    }
-}
-</PHP>
-
-Constructors in particular often have a larger than average number of parameters whose order has no particular significance, and which are commonly defaulted. While constructor promotion makes the class declaration simple, it does not help the actual object instantiation.
-
-There have been multiple attempts to make object construction more ergonomic, such as the [[rfc:object-initializer|Object Initializer RFC]] and the [[rfc:compact-object-property-assignment|COPA RFC]]. However, all such attempts have been declined, as they do not integrate well into the language, due to unfavorable interaction with constructors or non-public properties.
-
-Named arguments solve the object initialization problem as a side-effect, in a way that integrates well with existing language semantics.
-
-<PHP>
-new ParamNode("test", null, null, false, true);
-// becomes:
-new ParamNode("test", variadic: true);
-
-new ParamNode($name, null, null, $isVariadic, $passByRef);
-// or was it?
-new ParamNode($name, null, null, $passByRef, $isVariadic);
-// becomes
-new ParamNode($name, variadic: $isVariadic, byRef: $passByRef);
-// or
-new ParamNode($name, byRef: $passByRef, variadic: $isVariadic);
-// and it no longer matters!
-</PHP>
-
-The benefit of named arguments for object initialization is on the surface the same as for other functions, it just tends to matter more in practice here.
-
-==== Type-safe and documented options ====
-
-One of the common workarounds for the lack of named arguments, is the use of an options array. The previous example could be rewritten to use an options array as follows:
-
-<PHP>
-class ParamNode extends Node {
-    public string $name;
-    public ExprNode $default;
-    public TypeNode $type;
-    public bool $byRef;
-    public bool $variadic;
-
-    public function __construct(string $name, array $options = []) {
-        $this->name = $name;
-        $this->default = $options['default'] ?? null;
-        $this->type = $options['type'] ?? null;
-        $this->byRef = $options['byRef'] ?? false;
-        $this->variadic = $options['variadic'] ?? false;
-
-        parent::__construct(
-            $options['startLoc'] ?? null,
-            $options['endLoc'] ?? null
-        );
-    }
+function toBool(bool $a)
+{
+  var_dump($a);
 }
 
-// Usage:
-new ParamNode($name, ['variadic' => true]);
-new ParamNode($name, ['variadic' => $isVariadic, 'byRef' => $passByRef]);
+toBool('0'); // bool(false)
+toBool(-0); // bool(false)
+toBool('-0'); // bool(true)
+toBool(0.0); // bool(false)
+toBool('0.0'); // bool(true)
+toBool(0.1); // bool(true)
+toBool(-37593); // bool(true)
+toBool('inactive'); // bool(true)
+toBool('false'); // bool(true)
 </PHP>
-
-While this works, and is already possible today, it has a quite a range of disadvantages:
-
-  * For constructors in particular, it precludes usage of constructor promotion.
-  * The available options are not documented in the signature. You have to look at the implementation or phpdoc to find out what is supported and what types it requires. Phpdoc also provides no universally recognized way to document this.
-  * The type of the option values is not validated unless manually implemented. In the above example, the types will actually be validated due to the use of property types, but this will not follow usual PHP semantics (e.g. if the class declaration uses strict_types, the options will also be validated according to strict_types).
-  * Unless you go out of your way to protect against this, passing of unknown options will silently succeed.
-  * Use of an options array requires a specific decision at the time the API is introduced. If you start off without one, but then add additional optional parameters and realize that using an options array would be cleaner, you cannot perform the switch without breaking existing API users.
-
-Named parameters provide the same functionality as options arrays, without any of the disadvantages.
-
-==== Attributes ====
-
-The use of named arguments in phpdoc annotations is already wide-spread in the ecosystem. While the [[rfc:attributes_v2|Attributes RFC]] replaces phpdoc annotations with a first-class language feature, it does not provide support for named arguments. This means that existing annotations will have to introduce significant structural changes to migrate to the attribute system.
-
-For example, the Symfony ''Route'' annotation accepts a number of optional options such as ''methods''. Currently, a migration to attributes might look like this:
-
-<PHP>
-/**
- * @Route("/api/posts/{id}", methods={"GET","HEAD"})
- */
-public function show(int $id) { ... }
-
-// Might become:
-
-<<Route("/api/posts/{id}", ["methods" => ["GET", "HEAD"]])>>
-public function show(int $id) { ... }
-</PHP>
-
-Introducing named arguments in the same version as attributes would allow retaining exactly the same structure as before:
-
-<PHP>
-<<Route("/api/posts/{id}", methods: ["GET", "HEAD"])>>
-public function show(int $id) { ... }
-</PHP>
-
-Some changes would still be necessary due to the lack of support for nested annotations, but this would make the migration a good bit smoother.
 
 ===== Proposal =====
 
-==== Syntax ====
+In coercive typing mode, limit the allowed scalar values for typed boolean arguments, boolean return types and boolean class properties to the following:
 
-Named arguments are passed by prefixing the value with the parameter name followed by a colon:
+  * 0 (and -0) integer (= false)
+  * 0.0 (and -0.0) float (= false)
+  * "0" string (= false)
+  * "" (empty) string (= false)
+  * 1 integer (= true)
+  * 1.0 float (= true)
+  * "1" string (= true)
+
+Any other integers, floats and strings are always coerced to true (no behavior change) but will emit an ''E_DEPRECATED'' notice:
+
+  * For coercions from string the deprecation notice is: Implicit conversion from string "%s" to true, only "", "0" or "1" are allowed
+  * For coercions from int the deprecation notice is: Implicit conversion from int %d to true, only 0 or 1 are allowed
+  * For coercions from float the deprecation notice is: Implicit conversion from float %f to true, only 0 or 1 are allowed
+
+These would be the notices generated for the examples in the introduction:
 
 <PHP>
-callAFunction(paramName: $value);
+toBool('0');
+toBool(-0);
+toBool('-0'); // Implicit conversion from string "-0" to true, only "", "0" or "1" are allowed
+toBool(0.0);
+toBool('0.0'); // Implicit conversion from string "0.0" to true, only "", "0" or "1" are allowed
+toBool(0.1); // Implicit conversion from float 0.1 to true, only 0 or 1 are allowed
+toBool(-37593); // Implicit conversion from int -37593 to true, only 0 or 1 are allowed
+toBool('inactive'); // Implicit conversion from string "inactive" to true, only "", "0" or "1" are allowed
+toBool('false'); // Implicit conversion from string "false" to true, only "", "0" or "1" are allowed
 </PHP>
 
-It is possible to use reserved keywords as the parameter name:
+In the long-term these deprecations should be raised to a warning or to a ''TypeError''. The earliest for that is the next major version (PHP 9.0). At that time there will have been multiple years of experience with these new deprecation notices, making it easier to decide on how to continue and the impact in the PHP ecosystem.
+
+===== Rationale =====
+
+This RFC boils down to these questions:
+
+  * Are you losing information when you reduce a value like -375, "false" or NaN to true for a typed boolean?
+  * Would you want to know when a value like -375, "false" or NaN is given to a typed boolean in a codebase?
+  * How likely is it that such a coercion is unintended?
+  * What about other boolean coercions in PHP? (this is handled in the next section)
+
+The main motivation for this RFC is to reduce the possibility of errors when using the boolean type in a similar way that you cannot give a typed int a non-number string - if you provide "false" or "49x" to an int argument it will result in a TypeError. It will not be silently coerced to 0 (or 49), as that loses information and can lead to subtle bugs. This RFC does the same thing for boolean types:
+
+  * Avoid losing information when an unusual value is coerced to a boolean type
+  * Make the boolean type and the type juggling system safer and more consistent
+  * Setting up only 7 scalar values as unambiguous boolean values is easy to document and reason about
+
+When implementing this feature I found two bugs in php-src tests and the test runner that are most likely typical cases:
+
+  * In the PHP test runner the strings "success" and "failed" were given to a boolean function argument called $status. Maybe that argument was a string previously and changed to a boolean by mistake, but it clearly was a bug that has never been noticed so far.
+  * In an IMAP test a boolean argument $simpleMessages always got the string "multipart". I found out that there was another function definition which had the argument $new_mailbox at that position. This was most likely a copy-paste error or the wrong function was looked up when writing the test.
+  
+Changing the type of an argument, return or property in a codebase happens often, and because the boolean type accepts everything with no complaint it makes it easy to miss problems when changing a type to bool. In current PHP codebases there are likely a few of these unintended coercions to booleans which would be easy to fix if a developer noticed that an unusual value is coerced to true.
+
+While using strict_types is an option to avoid unintended type coercions, the goal of this RFC is to make coercions less error-prone when not using strict_types. Silently coercing "failed" (or -37486, or 0.01) to true seems like an invitation to unexpected behavior. By introducing this deprecation notice users will have the chance of finding surprising boolean coercions in their code while the coercion behavior will remain the same.
+
+===== Other boolean coercions in PHP =====  
+
+Typed booleans (arguments, returns, properties) as discussed in this RFC are not the only part of PHP where implicit boolean coercions happen. They also occur in expressions like ''if'', the ternary operator ''?:'', or logical operators ''&&'' / ''||''. Whenever an expression in that context is not clearly true or false it is implicitly coerced to true or false.
+
+However in these expressions you can use any values and are not restricted to scalar types like with typed booleans:
 
 <PHP>
-array_foobar(array: $value);
-</PHP>
-
-The parameter name must be an identifier, it's not possible to specify it dynamically:
-
-<PHP>
-// NOT supported.
-function_name($variableStoringParamName: $value);
-</PHP>
-
-This syntax is not supported, because it would create an ambiguity: Is ''function_name(FOO: $value)'' a simple named argument use, or does it intend to use the value of the ''FOO'' constant as the parameter name? However, a different way to specify the parameter name dynamically is provided in the argument unpacking section.
-
-Some syntax alternatives that are technically feasible are:
-
-<PHP>
-function_name(paramName: $value);    // (1) as proposed
-function_name(paramName => $value);  // (2)
-function_name(paramName = $value);   // (3)
-function_name(paramName=$value);     // (3) formatting variation
-function_name($paramName: $value);   // (4)
-function_name($paramName => $value); // (5)
-</PHP>
-
-It should be noted that the following syntax is not possible, because it already constitutes legal code:
-
-<PHP>
-function_name($paramName = $value);
-</PHP>
-
-A previous version of this RFC proposed ''%%=>%%'' (variant 2) as the named arguments syntax. However, practical usage has found this to be rather noisy and non-ergonomic. See the [[#shorthand_syntax_for_matching_parameter_and_variable_name|future scope]] section for some additional syntax considerations, and why '':'' might be a good choice.
-
-==== Constraints ====
-
-It is possible to use positional and named arguments in the same call, however the named arguments must come after the positional arguments:
-
-<PHP>
-// Legal
-test($foo, param: $bar);
-// Compile-time error
-test(param: $bar, $foo);
-</PHP>
-
-Passing the same parameter multiple times results in an ''Error'' exception:
-
-<PHP>
-function test($param) { ... }
-
-// Error: Named parameter $param overwrites previous argument
-test(param: 1, param: 2);
-// Error: Named parameter $param overwrites previous argument
-test(1, param: 2);
-</PHP>
-
-The first case is trivially illegal, because it specifies the same named argument twice. The second case is also illegal, because the positional argument and the named argument refer to the same parameter. 
-
-With the exception of variadic functions discussed below, specifying an unknown parameter name results in an ''Error'' exception:
-
-<PHP>
-function test($param) { ... }
-
-// Error: Unknown named parameter $parma
-test(parma: "Oops, a typo");
-</PHP>
-
-==== Variadic functions and argument unpacking ====
-
-Functions declared as variadic using the ''%%...$args%%'' syntax will also collect unknown named arguments into ''$args''. The unknown named arguments will always follow after any positional arguments and will be in the order in which they were passed.
-
-<code php>
-function test(...$args) { var_dump($args); }
-
-test(1, 2, 3, a: 'a', b: 'b');
-// [1, 2, 3, "a" => "a", "b" => "b"]
-</code>
-
-The ''%%foo(...$args)%%'' unpacking syntax from the [[rfc:argument_unpacking|argument unpacking RFC]] also supports unpacking named arguments:
-
-<code php>
-$params = ['start_index' => 0, 'num' => 100, 'value' => 50];
-array_fill(...$params);
-</code>
-
-Any value with a string key is unpacked as a named argument. Integers keys are treated as normal positional arguments (with the integer value being ignored). Keys that are neither integers or strings (only possible for iterators) result in a ''TypeError''.
-
-Argument unpacking is also subject to the general rule that positional arguments must always precede named arguments. Both of the following calls throw an ''Error'' exception:
-
-<PHP>
-array_fill(...['start_index' => 0, 100, 50]);
-array_fill(start_index: 0, ...[100, 50]);
-</PHP>
-
-Furthermore, unpacking is subject to the usual limitation that no positional or named arguments may follow the unpack:
-
-<PHP>
-test(...$values, $value); // Compile-time error (as before)
-test(...$values, paramName: $value); // Compile-time error
-</PHP>
-
-One of the primary use-cases for that variadic/unpacking syntaxes is forwarding of arguments:
-
-<PHP>
-function passthru(callable $c, ...$args) {
-    return $c(...$args);
-}
-</PHP>
-
-The support for named arguments in both variadics and argument unpacking ensures that this pattern will continue to work once named arguments are introduced.
-
-==== func_get_args() and friends ====
-
-The ''func_*()'' family of functions is intended to be mostly transparent with regard to named arguments, by treating the arguments as if they were all passed positionally, and missing arguments were replaced with their defaults. For example:
-
-<PHP>
-function test($a = 0, $b = 1, $c = 2) {
-    var_dump(func_get_args());
+if ($variable) { // identical to if ($variable == true)
+  // the $variable in the if statement is coerced in the following way:
+  // - true for a string if it is not empty and not '0'
+  // - true for an int if it is not zero
+  // - true for a float if it is not zero
+  // - true for an array if it is not empty
+  // - always true for a resource
+  // - always true for an object
+  // - always false for null
 }
 
-test(c: 5);
-// Will behave exactly the same as:
-test(0, 1, 5);
-// Which is:
-// array(3) { [0] => 0, [1] => 1, [2] => 5 }
-</PHP>
-
-The behavior of ''func_num_args()'' and ''func_get_arg()'' is consistent with that of ''func_get_args()''.
-
-All three functions are oblivious to the collection of unknown named arguments by variadics. ''func_get_args()'' will not return the collected values and ''func_num_args()'' will not include them in the argument count. Collected unknown named arguments can only be accessed through the variadic parameter.
-
-==== call_user_func() and friends ====
-
-Internal functions that perform some kind of "call forwarding", including ''call_user_func()'' and ''call_user_func_array()'' support named arguments:
-
-<PHP>
-
-$func = function($a = '', $b = '', $c = '') {
-    echo "a: $a, b: $b, c: $c\n";
+if ($array) {
+  // executed for a non-empty array
 }
 
-// All of the following behave the same:
-$func('x', c: 'y');
-call_user_func($func, 'x', c: 'y');
-call_user_func_array($func, ['x', 'c' => 'y']);
+toBool($array); // TypeError, must be of type bool, array given
 </PHP>
 
-These calls are subject to the same restrictions as normal, for example there may not be positional arguments after named arguments.
-
-For ''call_user_func_array()'', this behavior constitutes a minor backwards-compatibility break: Previously, array keys were completely ignored by this function. Now, string keys will be interpreted as parameter names.
-
-While ''call_user_func(_array)'' are the "base cases", this support also extends to other similar functions, such as ''ReflectionClass::newInstance()'' and ''ReflectionClass::newInstanceArgs()''.
-
-==== __call() ====
-
-Unlike ''%%__invoke()%%'', the ''%%__call()%%'' and ''%%__callStatic()%%'' magic methods do not specify a proper method signature, so we cannot differentiate behavior based on whether the method uses variadics or not. To permit maximum functionality, ''%%__call()%%'' will collect unknown named parameters into the ''$args'' array, just like it happens for variadics:
+Typed booleans behave differently compared to these expressions because they do not accept arrays, resources, objects and null. Further restricting typed booleans is therefore not a change which makes the language more inconsistent, on the contrary, it could be an opportunity to differentiate these two use cases from each other, as they often have different expectations already:
 
 <PHP>
-class Proxy {
-    public function __construct(
-        private object $object,
-    ) {}
-    public function __call(string $name, array $args) {
-        // $name == "someMethod"
-        // $args == [1, "paramName" => 2];
-        $this->object->$name(...$args);
-    }
+// often used to check if $string is not empty, and it is reasonably clear
+if ($string) {
+  // do something with $string here
 }
 
-$proxy = new Proxy(new FooBar);
-$proxy->someMethod(1, paramName: 2);
+$obj->boolProperty = $string; // did you want to check if $string is not empty here?
+                              // is it a value from a form, API or DB that should be '', '0' or '1'?
+                              // or is it a mistake because something is missing?
 </PHP>
 
-==== Attributes ====
-
-Attributes also support named arguments:
+When giving a typed boolean a scalar value you are reducing an int, float or string to a boolean, possibly losing information, and not evaluating an expression where there is follow-up code to do something more as is the case with ''if'', ''?:'' or ''&&'' / ''||''. By limiting the values of a typed boolean the previous example becomes less ambiguous:
 
 <PHP>
-<<MyAttribute('A', b: 'B')>>
-class Test {}
+$obj->boolProperty = $string; // $string must be '', '0' or '1', otherwise we get a deprecation notice
+$obj->boolProperty = strlen($string) > 0; // instead check that $string is not empty
 </PHP>
 
-Similar to normal calls, trying to pass positional arguments after named arguments results in a compile-time error. Additionally, using the same parameter name twice results in a compile-time error.
+===== filter extension =====
 
-The ''ReflectionAttribute::getArguments()'' method returns positional and named arguments in the same format as variadics do:
+The filter extension has its own way to validate booleans (FILTER_VALIDATE_BOOLEAN):
+
+  * "1", "true", "on" and "yes" evaluate to true, everything else to false
+  * if FILTER_NULL_ON_FAILURE is also used, only "0", "false", "off", "no" and "" evaluate to false, everything else to null
+  
+This behavior is incompatible with how PHP handles boolean coercions, making it impossible to resolve the behaviors without massive BC breaks. But it does add another argument in favor of this RFC - somebody switching from the filter extension to built-in boolean types has a big chance of accidentally introducing behavior changes in their application:
+
+  * PHP converts most values to true, while the filter extension converts these values to false (or null) - for example "success", "false", "off", "5", or "-30"
+  * The deprecation notice would make all these occurences visible and easy to fix
+  
+Usages of FILTER_VALIDATE_BOOLEAN are otherwise not affected by this RFC - that behavior remains unchanged.
+
+===== Considered alternatives =====
+
+It was briefly considered to allow more values for typed booleans instead of only 0, 1 and an empty string - for example the string "on". But it would be difficult and a bit arbitrary to determine where to draw the line for possible values, and an important goal of this RFC is for the coercion behavior to be simple and intuitive to understand. 0 and 1 are common alternative values to express a boolean in many programming languages, in databases and in APIs. Other values are not as widely used and would only make the coercion behavior more difficult to understand.
+
+Another possibility would have been to also change the behavior of boolean coercions, for example coerce the string "false" to false instead of true. Yet this would be quite a substantial BC break with no obvious benefits. With this RFC there will be a deprecation notice when coercing "false" to true in order for such behavior to be noticed instead of having to change it.
+
+===== Implementation notes =====
+
+As this is my first RFC and my first contribution to php-src, I mimicked the code from the "Deprecate implicit non-integer-compatible float to int conversions" RFC (https://github.com/php/php-src/pull/6661). I added some tests and made sure the existing tests still pass. There might be some room for improvements on my implementation though, so any feedback is welcome!
+
+===== Backward Incompatible Changes =====
+
+The following operations will now emit an ''E_DEPRECATED'' if any scalar value other than "", "0", "1", 0, 1, 0.0, 1.0 is used:
+
+  * Assignment to a typed property of type ''bool'' in coercive typing mode
+  * Argument for a parameter of type ''bool'' for both internal and userland functions in coercive typing mode
+  * Returning such a value for userland functions declared with a return type of ''bool'' in coercive typing mode
+  
+The actual conversion to a boolean value remains unchanged - anything that was coerced to false before will still be coerced to false, and anything coerced to true will still be coerced to true.
+
+The following shows typical ways to avoid a deprecation notice:
 
 <PHP>
-var_dump($attr->getArguments());
-// array(2) {
-//   [0]=>
-//   string(1) "A"
-//   ["b"]=>
-//   string(1) "B"
-// }
+// Resolution 1: Check for an expected value or range
+toBool($number > 0);
+toBool($int === 5);
+toBool($string === 'success');
+toBool(strlen($string) > 0);
+ 
+// Resolution 2: Check for truthiness
+toBool($scalar == true);
+ 
+// Resolution 3: Explicitly cast the argument
+toBool((bool) $scalar);
 </PHP>
 
-The ''ReflectionAttribute::newInstance()'' method will invoke the constructor with named arguments following the rules of ordinary calls.
+With the many deprecation notices that appeared in PHP 8.0 and 8.1 there is some wariness if more deprecation notices are worth it. These are the arguments why the RFC author thinks it will be worth it without too much pain:
 
-==== Parameter name changes during inheritance ====
+  * Each individual case is easy to fix, the easiest (but also least useful) is to loosly compare a value to true ($value == true) instead of directly giving the value to a typed bool
+  * Most of the coercions that will lead to a deprecation notice are likely to be unintended and the information given in the notice should make it reasonably clear to a developer whether it is a bug and how to fix it
+  * bool arguments for internal functions are usually optional, less numerous and are much more likely to be set by a constant expression than a variable
+  * deprecation notices do not demand immediate attention, and the "disadvantage" of the high number of deprecation notices with 8.0 and 8.1 should be that most tooling and codebases have gotten more used to dealing with them in their own time and not see them as an immediate call to action
+  
+===== Proposed PHP Version =====
 
-Currently, parameter names are not part of the signature-contract. When only positional arguments are used, this is quite reasonable: The name of the parameter is irrelevant to the caller. Named arguments change this. If an inheriting class changes a parameter name, calls using named arguments might fail, thus violating the Liskov substitution principle (LSP):
+Next minor version: PHP 8.2.
 
-<code php>
-interface I {
-    public function test($foo, $bar);
-}
+===== Unaffected PHP Functionality =====
 
-class C implements I {
-    public function test($a, $b) {}
-}
+  * Manually casting to boolean will not raise a notice.
+  * Strict Type behaviour is unaffected.
+  * Implicit boolean expressions (as used in if, ternary, logic operators) are not affected.
+  * FILTER_VALIDATE_BOOLEAN in the filter extension is not affected.
 
-$obj = new C;
+===== Patches and Tests =====
 
-// Pass params according to I::test() contract
-$obj->test(foo: "foo", bar: "bar"); // ERROR!
-</code>
+Patch: https://github.com/php/php-src/pull/8565
 
-[[https://externals.io/message/109549#109581|This mail]] contains a detailed analysis of how this issue is handled by different languages. To summarize the different observed behaviors:
+===== References =====
 
-  * Python and Ruby allow parameter name changes silently, and throw an error during the call.
-  * C# and Swift introduce a new overload (or error if override is requested). As PHP does not support method overloading, this is not an option for us.
-  * Kotlin warns on parameter name change and errors on call.
-
-Because we are retrofitting named arguments to an old language with a large body of existing code, we do not consider it sensible to unconditionally diagnose parameter name mismatches, especially considering that a lot of old code will never be invoked using named arguments.
-
-This RFC proposes to follow the model of Python or Ruby: PHP will silently accept parameter name changes during inheritance, which may result in call-time exceptions when methods with renamed parameters are called. Static analyzers and IDEs are encouraged to diagnose parameter name mismatches (with appropriate suppression facilities).
-
-This is a pragmatic approach that acknowledges that named arguments are not relevant for many methods, and renamed parameters will usually not become a problem in practice. There is no conceivable reason why a method such as ''offsetGet()'' would be called with named parameters, and there is thus no benefit in requiring ''offsetGet()'' implementors to use the same parameter name.
-
-As previously mentioned, this approach is also used by some existing languages, most notably Python, which is one of the languages with the heaviest usage of named arguments. This is hard evidence that such an approach does work reasonably well in practice, though of course the situations are somewhat different.
-
-The [[#to_parameter_name_changes_during_inheritance|alternatives section]] describes a possible alternative that is not pursued by this RFC, but could be added later on if we felt a strong need.
-
-==== Internal functions ====
-
-Historically, internal functions did not have a well-defined concept of a parameter "default value". While they specify which parameters are optional, the actual default value is determined by the implementation and not available for introspection.
-
-Since PHP 8.0, it is possible to specify reflectible default values for internal functions, and this has already happened for functions which are bundled with the PHP distribution. This proposal is based on this default value information: Skipped parameters will be replaced by their default value before the internal implementation of the function is invoked.
-
-However, it is not possible to specify a sensible notion of "default value" for all parameters. For example:
-
-<PHP>
-function array_keys(array $arg, $search_value = UNKNOWN, bool $strict = false): array {}
-</PHP>
-
-The ''array_keys()'' function has fundamentally different behavior depending on whether ''$search_value'' is passed. There exists no value that can be passed as ''$search_value'', which will exhibit the same behavior as not passing the parameter. Such parameters are denoted as ''UNKNOWN'' in stubs.
-
-Skipping such a parameter will result in an ''Error'' exception being thrown.
-
-<PHP>
-// This is okay.
-array_keys($array, search_value: 42, strict: true);
-
-// Error: Argument #2 ($search_value) must be passed explicitly,
-//        because the default value is not known
-array_keys($array, strict: true);
-</PHP>
-
-I believe this is exactly the behavior we want, as specifying ''$strict'' without ''$search_value'' does not make sense.
-
-The disadvantage of this general approach is that it requires default value information to be provided in order to work. 3rd-party extensions that do not provide this information (yet), will work with named arguments, but will not support skipping of arguments.
-
-The alternative, which has been pursued by a previous version of this proposal, is to leave UNDEF values on the stack and let them be interpreted appropriately by the internal parameter parsing mechanism (ZPP). This means that many cases will "just work", but some cases, especially those containing explicit argument counts checks (''ZEND_NUM_ARGS()''), may not just misbehave, but result in memory unsafety and crashes.
-
-=== Documentation / Implementation mismatches ===
-
-Currently, the parameter names used in the documentation and the implementation do not always match. If this proposal is accepted, we will synchronize the parameter names between both. This will also involve creating some naming guidelines, such as on the use of casing in parameter names.
-
-=== Internal APIs ===
-
-As outlined above, the existence of named arguments is mostly transparent for internal functions. Internal functions will see ordinary positional arguments, without any indication that the original call occurred via named arguments. As such, code adjustments will usually not be necessary.
-
-One special case to consider are variadic functions, which will collect unknown named parameters into the ''extra_named_params'' field in the call ''execute_data'' and set the ''ZEND_CALL_HAS_EXTRA_NAMED_PARAMS'' call info flag. On the assumption that most existing internal functions will not be able to do anything useful with this information, functions using the ZPP ''*'' or ''+'' specifiers, or the ''Z_PARAM_VARIADIC'' and ''Z_PARAM_VARIADIC_EX'' macros will automatically throw an ''ArgumentCountError'' if extra unknown named arguments are encountered.
-
-<PHP>
-array_merge([1, 2], a: [3, 4]);
-// ArgumentCountError: array_merge() does not accept unknown named parameters
-</PHP>
-
-Functions that do want to accept extra unknown named arguments should use the ''Z_PARAM_VARIADIC_WITH_NAMED'' FastZPP macro instead:
-
-<code>
-zval *args;
-uint32_t num_args,
-HashTable *extra_named;
-ZEND_PARSE_PARAMETERS_START(0, -1)
-    Z_PARAM_VARIADIC_WITH_NAMED(args, num_args, extra_named)
-ZEND_PARSE_PARAMETERS_END();
-</code>
-
-The ''zend_call_function()'' mechanism is extended to support calls with named parameters by adding a new field into the ''zend_fcall_info'' structure:
-
-<code>
-typedef struct _zend_fcall_info {
-    /* ... */
-    HashTable *named_params;
-} zend_fcall_info;
-</code>
-
-Code that manually initializes ''zend_fcall_info'' structures, instead of going through supported initialization functions, should take care to initialize this field to ''NULL'' if it is unused.
-
-For convenience of implementation for ''call_user_func_array()'' style functions, ''named_params'' may also contain positional arguments, that will be appended to the normal ''params''. As usual, ordering positional arguments after named ones in the array will result in an exception.
-
-===== Backwards incompatible changes =====
-
-In the narrow sense, this proposal has only one backwards-incompatible change: String keys in the ''call_user_func_array()'' arguments will now be interpreted as parameter names, instead of being silently ignored.
-
-Next to this actual incompatibility, there are also two potential complications that may occur when named arguments are used with code that is not prepared to deal with them:
-
-First, as parameter names are now significant, they should not be changed during inheritance. Existing code that performs such changes may be practically incompatible with named arguments. More generally, greater care needs to be taken when choosing parameter names, as they are now part of the API contract.
-
-Second, code may not be prepared to deal with unknown named arguments collected into variadics. In most cases this will manifest with the parameter names simply being ignored, which is mostly harmless.
-
-===== Alternatives =====
-
-==== To named arguments ====
-
-There are two primary alternative implementation approaches for named arguments that I'm aware of, which will be briefly discussed in the following.
-
-First, to make named arguments opt-in. The current RFC allows all functions/methods to be invoked using named arguments. Requiring an explicit opt-in through a keyword or attribute would nicely side-step the problem of parameter name changes, as we could enforce those only for functions that opt-in to named arguments.
-
-The big disadvantage of the opt-in approach is, of course, that named arguments would not work with any existing code (both userland and internal). I think that this would be a big loss to the feature, to the point that it might no longer be worthwhile. In particular, this would lose out on the object initialization use-case (as the syntax would not be usable in most cases), and would not help with old APIs, which tend to be particularly bad offenders when it comes to having many defaulted parameters and boolean flags.
-
-I think it would be more fruitful to provide an explicit opt-out mechanism, such as a ''%%<<NoNamedArgs>>%%'' attribute, for APIs that explicitly do not wish to support named arguments, and the API burden that comes with it. (A possible example is the ''ArrayAccess'' interface, which is almost never invoked directly, and for which it is particularly common to change the parameter names for each implementer.)
-
-Second, implementing named arguments as a side-effect of improved array destructuring functionality. As an example, let's return to the ''ParamNode'' with ''$options'' array example from earlier, and rewrite it to use array destructuring:
-
-<PHP>
-class ParamNode extends Node {
-    public string $name;
-    public ExprNode $default;
-    public TypeNode $type;
-    public bool $byRef;
-    public bool $variadic;
-
-    public function __construct(string $name, array $options) {
-        [
-            "default" => ExprNode $default = null,
-            "type" => TypeNode $type = null,
-            "byRef" => bool $type = false,
-            "variadic" => bool $variadic = false,
-            "startLoc" => Location $startLoc = null,
-            "endLoc" => Location $endLoc = null,
-        ] = $options;
-
-        $this->name = $name;
-        $this->default = $default;
-        $this->type = $type;
-        $this->byRef = $byRef;
-        $this->variadic = $variadic;
-        parent::__construct($startLoc, $endLoc);
-    }
-}
-</PHP>
-
-This uses the existing syntax for array destructuring with keys, but additionally assumes support for destructuring default values, as well as destructuring type checks. As an additional step, we could support destructuring directly in the function signature:
-
-<PHP>
-class ParamNode extends Node {
-    public string $name;
-    public ExprNode $default;
-    public TypeNode $type;
-    public bool $byRef;
-    public bool $variadic;
-
-    public function __construct(
-        string $name,
-        array [
-            "default" => ExprNode $default = null,
-            "type" => TypeNode $type = null,
-            "byRef" => bool $type = false,
-            "variadic" => bool $variadic = false,
-            "startLoc" => Location $startLoc = null,
-            "endLoc" => Location $endLoc = null,
-        ],
-    ) {
-        $this->name = $name;
-        $this->default = $default;
-        $this->type = $type;
-        $this->byRef = $byRef;
-        $this->variadic = $variadic;
-        parent::__construct($startLoc, $endLoc);
-    }
-}
-</PHP>
-
-While I think that improvements to array destructuring are worth pursuing, I don't think this covers the named parameter use-case satisfactorily. While this does take care of the type-safety concern, it still requires APIs to be specifically designed around an options array.
-
-Additionally, this does not solve the problem of unknown options being silently accepted (though this could be part of a new infallible pattern matching syntax), and of unclear interaction with features like ''strict_types''.
-
-==== To parameter name changes during inheritance ====
-
-This RFC proposes to silently allow parameter name changes during inheritance. This is pragmatic, but may result in call-site errors when parameter names are changed and methods are invoked on child objects. An alternative is to automagically allow using parameter names from parent methods, as the following example illustrates:
-
-<PHP>
-interface I {
-    public function test($foo, $bar);
-}
-
-class C implements I {
-    public function test($a, $b) {}
-}
-
-$obj = new C;
-
-// Pass params according to C::test() contract
-$obj->test(a: "foo", b: "bar");     // Works!
-// Pass params according to I::test() contract
-$obj->test(foo: "foo", bar: "bar"); // Also works!
-</PHP>
-
-Here using ''foo'' and ''bar'' as parameter names is allowed, and will be interpreted as ''a'' and ''b'', because there is a parent method using those names. This makes the methods artificially and automagically LSP compatible.
-
-Names from parent methods are registered as aliases, but not bound to a specific signature. As such, it's possible (though not recommended) to mix parameter names from different signatures:
-
-<PHP>
-// Use parameter names from both C::test() and I::test()
-$obj->test(a: "foo", bar: "bar"); // Also works.
-</PHP>
-
-From a design perspective it would be better to forbid such calls, but I don't believe that it is worth the technical and performance cost this would entail.
-
-There is one problem with this scheme: What happens if two signatures share the same name at different positions?
-
-<PHP>
-interface I {
-    public function test($foo, $bar);
-}
-
-class C implements I {
-    public function test($bar, $foo) {}
-}
-
-// Fatal error: Parameter $foo of C::test() at position #2 conflicts with
-//              parameter $foo of I::test() at position #1
-</PHP>
-
-In this case, the LSP inheritance checks will report a fatal error. It is expected that this restriction will have much less impact in practice than a blanket prohibition of parameter renames, and that it will mostly point out legitimate LSP violations that hold even in the absence of named arguments. An analysis of affected cases in the top 2k composer packages can be found at https://gist.github.com/nikic/6cc9891381a83b8dca5ebdaef1068f4d. (It should be noted that the analysis is not fully accurate and may have false negatives.)
-
-Parameter names from prototype methods can come from a number of sources:
-
-  * Parent methods, including grand parents.
-  * Interface methods, including implementations of the same method from multiple interfaces.
-  * Abstract trait methods.
-
-As such, a single parameter can have a potentially large number of aliases from a large number of prototypes.
-
-A case that requires special consideration are parameters that are absorbed by a variadic in a child class:
-
-<PHP>
-class A {
-    public function method($a) {}
-}
-class B extends A {
-    public function method(...$args) {}
-}
-class C extends B {
-    public function method($c = null, ...$args) {}
-}
-
-(new B)->method(a: 42);
-(new C)->method(a: 42);
-</PHP>
-
-There are principally two ways in which this might behave:
-
-<PHP>
-// Option A:
-(new B)->method(a: 42); // $args = [42]
-(new C)->method(a: 42); // $c = 42, $args = []
-
-// Option B:
-(new B)->method(a: 42); // $args = ['a' => 42]
-(new C)->method(a: 42); // $c = null, $args = ['a' => 42]
-</PHP>
-
-With option A, we would remember that ''$a'' was the first parameter of a parent method, and as such store the value at offset 0 rather than under the name ''%%"a"%%'' in the variadic parameter. Consequently, in the ''C'' class, the parameter ''$a'' would be considered an alias of ''$c''.
-
-With option B, we instead discard parent parameters that are absorbed into a variadic. This means that the parameter ''$a'' will be stored under the name ''%%"a"%%'' in the variadic parameter for both classes ''B'' and ''C''. This is the option I would prefer, as it avoids further special-casing of variadic argument collection.
-
-While I think this approach to the LSP problem is conceptually elegant, it turns out that it involves quite a few language design edge cases, as well as non-trivial technical complexity.
-
-More importantly, code that renames parameters during inheritance may fall into one of two categories: Either the code is not used with named parameters, in which case the parameter names don't matter in the first place, or it is used with named parameters, in which case the names should really, really be changed to match across the inheritance hierarchy. Implementing this mechanism papers over a migration issue by introducing a core language feature that will have to be supported forever.
-
-===== Future Scope =====
-
-==== Shorthand syntax for matching parameter and variable name ====
-
-Especially for constructors, one of the common use-cases is to assign local variables to parameters with the same name, for example:
-
-<PHP>
-new ParamNode(
-    name: $name,
-    type: $type,
-    default: $default,
-    variadic: $variadic,
-    byRef: $byRef
-);
-</PHP>
-
-Some languages offer special syntax (both for object initialization and destructuring) to avoid repeating the same name twice. Here is how such a syntax could look like in PHP, depending on the chosen named arguments syntax:
-
-<PHP>
-new ParamNode(:$name, :$type, :$default, :$variadic, :$byRef);
-new ParamNode(=$name, =$type, =$default, =$variadic, =$byRef);
-new ParamNode(=> $name, => $type, => $default, => $variadic, => $byRef);
-</PHP>
-
-It should be noted that this problem is not specific to named arguments, and also affects array destructuring:
-
-<PHP>
-// What you have to write right now:
-['x' => $x, 'y' => $y, 'z' => $z] = $point;
-</PHP>
-
-Analogously to the above examples, this could be written as:
-
-<PHP>
-[:$x, :$y, :$z] = $point;
-[=$x, =$y, =$z] = $point;
-[=> $x, => $y, => $z] = $point;
-</PHP>
-
-Finally, this could also be useful for array construction, obsoleteing the ''compact()'' magic function and making code more analyzable:
-
-<PHP>
-return compact('x', 'y', 'z');
-
-// Could become:
-return [:$x, :$y, :$z];
-return [=$x, =$y, =$z];
-return [=> $x, => $y, => $z];
-</PHP>
-
-If I wanted to put these ideas into a general framework, I think one way to go about this would be as follows:
-
-  * Consider ''identifier: $expr'' as a shorthand for ''%%"identifier" => $expr%%''.
-  * Consider '':$variable'' as a shorthand for ''variable: $variable'' and thus ''%%"variable" => $variable%%''.
-
-Under this proposal, all three of the following would behave identically:
-
-<PHP>
-$point = ['x' => $x, 'y' => $y, 'z' => $z];
-$point = [x: $x, y: $y, z: $z];
-$point = [:$x, :$y, :$z];
-</PHP>
-
-Approaching from this angle, the named argument syntax we should use is ''paramName: $value'', or '':$paramName'' for short.
-
-==== Positional-only and named-only parameters ====
-
-A useful extension of this proposal would be to allow parameters that can only be used positionally, or only using named arguments. This is primarily helpful for API designers, because it gives them more freedom: A positional-only parameter may be freely renamed, while a named-only parameter may be freely reordered.
-
-===== Vote =====
-
-Voting opened 2020-07-10 and closes 2020-07-24. A 2/3 majority is required.
-
-<doodle title="Add named argument support?" auth="nikic" voteType="single" closed="true">
-   * Yes
-   * No
-</doodle>
-
-===== Changelog =====
-
-  * 2020-07-06: Move alternative LSP behavior to "alternatives", it's not part of the main RFC.
-  * 2020-07-06: Specify that call_user_func etc support named args.
-  * 2020-07-03: Add information on internal APIs.
-  * 2020-07-03: Explicitly mention behavior of attributes.
-  * 2020-06-23: Add alternative LSP behavior.
-  * 2020-06-23: Remove syntax as open question, specify use of '':''.
-  * 2020-05-05: RFC picked up again for PHP 8.0.
-  * 2013-09-09: ''func_get_arg(s)'' now return default values on skipped parameters.
+Initial mailing list discussion: <https://externals.io/message/117608> \\
+RFC mailing list discussion: <https://externals.io/message/117732> \\
