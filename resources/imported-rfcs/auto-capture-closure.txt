@@ -35,47 +35,100 @@ $fn3 = fn ($x): int { // auto-capture + statement list
 };
 </code>
 
-===== Proposal =====
+==== Why add another function mechanism? ====
 
-==== Background ====
+Long Closures in PHP can be quite verbose, even when they only perform a simple operation. This is due to a large amount of syntactic boilerplate that is needed in “long closures” to manually import used variables with the ''use'' keyword.
 
-As of PHP 8.1, the following syntaxes around functions have the following meaning:
+While one-line arrow functions solve this problem to some extent, there are ample cases that require a 2-3 statement body.  That is still short enough that the chances of a developer confusing in-function and out-of-function variables is very remote, but the burden of manually closing over 3-4 variables is relatively high.
+
+One example is when you are within a class method with multiple arguments and you want to simply return a closure that uses all the arguments, using the “use” keyword to list all the arguments is entirely redundant and pointless.
+
+Then there are often use-cases with ''array_filter()'' and similar functions where the ''use()'' just adds visual noise to what the code actually means.
+
+The trend in PHP in recent years has been toward more compact but still readable syntax that eliminates redundancy.  Property promotion, arrow functions, the nullsafe operator, and similar recent well-received additions demonstrate this trend.  This RFC seeks to continue that trend to make PHP more pleasant to write while still being just as clear to read.
+
+==== Examples ====
+
+Closures are often used to "wrap" some behavior in other behavior.  One example provided by Mark Randall is for a throw-aware buffer.  The following is actual code he wrote:
 
 <code php>
-
-// A named, globally available function.
-// No variables are auto-captured from the environment.
-// The body is a statement list, with possibly a return statement.
-function foo($a, $b, $c): int {
-  return $a * $b * $c;
-}
-
-// An anonymous, locally available function.
-// Variables are explicitly captured lexically. 
-// The body is a statement list, with possibly a return statement.
-$foo = function ($a, $b) use ($c) {
-  return $a * $b * $c;
+$x = function () use ($to, $library, $thread, $author, $title, $library_name, $top_post) {
+// ...
 };
-
-// An anonymous, locally available function.
-// Variables are auto-captured lexically.
-// The body is a single-expression, whose value is returned.
-$foo = fn($a, $b): int => $a * $b * $c;
 </code>
 
-That is, a function may be named or local/anonymous, auto-capture or not, and a statement list or single expression.  That means there are 8 possible combinations of properties, of which only three are currently supported.
+From Mark: "That was just to get those variables inside a callback that could be 
+invoked inside a throw-aware buffering helper."
 
-The declined [[rfc:short-functions|Short Functions]] RFC sought to add one additional combination: named, no-capture, single-expression.
+Another similar example is for wrapping behavior in a transaction.  Often, that is done by passing a callable to an ''inTransaction()'' method or similar.
 
-This RFC seeks to add a different combination: anonymous, auto-capture, statement list.
+<code php>
+public function savePost($user, $date, $title, $body, $tags) {
+  return $this->db->inTransaction(function() use ($user, $date, $title, $body, $tags) {
+    $this->db->query(...);
+    $this->db->query(...);
+    return $this->db->lastInsertId();
+  });
+}
+</code>
 
-The remaining potential combinations would be:
+In this case, the ''use''d variable listing is entirely redundant and pointless, much the same as constructor property promotion eliminated entirely redundant boilerplate.  (Though admittedly, the difference there was greater.)
 
-  * named function, auto-capture, statement list - This is of little use in practice as there is nothing to auto-capture, except potentially global variables.
-  * named function, auto-capture, expression - Ibid.
-  * anonymous function, manual-capture, expression - While this form would be possible to add, its use cases are limited.  The existing short-closure syntax is superior in nearly all cases.
+This code could, with this RFC, be simplified to the following, which is no less debuggable, more readable, and less typing to produce:
 
-None of these additional variants are included in this RFC.
+<code php>
+public function savePost($user, $date, $title, $body, $tags) {
+  return $this->db->inTransaction(fn() {
+    $this->db->query(...);
+    $this->db->query(...);
+    return $this->db->lastInsertId();
+  });
+}
+</code>
+
+As noted, inline callbacks may also need to capture multiple variables for only a short operation.
+
+<code php>
+/** @var Product[] */
+$arr = [ ... ];
+
+$wantApproved = true;
+$size = 'L'
+
+$filtered = array_filter($arr, function ($item) use ($wantApproved, $size): bool {
+  if ($wantApproved) {
+    return $item->isApproved();
+  } else if ($size) {
+    return $item->size() == $size;
+  } else {
+    return false;
+  }
+});
+</code>
+
+In this case, again, the explicit ''use'' clause offers no clarity, only visual noise.  This RFC allows it to be simplified to:
+
+<code php>
+/** @var Product[] */
+$arr = [ ... ];
+
+$wantApproved = true;
+$size = 'L'
+
+$filtered = array_filter($arr, fn ($item): bool {
+  if ($wantApproved) {
+    return $item->isApproved();
+  } else if ($size) {
+    return $item->size() == $size;
+  } else {
+    return false;
+  }
+});
+</code>
+
+The majority of closures users fall into these type of categories.
+
+===== Proposal =====
 
 ==== Auto-capture multi-statement closures ====
 
@@ -86,7 +139,7 @@ Specifically, this RFC adds the following syntax:
 // Variables are auto-captured lexically.
 // The body is a statement list, with possibly a return statement;
 $c = 1;
-$foo = fn($a, $b):int {
+$foo = fn(int $a, int $b):int {
   $val = $a * $b;
   return $val * $c;
 };
@@ -214,18 +267,6 @@ The capture analysis approach described above makes auto-capturing multi-stateme
 
 For more benchmark details, see: https://gist.github.com/arnaud-lb/d9adfbf786ce9e37c7157b0f9c8d8e13
 
-==== Why add another function mechanism? ====
-
-Long Closures in PHP can be quite verbose, even when they only perform a simple operation. This is due to a large amount of syntactic boilerplate that is needed in “long closures” to manually import used variables with the ''use'' keyword.
-
-While one-line arrow functions solve this problem to some extent, there are ample cases that require a 2-3 statement body.  That is still short enough that the chances of a developer confusing in-function and out-of-function variables is very remote, but the burden of manually closing over 3-4 variables is relatively high.
-
-One example is when you are within a class method with multiple arguments and you want to simply return a closure that uses all the arguments, using the “use” keyword to list all the arguments is entirely redundant and pointless.
-
-Then there are often use-cases with ''array_filter()'' and similar functions where the ''use()'' just adds visual noise to what the code actually means.
-
-The trend in PHP in recent years has been toward more compact but still readable syntax that eliminates redundancy.  Property promotion, arrow functions, the nullsafe operator, and similar recent well-received additions demonstrate this trend.  This RFC seeks to continue that trend to make PHP more pleasant to write while still being just as clear to read.
-
 ==== Methods ====
 
 As methods cannot be anonymous, there are no impacts on methods from this RFC.
@@ -257,60 +298,25 @@ $ret = match ($a) {
 
 While sub-optimal, it may be sufficient for the few times that a multi-statement ''match()'' arm is needed.
 
-==== Examples ====
-
-Closures are often used to "wrap" some behavior in other behavior.  One example provided by Mark Randall is for a throw-aware buffer.  The following is actual code he wrote:
-
-<code php>
-$x = function () use ($to, $library, $thread, $author, $title, $library_name, $top_post) {
-// ...
-};
-</code>
-
-From Mark: "That was just to get those variables inside a callback that could be 
-invoked inside a throw-aware buffering helper."
-
-Another similar example is for wrapping behavior in a transaction.  Often, that is done by passing a callable to an ''inTransaction()'' method or similar.
-
-<code php>
-public function savePost($user, $date, $title, $body, $tags) {
-  return $this->db->inTransaction(function() use ($user, $date, $title, $body, $tags) {
-    $this->db->query(...);
-    $this->db->query(...);
-    return $this->db->lastInsertId();
-  });
-}
-</code>
-
-In this case, the ''use''d variable listing is entirely redundant and pointless, much the same as constructor property promotion eliminated entirely redundant boilerplate.  (Though admittedly, the difference there was greater.)
-
-As noted, inline callbacks may also need to capture multiple variables for only a short operation.
-
-<code php>
-/** @var Product[] */
-$arr = [ ... ];
-
-$wantApproved = true;
-$size = 'L'
-
-$filtered = array_filter($arr, function ($item) use ($wantApproved, $size): bool {
-  if ($wantApproved) {
-    return $item->isApproved();
-  } else if ($size) {
-    return $item->size() == $size;
-  } else {
-    return false;
-  }
-});
-</code>
-
-In this case, again, the explicit ''use'' clause offers no clarity, only visual noise.
-
 ==== Comparison to other languages ====
 
 As far as we are aware, only two languages in widespread use require variables to be explicitly closed over: PHP and C++.  All other major languages capture implicitly, as is proposed here.
 
-Many languages tend to capture by variable. In practice this can lead to surprising effects, especially in loops. 
+Many languages tend to capture by reference. In practice this can lead to surprising effects, especially in loops. For that reason, PHP defaults to capturing by value, which avoids this problem.
+
+==== Counter-arguments ====
+
+In the past, there has been reticence about auto-capture that has kept it out of previous evolutions in closures.  Mostly that has boiled down to two concerns: Performance and debugability.
+
+As noted above in the benchmarks section, the implementation offered here has effectively no performance impact either way.
+
+In the majority of cases where closures are used in practice, the code involved is short enough that debugging is not hampered by implicit capture.  They are usually only a few lines long, easily small enough to fit into a developer's short term memory while reading it.  What variables are captured is visually self-evident.  In many cases, such as in the examples above, an entire named function/method body is just wrapping context around a closure, such that repeating the named function's arguments in a ''use'' block is simply redundant.
+
+Potential confusing behavior is further mitigated by PHP's (correct) use of by-value capture, which minimizes the potential for inadvertent bizarre changes to values from closures.
+
+Furthermore, as noted PHP is unusual in requiring explicit capture.  The only other language that does so is C++.  Most languages get along fine without that extra step.
+
+For those few cases in which, for whatever reason, the developer is concerned about auto-capture reducing debugability or about accidental capture, the existing explicit-only syntax remains valid and unchanged.
 
 ===== Backward Incompatible Changes =====
 
@@ -327,28 +333,6 @@ None.
 ===== Unaffected PHP Functionality =====
 
 Existing function syntaxes continues to work precisely as they do now.  Only new combinations are possible.
-
-===== Future Scope =====
-
-The proposal section detailed three additional possible combinations of function functionality that are not included here.  While it is not likely that they have much use, the pattern here clearly lays out what they would be were a future RFC to try and implement them.
-
-Specifically, they would be:
-
-<code php>
-// Global scope
-$c = 1;
-
-fn foo($a, $b): int {
-  $val = $a * $b;
-  return $val * $c;
-}
-
-fn foo($a, $b): int => $a * $b * $c;
-
-$foo = function($a, $b) use ($c): int => $a * $b * $c;
-</code>
-
-Those versions are //not// included in this RFC.  
 
 ===== Proposed Voting Choices =====
 
