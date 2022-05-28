@@ -3,10 +3,11 @@ Sealed Classes
 
 :PHP-RFC: 0812
 :Title: Sealed Classes
-:Author: Saif Eddin Gmati <azjezz@protonmail.com>, Joe Watkins
-:Status: Draft
+:Author: Saif Eddin Gmati <azjezz@protonmail.com>, Joe Watkins <krakjoe@php.net>
+:Status: Declined
 :Type: Standards Track
 :Created: 2021-04-24
+:PHP-Version: 8.2
 :Version: 1.0
 
 Introduction
@@ -26,9 +27,9 @@ Internally, PHP has the \`Throwable\` interface, which defines common
 functionality between \`Error\` and \`Exception\` and is implemented by
 both, however, end users are not allowed to implement \`Throwable`.
 
-Currently PHP has a special case for \`Throwable`, and what this RFC is
-proposing is to make this kind of functionally possible to end users as
-well, so that \`Throwable\` is not a spacial case anymore.
+Currently PHP has a special case for \`Throwable\` ( and
+\`DateTimeInterface\` ), this RFC is proposing to make this kind of
+functionally possible to user land.
 
 Proposal
 --------
@@ -37,15 +38,22 @@ Support for sealed classes is added through a new modifier \`sealed`,
 and a new \`permits\` clause that takes place after \`extends`, and
 \`implements`.
 
+A class that is sealed can be extended directly only by the classes
+named in the attribute value list. Similarly, an interface, or a trait
+that is sealed can be implemented, or used directly only by the classes
+named in the permit clause value list. Classes named in the permit
+clause value list can themselves be extended arbitrarily unless they are
+final or also sealed. In this way, sealing provides a single-level
+restraint on inheritance.
+
 .. code:: php
 
-   sealed class Shape permits Circle, Square, Rectangle {}
+   sealed interface Option permits Some, None { ... }
 
-   final class Circle extends Shape {} // ok
-   final class Square extends Shape {} // ok
-   final class Rectangle extends Shape {} // ok
+   interface Some extends Option { ... } // ok
+   interface None extends Option { ... } // ok
 
-   final class Triangle extends Shape {} // Fatal error: Class Triangle cannot extend sealed class Shape.
+   interface Maybe extends Option { ... } // Fatal error: Interface Maybe cannot extend sealed interface Option.
 
 An interface that is sealed can be implemented directly only by the
 classes named in the \`permits\` clause.
@@ -55,16 +63,16 @@ classes named in the \`permits\` clause.
    namespace Psl\Result {
      sealed interface ResultInterface permits Success, Failure { ... }
 
-     final class Success implements ResultInterface { ... }
-     final class Failure implements ResultInterface { ... }
-     
+     class Success implements ResultInterface { ... }
+     class Failure implements ResultInterface { ... }
+
      function wrap(callable $callback): ResultInterface { ... }
      
      function unwrap(ResultInterface $result): mixed
      {    
-       return match($result::class) {
-         Result\Success::class => $result->value(),
-         Result\Failure::class => throw $result->error(),
+       return match(true) {
+         $result instanceof Success => $result->value(),
+         $result instanceof Failure => throw $result->error(),
        }; // no need for default, it's not possible.
      }
 
@@ -80,55 +88,198 @@ classes named in the \`permits\` clause.
 Similarly, a trait that is sealed can only be used by the classes named
 in the \`permits\` clause.
 
-    This is an example taken from the `Symfony Cache component
-    <https://github.com/symfony/symfony/blob/bb1e1e58aea5318e96d1c22cc8a91668ed7baaaa/src/Symfony/Component/Cache>`__
+    This is an example taken from the `PSL Channel component
+    <https://github.com/azjezz/psl/blob/9f8657cb37be971862f2de013cbd16469f48e53e/src/Psl/Channel/Internal/ChannelSideTrait.php>`__
 
 .. code:: php
 
-   namespace Symfony\Component\Cache\Traits {
-     use Symfony\Component\Cache\Adapter\FilesystemAdapter;
-     use Symfony\Component\Cache\Adapter\FilesystemTagAwareAdapter;
-     use Symfony\Component\Cache\Adapter\PhpFilesAdapter;
+   namespace Psl\Channel\Internal {
+     use Psl\Channel\ReceiverInterface;
      
-     sealed trait FilesystemCommonTrait permits FilesystemTrait, PhpFilesAdapter { ... }
-     sealed trait FilesystemTrait permits FilesystemAdapter, FilesystemTagAwareAdapter {
-      use FilesystemCommonTrait; // ok
-      ...
+     sealed trait ChannelSideTrait permits BoundedReceiver, BoundedSender, UnboundedReceiver, UnboundedSender { ... }
+
+     // OK
+     final class BoundedReceiver implements ReceiverInterface
+     {
+       use ChannelSideTrait;
+
+       ...
+     }
+
+     // OK
+     final class UnboundedReceiver implements ReceiverInterface
+     {
+       use ChannelSideTrait;
+
+       ...
      }
    }
 
-   namespace Symfony\Component\Cache\Adapter {
-      use Symfony\Component\Cache\Traits\FilesystemTrait;
-
-      final class FilesystemAdapter {
-        use FilesystemTrait; // ok
-        ...
-      }
-
-      final class FilesystemTagAwareAdapter {
-        use FilesystemTrait; // ok
-        ...
-      }
-   }
-
-   namespace App\Cache {
-       use Symfony\Component\Cache\Traits\FilesystemTrait;
+   namespace App\Channel {
+       use Psl\Channel\Internal\ChannelSideTrait;
       
-       // Error: Class App\Cache\MyFilesystemCache may not use sealed trait (Symfony\Component\Cache\Traits\FilesystemTrait)
-       final class MyFilesystemAdapter {
-         use FilesystemTrait;
+       // Fatal error: Class App\Channel\MyReceiver may not use sealed trait Psl\Channel\Internal\ChannelSideTrait.
+       final class MyReceiver {
+         use ChannelSideTrait;
+         
+         ...
        }
 
-       // Error: Trait App\Cache\MyFilesystemTrait may not use sealed trait (Symfony\Component\Cache\Traits\FilesystemTrait)
-       trait MyFilesystemTrait {
-         use FilesystemTrait;
+       // Fatal error: Trait App\Channel\MyReceiver may not use sealed trait Psl\Channel\Internal\ChannelSideTrait.
+       trait MyChannelSideTrait {
+         use ChannelSideTrait;
+         
+         ...
        }
    }
+
+When a sealed class, trait, or an interface permits a specific
+interface, any class can use it as long as that interface exists in it's
+inheritance tree, as follows:
+
+    This also applies when sealing to a specific class, or a trait.
+
+.. code:: php
+
+   interface Foo {}
+
+   sealed interface Bar permits Foo {}
+
+   class FooImpl implements Foo {}
+
+   class Baz extends FooImpl {}
+
+   // `BarImpl` is allowed to implement `Bar` because it extends `Baz`, which
+   // extends `FooImpl`, which implement `Foo`, making `BarImpl` an instance of `Foo`.
+   class BarImpl extends Baz implements Bar {}
+
+Sealed classes with no \`permits\` clause, or with an empty \`permits\`
+clause will result in a parse error, as follows:
+
+.. code:: php
+
+   // Parse error: syntax error, unexpected '{', expecting permits (T_PERMITS) in ...
+   sealed class Bar { }
+
+   // Parse error: syntax error, unexpected '{', expecting identifier (T_STRING) or namespace (T_NAMESPACE) or \\ (T_NS_SEPARATOR) in ...
+   sealed class Bar permits { }
+
+Why not composite type aliases
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Some have suggested that the use of composite type aliases could solve
+the same problem, such as:
+
+.. code:: php
+
+   <?php
+
+   final class Success { ... }
+   final class Failure { ... }
+
+   type Result = Success | Failure;
+
+   function foo(): Result { ... }
+
+   $result = foo();
+   if ($result instanceof Success) {
+     // $result is Success
+   } else {
+     // $result is Failure
+   }
+
+However, a type alias of N types, is not the same as a sealed class that
+permits N sub-types, as sealing offers 2 major differences.
+
+1. shared functionality
+
+Sealed classes feature allow you to implement functionalities in the
+parent class, such as:
+
+::
+
+   <?php
+
+   sealed abstract class Result permits Success, Failure
+   {
+     public function then(Closure $success, Closure $failure): Result
+     {
+         try {
+           $result = $this instanceof Success ? $success($this->value) : $failure($this->throwable);
+
+           return new Success($result);
+         } catch(Throwable $e) {
+           return new Failure($e);
+         }
+     }
+
+     public function catch(Closure $failure): Result
+     {
+       return $this->then(fn($value) => $value, $failure);
+     }
+
+     public function map(Closure $success): Result
+     {
+       return $this->then(
+         $success,
+         fn($exception) => throw $exception
+       );
+     }
+   }
+
+   final class Success extends Result {
+     public function __construct(
+       public readonly mixed $value,
+     ) {}
+   }
+
+   final class Failure extends Result {
+     public function __construct(
+       public readonly Throwable $throwable,
+     ) {}
+   }
+
+2. the N+1 type.
+
+Unlike a type alias, a sealed class is by itself a type.
+
+Considering the following code which uses type aliases:
+
+.. code:: php
+
+   final class B {}
+   final class C {}
+
+   type A = B|C;
+
+When you have a function defined as:
+
+.. code:: php
+
+   function consumer(A $instance): void
+   {
+     echo $instance::class;
+   }
+
+The output can only be either \`"B"\` or \`"C"`.
+
+However, considering the following code which uses sealed classes
+feature:
+
+.. code:: php
+
+   sealed class A permits B, C {}
+   final class B extends A {}
+   final class C extends A {}
+
+The output of \`consumer\` could be either \`"A"`, \`"B"`, or \`"C"`, as
+\`A\` is a non-abstract class, it is possible to do \`consumer(new
+A())`.
 
 Syntax
 ------
 
-Some people might be against introducing a new keyword into the
+Some people might be against introducing a new keywords into the
 language, which will lead to \`sealed\` and \`permits\` not being a
 valid class names anymore, therefor, a second vote will take place to
 decide which syntax should be used.
@@ -165,15 +316,63 @@ The available options are the following:
 
    trait Corge for Grault, Garply {}
 
+FAQ's
+-----
+
+Wouldn't a sealed class without permits clauses be considered final?
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+No, a sealed class will always have a \`permits\` clauses, if a sealed
+class is defined without a \`permits\` clauses, it's considered a
+compile error.
+
+Would PHP check if permitted classes exists when loading a sealed class?
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+No, when loading a sealed class, PHP would treat just like any other
+class, and store the permitted types list to check against later when
+another type tries to inherit from it.
+
+What if the permitted types don't actually extend the sealed type
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+Example:
+
+.. code:: php
+
+   sealed interface A permits B {}
+
+   class B {}
+
+This code would not produce any errors, as another type ( e.g: \`C\` )
+could exist, in which it inherits from both \`B`, and \`A`, therefor, an
+instance of \`A&B\` could still exist.
+
+What if the permitted types don't actually extend the sealed type, and are final
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+Example:
+
+.. code:: php
+
+   sealed interface A permits B {}
+
+   final class B {}
+
+In this case, we would end up with an interface 'A', but with no
+possible instance of it, however, due to the behavior stated above of
+only checking permitted types on inheritance and not when loading the
+sealed type, this is allowed, and is considered a small inconvenience.
+
 Backward Incompatible Changes
 -----------------------------
 
-\`sealed\` and \`permits\` become reserved keywords in PHP 8.1
+\`sealed\` and \`permits\` become reserved keywords in PHP 8.2
 
 Proposed PHP Version(s)
 -----------------------
 
-PHP 8.1
+PHP 8.2
 
 RFC Impact
 ----------
@@ -200,24 +399,41 @@ reflection:
 -  A new ReflectionClass::getPermittedClasses() method will return the
    list of class names allowed in the \`permits\` clause.
 
-Proposed Voting Choices
------------------------
+Vote
+----
 
 As this is a language change, a 2/3 majority is required.
+
+Voting started on 2022-03-17 and will end on 2022-03-31.
+
+Question: Accept sealed classes RFC?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+A Second vote for the preferred syntax choice.
+
+Question: Which syntax option do you prefer?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _voting-choices-1:
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  \`sealed\` + \`permits\`
+-  \`permits\` only
+-  \`for\`
 
 Patches and Tests
 -----------------
 
-Links to any external patches and tests go here.
-
-If there is no patch, make it clear who will create a patch, or whether
-a volunteer to help with implementation is needed.
-
-Make it clear if the patch is intended to be the final patch, or is just
-a prototype.
-
-For changes affecting the core language, you should also provide a patch
-for the language specification.
+Prototype patch using \`for\` syntax:
+https://github.com/php/php-src/compare/master...azjezz:sealed-classes
 
 References
 ----------
@@ -229,9 +445,17 @@ References
 -  `Sealed classes in
    Kotlin <https://kotlinlang.org/docs/sealed-classes.html>`__
 
+Changelog
+---------
+
+-  1.1: added comparison to composite types.
+-  1.2: added FAQ's section.
+
 Additional Metadata
 -------------------
 
-:Original Authors: Saif Eddin Gmati azjezz@protonmail.com, Joe Watkins
+:Original Authors: Saif Eddin Gmati azjezz@protonmail.com, Joe Watkins krakjoe@php.net
+:Original PHP Version: PHP 8.2
+:Original Status: Decline
 :Slug: sealed_classes
 :Wiki URL: https://wiki.php.net/rfc/sealed_classes
