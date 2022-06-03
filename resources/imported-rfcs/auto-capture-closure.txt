@@ -1,4 +1,4 @@
-====== PHP RFC: Auto-capturing multi-statement closures ======
+====== PHP RFC: Short Closures 2.0 ======
   * Version: 2.0
   * Date: 2022-05-25
   * Author: Nuno Maduro (enunomaduro@gmail.com)
@@ -9,37 +9,39 @@
 
 ===== Introduction =====
 
-Closures (also known as lambdas or anonymous functions), have become increasingly powerful and useful in PHP in recent versions.  In their current form they have two versions, long and short.  Unfortunately, these two syntaxes have different, mutually-incompatible benefits.  This RFC proposes a syntax for closures that combines the benefits of both for those situations where that is warranted.
+Traditional anonymous functions in PHP can be verbose, in part due to the need to manually import used variables. This makes code using simple closures hard to read and understand.
+
+[[https://wiki.php.net/rfc/arrow_functions_v2|Arrow Functions]] were introduced in PHP 7.4 as an alternative. However, the single-expression limitation can lead to complex one-liners, or makes arrow functions unfit in many use-cases that would benefit from a more concise syntax.
+
+This RFC proposes to extend the arrow function syntax to support multiple statements:
 
 <code php>
-// As of 8.1:
+$guests = array_filter($users, fn ($user) {
+    $guest = $repository->findByUserId($user->id);
 
-$y = 1;
-
-$fn1 = fn($x) => $x + $y; // auto-capture + single expression
-
-$fn2 = function ($x) use ($y): int { // manual-capture + statement list
-   // ...
-
-   return $x + $y;
-};
+    return $guest !== null && in_array($guest->id, $guestsIds);
+});
 </code>
 
-The proposed syntax combines the auto-capture and multi-line capabilities into a single syntax:
+==== Why extend arrow functions? ====
+
+Anonymous functions in PHP can be quite verbose, even when they only perform a simple operation. This is due to a large amount of syntactic boilerplate that is needed to manually import used variables with the ''use'' keyword.
+
+While arrow functions solve this problem to some extent, the one-expression limit can force code into one-liners with non ideal readability. There are ample cases where breaking an expression to 2-3 statements is required or would improve the legibility of the code.
 
 <code php>
-$fn3 = fn ($x): int { // auto-capture + statement list
-    // ...
+$users = [/** */];
+$guestsIds = [/** */];
+$repository = /** */;
 
-    return $x + $y;
-};
+$guests = array_filter($users, fn ($user) {
+    $guest = $repository->findByUserId($user->id);
+
+    return $guest !== null && in_array($guest->id, $guestsIds);
+});
 </code>
 
-==== Why add another function mechanism? ====
-
-Long Closures in PHP can be quite verbose, even when they only perform a simple operation. This is due to a large amount of syntactic boilerplate that is needed in “long closures” to manually import used variables with the ''use'' keyword.
-
-While one-line arrow functions solve this problem to some extent, there are ample cases that require a 2-3 statement body.  That is still short enough that the chances of a developer confusing in-function and out-of-function variables is very remote, but the burden of manually closing over 3-4 variables is relatively high.
+A function of this size is still short enough that the chances of a developer confusing in-function and out-of-function variables is very remote, but the burden of manually capturing 3-4 variables is relatively high.
 
 One example is when you are within a class method with multiple arguments and you want to simply return a closure that uses all the arguments, using the “use” keyword to list all the arguments is entirely redundant and pointless.
 
@@ -130,13 +132,13 @@ The majority of closures use cases fall into these type of categories.
 
 ===== Proposal =====
 
-==== Auto-capture multi-statement closures ====
+==== Short Closures ====
 
 Specifically, this RFC adds the following syntax:
 
 <code php>
 // An anonymous, locally available function.
-// Variables are auto-captured lexically.
+// Variables are auto-captured lexically by-value.
 // The body is a statement list, with possibly a return statement;
 $c = 1;
 $foo = fn(int $a, int $b):int {
@@ -150,7 +152,7 @@ The syntax choice here leads to the following consistent syntactic meanings:
   * The ''=>'' symbol always means "evaluates to the expression on the right," in all circumstances.  (Named functions, anonymous functions, arrays, and ''match()''.)
   * ''{ ... }'' denotes a statement list, potentially ending in a ''return''.
   * The ''function'' keyword indicates a function that has no auto-capture.
-  * The ''fn'' keyword indicates a function that will auto-capture variables, by value.
+  * The ''fn'' keyword indicates a function that will auto-capture variables, by-value.
   * A function with a name is declared globally at compile time.  A function without a name is declared locally as a closure at runtime.
 
 These rules are easily recognizable and learnable by developers.
@@ -180,15 +182,15 @@ fn () use ($a, &$b) {
 }
 </code>
 
-This allows auto-capturing multi-statement closures to match long closures in functionality. Without this, it could be necessary to switch back and forth between the auto-capturing syntax and the long closure syntax when capturing by reference is needed.
+This allows short closures to match long closures in functionality. Without this, it could be necessary to switch back and forth between the short syntax and the long closure syntax when capturing by reference is needed.
 
 We expect that explicitly capturing by value will be rare in practice.
 
 ==== Auto-capture semantics ====
 
-The auto-capture semantics presented here are designed to be intuitive and have negligible performance impact.
+Short closures follow the same semantics as [[https://wiki.php.net/rfc/arrow_functions_v2#by-value_variable_binding|Arrow Functions]], which is intuitive and easy to reason about.
 
-Auto-capturing multi-statement closures can access all variables in their declaring scope with the variable access syntax (e.g. ''$var''):
+Variables that are used in a short closure are captured //by-value//:
 
 <code php>
 $a = 1;
@@ -200,7 +202,20 @@ $f = fn () {
 $f(); // prints "3"
 </code>
 
-Accessed variables are bound //by value// at the time of the function declaration:
+A by-value capture means that it is not possible to modify any variables from the outer scope:
+
+<code php>
+$a = 1;
+$f = fn () {
+    $a++; // Has no effect outside of the function
+};
+
+print $a; // prints "1"
+$f();
+print $a; // prints "1" (again)
+</code>
+
+Similarly, the outer scope can not modify variables in the function:
 
 <code php>
 $a = 1;
@@ -213,32 +228,19 @@ $a = 2;
 $f();     // prints "1" (again)
 </code>
 
-<code php>
-$a = 1;
-$f = fn () {
-    $a++;
-};
-
-print $a; // prints "1"
-$f();
-print $a; // prints "1" (again)
-</code>
-
 Because variables are bound by value, the potential for "spooky action at a distance" is minimized.  Captured scalar values changed inside a closure will not "leak" to other parts of the code.  Objects captured inside a closure may have changes that propagate, depending on the object, but that is no different than objects used in any other function or object, and developers are used to being aware of that potential.
-
-This is the behavior of long closures with explicit capture and of arrow functions.
 
 For performance reasons, only the variables that are directly accessed with the variable access syntax in the closure are auto-captured. This excludes dynamic means of accessing variables, such as the variable-variable syntax. This matches arrow functions.
 
 Additionally, variables that are always assigned by the closure before being read are not captured, since this is not needed. This differs from arrow functions (which rarely assign to a value, so that situation does not come up).
 
-We can express these semantics more succinctly like this: Auto-capturing multi-statement closures capture at least all the variables that are directly accessed by the closure.
+We can express these semantics more succinctly like this: Short closures capture at least all the variables that are used literally by the closure.
 
 The "at least" part has only marginal effect aside from performance, and is not relevant for most programs. Whether a variable is captured or not may only be observed through reflection, or through object destructors (because capturing may impact the exact moment at which they are called).
 
 ==== Implementation details ====
 
-Auto-capturing all variables directly accessed by a closure body will commonly capture too many variables. In the following example, the variable ''$tmp'' would be captured although this is not necessary because it is always assigned before being read (remember that variable assignments do not have an effect outside of the closure).
+Auto-capturing all variables used literally in the function body will commonly capture too many variables. In the following example, the variable ''$tmp'' would be captured although this is not necessary because it is always assigned before being read (remember that variable assignments do not have an effect outside of the closure).
 
 <code php>
 $tmp = 5;
@@ -251,9 +253,9 @@ fn() {
 
 A naive capture mechanism would unnecessarily capture ''$tmp'', resulting in wasted memory usage.
 
-Capture analysis, the process of choosing which variables to capture, is based on [[https://en.wikipedia.org/wiki/Live-variable_analysis|live-variable analysis]]. This reuses the Optimizer's existing implementation of live-variable analysis. We use this to conservatively find the variables for which a path exists in the function's code in which the variable may be read before being assigned. These variables are the minimum set we need to capture.
+The capture analysis used in this RFC is based on [[https://en.wikipedia.org/wiki/Live-variable_analysis|live-variable analysis]]. This reuses the Optimizer's existing implementation of live-variable analysis. We use this to conservatively find the variables for which a path exists in the function's code in which the variable may be read before being assigned. These variables are the minimum set we need to capture.
 
-In practice, auto-capturing multi-statement closures end up capturing the same set of variables as long closure with explicit capture would have captured. This was verified on the PHPStan code base by converting all closures to auto-capturing multi-statement closures, and observing which variables was captured.
+In practice, short closures end up capturing the same set of variables as traditional anonymous functions with explicit capture would have captured. This was verified on the PHPStan code base by converting all anonymous functions to short closures, and observing which variables was captured.
 
 This retains the semantics described in the previous section, so an understanding of these semantics is enough to reason about auto-capturing multi-statement closures.
 
@@ -271,7 +273,7 @@ For more benchmark details, see: https://gist.github.com/arnaud-lb/d9adfbf786ce9
 
 As methods cannot be anonymous, there are no impacts on methods from this RFC.
 
-==== What about long-closures? ====
+==== What about long anonymous functions? ====
 
 The existing all-explicit multi-line closure syntax remains valid, and there is no intent to deprecate it.
 
@@ -302,21 +304,37 @@ While sub-optimal, it may be sufficient for the few times that a multi-statement
 
 As far as we are aware, only two languages in widespread use require variables to be explicitly closed over: PHP and C++.  All other major languages capture implicitly, as is proposed here.
 
-Many languages tend to capture by reference. In practice this can lead to surprising effects, especially in loops. For that reason, PHP defaults to capturing by value, which avoids this problem.
+Many languages tend to capture by variable or by reference. In practice this can lead to surprising effects, especially in loops. For that reason, PHP defaults to capturing by value, which avoids this problem. See the discussion on binding behavior in [[https://wiki.php.net/rfc/arrow_functions_v2#binding_behavior|Arrow Functions]].
 
 ==== Counter-arguments ====
 
-In the past, there has been reticence about auto-capture that has kept it out of previous evolutions in closures.  Mostly that has boiled down to two concerns: Performance and debugability.
+In the past, there has been reticence about auto-capture that has kept it out of previous evolutions in closures.  Mostly that has boiled down to a few concerns: Implementation difficulties, performance, and debugability.
+
+We have noted that early discussions about closures was assuming by-reference or by-variable semantics, like in Javascript. Auto-capture has never really been discussed in the context of by-value capture, which is the default in PHP.
+
+Implementation difficulties arise from by-reference or by-variable semantics, especially when supporting dynamic means of accessing variables like variable-variables, compact(), or eval(). In this proposal and in Arrow Functions, the implementation difficulties are eliminated by using by-value semantics and requiring dynamically accessed variables to be captured explicitly.
 
 As noted above in the benchmarks section, the implementation offered here has effectively no performance impact either way.
 
-In the majority of cases where closures are used in practice, the code involved is short enough that debugging is not hampered by implicit capture.  They are usually only a few lines long, easily small enough to fit into a developer's short term memory while reading it.  What variables are captured is visually self-evident.  In many cases, such as in the examples above, an entire named function/method body is just wrapping context around a closure, such that repeating the named function's arguments in a ''use'' block is simply redundant.
+In the majority of cases where closures are used in practice, the code involved is short enough that debugging is not hampered by automatic capture.  They are usually only a few lines long, easily small enough to fit into a developer's short term memory while reading it.  What variables are captured is visually self-evident.  In many cases, such as in the examples above, an entire named function/method body is just wrapping context around a closure, such that repeating the named function's arguments in a ''use'' block is simply redundant.
 
 Potential confusing behavior is further mitigated by PHP's (correct) use of by-value capture, which minimizes the potential for inadvertent bizarre changes to values from closures.
 
 Furthermore, as noted PHP is unusual in requiring explicit capture.  The only other language that does so is C++.  Most languages get along fine without that extra step.
 
 For those few cases in which, for whatever reason, the developer is concerned about auto-capture reducing debugability or about accidental capture, the existing explicit-only syntax remains valid and unchanged.
+
+===== History =====
+
+The first [[https://externals.io/message/28399|Anonymous Functions]] proposal was objected because of the lack of closures: It would be unusual for anonymous functions to not support closures, which would surprise users, and it would limit their usefulness. At the same time, objections against closures cited implementation difficulties and performance issues, as well as potential complexity or pitfalls of Javascript- and Lisp-like closures.
+
+A solution was proposed to use explicit capture with a new keyword, ''lexical'', close in many aspects to the ''global'' keyword. Alternative syntaxes was later proposed that would allow to chose between by-reference and by-value capture, leading to the current ''use ( ... )'' syntax.
+
+It is unclear whether this was chosen because of technical concerns or language concerns. Specifically, language-focused objections to closures appeared to assume Javascript or Lisp semantics, which is not what the current RFC is proposing. Discussions didn't appear to occur in the light of by-value semantics.
+
+The [[https://wiki.php.net/rfc/short_closures|Short Closures 1.0]] RFC was rejected for three main reasons: The syntax, the lack or type hints, and automatic closures. Objections to automatic closures appear to cite Javascript-like semantics that do not exist in the current RFC.
+
+The [[https://wiki.php.net/rfc/arrow_functions_v2|Arrow Functions 2.0]] RFC was accepted with a large majority. Compared to the Short Closures 1.0 RFC, it addressed the syntax and type hints concerns, limited the body to only one expression, and introduced automatic closure by-value.
 
 ===== Backward Incompatible Changes =====
 
@@ -354,4 +372,4 @@ After the project is implemented, this section should contain
 
 ===== Changelog =====
 
-2.0: Updated for new patch; reduced discussion of short-function RFC and related topics; expanded discussion of the capture rules and noted benchmarks showing minimal performance impact
+2.0: Updated for new patch; reduced discussion of short-function RFC and related topics; expanded discussion of the capture rules and noted benchmarks showing minimal performance impact; renamed to "Short Closures 2.0"
