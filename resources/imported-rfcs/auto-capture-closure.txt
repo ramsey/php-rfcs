@@ -280,17 +280,21 @@ $fn2 = function () use (&$a) {
 
 ===== Auto-capture semantics =====
 
-Short Closures follow the semantics of Arrow Functions: Only the variables that are accessed literally in the closure are auto-captured. This excludes dynamic means of accessing variables, such as the variable-variable syntax.
+The RFC inherits the auto-capture semantics of Arrow Functions. These semantics can be stated as follows: 
 
-As an optimization, variables that are always assigned by the function before being read are not captured, since this is not needed. This differs from Arrow Functions (which rarely assign to a value, so that situation does not come up).
+> Short Closures can //view// the value of the variables of their declaring scope by accessing them literally. If the Short Closure assigns a value to one of these variables, it does not affect the declaring scope.
 
-This optimization has marginal effects aside from performance. Specifically, it can affect the lifetime of objects, and consequently the time at which an object destructor is called. This is because some objects may not be captured if they are never used by the function, thus their lifetime will not be extended.
+<code php>
+$a = 5;
+fn () {
+    print $a; // prints "5"
+    $a = 0;   // assigns $a locally. $a from the outer scope is not changed
+}
+</code>
 
-We can express these semantics more succinctly like this: Short Closures capture the variables that are used literally by the closure.
+This is implemented by capturing the value of the literally-accessed variables at the time the function is declared.
 
-==== Implementation details ====
-
-Auto-capturing all variables used literally in the function body will commonly capture too many variables. In the following example, the variable ''$tmp'' would be captured although this is not necessary because it is always assigned before being read (remember that variable assignments do not have an effect outside of the closure).
+A naive implementation of these semantics would capture //all// the variables that are accessed literally by the closure. This will commonly capture variables that are not necessary for these semantics. In the following example, the variable ''$tmp'' would be captured although this is not necessary because it is always assigned before being read (remember that variable assignments do not have an effect outside of the closure).
 
 <code php>
 $tmp = 5;
@@ -301,13 +305,29 @@ fn () {
 }
 </code>
 
-A naive capture analysis would unnecessarily capture ''$tmp'', resulting in wasted memory usage.
+This approach would result in a wast of memory or CPU usage.
+
+The implementation proposed in this RFC prevents this by attempting to capture the smallest possible set of variables that is necessary to maintain these semantics. In practice, Short Closures end up capturing the same set of variables an Anonymous Functions with manually curated capture list would have captured. This was observed on the PHPStan code base by converting all Anonymous Functions to Short Closures, and looking at which variables was automatically captured after that.
+
+These implementation details are irrelevant for most purposes, as they not have an effect on the behavior of the program, apart from the marginal cases listed bellow. 
+
+==== Observable effects of capture ====
+
+As long as the semantics are maintained, whether a variable is captured or not is largely irrelevant for most purposes, and can be observed only in marginal cases. These cases are listed here.
+
+When debugging: Whether a variables is captured or not may be visible in the list of variables in scope in debuggers. Captured variables are local variables in the Closure, bound to the captured value. 
+
+Via reflection: Captured variables will be visible in ReflectionFunction.
+
+Via destructors: Capture can extend the lifetime of objects. Optimized capture will prevent this when the variable holding the object is never read before being written by the Closure. An observable effect is that a destructor would be called later if the object was captured. Note that destructor timing is undefined in PHP, especially when reference cycles exist.
+
+Via resource usage: Capturing too much could increase memory or CPU usage. The optimized captured used in this RFC prevents this. It ends up capturing the same variables that would have been captured by a manually curated ''use'' list.
+
+==== Implementation details ====
 
 The capture analysis used in this RFC will only capture the variables that may be read before being assigned by the function. This uses the Optimizer's implementation of [[https://en.wikipedia.org/wiki/Live-variable_analysis|live-variable analysis]].
 
-In practice, Short Closures end up capturing the same set of variables an Anonymous Functions with manually curated capture list would have captured. This was observed on the PHPStan code base by converting all Anonymous Functions to Short Closures, and looking at which variables was automatically captured after that.
-
-This retains the semantics described earlier, so an understanding of these semantics is enough to reason about Short Closures.
+This maintains the semantics described earlier, so an understanding of these semantics is enough to reason about Short Closures.
 
 ===== Benchmarks =====
 
