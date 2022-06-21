@@ -1,0 +1,300 @@
+====== PHP RFC: Constants in Traits ======
+  * Version: 0.1
+  * Date: 2022-06-21
+  * Author: Shinji Igarashi<sji@sj-i.dev>, Stephen Reay<stephen@koalephant.com>
+  * Status: Draft
+  * First Published at: http://wiki.php.net/rfc/constants_in_traits
+
+===== Introduction =====
+Traits are used for horizontal code reuse across classes, and currently allow the definition of methods and properties, but not constants. This means that it is not possible to define invariants expected by the trait in the trait itself. So currently, workarounds are required in some cases, such as defining constants in its composing class or an interface implemented by the class.
+
+This RFC proposes to allow defining constants in traits in the same manner that is currently possible for properties, with the following use cases in mind.
+
+  * Defining invariants used internally by methods in traits
+  * Defining constants as a public API
+
+==== Defining invariants used internally by methods in traits ====
+
+The main use case is the definition of invariants to be used by methods in traits. Currently, we can write codes like the following.
+
+<code>
+trait FooTrait {
+    public function doFoo(int $value): void {
+        if ($value > self::MAX_VALUE) {
+            throw new \Exception('out of range');
+        }
+    }
+}
+
+class FooClass {
+    public const MAX_VALUE = 42;
+    use FooTrait;
+}
+</code>
+
+This code requires that the constant definitions used by the methods in the trait be provided in the composing class. It can be said that the implementation detail of the trait is leaked to the composing class. Definitions of constants needed to make a trait work should be provided by the trait itself.
+
+==== Defining constants as a public API ====
+One common use case for traits is to provide a default implementation that conforms to a particular interface.
+
+<code>
+intertface FooInterface {
+    public const FLAG_1 = 1;
+    public function doFoo(int $flags): void;
+}
+
+trait FooTrait {
+    public function doFoo(int $flags): void {
+        if ($flags & self::FLAG_1) {
+            echo 'Got flag 1';
+        }
+    }
+}
+
+class FooClass implements FooInterface {
+    use FooTrait;
+}
+</code>
+
+Since the constant used internally by the trait in the above code is also part of the public API, it's natural to have the definition of this constant on the interface side. However, there is currently no way on the trait side to require that a particular interface be implemented by the composing class. Such a feature should be discussed in a separate proposal. Aside from that, if traits could have the same constant definitions of the interface and guarantee that they are compatible, it would improve the completeness of the trait as a module.
+
+===== Proposal =====
+This RFC proposes to allow defining constants in traits. Trait constants can be defined in the same way as class constants, and are flattened into the definition of the composing class in the same way as property and method definitions in traits.
+
+<code>
+trait Foo {
+    public const FLAG_1 = 1;
+    public const FLAG_2 = 2;
+
+    public function doFoo(int $flags): void {
+        if ($flags & self::FLAG_1) {
+            echo 'Got flag 1';
+        }
+        if ($flags & self::FLAG_2) {
+            echo 'Got flag 2';
+        }
+    }
+}
+</code>
+
+==== Prohibit direct access through a trait name ====
+Trait constants cannot be accessed through the name of the trait in a form like TraitName::CONSTANT. This is in line with the deprecation of accessing static properties of traits through the name of the trait. Trait constants must be accessed through the composing class. That is, they must be accessed through the composing class name, or its descendant class name, self, static, parent, $this, or variables that hold its instance.
+
+<code>
+trait T {
+    public const CONSTANT = 42;
+
+    public function doSomething(): void {
+        // Fatal Error
+        echo T::CONSTANT;
+
+        // OK
+        echo self::CONSTANT;
+        echo static::CONSTANT;
+        echo $this::CONSTANT;
+    }
+}
+
+class Base {
+    use Foo;
+}
+
+class Child extends Base {
+    public function doSomething(): void {
+        // OK
+        echo parent::CONSTANT;
+    }
+}
+
+// OK
+echo Base::CONSTANT;
+echo Child::CONSTANT;
+echo (new Base)::CONSTANT;
+$child = new Child;
+echo $child::CONSTANT;
+
+// Fatal Error
+echo T::CONSTANT;
+</code>
+
+==== Compatibility restrictions similar to properties ====
+Trait constants have the same compatibility restrictions as the properties of traits. That is, if a trait constant of a given name appears in multiple places, such as in a composing class or in another trait in the composing class, they are only compatible if they have the same visibility and value; otherwise, they are treated as conflicts. If the definitions of the trait constants conflict, it triggers a fatal error.
+
+<code>
+trait T1 {
+    public const CONSTANT = 42;
+}
+
+// OK
+class C1 {
+    use T1:
+    public const CONSTANT = 42;
+}
+
+// Fatal Error
+class C2 {
+    use T1:
+    public const CONSTANT = 43;
+}
+
+// Fatal Error
+class C3 {
+    use T1:
+    protected const CONSTANT = 42;
+}
+
+interface I {
+    public const CONSTANT = 43;
+}
+
+// Fatal Error
+class C4 implements I {
+    use T1:
+}
+
+class Base {
+    public const CONSTANT = 43;
+}
+
+// Fatal Error
+class Derived extends Base {
+    use T1;
+}
+
+// Fatal Error
+trait T2 {
+    use T1;
+    public const CONSTANT = 43;
+}
+</code>
+
+Unlike properties, trait constants can be declared as final as with class constants, and the finality of trait constants is also used for this compatibility check.
+
+<code>
+trait T {
+    public final const CONSTANT = 42;
+}
+
+// OK
+class C1 {
+    use T;
+    public final const CONSTANT = 42;
+}
+
+// Fatal Error
+class C2 {
+    use T;
+    public const CONSTANT = 42;
+}
+</code>
+
+As in the case of trait properties, and unlike trait methods, no <code>as</code> or <code>insteadof</code> conflict resolution is provided. Also, changing visibility in the composing class by <code>as</code> is not provided.
+
+<code>
+trait T1 {
+    public const CONSTANT = 42;
+}
+trait T2 {
+    public const CONSTANT = 43;
+}
+
+// Fatal Error
+class C1 {
+    use T1 { CONSTANT as ALIAS; }
+}
+
+// Fatal Error
+class C2 {
+    use T1, T2 {
+        T1::CONSTANT insteadof T2;
+        T1::CONSTANT as ALIAS;
+    }
+}
+
+// Fatal Error
+class C3 {
+    use T1 {
+        CONSTANT as private;
+    }
+}
+</code>
+
+===== Backward Incompatible Changes =====
+There are no backwards-incompatible changes in this RFC.
+
+===== Proposed PHP Version(s) =====
+PHP 8.2
+
+===== Discussions =====
+==== Why not provide conflict resolution like methods ====
+While trait methods can use aliases with `as` and selection with `insteadof` to resolve conflicts, there is not much benefit in allowing this to be used in constants in traits. Consider the following example.
+
+<code>
+trait ByteHandler {
+    public const BIT_MASK = 0x1111_1111;
+
+    public function truncateToByte(int $i): int {
+        return $i & BIT_MASK;
+    }
+}
+
+trait WordHandler {
+    public const BIT_MASK = 0x1111_1111_1111_1111;
+
+    public function truncateToWord(int $i): int {
+        return $i & BIT_MASK;
+    }
+}
+
+class C {
+    use ByteHandler, WordHandler {
+        ByteHandler::BIT_MASK insteadof WordHandler;
+        WordHandler::BIT_MASK as WORD_BIT_MASK;
+    }
+}
+</code>
+
+Creating an alias for a constant in a trait does not rewrite the method implementation in the trait to refer to that alias. Traits with constant definitions selected by the user can continue to refer to the correct invariants expected by the trait. However, for other traits the selected definition will be wrong invariants of the same name. truncateToWord() in this case will truncate the value with an 8-bit bitmask, which will cause the WordHandler's expected invariants to be compromised, this is just a bug.
+
+While the main use case of trait methods is to be invoked from outside the using class, the main use case of a trait constant is to serve as a member that is referenced by methods in the trait. Therefore, this same method of conflict resolution as for methods is not very useful.
+
+Currently, PHP has held off on better conflict resolution for trait properties for the last decade, and simply marks multiple incompatible definitions as errors, as an obvious sign of a mistake. One idea to address this issue is to introduce new visibility "trait local" that are only accessible within a given trait. This is beyond the scope of this proposal and would require a separate RFC.
+
+Constants in PHP can hold state through object constants and are more similar in nature to properties than methods. Both constants and properties should have the same style of conflict resolution. Therefore, in this proposal, we are limiting ourselves to the content that once a trait constant has the same restrictions as a property, it has the same restrictions as a property. Therefore, this RFC only proposes that trait constants have the same restrictions as properties.
+
+==== Why not introduce visibility changes via `as` like methods ====
+Trait methods can also change visibility on the use class side via the <code>as</code> keyword.
+
+<code>
+trait T {
+    public function method(): void {}
+}
+
+class C {
+    use T {
+        method as public;
+    }
+}
+</code>
+
+Simply because it is not currently available for the property, this RFC doesn't propose to allow similar visibility changes for trait constants.
+
+A survey of the 1149 packages on packagist shows that at least 222 locations in 26 packages use this feature for trait methods.
+
+We refrain from judging whether this is large or small, but there are probably cases where it is more convenient for classes to be able to decide which members to expose.
+
+We do not preclude the future introduction of this feature, but for the sake of simplicity, we do not include it in this RFC.
+
+In case it is to be introduced, it would be necessary to allow the same visibility change on the property side for consistency, and to provide a way to distinguish between a constant and a method with the same name in the trait, while maintaining consistency with the compatibility check behavior.
+
+===== Proposed Voting Choices =====
+Include these so readers know where you are heading and can discuss the proposed voting options.
+
+===== Patches and Tests =====
+Will be added in a few days.
+
+===== References =====
+  * https://externals.io/message/110741 The initial discussion about constants in traits
+  * https://externals.io/message/51007 The original discussion about properties in constatns
+  * https://www.php.net/manual/en/language.oop5.traits.php The explanation of traits in the PHP manual
+  * https://externals.io/message/35800 The discussion on "trait local" 14 years ago
