@@ -1,0 +1,105 @@
+====== PHP RFC: Auto-implement Stringable for string backed enums ======
+  * Version: 1.0
+  * Date: 2022-06-21
+  * Author: Ilija Tovilo <tovilo.ilija@gmail.com>, Nicolas Grekas <nicolasgrekas@php.net>
+  * Status: Draft
+  * Implementation: https://github.com/php/php-src/pull/8825
+  * First Published at: https://wiki.php.net/rfc/auto-implement_stringable_for_string_backed_enums
+
+===== Introduction =====
+
+The engine currently doesn't allow enums to implement Stringable. This RFC proposes that string-backed enums auto-implement Stringable, while still disallowing user-land implementations of the method.
+
+===== Proposal =====
+
+==== The problem ====
+As the community starts adopting enums, people realize that they don't always work with libraries that deal with strings as input, since they're type-incompatible with the string type. In other cases, using enums requires casting them explicitly to strings by accessing their "''->value''" property, forcing needless boilerplate for people that don't use strict-mode.
+
+A typical example is when using attributes. For example, Symfony has an ''#[IsGranted('SOME_ROLE')]'' attribute and ppl want to use it with enums like in ''#[IsGranted(PossibleRoles::SomeRole)]''. Yet this is forbidden by the engine and ppl suggest that the definition of the ''IsGranted'' attribute is patched to accept backed enums as arguments.
+
+As experienced on the Symfony repository, this problem is especially visible at the boundary of libraries: when some component accepts a string as input, ppl want them to also accept backed-enums. This usually means that they propose widening the accepted types of some method to make them work seamslessly with enums. Such patched methods then start with something like ''$input = $input instanceof \BackedEnum ? $input->value : $input;''.
+
+The problem for maintainers is that 1. widening an accepted type is a BC break for non-final public APIs since this can break child classes and 2. potentially any string argument is a candidate for such widening. This means that going this way creates a scalability issue for the adoption of enums: there is no way all libraries in the PHP ecosystem at large are going to do these changes everywhere string is accepted since there are too many of them and many libs would require a major version bump.
+
+The scale of the concern means this should likely be fixed at the engine level.
+
+So, to sum it up, even if people use enum for their application logic in valid ways, they face limitations if they want to use external libraries with their enums. It would be great if we could find ways to make it easier for general-purpose libraries to support enums without cluttering libraries with if/else blocks and without changing existing interfaces in a backwards-incompatible way.
+
+==== Auto-implementing Stringable for string-backed enums ====
+
+In order to enable using enums seamelessly with string types, this PR proposes that the engine auto-implements Stringable for string-backed enums. E.g. defining an enum like this one:
+
+<code php>
+enum Suit: string {
+  case Hearts = 'H';
+  // ...
+}
+</code>
+
+Would virtually define this:
+
+<code php>
+enum Suit: string implements Stringable {
+  case Hearts = 'H';
+  // ...
+  public function __toString(): string
+  {
+    return $this->value;
+  }
+}
+</code>
+
+The implementation of __toString would be auto-provided by the engine and re-implementing the method in user-land would be forbidden (as already the case right now.) This implementation is The One that just makes sense and this restriction would enforce a consistent behavior for all string-backed enums. 
+
+For the other enum types (unit enums and int-backed enums), the current behavior would be maintained: the implementation of Stringable would remain forbidden. A future RFC could relax this restriction but the problem presented by this RFC mostly affects string-backed enums.
+
+==== Strict-mode vs non-strict mode ====
+
+Allowing enums in attributes (see earlier example) is a practice that is highly desired by the community and that led to the following complementary RFC:
+https://wiki.php.net/rfc/fetch_property_in_const_expressions
+
+Instead of allowing one to write ''#[IsGranted(PossibleRoles::SomeRole)]'', this other RFC aims at allowing ''#[IsGranted(PossibleRoles::SomeRole->value)]''.
+
+The benefit of using this syntax is that it passes strict-types.
+Its drawback is that it adds boilerplate.
+
+The same goes with code-level function calls, where one is currently forced to write e.g.: ''->isGranted(PossibleRoles::SomeRole->value)''.
+
+For people that use non-strict mode, this extra "''->value''" is boilerplate that they'd better remove, exactly like they decided to not opt-in for the permanent "''(string)''" casts that strict-mode requires.
+
+Non-strict mode deserves as much love as strict-mode.
+
+More broadly about types, e.g. TypeScript allows backed enums to act as their backed primitive type.
+In PHP, string is not a type that be can extended. The closest we have is Stringable, and it would be very much expected to see it implemented on string-backed enums.
+
+==== Out-of-band discussion ====
+
+A preliminary discussion about the topic presented in this RFC started at https://github.com/php/php-src/pull/8825
+
+The reader might want to check it to read various insights on the topic.
+
+===== Backward Incompatible Changes =====
+Loose comparisons will change their outcome, for example ''MyEnum::Foo == 'foo''' will return true instead of false when ''MyEnum::Foo->value === 'foo'''.
+
+The authors of this RFC believe that because such loose comparisons are not useful in their current state, and because enums are very new, this BC issue should almost never arise in practice, if at all (but they must admit this is just an intuition.)
+
+===== Future Scope =====
+We could consider allowing unit enums and int-backed enums to implement Stringable in user-land, to give back these tools to the community.
+
+===== Proposed PHP Version(s) =====
+8.2
+
+===== Proposed Voting Choices =====
+Auto-implement Stringable for string backed enums: yes/no - 2/3 majority required to pass.
+
+===== Patches and Tests =====
+
+See https://github.com/php/php-src/pull/8825
+
+===== Implementation =====
+
+After the project is implemented, this section should contain 
+  - the version(s) it was merged into
+  - a link to the git commit(s)
+  - a link to the PHP manual entry for the feature
+  - a link to the language specification section (if any)
