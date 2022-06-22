@@ -1,5 +1,5 @@
 ====== PHP RFC: Random Extension Improvement ======
-  * Version: 1.4
+  * Version: 1.5
   * Date: 2022-06-16
   * Author: Go Kudo <g-kudo@colopl.co.jp> <zeriyoshi@gmail.com>
   * Status: Under Discussion
@@ -21,40 +21,14 @@ Even if the native classes are made final, it is easy for the user to create an 
 
 This is clearly an API design error, and the native implementations of the interface should be marked as final.
 
-==== Randomizer lacks array_rand() replacement method ====
+==== Random\SerializableEngine is outdated ====
 
-array_rand() uses RNG internally, but there is no alternative method in Randomizer.
-As per the previous RFC, this was the intent, but upon further investigation, array_rand() is used by many packages and should probably be drop-in replaceable.
+This interface is a remnant from when the Serializable interface was still useful. This interface is no longer needed in PHP, as serializability is now determined by the existence of a magic method.
 
-However, the name of the method may need to be reconsidered. How about Randomizer::pickArrayKey(array $array, int $num = 1): int|string|array or something similar?
+For this reason, remove RandomEngine\SerializableEngine.
 
-==== "string" means a binary ====
-
-In PHP, "string" means a binary. This is often a problem when using multibyte characters. For example, str_shuffle on a Japanese (UTF-8) string will give messed up results.
-
-Therefore, it may be better to change the alternative method of str_shuffle(), Randomizer::shuffleString(), to Randomizer::shuffleBytes(). This is a more appropriate name.
-
-==== PCG64 is ambiguous ====
-
-The Random Extension has implemented PCG64 as a new PRNG, but it is officially one variant of PCG64, oneseq-128-xsl-rr-64, and may need to be made more easily understood.
-
-Therefore, change the class name from Random\Engine\PCG64 to Random\Engine\PCGOneseq128XslRr64.
-
-==== Mersenne Twister is ambiguous ====
-
-When PCG makes the choice to reflect a more detailed implementation in the name, Random\Engine\MersenneTwister is also an issue at the same time.
-
-Random\Engine\MersenneTwister is precisely an implementation of the MT19937 algorithm.
-
-MT19937 also has an algorithm called MT19937_64 that generates 64-bit values. If for some reason MT19937_64 were to be implemented, the fact that the name Mersenne Twister is already in use could be problematic.
-
-==== PCG is not so famous ====
-
-PCG is a very good algorithm, boasting great randomness and performance.
-
-However, I think its name recognition is in some ways inferior to Vigna's RNG, which started with Xorshift.
-
-Therefore, I reimplement Xoshiro256**, which was previously mentioned as a candidate, and create the class Random\Engine\Xoshiro256StarStar. This will avoid the problem of using the old MT19937 since it is not familiar with PCG.
+This means that an Engine that implements SerializableEngine will no longer implement it. 
+However, serializability is determined by the implementation of the magic method in current PHP, so it has no effect.
 
 ==== CombinedLCG is outdated ====
 
@@ -63,11 +37,44 @@ However, this algorithm is very classical and the quality of the output random n
 
 In order to preserve the implementation of the lcg_value() function, the internal implementation is retained, but the implementation as a class is being dropped to prevent users from unintentionally using it.
 
-==== Random\SerializableEngine is outdated ====
+==== Add Randomizer::pickArrayKeys(array $array, int $num): array method ====
 
-This interface is a remnant from when the Serializable interface was still useful. This interface is no longer needed in PHP, as serializability is now determined by the existence of a magic method.
+array_rand() uses RNG internally, but there is no alternative method in Randomizer.
+As per the previous RFC, this was the intent, but upon further investigation, array_rand() is used by many packages and should probably be drop-in replaceable.
 
-For this reason, remove RandomEngine\SerializableEngine.
+So add a method called Randomizer::pickArrayKeys(array $array, int $num): array. It looks incompatible with array_rand(), but you can get completely consistent results by doing the following:
+
+<code php>
+mt_srand(1234, MT_RAND_PHP);
+$beforeMultiple = array_rand(['foo' => 'foo', 'bar' => 'bar', 'baz' => 'baz'], 2); // (array) ['bar', 'baz']
+$beforeSingle = array_rand(['foo' => 'foo', 'bar' => 'bar', 'baz' => 'baz'], 1); // (string) foo
+
+$engine = new Random\Engine\Mt19937(1234, MT_RAND_PHP);
+$randomizer = new Random\Randomizer($engine);
+$beforeMultiple = $randomizer->pickArrayKeys(['foo' => 'foo', 'bar' => 'bar', 'baz' => 'baz'], 2); // (array) ['bar', 'baz']
+[$beforeSingle] = $randomizer->pickArrayKeys(['foo' => 'foo', 'bar' => 'bar', 'baz' => 'baz'], 1); // (string) foo
+</code>
+
+==== "string" means a binary ====
+
+In PHP, "string" means a binary. This is often a problem when using multibyte characters. For example, str_shuffle on a Japanese (UTF-8) string will give messed up results.
+
+Therefore, it may be better to change the alternative method of str_shuffle(), Randomizer::shuffleString(), to Randomizer::shuffleBytes(). This is a more appropriate name.
+
+==== Refine classnames ====
+
+To make it more readable and regular, the class name is changed as follows:
+
+  * Random\Engine\PCG64 -> Random\Engine\PcgOneseq128XslRr64
+  * Random\Engine\MersenneTwister -> Random\Engine\Mt19937
+
+==== PCG is not so famous ====
+
+PCG is a very good algorithm, boasting great randomness and performance.
+
+However, I think its name recognition is in some ways inferior to Vigna's RNG, which started with Xorshift.
+
+Therefore, I reimplement Xoshiro256**, which was previously mentioned as a candidate, and create the class Random\Engine\Xoshiro256StarStar. This will avoid the problem of using the old MT19937 since it is not familiar with PCG.
 
 ===== Proposal =====
 
@@ -80,37 +87,9 @@ For each of these issues, we will create a ballot option and make a decision.
    * No
 </doodle>
 
-==== Randomizer lacks array_rand() replacement method ====
+==== Random\SerializableEngine is outdated ====
 
-<doodle title="Add Random\Randomizer::pickArrayKey(array $array, int $num = 1): int|string|array" auth="zeriyoshi" voteType="single" closed="true">
-   * Yes
-   * No
-</doodle>
-
-==== "string" means a binary ====
-
-<doodle title="Rename Random\Randomizer::shuffleString() to Random\Randomizer::shuffleBytes()" auth="zeriyoshi" voteType="single" closed="true">
-   * Yes
-   * No
-</doodle>
-
-==== PCG64 is ambiguous ====
-
-<doodle title="Rename Random\Engine\PCG64 to Random\Engine\PCGOneseq128XslRr64" auth="zeriyoshi" voteType="single" closed="true">
-   * Yes
-   * No
-</doodle>
-
-==== Mersenne Twister is ambiguous ====
-
-<doodle title="Rename Random\Engine\MersenneTwister to Random\Engine\MT19937" auth="zeriyoshi" voteType="single" closed="true">
-   * Yes
-   * No
-</doodle>
-
-==== PCG is not so famous ====
-
-<doodle title="Implement Random\Engine\Xoshiro256StarStar" auth="zeriyoshi" voteType="single" closed="true">
+<doodle title="Remove Random\SerializableEngine" auth="zeriyoshi" voteType="single" closed="true">
    * Yes
    * No
 </doodle>
@@ -122,9 +101,30 @@ For each of these issues, we will create a ballot option and make a decision.
    * No
 </doodle>
 
-==== Random\SerializableEngine is outdated ====
+==== Add Randomizer::pickArrayKeys(array $array, int $num): array method ====
 
-<doodle title="Remove Random\SerializableEngine" auth="zeriyoshi" voteType="single" closed="true">
+<doodle title="Add Random\Randomizer::pickArrayKeys(array $array, int $num): array" auth="zeriyoshi" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+==== "string" means a binary ====
+
+<doodle title="Rename Random\Randomizer::shuffleString() to Random\Randomizer::shuffleBytes()" auth="zeriyoshi" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+==== Refine classnames ====
+
+<doodle title="Change classnames" auth="zeriyoshi" voteType="single" closed="true">
+   * Yes
+   * No
+</doodle>
+
+==== PCG is not so famous ====
+
+<doodle title="Implement Random\Engine\Xoshiro256StarStar" auth="zeriyoshi" voteType="single" closed="true">
    * Yes
    * No
 </doodle>
@@ -133,9 +133,9 @@ For each of these issues, we will create a ballot option and make a decision.
 
 The following names have been reserved and will no longer be available:
 
-  * Random\Engine\PCGOneseq128XslRr64
+  * Random\Engine\PcgOneseq128XslRr64
   * Random\Engine\Xoshiro256StarStar
-  * Random\Engine\MT19937
+  * Random\Engine\Mt19937
 
 The following class names will be made available again:
 
