@@ -4,10 +4,11 @@ Deprecate And Remove Utf8_encode And Utf8_decode
 :PHP-RFC: 0810
 :Title: Deprecate And Remove Utf8_encode And Utf8_decode
 :Author: Rowan Tommins <rowan.collins@gmail.com>
-:Status: Draft
-:Type: Unknown
-:Created: 2021-04-03
-:Version: 0.3
+:Status: Implemented
+:Type: Standards Track
+:Created: 2022-04-04
+:PHP-Version: 8.2
+:Version: 1.2
 
 Introduction
 ------------
@@ -31,10 +32,15 @@ more appropriate functions for their use cases.
 Proposal
 --------
 
--  In PHP 8.1, all uses of utf8_encode and utf8_decode will raise an
-   E_DEPRECATED diagnostic. [TODO: Specify custom message?]
+-  In PHP 8.2, all uses of utf8_encode and utf8_decode will raise a
+   standard E_DEPRECATED diagnostic ("Function utf8_encode() is
+   deprecated" / "Function utf8_decode() is deprecated").
 -  In PHP 9.0, the utf8_encode and utf8_decode functions will be removed
-   from the language.
+   from PHP.
+-  Documentation and deprecation messages will encourage users to check
+   that their usage is correct, and recommend ``mb_convert_encoding`` as
+   the primary replacement, with ``UConverter::transcode`` and ``iconv``
+   also listed as possibilities.
 
 Historical note
 ---------------
@@ -64,8 +70,8 @@ that will do exactly that, and these functions are frequently used in
 functions called things like "fix_utf8" or "ensure_utf8".
 
 While the language can never protect users from all misunderstanding, it
-is at best unfortunate to include functions whose functionality could
-not be guessed without looking at the manual.
+is unhelpful to include functions whose functionality could not be
+guessed without looking at the manual.
 
 Confusion around Latin-1 encoding
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -122,9 +128,14 @@ Usage
 In popular Composer packages
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Of the top 1000 packages by popularity on Packagist, 37 mention one or
-both of these functions. These uses can be roughly categorised as
-follows (some packages have uses in more than one category):
+*Note: this survey was carried out in April 2021; some of the specific
+examples may no longer be valid, but the general pattern is likely to
+remain.*
+
+A survey of the top 1000 packages by popularity on Packagist found 37
+mentioning one or both of these functions. These uses can be roughly
+categorised as follows (some packages have uses in more than one
+category):
 
 ::
 
@@ -164,10 +175,11 @@ On output of strftime
 ~~~~~~~~~~~~~~~~~~~~~
 
 The `strftime <https://www.php.net/strftime>`__ function formats dates
-and times according to the currently selected locale. Where non-ASCII
-characters are needed, common locales will use Latin 1 encoding. If
-UTF-8 output is required, using ``utf8_encode(strftime(...))`` will give
-the correct result for these locales.
+and times according to the currently selected locale. These locales are
+system-dependent, but many systems have European locales using Latin 1
+encoding. If UTF-8 output is required, using
+``utf8_encode(strftime(...))`` will give the correct result for these
+locales.
 
 This is used in
 `nesbot/carbon <https://packagist.org/packages/nesbot/carbon>`__ and
@@ -182,9 +194,9 @@ can be used to count the number of code points it contains. This works
 because any unmappable code point is replaced with the single byte '?'
 in the output.
 
-Although convenient, this is mostly used as a fallback from more
-specific functions, and a pure PHP implementation is also possible, as
-discussed below.
+Although convenient, this is mostly used as a fallback for more specific
+functions, and a pure PHP implementation is also possible, as discussed
+below.
 
 As "armour" for a binary value
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -260,8 +272,7 @@ Here are a few found on Stack Overflow:
    This is of course equivalent to
    ``$input = iconv('UTF-8', 'UTF-8//IGNORE', iconv('ISO-8859-1', 'UTF-8', $input));``
    Since the inner conversion always returns valid UTF-8, the outer call
-   to iconv is completely pointless, and was probably added by
-   trial-and-error.
+   to iconv is completely pointless.
 -  This user called utf8_encode on the same CSV file every time they
    processed it, eventually ending up with cells of
    `mojibake <https://en.wikipedia.org/wiki/Mojibake>`__ 32kB long:
@@ -278,22 +289,54 @@ correctly. However, replacement is straight-forward in most cases.
 For character conversion
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-If the exact error-handling behaviour is not important, and the relevant
-extension is installed, any of the following can be used:
+PHP currently has three supported extensions which provide character
+encoding facilities, which can be used as approximate replacements:
 
--  ``$utf8 = mb_convert_encoding($latin1, 'UTF-8', 'ISO-8859-1');`` and
+-  ext/mbstring:
+   ``$utf8 = mb_convert_encoding($latin1, 'UTF-8', 'ISO-8859-1');`` and
    ``$latin1 = mb_convert_encoding($utf8, 'ISO-8859-1', 'UTF-8');``
-   (from ext/mbstring)
--  ``$utf8 = iconv('ISO-8859-1', 'UTF-8', $latin1);`` and
-   ``$latin1 = iconv('UTF-8', 'ISO-8859-1', $utf8);`` (from ext/iconv)
--  ``$utf8 = UConverter::transcode($latin1, 'UTF8', 'ISO-8859-1');`` and
+-  ext/intl:
+   ``$utf8 = UConverter::transcode($latin1, 'UTF8', 'ISO-8859-1');`` and
    ``$latin1 = UConverter::transcode($utf8, 'ISO-8859-1', 'UTF8');``
-   (from ext/intl)
+-  ext/iconv: ``$utf8 = iconv('ISO-8859-1', 'UTF-8', $latin1);`` and
+   ``$latin1 = iconv('UTF-8', 'ISO-8859-1', $utf8);``
 
-An exact replacement is also straight-forward to implement in pure PHP;
-examples are available in
+These vary slightly in the options available, particularly around
+invalid and unmappable UTF-8 input. The 'to_subst' option to
+``Uconverter::transcode`` allows the closest match to ``utf8_decode``,
+e.g.
+``$latin1 = UConverter::transcode($utf8, 'ISO-8859-1', 'UTF8', ['to_subst' => '?']);``
+
+Of these three extensions, ext/mbstring is probably the most commonly
+installed. It is already required by 65 of the 1000 most popular
+packages on Packagist, including ``phpunit/phpunit`` and
+``laravel/framework``; another 35 require ``symfony/polyfill-mbstring``.
+It is also listed as a requirement for
+`Drupal <https://www.drupal.org/docs/system-requirements/php-requirements#s-mbstring->`__
+and
+`phpBB <https://www.phpbb.com/support/docs/en/3.3/ug/quickstart/>`__,
+and recommended for
+`WooCommerce <https://woocommerce.com/document/server-requirements/#section-3>`__.
+
+By contrast, ext/iconv is required by only 6 (plus 4 via
+``symfony/polyfill-iconv``), and ext/intl by only 2. It also has an
+implementation entirely contained in the ``php-src`` git repository,
+whereas ext/intl and ext/iconv rely on external libraries, with
+ext/iconv particularly prone to platform-specific differences.
+
+The possibility has been raised of making ext/mbstring non-optional in
+future, although that is out of scope for the current discussion.
+
+An exact replacement is also straight-forward to implement in pure PHP,
+as long as performance is not critical. Examples are available in
 `patchwork/utf8 <https://packagist.org/packages/patchwork/utf8>`__ and
-`symfony/polyfill-php72 <https://packagist.org/packages/symfony/polyfill-php72>`__
+`symfony/polyfill-php72 <https://packagist.org/packages/symfony/polyfill-php72>`__.
+The same approach could be used for a standalone function for
+Windows-1252 or any other single-byte encoding.
+
+In order to give users a clear message, it seems sensible to recommend
+``mb_convert_encoding`` as the primary replacement for the removed
+functions.
 
 For code point counting
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -331,7 +374,10 @@ preferred.
 On output of strftime
 ~~~~~~~~~~~~~~~~~~~~~
 
-Most systems now include variant locales which use UTF-8, so
+The ``strftime`` function itself is now deprecated.
+
+Where it is used, most systems now include variant locales which use
+UTF-8, so
 ``setlocale(LC_ALL, 'fr_FR.UTF8'); echo strftime("%A, %d %B %Y");`` will
 have the same result as
 ``setlocale(LC_ALL, 'fr_FR'); echo utf8_encode(strftime("%A, %d %B %Y"));``
@@ -339,7 +385,7 @@ have the same result as
 Proposed PHP Version(s)
 -----------------------
 
-Deprecation in 8.1, removal in 9.0
+Deprecation in 8.2, removal in 9.0
 
 RFC Impact
 ----------
@@ -356,22 +402,11 @@ Unaffected PHP Functionality
 The use of these functions internally within the ext/xml extension has
 not been examined, and will not be changed.
 
-Open Issues
------------
-
--  Exact wording of deprecation notice.
--  What alternatives should the manual actively promote?
-
-Proposed Voting Choices
------------------------
-
-Should utf8_encode and utf8_decode be deprecated in 8.1 and removed in
-9.0? (Yes / No)
-
 Patches and Tests
 -----------------
 
-TODO
+-  `Proposed additional wording in the
+   manual <https://github.com/IMSoP/doc-en/pull/1>`__
 
 References
 ----------
@@ -408,13 +443,58 @@ An alternative approach would be to introduce aliases, such as
 functionality, then deprecate the old names.
 
 This has the advantage of giving a single clear replacement for correct
-use of the existing functions. In the long term, though, users are best
-served by using general-purpose encoding functions than by this narrow
-feature.
+use of the existing functions. Again, if they did not already exist, it
+is unlikely we would add such narrow functions; users are better served
+by discovering existing general-purpose encoding functions.
+
+Adding functionality to the existing functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Conversely, we could add additional features to these functions
+*without* renaming them. For instance, by changing their signatures to
+utf8_encode(string $string, string $source_encoding = "ISO-8859-1") and
+utf8_decode(string $string, string $destination_encoding =
+"ISO-8859-1"), respectively. This parameter could later be made
+mandatory, making the function's purpose clearer.
+
+However, this would require either implementing a significant amount of
+extra code, or wrapping one of the existing functions, all of which are
+in optional extensions. It would also require several versions before
+the benefit could be realised: first, add the parameter; in a later
+version, raise a deprecation if the new parameter is not passed;
+finally, make the parameter mandatory. Users would then still need to
+check and update every use of the functions, which would be a similar
+effort to switching to a new function.
+
+Vote
+----
+
+Question: Should utf8_encode and utf8_decode be deprecated in 8.2 and removed in 9.0?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Voting started 2022-04-05 18:40 UTC, and will run for two weeks, closing
+2022-04-19 18:40 UTC
+
+Changelog
+---------
+
+-  v1.0 (2022-02-20) Initial version sent for discussion
+-  v1.1 (2022-03-04) Made a stronger recommendation of
+   mb_convert_encoding as a replacement (see "Alternatives to Removed
+   Functionality")
+-  v1.2 (2022-04-04) Dropped proposed custom wording for deprecation
+   message. The nuances can be better expressed in the manual.
 
 Additional Metadata
 -------------------
 
 :Original Authors: Rowan Tommins rowan.collins@gmail.com
+:Original Status: `Implemented <https://github.com/php/php-src/pull/8726>`__ (PHP 8.2.0)
 :Slug: remove_utf8_decode_and_utf8_encode
 :Wiki URL: https://wiki.php.net/rfc/remove_utf8_decode_and_utf8_encode
