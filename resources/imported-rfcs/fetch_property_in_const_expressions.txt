@@ -7,7 +7,7 @@
 
 ===== Introduction =====
 
-This RFC proposes to allow use of ''->''/''?->'' to fetch properties in constant expressions. The primary motivation for this change is to allow fetching the ''name'' and ''value'' properties of enums in places where enum objects aren't allowed, like array keys (see https://github.com/php/php-src/issues/8344). There is currently no way to express this without repeating the value of the enum case.
+This RFC proposes to allow use of ''->''/''?->'' to fetch properties of enums in constant expressions. The primary motivation for this change is to allow fetching the ''name'' and ''value'' properties in places where enum objects aren't allowed, like array keys (see https://github.com/php/php-src/issues/8344). There is currently no way to express this without repeating the value of the enum case.
 
 <PHP>
 enum A: string {
@@ -19,34 +19,38 @@ enum A: string {
 
 ===== Proposal =====
 
-This RFC proposes to allow the use of ''->'' to fetch properties inside all constant expressions. As ''->'' may only be used on objects there are two scenarios where ''->'' can be used:
-
-  * Enums (for the ''name'' and ''value'' properties)
-  * ''new'' (for any declared property or magic ''__get'')
+This RFC proposes to allow the use of ''->'' to fetch properties on enums inside all constant expressions. Using ''->'' on all other objects will result in a runtime error.
 
 Here are a few examples of code that will become valid if this RFC is accepted:
 
 <PHP>
-// Where E::B is a unit enum
-const A = E::B->name;
-
-// Where E::C is a backed enum
-function a() {
-    static $b = E::C->value;
+enum E: string {
+    case Foo = 'foo';
 }
 
-// Where B is a class with a property $c
-#[A((new B)->c)]
-class D {}
+const C = E::Foo->name;
 
-// Where C::$d is an object with a property $e
-function a(
-    $b = (new C)->d->e
+function f() {
+    static $v = E::Foo->value;
+}
+
+#[Attr(E::Foo->name)]
+class C {}
+
+function f(
+    $p = E::Foo->value,
 ) {}
 
+class C {
+    public string $p = E::Foo->name;
+}
+
 // The rhs of -> allows other constant expressions
-const A = 'foo';
-const B = (new C)->{A};
+const VALUE = 'value';
+
+class C {
+     const C = E::Foo->{VALUE};
+}
 </PHP>
 
 As mentioned, the primary motivation for this feature are enums. However, the implementation for supporting ''new'' is identical and I don't believe arbitrarily restricting how ''->'' can be used in this context makes sense.
@@ -55,13 +59,15 @@ For the sake of completeness, this RFC also adds support for the nullsafe operat
 
 ===== Semantics =====
 
-The semantics of ''->'' in constant expressions are identical to outside of constant expressions, including access on non-object warnings, undefined property warnings, etc.
+The semantics of ''->'' in constant expressions are identical to outside of constant expressions, including access on non-object warnings, undefined property warnings, etc. One exception is that in constant expressions the operators may only be used on enums. The rationale for this decision is in "Supporting all objects".
 
 <PHP>
-class A {}
+enum E {
+    case Foo;
+}
 
 // Warning: Undefined property: A::$c
-const B = (new A)->c; // NULL
+const B = E::Foo->c; // NULL
 // Note that this will change to an error in PHP 9 https://wiki.php.net/rfc/undefined_property_error_promotion
 
 // Warning: Attempt to read property "e" on null
@@ -81,6 +87,88 @@ const F = (null)?->{new NotInstanciated}; // NULL
 const G = (null)?->h['i']; // NULL
 </PHP>
 
+===== Supporting all objects =====
+
+A previous version of this RFC allowed fetching properties on all objects, not just enums. There are two primary reasons support for all object was dropped.
+
+  - Order of evaluation
+  - Cache invalidation
+
+==== Order of evaluation ====
+
+This problem was previously described in [[https://wiki.php.net/rfc/new_in_initializers#unsupported_positions|New in initializers RFC - unsupported positions]].
+
+<blockquote>
+New expressions continue to not be supported in (static and non-static) property initializers and class constant initializers. The reasons for this are twofold:
+
+For non-static property initializers, the initializer expression needs to be evaluated on each object creation. There are currently two places where this could happen: As part of object creation, and as part of the constructor call. Doing this as part of object creation can create issues for unserialization and any other process that is based on newInstanceWithoutConstructor() and does not want to implicitly execute potential side-effects.
+
+Performing the initialization by injecting code in the constructor avoids the issue, but requires that constructor to actually be called. In particular, this would necessitate generating constructors for classes that do not explicitly declare them, and the disciplined invocation of such constructors from potential child constructors. The third option would be to introduce an additional initialization phase between creation and construction.
+
+For static property initializers and class constant initializers a different evaluation order issue arises. Currently, these initializers are evaluated lazily the first time a class is used in a certain way (e.g. instantiated). Once initializers can contain potentially side-effecting expressions, it would be preferable to have a more well-defined evaluation order. However, the straightforward approach of evaluating initilizers when the class is declared would break certain existing code patterns. In particular, referencing a class that is declared later in the same file would no longer work.
+
+As such support in these contexts is delayed until such a time as a consensus on the preferred behavior can be reached.
+</blockquote>
+
+The ''->'' suffers from the same problem as it may invoke the ''%%__get%%'' magic method with arbitrary side-effects. I incorrectly assumed this wasn't possible because ''%%__get%%'' can only be invoked in combination with ''new'' (as enums don't allow ''%%__get%%'') which are disallowed in these contexts. This assumption was incorrect though as the LHS of the ''->'' operator might be another constant which might be an object.
+
+<PHP>
+class Foo {
+    public function __get(string $name) {
+        echo "Side effect!\n";
+    }
+}
+
+const FOO = new Foo();
+
+class C {
+    const C = FOO->bar;
+}
+</PHP>
+
+==== Caching of constant expression values ====
+
+The engine caches the result of default arguments between function calls to avoid re-evaluation if result is not ref-counted [1]. This works nicely because there is currently no way to produce a non-pure, non-ref-counted result in a constant expression. This would no longer be true if allowing ''->'' on all objects in constant expressions.
+
+<PHP>
+class Foo {
+    public function __get(string $name) {
+        return rand(0, 100);
+    }
+}
+
+function test($bar = (new Foo)->bar) {
+    var_dump($bar);
+}
+</PHP>
+
+We could remove the caching mechanism from function default arguments but that would negatively hurt performance for a small edge-case.
+
+Similarly, property initializers are currently only evaluated once per class, and then the result is copied when an instance of the given class is created. Allowing side-effects and non-pure results means we must re-evaluate the property initializer once per instance.
+
+[1] Ref-counted values consist of non-interned strings, arrays, resources and objects.
+
+==== Allow all ''readonly'' properties ====
+
+It was suggested that, instead of restricting ''->'' to be used on all non-enums to restrict access to just non-''readonly'' properties. Unfortunately, this doesn't solve the caching problem described above as ''readonly'' properties can be initialized after object construction and thus becomes non-pure.
+
+<PHP>
+class Foo {
+    public readonly string $bar;
+
+    public function init() {
+        $this->bar = 'bar';
+    }
+}
+
+const FOO = new Foo();
+function test($bar = FOO->bar ?? 'default') {}
+
+test();
+FOO->init();
+test();
+</PHP>
+
 ===== Backward Incompatible Changes =====
 
 There are no backwards-incompatible changes in this RFC.
@@ -97,7 +185,7 @@ Note that the term "constant expression" in this RFC refers to any expression th
 
 Voting opened on xxx and closes on xxx.
 
-<doodle title="Add support for fetching properties in constant expressions?" auth="ilutov" voteType="single" closed="true">
+<doodle title="Add support for fetching properties of enums in constant expressions?" auth="ilutov" voteType="single" closed="true">
    * Yes
    * No
 </doodle>
