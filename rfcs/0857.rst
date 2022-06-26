@@ -1,0 +1,655 @@
+Redacting Parameters In Back Traces
+===================================
+
+:PHP-RFC: 0857
+:Title: Redacting Parameters In Back Traces
+:Author: Tim Düsterhus <duesterhus@woltlab.com>
+:Status: Implemented
+:Type: Standards Track
+:Created: 2022-01-10
+:PHP-Version: 8.2
+:Version: 1.5
+
+Introduction
+------------
+
+PHP's stack traces in exceptions are very useful for debugging, because
+they include the original parameters for each stack frame, allowing the
+developer to see exactly what data is passed to a function call.
+Unfortunately sometimes this verbosity is a drawback. Specifically when
+sensitive values, such as credentials, are passed to a function and some
+other function deep down the call stack throws an Exception.
+
+One common "offender" is PDO which takes the database password as a
+constructor parameter and immediately attempts to connect to the
+database within the constructor, instead of having a pure constructor
+and a separate ``->connect()`` method. Thus when the database connection
+fails the stack trace will include the database password:
+
+.. raw:: html
+
+   PDOException: SQLSTATE[HY000] [2002] No such file or directory in /var/www/html/test.php:3
+   Stack trace:
+   #0 /var/www/html/test.php(3): PDO->__construct('mysql:host=loca...', 'root', 'password')
+   #1 {main}
+
+While exposing the database password certainly should be avoided, any
+exposed passwords can usually quickly be rotated and the risk reduced by
+not connecting the database to the Internet.
+
+However passing secrets into function that might fail is not limited to
+the internal database connection of the application. The application
+itself commonly handles many more kinds of secrets that are often
+directly related to a single user, putting them at risk in case of
+exposure. For instance the PDO example can happen likewise when
+validating the user's password while the authentication service (e.g.
+LDAP) is unavailable, exposing the password in a
+``validatePassword(string $password): bool`` method. During the checkout
+within an e-commerce application, a credit card number might be part of
+a stack frame when the backend service times out during credit card
+validation.
+
+Even if the application follows best practices by not exposing raw error
+messages to the visitor, the error messages, including their stack
+trace, will usually end up within the application's error log. These
+error logs are then commonly shipped to a log analysis or error tracking
+services and in many cases these services are provided by a third party
+as a SaaS offering. Sending plaintext passwords, credit card numbers or
+other personally identifying information to such a log analysis service
+might put the operator in a violation of their respective privacy laws.
+
+Not having a standardized solution to parameter redaction makes it hard
+for userland exception handlers to reliably scrub stack traces, because
+the handler will need to guess which parameters might or might not hold
+sensitive values. Furthermore it requires reimplementing the scrubbing
+logic within every library, framework or application.
+
+Proposal
+--------
+
+To prevent these sensitive parameters from appearing within a stack
+trace this RFC proposes a new standardized ``\SensitiveParameter``
+attribute that can be applied to a function's parameter to indicate that
+the parameter contains sensitive information that must not appear in
+back traces.
+
+To reliably apply this protection for all types of back traces and all
+types of exception and error handlers, the redaction should happen when
+collecting the parameter values during back trace generation.
+Specifically when the backtrace is generated, any parameter that has a
+``\SensitiveParameter`` attribute will not have its value stored in the
+backtrace, but instead will be replaced with a
+``\SensitiveParameterValue`` object.
+
+Choice of replacement value
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC proposes a ``\SensitiveParameterValue`` object as the
+replacement value, instead of something simpler such as a
+``'[redacted]'`` string.
+
+While strings are likely the most commonly encountered type of sensitive
+parameter, some sensitive values might also be passed as an object that
+might get serialized and then shipped to a logging service (e.g. a
+``Keypair`` object) within an exception handler. For parameters that are
+type-hinted to take a specific argument it is generally not possible to
+generically construct a replacement value that does not violate the
+type-hint.
+
+For this reason, the replacement value will need to violate the
+type-hint for at least some of the parameters the attribute is applied
+to. Using a ``\SensitiveParameterValue`` object will almost certainly
+violate a type hint, but it allows userland code to reliably detect the
+difference between a real value and a parameter that was redacted by
+using an ``$foo instanceof \SensitiveParameterValue`` check.
+
+Furthermore the replacement object will store the original value,
+allowing it to retrieve it on explicit request, while making it hard to
+accidentally expose it.
+
+The userland equivalent of the ``\SensitiveParameterValue`` class is:
+
+.. code:: php
+
+   <?php
+
+   final class SensitiveParameterValue
+   {
+       public function __construct(private readonly mixed $value) {}
+
+       public function getValue(): mixed { return $value; }
+
+       /* Hide the value from var_dump(). */
+       public function __debugInfo(): array { return []; }
+
+       /* Hide the value from serialization. */
+       public function __serialize(): array { return []; }
+
+       /* Prevent unserialization, as the stored value cannot round-trip. */
+       public function __unserialize(array $data): void {
+           throw new \Exception('...');
+       }
+   }
+
+Examples
+~~~~~~~~
+
+Simple example with a single sensitive parameter:
+
+.. code:: php
+
+   <?php
+
+   function test(
+       $foo,
+       #[\SensitiveParameter] $bar,
+       $baz
+   ) {
+       throw new \Exception('Error');
+   }
+
+   test('foo', 'bar', 'baz');
+
+   /*
+   Fatal error: Uncaught Exception: Error in test.php:8
+   Stack trace:
+   #0 test.php(11): test('foo', Object(SensitiveParameterValue), 'baz')
+   #1 {main}
+     thrown in test.php on line 8
+   */
+
+Named parameters:
+
+.. code:: php
+
+   <?php
+
+   function test(
+       $foo = null,
+       #[\SensitiveParameter] $bar = null,
+       $baz = null
+   ) {
+       throw new \Exception('Error');
+   }
+
+   test(
+       baz: 'baz',
+       bar: 'bar',
+   );
+
+   /*
+   Fatal error: Uncaught Exception: Error in test.php:8
+   Stack trace:
+   #0 test.php(13): test(NULL, Object(SensitiveParameterValue), 'baz')
+   #1 {main}
+     thrown in test.php on line 8
+   */
+
+Omitted default parameter:
+
+.. code:: php
+
+   <?php
+
+   function test(
+       $foo = null,
+       #[\SensitiveParameter] $bar = null,
+       $baz = null
+   ) {
+       throw new \Exception('Error');
+   }
+
+   test(baz: 'baz');
+
+   /*
+   Fatal error: Uncaught Exception: Error in test.php:8
+   Stack trace:
+   #0 test.php(11): test(NULL, Object(SensitiveParameterValue), 'baz')
+   #1 {main}
+     thrown in test.php on line 8
+   */
+
+Variadic parameters:
+
+.. code:: php
+
+   <?php
+
+   function test(
+       $foo,
+       #[\SensitiveParameter] ...$bar
+   ) {
+       throw new \Exception('Error');
+   }
+
+   test('foo', 'bar1', 'bar2', 'bar3');
+
+   /*
+   Fatal error: Uncaught Exception: Error in test.php:7
+   Stack trace:
+   #0 test.php(10): test('foo', Object(SensitiveParameterValue), Object(SensitiveParameterValue), Object(SensitiveParameterValue))
+   #1 {main}
+     thrown in test.php on line 7
+   */
+
+Nested function calls:
+
+.. code:: php
+
+   <?php
+
+   function test(
+       $foo,
+       #[\SensitiveParameter] $bar,
+       $baz
+   ) {
+       throw new \Exception('Error');
+   }
+
+   function test2(
+       #[\SensitiveParameter] $foo,
+       $bar,
+       $baz
+   ) {
+       test($foo, $bar, $baz);
+   }
+
+   test2('foo', 'bar', 'baz');
+
+   /*
+   Fatal error: Uncaught Exception: Error in test.php:8
+   Stack trace:
+   #0 test.php(16): test('foo', Object(SensitiveParameterValue), 'baz')
+   #1 test.php(19): test2(Object(SensitiveParameterValue), 'bar', 'baz')
+   #2 {main}
+     thrown in test.php on line 8
+   */
+
+Closures:
+
+.. code:: php
+
+   <?php
+
+   $test = function (
+       $foo,
+       #[\SensitiveParameter] $bar,
+       $baz
+   ) {
+       throw new \Exception('Error');
+   };
+
+   $test('foo', 'bar', 'baz');
+
+   /*
+   Fatal error: Uncaught Exception: Error in test.php:8
+   Stack trace:
+   #0 test.php(11): {closure}('foo', Object(SensitiveParameterValue), 'baz')
+   #1 {main}
+     thrown in test.php on line 8
+   */
+
+Processing Stack Traces:
+
+.. code:: php
+
+   <?php
+
+   function test(
+       $foo,
+       #[\SensitiveParameter] $bar,
+       $baz
+   ) {
+       throw new \Exception('Error');
+   }
+
+   try {
+       test('foo', 'bar', 'baz');
+       echo 'Not reached';
+   } catch (\Exception $e) {
+       echo $e->getMessage();
+       $testFrame = $e->getTrace()[0];
+       \assert($testFrame['function'] === 'test');
+       \assert($testFrame['args'][0] === 'foo');
+       \assert($testFrame['args'][1] instanceof \SensitiveParameterValue);
+       // Explicitly retrieve the original value.
+       \assert($testFrame['args'][1]->getValue() === 'bar');
+       \assert($testFrame['args'][2] === 'baz');
+   }
+
+   /*
+   Error
+   */
+
+Non-string arguments:
+
+.. code:: php
+
+   <?php
+
+   class Keypair { 
+       private $publicKey;
+       private $privateKey;
+
+       public function __construct($publicKey, $privateKey)
+       {
+           $this->publicKey = $publicKey;
+           $this->privateKey = $privateKey;
+       }
+   }
+
+   function test(
+       Keypair $foo,
+       #[\SensitiveParameter] Keypair $bar
+   ) {
+       throw new \Exception('Error');
+   };
+
+   try {
+       test(
+           new Keypair('public1', 'private1'),
+           new Keypair('public2', 'private2')
+       );
+   } catch (\Exception $e) {
+       // Send the exception to a logging service.
+       echo serialize($e->getTrace());
+   }
+
+   /*
+   (Formatting for readability)
+   a:1:{
+       i:0;
+           a:4:{
+               s:4:"file";
+                   s:8:"test.php";
+               s:4:"line";
+                   i:24;
+               s:8:"function";
+                   s:4:"test";
+               s:4:"args";
+                   a:2:{
+                       i:0;
+                           O:7:"Keypair":2:{
+                               s:18:"KeypairpublicKey";
+                                   s:7:"public1";
+                               s:19:"KeypairprivateKey";
+                                   s:8:"private1";
+                           }
+                       i:1;
+                           O:18:"SensitiveParameterValue":0:{}
+                   }
+           }
+   }
+   */
+
+debug_print_backtrace / debug_backtrace:
+
+.. code:: php
+
+   <?php
+
+   function test(
+       $foo,
+       #[\SensitiveParameter] $bar,
+       $baz
+   ) {
+       debug_print_backtrace();
+       var_dump(debug_backtrace());
+   }
+
+   test('foo', 'bar', 'baz');
+
+   /*
+   #0 test.php(12): test('foo', Object(SensitiveParameterValue), 'baz')
+   array(1) {
+     [0]=>
+     array(4) {
+       ["file"]=>
+       string(8) "test.php"
+       ["line"]=>
+       int(12)
+       ["function"]=>
+       string(4) "test"
+       ["args"]=>
+       array(3) {
+         [0]=>
+         string(3) "foo"
+         [1]=>
+         object(SensitiveParameterValue)#1 (0) {
+         }
+         [2]=>
+         string(3) "baz"
+       }
+     }
+   }
+   */
+
+Why existing features are insufficient
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+zend.exception_ignore_args
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+zend.exception_ignore_args completely omits parameters in back traces.
+This is not a useful alternative:
+
+-  The stack trace parameters are just too useful for debugging to
+   completely strip them.
+
+zend.exception_string_param_max_len
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+zend.exception_string_param_max_len configures the length of string
+parameters in back traces. This is not a useful alternative:
+
+-  Many sensitive values might already be fully exposed before they are
+   truncated. This specifically includes end-user credentials which tend
+   to be low-entropy and shortish.
+
+Creating a wrapper class for sensitive strings
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The
+`paragonie/hidden-string <https://github.com/paragonie/hidden-string>`__
+library attempts to solve the same problem of sensitive parameters
+appearing in stack traces. While this attempt works with functions that
+specifically expect such a ``HiddenString`` to be passed, it will not
+work with parameters that are type-hinted to take a ``string``. Either
+the underlying string needs to be explicitly extracted, or
+``__toString()`` support needs to be enabled within the library. In both
+cases the scalar string will appear in the stack trace.
+
+Furthermore such a wrapper class is limited to string values and cannot
+easily protect other types of sensitive values.
+
+Backward Incompatible Changes
+-----------------------------
+
+1. The ``\SensitiveParameter`` and ``\SensitiveParameterValue`` class
+name will no longer be available to userland code.
+
+This is very unlikely to break existing code. The class name is fairly
+specific and GitHub's search for ``SensitiveParameter`` in PHP code only
+returns 6 results, all of them strings:
+
+https://github.com/search?l=PHP&q=SensitiveParameter&type=Code
+
+2. Custom exception handlers might see objects of class
+``\SensitiveParameterValue``, despite the parameter having a different
+type within the method's signature.
+
+Clearly indicating any redacted parameters is considered to outweight
+this minor BC break. It is unlikely that an exception handler would use
+reflection to learn about the parameter type and then validate the
+passed value. In any case updating the exception handler to include an
+``$foo instanceof \SensitiveParameterValue`` check is considered trivial
+and will not break compatibility with older PHP versions.
+
+Proposed PHP Version(s)
+-----------------------
+
+Next PHP 8.x.
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+None.
+
+To Existing Extensions
+~~~~~~~~~~~~~~~~~~~~~~
+
+Extensions should verify any existing parameters and add the
+``\SensitiveParameter`` attribute for parameters deemed sensitive.
+
+Debuggers might be affected. Changes might be required to expose the
+original values during a debugging session, e.g. when stepping through
+the code.
+
+To Opcache
+~~~~~~~~~~
+
+None.
+
+New Constants
+~~~~~~~~~~~~~
+
+None.
+
+php.ini Defaults
+~~~~~~~~~~~~~~~~
+
+None.
+
+Open Issues
+-----------
+
+None.
+
+Unaffected PHP Functionality
+----------------------------
+
+This RFC only affects the collected arguments within a back trace.
+Unless the back trace is processed programmatically, the only change is
+that a developer will notice is that some error messages show in place
+of a real parameter.
+
+Future Scope
+------------
+
+None.
+
+Proposed Voting Choices
+-----------------------
+
+Add the ``\SensitiveParameter`` attribute and replace parameters having
+this attribute in back traces by ``\SensitiveParameterValue``?
+
+Voting started on 2022-02-09. Voting runs until 2022-02-23 at 13:30 UTC.
+
+Question: Redacting parameters in back traces
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Voting Choices
+^^^^^^^^^^^^^^
+
+-  Yes
+-  No
+
+Patches and Tests
+-----------------
+
+Prototype patch: https://github.com/php/php-src/pull/7921
+
+Errata
+------
+
+During code review it was noticed that the proposed serialization
+behavior of ``\SensitiveParameterValue`` was not useful:
+
+-  https://github.com/php/php-src/pull/7921#discussion_r813743903
+-  https://externals.io/message/117136
+
+Compared to the proposal a userland implementation of
+``\SensitiveParameterValue`` class would look like the following:
+
+.. code:: php
+
+   <?php
+
+   final class SensitiveParameterValue
+   {
+       public function __construct(private readonly mixed $value) {}
+
+       public function getValue(): mixed { return $value; }
+
+       /* Hide the value from var_dump(). */
+       public function __debugInfo(): array { return []; }
+
+       /* Prevent serialization. */
+       public function __serialize(): array {
+           throw new \Exception('...');
+       }
+
+       /* Prevent unserialization. */
+       public function __unserialize(array $data): void {
+           throw new \Exception('...');
+       }
+   }
+
+Note that the ``__serialize()`` and ``__unserialize()`` methods are not
+actually implemented. Serialization is prevented using a flag on the
+internal class implementation.
+
+Implementation
+--------------
+
+This was merged into PHP 8.2 in
+https://github.com/php/php-src/commit/90851977348cbb8c65fce19a1670868422414fae,
+based on the PR https://github.com/php/php-src/pull/7921.
+
+The attribute was applied to existing functions in
+https://github.com/php/php-src/pull/8352.
+
+References
+----------
+
+-  Pre-RFC: https://externals.io/message/116847
+-  Existing user-land implementation:
+   https://github.com/WoltLab/WCF/blob/c4d4b97448213a1f806e3b7b7af8d50d68034b02/wcfsetup/install/files/lib/core.functions.php#L720-L741
+-  Discussion thread: https://externals.io/message/116853
+-  PHP Internals News Podcast: https://phpinternals.news/97
+-  Library attempting to solve the same problem by wrapping strings in
+   objects: https://github.com/paragonie/hidden-string
+
+Rejected Features
+-----------------
+
+-  Inheriting the "sensitivity" across the stack trace, to parameters
+   without explicit attributes:
+   https://externals.io/message/116853#116868 /
+   https://externals.io/message/116853#116872
+
+Changelog
+---------
+
+-  1.5: Store the original value.
+-  1.4: Use SensitiveParameterValue as the replacement value.
+-  1.3: "Creating a wrapper class" section, resolved open
+   issues/questions, future scope.
+-  1.2: Expanded Introduction: Clarify that secrets are not limited to
+   database passwords. Clarify that they might result in error tracking
+   services.
+-  1.1: Clarified language, justifying the choice of replacement value,
+   Closure example, Keypair example, debug_backtrace example.
+
+Additional Metadata
+-------------------
+
+:Implementation: https://github.com/php/php-src/commit/90851977348cbb8c65fce19a1670868422414fae (Creation of the attribute) / https://github.com/php/php-src/pull/8352 (Applying the attribute)
+:Original Authors: Tim Düsterhus, duesterhus@woltlab.com
+:Original PHP Version: PHP 8.2
+:Slug: redact_parameters_in_back_traces
+:Wiki URL: https://wiki.php.net/rfc/redact_parameters_in_back_traces
