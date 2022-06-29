@@ -1,0 +1,249 @@
+PDO Driver Specific Sub-classes
+===============================
+
+:PHP-RFC: 0855
+:Title: PDO Driver Specific Sub-classes
+:Author: Danack
+:Status: Draft
+:Type: Unknown
+:Created: 2022-06-20
+:Version: 1.0
+
+Introduction
+------------
+
+PDO is a generic database class. Some of the databases it supports have
+functionality that is specific to that database. For example, when
+connected to an SQLite database, the sqlite specific function
+PDO::sqliteCreateFunction is available.
+
+Having methods exist on a class depending on how the program was
+compiled and/or what database it is connecting to is quite surprising.
+It would make the code be easier to reason about if there were
+subclasses of the PDO class, specific to each database that has specific
+functionality available.
+
+Proposal
+--------
+
+The proposal has three parts:
+
+-  Add new subclasses of PDO
+-  Add PDO::connect to be able to create them
+-  Add DB specific function to those subclasses.
+
+Add new subclasses of PDO
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There will be one subclasse each for the SQLite and PGsql (aka Postgres)
+database drivers. PDOSqlite and PDOPostgres (or maybe PDOPgsql?).
+
+Each of these subclasses will expose functionality that exists that is
+peculiar to that DB, and not present in the generic PDO class. e.g.
+PDOSqlite::createFunction() should be there rather than on the generic
+PDO class PDO::sqliteCreateFunction.
+
+Although there may be DB specific functionality that could be exposed
+for the other database types that PDO support, this RFC does not intend
+to expose them.
+
+Add a way of creating them through PDO static factory method
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Add a static factory method to PDO called connect. During the connect
+process, the exact type of database being connected to will be checked,
+and if it is a DB that has a specific sub-class, return that sub-class
+instead of a generic PDO object
+
+.. code:: php
+
+   class PDO
+   {
+       public static function connect(string $dsn [, string $username [, string $password [, array $options ]]]) {
+
+           if (connecting to SQLite DB) {
+               return new PDOSqlite(...);
+           }
+
+
+           return new PDO(...);
+       }
+   }
+
+PDO::connect will return the appropriate sub-class when connecting to
+specific type of DB.
+
+Users will also be able to create the DB specific classes directly,
+through the appropriate constructor e.g.
+
+.. code:: php
+
+   $db = new PDOSqlite($dsn, $username, $password, $options);
+
+The code will throw an exception if the type of database being connected
+to isn't of the correct type for the class.
+
+Add DB specific function to those subclasses.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Postgres
+^^^^^^^^
+
+These methods already exist as magic functions on PDO:
+
+-  PDOPostgres::copyFromArray
+-  PDOPostgres::copyFromFile
+-  PDOPostgres::copyToArray
+-  PDOPostgres::copyToFile
+-  PDOPostgres::getNotify
+-  PDOPostgres::getPid
+-  PDOPostgres::LOBCreate
+-  PDOPostgres::LOBOpen
+-  PDOPostgres::LOBUnlink
+
+SQLIte
+^^^^^^
+
+These functions already exist as magic functions on PDO:
+
+-  PDOSQLite::createAggregate
+-  PDOSQLite::createCollation
+-  PDOSQLite::createFunction
+
+These will be two new methods
+
+-  PDOSqlite::loadExtension
+-  PDOSqlite::blobOpen
+
+Backward Incompatible Changes
+-----------------------------
+
+None known. It might be inconvenient for people who are extending PDO
+class directly, and would like to extend the specific types. They would
+need to write their own connect functions, that wrap and proxy those
+specific types.
+
+Proposed PHP Version(s)
+-----------------------
+
+PHP 8.2
+
+RFC Impact
+----------
+
+To SAPIs
+~~~~~~~~
+
+Describe the impact to CLI, Development web server, embedded PHP etc.
+
+Open Issues
+-----------
+
+These are the known current issues.
+
+Should the sub-classes only be available when support for that DB is compiled in?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+e.g. should PDOSqlite exist if PHP was compiled without PDO_SQLITE
+compilted in? Probaby not.
+
+Create all DB sub-classes?
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Should all DBs have sub-classes created now, or should they be added
+when someone requests it?
+
+When to deprecate old function on PDO
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The method PDO::sqliteCreateFunction should probably be deprecated and
+removed at 'some point'. Although this cleanup should happen, the
+position of this RFC is that it's very low priority.
+
+8.2 - PDO subclassses become available 9.0 - calls to
+PDO::sqliteCreateFunction start raising deprecation notice. 10.0 -
+method PDO::sqliteCreateFunction is removed, and that functionality can
+only be accessed through PDOSqlite
+
+Removing the methods that magically exist or not depending on the
+specific driver created would save some complication in the PDO code. So
+although there's not benefit in userland for deprecating the existing
+magic methods, there may be a complexity saving in maintenance.
+
+PQescapeIdentifier
+~~~~~~~~~~~~~~~~~~
+
+Postgres has a slightly different set of rules for escaping identifiers
+than it does for values and has a function \`PQescapeIdentifier\` to
+escape identifiers. Should this be exposed in the PDOPostgres class, or
+should PDO itself be capable of quoting values and identifiers
+separately?
+
+Unaffected PHP Functionality
+----------------------------
+
+Everything not PDO
+
+Future Scope
+------------
+
+Subclasses for other database drivers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This RFC considers adding subclasses for any other PDO database that
+isn't explicitly listed above as out of scope. People who use a
+particular database driver and would like to see a subclass that exposes
+methods peculiar to that database could propose an RFC similar to this
+one, for that database.
+
+Quoting identifiers
+~~~~~~~~~~~~~~~~~~~
+
+During the discussion, a point was raised that currently there is no
+"escape identifier" method on the base PDO class. Postgres at least has
+a specific method for escaping identifiers as the rules for escaping
+those are different from escaping values. It sounds valuable to add an
+escape method to the base PDO class, but that needs to be done by
+someone familiar with all of the database drivers.
+
+Proposed Voting Choices
+-----------------------
+
+Accept the RFC or not.
+
+Patches and Tests
+-----------------
+
+WIP code https://github.com/php/php-src/pull/8707
+
+Implementation
+--------------
+
+After the project is implemented, this section should contain
+
+#. the version(s) it was merged into
+#. a link to the git commit(s)
+#. a link to the PHP manual entry for the feature
+#. a link to the language specification section (if any)
+
+References
+----------
+
+A proprosal to add `sqlite openblob
+functionality </rfc/implement_sqlite_openblob_in_pdo>`__ previously
+failed to pass. The discussion gave the impression that the sub-classing
+`approach would be more
+acceptable <https://externals.io/message/100773#100813>`__.
+
+Rejected Features
+-----------------
+
+Keep this updated with features that were discussed on the mail lists.
+
+Additional Metadata
+-------------------
+
+:Original Authors: Danack
+:Original Status: Under Discussion
+:Slug: pdo_driver_specific_subclasses
+:Wiki URL: https://wiki.php.net/rfc/pdo_driver_specific_subclasses
