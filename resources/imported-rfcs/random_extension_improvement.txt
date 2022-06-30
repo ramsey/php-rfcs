@@ -1,5 +1,5 @@
 ====== PHP RFC: Random Extension Improvement ======
-  * Version: 1.52
+  * Version: 1.5.3
   * Date: 2022-06-16
   * Author: Go Kudo <g-kudo@colopl.co.jp> <zeriyoshi@gmail.com>
   * Status: Under Discussion
@@ -7,74 +7,78 @@
 
 ===== Introduction =====
 
-There are several issues with RFC: Random Extension 5.x that are already in the voting phase due to lack of proper discussion.
-
-Key issues include:
+Several issues with [[rfc:rng_extension|the "Random Extension 5.x" RFC]] were only raised after voting started (due to lack of proper discussion):
 
 ==== Engine implementations are not final ====
 
-The Random Extension has classes that are natively implemented as RNG engines, but they are not marked as final.
+The Random Extension has classes that are natively implemented as RNG engines, but they are not marked as <php>final</php>.
 This allows classes to be created that inherit from native classes, but as stated in the previous RFC, user-implemented engines are inferior to native classes in terms of execution efficiency. This is true even for inheritance without method overrides, which often leads to confusion.
 
-The extension already provides a Random\Engine interface with a single generate(): string method.
+The extension already provides a ''Random\Engine'' interface with a single ''generate(): string'' method.
 Even if the native classes are made final, it is easy for the user to create an alternative class using delegates.
 
 This is clearly an API design error, and the native implementations of the interface should be marked as final.
 
 ==== Random\SerializableEngine is not useful ====
 
-This interface is a remnant from when the Serializable interface was still useful. This interface is no longer needed in PHP, as serializability is now determined by the existence of a magic method.
+This interface is a remnant from when the <php>Serializable</php> interface was still useful. This interface is no longer needed in PHP, as serializability is now determined by the existence of a magic method.
 
-For this reason, remove RandomEngine\SerializableEngine.
+For this reason, remove ''Random\SerializableEngine''.
 
 This means that an Engine that implements SerializableEngine will no longer implement it. 
 However, serializability is determined by the implementation of the magic method in current PHP, so it has no effect.
 
 ==== Random\Engine\CombinedLCG is low quality ====
 
-The newly added Random\Engine\CombinedLCG is only for use with PHP's lcg_value() function.
+The newly added ''Random\Engine\CombinedLCG'' is only for use with PHP's <php>lcg_value()</php> function.
 However, this algorithm is very classical and the quality of the output random numbers is at the lowest level.
 
 In order to preserve the implementation of the lcg_value() function, the internal implementation is retained, but the implementation as a class is being dropped to prevent users from unintentionally using it.
 
 ==== Add Randomizer::pickArrayKeys(array $array, int $num): array method ====
 
-array_rand() uses RNG internally, but there is no alternative method in Randomizer.
+<php>array_rand()</php> uses RNG internally, but there is no alternative method in ''Randomizer''.
 As per the previous RFC, this was the intent, but upon further investigation, array_rand() is used by many packages and should probably be drop-in replaceable.
 
-So add a method called Randomizer::pickArrayKeys(array $array, int $num): array. It looks incompatible with array_rand(), but you can get completely consistent results by doing the following:
+So add a method <php>Randomizer::pickArrayKeys(array $array, int $num): array</php>.
+
+It may look incompatible with <php>array_rand(array $array, int $num = 1): int|string|array</php>, but you can get completely consistent results by doing the following:
 
 <code php>
-mt_srand(1234, MT_RAND_PHP);
-$beforeMultiple = array_rand(['foo' => 'foo', 'bar' => 'bar', 'baz' => 'baz'], 2); // (array) ['bar', 'baz']
-$beforeSingle = array_rand(['foo' => 'foo', 'bar' => 'bar', 'baz' => 'baz'], 1); // (string) foo
+$array = ['foo', 'bar', 'baz'];
 
+// Before:
+mt_srand(1234, MT_RAND_PHP);
+$single = array_rand($array); // (int) 0
+$multiple = array_rand($array, 2); // (array) [1, 2]
+
+// After:
 $engine = new Random\Engine\Mt19937(1234, MT_RAND_PHP);
 $randomizer = new Random\Randomizer($engine);
-$afterMultiple = $randomizer->pickArrayKeys(['foo' => 'foo', 'bar' => 'bar', 'baz' => 'baz'], 2); // (array) ['bar', 'baz']
-[$afterSingle] = $randomizer->pickArrayKeys(['foo' => 'foo', 'bar' => 'bar', 'baz' => 'baz'], 1); // (string) foo
+$single = $randomizer->pickArrayKeys($array, 1)[0]; // (int) 0
+ // or: [$single] = $randomizer->pickArrayKeys($array, 1);
+$multiple = $randomizer->pickArrayKeys($array, 2); // (array) [1, 2]
 </code>
 
 ==== "string" means a binary ====
 
-In PHP, "string" means a binary. This is often a problem when using multibyte characters. For example, str_shuffle on a Japanese (UTF-8) string will give messed up results.
+In PHP, "string" means a binary. This is often a problem when using multibyte characters. For example, <php>str_shuffle()</php> on a Japanese (UTF-8) string will give messed up results.
 
-Therefore, it may be better to change the alternative method of str_shuffle(), Randomizer::shuffleString(), to Randomizer::shuffleBytes(). This is a more appropriate name.
+Therefore, it may be better to change the alternative method of str_shuffle(), ''Randomizer::shuffle**String**()'', to ''Randomizer::shuffle**Bytes**()''. This is a more appropriate name.
 
 ==== Refine classnames ====
 
-To clearly identify the implemented algorithm the PCG64 and MersenneTwister twister engines should be renamed to their canonical upstream name:
+To clearly identify the implemented algorithm, the PCG64 and MersenneTwister engines should be renamed to their canonical upstream name:
 
-  * Random\Engine\PCG64 -> Random\Engine\PcgOneseq128XslRr64
-  * Random\Engine\MersenneTwister -> Random\Engine\Mt19937
+  * ''Random\Engine\**PCG64**'' → ''Random\Engine\**PcgOneseq128XslRr64**''
+  * ''Random\Engine\**MersenneTwister**'' → ''Random\Engine\**Mt19937**''
 
 ==== PCG is not so famous ====
 
 PCG is a very good algorithm, boasting great randomness and performance.
-
 However, I think its name recognition is in some ways inferior to Vigna's RNG, which started with Xorshift.
 
-Therefore, I reimplement Xoshiro256**, which was previously mentioned as a candidate, and create the class Random\Engine\Xoshiro256StarStar. This will avoid the problem of using the old MT19937 since it is not familiar with PCG.
+Therefore, I reimplement %%Xoshiro256**%%, which was previously mentioned as a candidate, and create the class ''Random\Engine\Xoshiro256StarStar''. This will avoid the problem of using the old MT19937 since it is not familiar with PCG.
 
 ===== Proposal =====
 
@@ -133,13 +137,15 @@ For each of these issues, we will create a ballot option and make a decision.
 
 The following names have been reserved and will no longer be available:
 
+  * Random\Engine\Mt19937
   * Random\Engine\PcgOneseq128XslRr64
   * Random\Engine\Xoshiro256StarStar
-  * Random\Engine\Mt19937
 
 The following class names will be made available again:
 
   * Random\Engine\CombinedLCG
+  * Random\Engine\MersenneTwister
+  * Random\Engine\PCG64
   * Random\SerializableEngine
 
 ===== Proposed PHP Version(s) =====
