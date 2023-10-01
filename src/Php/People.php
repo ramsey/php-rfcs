@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PhpRfcs\Php;
 
+use InvalidArgumentException;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\UriFactoryInterface;
@@ -34,15 +35,13 @@ final class People
 
     /**
      * Returns a User instance for the given PHP.net username.
-     *
-     * @throws UserNotFound
      */
     public function lookupUser(string $username): User
     {
         $username = trim($username);
 
         if ($username === '') {
-            throw new UserNotFound('User is an empty string');
+            throw new InvalidArgumentException('Username cannot be an empty string');
         }
 
         if (array_key_exists($username, self::$people)) {

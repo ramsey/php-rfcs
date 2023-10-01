@@ -6,6 +6,7 @@ namespace PhpRfcs\Test\Php;
 
 use Fig\Http\Message\StatusCodeInterface;
 use Hamcrest\Core\IsInstanceOf;
+use InvalidArgumentException;
 use Laminas\Diactoros\RequestFactory;
 use Laminas\Diactoros\Response;
 use Laminas\Diactoros\StreamFactory;
@@ -17,7 +18,6 @@ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PhpRfcs\HttpFactory;
 use PhpRfcs\Php\People;
 use PhpRfcs\Php\User;
-use PhpRfcs\Php\UserNotFound;
 use PhpRfcs\Test\PhpRfcsTestCase;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestInterface;
@@ -45,8 +45,8 @@ class PeopleTest extends PhpRfcsTestCase
     {
         $people = new People($this->http);
 
-        $this->expectException(UserNotFound::class);
-        $this->expectExceptionMessage('User is an empty string');
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Username cannot be an empty string');
 
         $people->lookupUser('   ');
     }
