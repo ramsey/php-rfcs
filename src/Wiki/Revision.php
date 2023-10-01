@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace PhpRfcs\Wiki;
 
 use DateTimeImmutable;
+use DateTimeInterface;
+use JsonSerializable;
 use PhpRfcs\Php\User;
 
 /**
  * Represents a PHP wiki page revision.
  */
-final readonly class Revision
+final readonly class Revision implements JsonSerializable
 {
     /**
      * The content of the page at this revision.
@@ -36,5 +38,15 @@ final readonly class Revision
     ) {
         $this->content = new Content();
         $this->page->addRevision($this);
+    }
+
+    public function jsonSerialize(): object
+    {
+        return (object) [
+            'revision' => $this->revision,
+            'date' => $this->date->format(DateTimeInterface::ATOM),
+            'author' => $this->author,
+            'summary' => $this->summary,
+        ];
     }
 }

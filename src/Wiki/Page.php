@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpRfcs\Wiki;
 
 use ArrayObject;
+use JsonSerializable;
 use LogicException;
 use Psr\Http\Message\UriInterface;
 
@@ -13,7 +14,7 @@ use const SORT_NUMERIC;
 /**
  * Represents a page found on the PHP wiki.
  */
-final readonly class Page
+final readonly class Page implements JsonSerializable
 {
     /**
      * @var ArrayObject<int, Revision>
@@ -60,5 +61,14 @@ final readonly class Page
     public function getRevisions(): ArrayObject
     {
         return $this->revisions;
+    }
+
+    public function jsonSerialize(): object
+    {
+        return (object) [
+            'slug' => $this->slug,
+            'url' => (string) $this->pageUrl,
+            'revisions' => $this->revisions,
+        ];
     }
 }
