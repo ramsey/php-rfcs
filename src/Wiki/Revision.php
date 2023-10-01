@@ -34,6 +34,7 @@ final readonly class Revision
         public string $summary,
         public bool $isCurrent,
     ) {
+        $this->content = new Content();
         $this->page->addRevision($this);
     }
 }

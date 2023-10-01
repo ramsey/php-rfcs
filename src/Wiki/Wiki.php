@@ -9,16 +9,20 @@ use DOMNode;
 use DOMNodeList;
 use DOMXPath;
 use DateTimeImmutable;
+use Generator;
 use PhpRfcs\Php\People;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\UriFactoryInterface;
+use RuntimeException;
 
+use function array_filter;
 use function assert;
 use function count;
 use function http_build_query;
 use function parse_str;
 use function parse_url;
+use function sprintf;
 use function str_replace;
 use function trim;
 
@@ -37,17 +41,17 @@ final readonly class Wiki
     }
 
     /**
-     * @return Revision[]
+     * @return Generator<Revision>
      */
-    public function getRevisionsForPage(Page $page): iterable
+    public function getRevisionsForPage(Page $page): Generator
     {
         return $this->getPageHistory($page);
     }
 
     /**
-     * @return Revision[]
+     * @return Generator<Revision>
      */
-    private function getPageHistory(Page $page, int $first = 0): iterable
+    private function getPageHistory(Page $page, int $first = 0): Generator
     {
         $contents = $this->getRevisionPageContents($page, $first);
 
@@ -65,7 +69,10 @@ final readonly class Wiki
             $summary = $this->getRevisionSummary($revision, $xpath);
             $user = $this->people->lookupUser($this->getRevisionAuthor($revision, $xpath));
 
-            yield new Revision($page, $id ?: $date->getTimestamp(), $date, $user, $summary, $id === 0);
+            $revision = new Revision($page, $id ?: $date->getTimestamp(), $date, $user, $summary, $id === 0);
+            $revision->content->raw = $this->getRawContentForRevision($revision);
+
+            yield $revision;
         }
 
         $nextNav = $xpath->query("//div[@class='pagenav-next']") ?: [];
@@ -75,6 +82,27 @@ final readonly class Wiki
                 yield $revision;
             }
         }
+    }
+
+    private function getRawContentForRevision(Revision $revision): string
+    {
+        $queryParams = array_filter([
+            'rev' => $revision->isCurrent ? '' : $revision->revision,
+        ]);
+
+        $url = $revision->page->pageUrl->withQuery(http_build_query($queryParams));
+
+        $request = $this->http
+            ->createRequest('GET', $url)
+            ->withHeader('X-DokuWiki-Do', 'export_raw');
+
+        $response = $this->http->sendRequest($request);
+
+        if ($response->getStatusCode() !== 200) {
+            throw new RuntimeException(sprintf('Unable to find revision at %s', $url));
+        }
+
+        return $response->getBody()->getContents();
     }
 
     private function getRevisionPageContents(Page $page, int $first = 0): string
