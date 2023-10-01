@@ -13,7 +13,12 @@ use PhpRfcs\Php\User;
 final readonly class Revision
 {
     /**
-     * @param Rfc $rfc The RFC instance to which this revision belongs.
+     * The content of the page at this revision.
+     */
+    public Content $content;
+
+    /**
+     * @param Page $page The page instance to which this revision belongs.
      * @param int $revision The ID (i.e., timestamp) of the revision.
      * @param DateTimeImmutable $date The date of the revision.
      * @param User | null $author The person who authored this revision.
@@ -22,13 +27,13 @@ final readonly class Revision
      *     recent, set of changes to the RFC.
      */
     public function __construct(
-        public Rfc $rfc,
+        public Page $page,
         public int $revision,
         public DateTimeImmutable $date,
         public ?User $author,
         public string $summary,
         public bool $isCurrent,
     ) {
-        $this->rfc->addRevision($this);
+        $this->page->addRevision($this);
     }
 }

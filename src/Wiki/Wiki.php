@@ -39,17 +39,17 @@ final readonly class Wiki
     /**
      * @return Revision[]
      */
-    public function getRevisionsForRfc(Rfc $rfc): iterable
+    public function getRevisionsForPage(Page $page): iterable
     {
-        return $this->getRfcHistory($rfc);
+        return $this->getPageHistory($page);
     }
 
     /**
      * @return Revision[]
      */
-    private function getRfcHistory(Rfc $rfc, int $first = 0): iterable
+    private function getPageHistory(Page $page, int $first = 0): iterable
     {
-        $contents = $this->getRfcRevisionPageContents($rfc, $first);
+        $contents = $this->getRevisionPageContents($page, $first);
 
         $dom = new DOMDocument();
         @$dom->loadHTML('<?xml encoding="utf-8">' . $contents);
@@ -65,30 +65,30 @@ final readonly class Wiki
             $summary = $this->getRevisionSummary($revision, $xpath);
             $user = $this->people->lookupUser($this->getRevisionAuthor($revision, $xpath));
 
-            yield new Revision($rfc, $id ?: $date->getTimestamp(), $date, $user, $summary, $id === 0);
+            yield new Revision($page, $id ?: $date->getTimestamp(), $date, $user, $summary, $id === 0);
         }
 
         $nextNav = $xpath->query("//div[@class='pagenav-next']") ?: [];
 
         if (count($nextNav) > 0) {
-            foreach ($this->getRfcHistory($rfc, $first + self::FIRST_INCREMENT) as $revision) {
+            foreach ($this->getPageHistory($page, $first + self::FIRST_INCREMENT) as $revision) {
                 yield $revision;
             }
         }
     }
 
-    private function getRfcRevisionPageContents(Rfc $rfc, int $first = 0): string
+    private function getRevisionPageContents(Page $page, int $first = 0): string
     {
         $queryParams = [
             'do' => 'revisions',
             'first' => $first,
         ];
 
-        $historyUrl = $rfc->pageUrl->withQuery(http_build_query($queryParams));
+        $historyUrl = $page->pageUrl->withQuery(http_build_query($queryParams));
         $request = $this->http->createRequest('GET', $historyUrl);
-        $rfcPageResponse = $this->http->sendRequest($request);
+        $pageResponse = $this->http->sendRequest($request);
 
-        return $this->tidy->repairString($rfcPageResponse->getBody()->getContents());
+        return $this->tidy->repairString($pageResponse->getBody()->getContents());
     }
 
     private function getRevisionDate(DOMNode $revisionNode, DOMXPath $xpath): DateTimeImmutable

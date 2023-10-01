@@ -17,8 +17,8 @@ use PhpRfcs\HttpFactory;
 use PhpRfcs\Php\People;
 use PhpRfcs\Php\User;
 use PhpRfcs\Test\PhpRfcsTestCase;
+use PhpRfcs\Wiki\Page;
 use PhpRfcs\Wiki\Revision;
-use PhpRfcs\Wiki\Rfc;
 use PhpRfcs\Wiki\Tidy;
 use PhpRfcs\Wiki\Wiki;
 use Psr\Http\Client\ClientInterface;
@@ -33,7 +33,7 @@ use function sprintf;
 #[CoversClass(Tidy::class)]
 #[CoversClass(Wiki::class)]
 #[UsesClass(People::class)]
-#[UsesClass(Rfc::class)]
+#[UsesClass(Page::class)]
 #[UsesClass(User::class)]
 class WikiTest extends PhpRfcsTestCase
 {
@@ -55,7 +55,7 @@ class WikiTest extends PhpRfcsTestCase
         $this->wiki = new Wiki($http, new People($http), $tidy);
     }
 
-    public function testGetRevisionsForRfc(): void
+    public function testGetRevisionsForPage(): void
     {
         $wikiResponse = new Response(
             fopen(__DIR__ . '/stubs/rfc-dnf_types-revisions-contents-01.txt', 'r') ?: '',
@@ -89,16 +89,16 @@ class WikiTest extends PhpRfcsTestCase
                 default => $this->fail(sprintf('Received unexpected request for %s', $request->getUri())),
             });
 
-        $rfc = new Rfc(
+        $page = new Page(
             'an-rfc-slug',
             (new UriFactory())->createUri('https://example.com/an-rfc-slug'),
         );
 
         $revisions = [];
-        foreach ($this->wiki->getRevisionsForRfc($rfc) as $revision) {
+        foreach ($this->wiki->getRevisionsForPage($page) as $revision) {
             $isCurrent = $revision->isCurrent ? ['current' => true] : [];
             $revisions[] = [
-                'slug' => $revision->rfc->slug,
+                'slug' => $revision->page->slug,
                 'id' => $revision->revision,
                 'date' => $revision->date->format('Y/m/d H:i'),
                 'author' => ['name' => $revision->author?->name, 'email' => $revision->author?->email],
@@ -241,7 +241,7 @@ class WikiTest extends PhpRfcsTestCase
         );
     }
 
-    public function testGetRevisionsForRfcPaginates(): void
+    public function testGetRevisionsForPagePaginates(): void
     {
         $wikiResponse1 = new Response(
             fopen(__DIR__ . '/stubs/rfc-typed_class_constants-revisions-contents-01.txt', 'r') ?: '',
@@ -299,16 +299,16 @@ class WikiTest extends PhpRfcsTestCase
                 default => $this->fail(sprintf('Received unexpected request for %s', $request->getUri())),
             });
 
-        $rfc = new Rfc(
+        $page = new Page(
             'an-rfc-slug',
             (new UriFactory())->createUri('https://example.com/an-rfc-slug'),
         );
 
         $revisions = [];
-        foreach ($this->wiki->getRevisionsForRfc($rfc) as $revision) {
+        foreach ($this->wiki->getRevisionsForPage($page) as $revision) {
             $isCurrent = $revision->isCurrent ? ['current' => true] : [];
             $revisions[] = [
-                'slug' => $revision->rfc->slug,
+                'slug' => $revision->page->slug,
                 'id' => $revision->revision,
                 'date' => $revision->date->format('Y/m/d H:i'),
                 'author' => ['name' => $revision->author?->name, 'email' => $revision->author?->email],

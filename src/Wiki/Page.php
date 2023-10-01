@@ -11,9 +11,9 @@ use Psr\Http\Message\UriInterface;
 use const SORT_NUMERIC;
 
 /**
- * Represents an RFC found on the PHP wiki.
+ * Represents a page found on the PHP wiki.
  */
-final readonly class Rfc
+final readonly class Page
 {
     /**
      * @var ArrayObject<int, Revision>
@@ -21,8 +21,8 @@ final readonly class Rfc
     private ArrayObject $revisions;
 
     /**
-     * @param string $slug The URL slug of the RFC, which acts as an identifier.
-     * @param UriInterface $pageUrl The URL of the RFC.
+     * @param string $slug The URL slug of the page, which acts as an identifier.
+     * @param UriInterface $pageUrl The URL of the page.
      */
     public function __construct(
         public string $slug,
