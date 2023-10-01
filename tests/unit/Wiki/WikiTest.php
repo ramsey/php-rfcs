@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace PhpRfcs\Test\Wiki;
 
 use Fig\Http\Message\StatusCodeInterface;
-use Hamcrest\Core\IsInstanceOf;
 use Laminas\Diactoros\RequestFactory;
 use Laminas\Diactoros\Response;
 use Laminas\Diactoros\StreamFactory;
@@ -30,7 +29,9 @@ use RuntimeException;
 use Spatie\Snapshots\MatchesSnapshots;
 
 use function fopen;
+use function in_array;
 use function sprintf;
+use function str_contains;
 
 #[CoversClass(HttpFactory::class)]
 #[CoversClass(Revision::class)]
@@ -93,7 +94,15 @@ class WikiTest extends PhpRfcsTestCase
 
         $this->client
             ->expects('sendRequest')
-            ->with(new IsInstanceOf(RequestInterface::class))
+            ->withArgs(function (RequestInterface $request): bool {
+                if (str_contains((string) $request->getUri(), 'rev=')) {
+                    if (!in_array('export_raw', $request->getHeader('X-DokuWiki-Do'))) {
+                        $this->fail('Requests for raw content must include the "X-DokuWiki-Do: export_raw" header');
+                    }
+                }
+
+                return true;
+            })
             ->times(22)
             ->andReturnUsing(fn (RequestInterface $request): ResponseInterface => match ((string) $request->getUri()) {
                 'https://example.com/an-rfc-slug?do=revisions&first=0' => $wikiResponse,
@@ -194,7 +203,15 @@ class WikiTest extends PhpRfcsTestCase
 
         $this->client
             ->expects('sendRequest')
-            ->with(new IsInstanceOf(RequestInterface::class))
+            ->withArgs(function (RequestInterface $request): bool {
+                if (str_contains((string) $request->getUri(), 'rev=')) {
+                    if (!in_array('export_raw', $request->getHeader('X-DokuWiki-Do'))) {
+                        $this->fail('Requests for raw content must include the "X-DokuWiki-Do: export_raw" header');
+                    }
+                }
+
+                return true;
+            })
             ->times(69)
             ->andReturnUsing(fn (RequestInterface $request): ResponseInterface => match ((string) $request->getUri()) {
                 'https://example.com/an-rfc-slug?do=revisions&first=0' => $wikiResponse1,
@@ -317,7 +334,15 @@ class WikiTest extends PhpRfcsTestCase
 
         $this->client
             ->expects('sendRequest')
-            ->with(new IsInstanceOf(RequestInterface::class))
+            ->withArgs(function (RequestInterface $request): bool {
+                if (str_contains((string) $request->getUri(), 'rev=')) {
+                    if (!in_array('export_raw', $request->getHeader('X-DokuWiki-Do'))) {
+                        $this->fail('Requests for raw content must include the "X-DokuWiki-Do: export_raw" header');
+                    }
+                }
+
+                return true;
+            })
             ->times(4)
             ->andReturnUsing(fn (RequestInterface $request): ResponseInterface => match ((string) $request->getUri()) {
                 'https://example.com/an-rfc-slug?do=revisions&first=0' => $wikiResponse,

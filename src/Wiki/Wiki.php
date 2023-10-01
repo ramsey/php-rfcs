@@ -94,7 +94,7 @@ final readonly class Wiki
 
         $request = $this->http
             ->createRequest('GET', $url)
-            ->withHeader('X-DokuWiki-Do', 'export_raw');
+            ->withHeader('x-dokuwiki-do', 'export_raw');
 
         $response = $this->http->sendRequest($request);
 
