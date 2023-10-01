@@ -30,10 +30,10 @@ use function sprintf;
 
 #[CoversClass(HttpFactory::class)]
 #[CoversClass(Revision::class)]
-#[CoversClass(Rfc::class)]
 #[CoversClass(Tidy::class)]
 #[CoversClass(Wiki::class)]
 #[UsesClass(People::class)]
+#[UsesClass(Rfc::class)]
 #[UsesClass(User::class)]
 class WikiTest extends PhpRfcsTestCase
 {
