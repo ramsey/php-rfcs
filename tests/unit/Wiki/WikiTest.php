@@ -97,11 +97,13 @@ class WikiTest extends PhpRfcsTestCase
 
         $revisions = [];
         foreach ($this->wiki->getRevisionsForRfc($rfc) as $revision) {
+            $isCurrent = $revision->isCurrent ? ['current' => true] : [];
             $revisions[] = [
                 'id' => $revision->revision,
                 'date' => $revision->date->format('Y/m/d H:i'),
                 'author' => ['name' => $revision->author?->name, 'email' => $revision->author?->email],
                 'summary' => $revision->summary,
+                ...$isCurrent,
             ];
         }
 
@@ -112,6 +114,7 @@ class WikiTest extends PhpRfcsTestCase
                     'date' => '2023/01/21 22:12',
                     'author' => ['name' => 'George Peter Banyard', 'email' => 'girgias@php.net'],
                     'summary' => 'Typo in code example, brakets are not allowed for standalone intersection types',
+                    'current' => true,
                 ],
                 [
                     'id' => 1656814622,
@@ -286,11 +289,13 @@ class WikiTest extends PhpRfcsTestCase
 
         $revisions = [];
         foreach ($this->wiki->getRevisionsForRfc($rfc) as $revision) {
+            $isCurrent = $revision->isCurrent ? ['current' => true] : [];
             $revisions[] = [
                 'id' => $revision->revision,
                 'date' => $revision->date->format('Y/m/d H:i'),
                 'author' => ['name' => $revision->author?->name, 'email' => $revision->author?->email],
                 'summary' => $revision->summary,
+                ...$isCurrent,
             ];
         }
 
@@ -302,6 +307,7 @@ class WikiTest extends PhpRfcsTestCase
                     'date' => '2023/03/24 16:40',
                     'author' => ['name' => 'Ilija Tovilo', 'email' => 'ilutov@php.net'],
                     'summary' => 'Properly close poll',
+                    'current' => true,
                 ],
                 [
                     'id' => 1678725579,

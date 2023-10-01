@@ -61,11 +61,11 @@ final class Wiki
 
         foreach ($revisions as $revision) {
             $date = $this->getRevisionDate($revision, $xpath);
-            $id = $this->getRevisionId($revision, $xpath) ?: $date->getTimestamp();
+            $id = $this->getRevisionId($revision, $xpath);
             $summary = $this->getRevisionSummary($revision, $xpath);
             $user = $this->people->lookupUser($this->getRevisionAuthor($revision, $xpath));
 
-            yield new Revision($id, $date, $user, $summary);
+            yield new Revision($id ?: $date->getTimestamp(), $date, $user, $summary, $id === 0);
         }
 
         $nextNav = $xpath->query("//div[@class='pagenav-next']") ?: [];
