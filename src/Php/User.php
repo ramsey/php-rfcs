@@ -7,7 +7,7 @@ namespace PhpRfcs\Php;
 /**
  * Represents a PHP user.
  */
-readonly final class User
+final readonly class User
 {
     public function __construct(
         public string $name,

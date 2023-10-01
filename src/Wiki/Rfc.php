@@ -9,7 +9,7 @@ use Psr\Http\Message\UriInterface;
 /**
  * Represents an RFC found on the PHP wiki.
  */
-readonly final class Rfc
+final readonly class Rfc
 {
     public function __construct(
         public string $slug,

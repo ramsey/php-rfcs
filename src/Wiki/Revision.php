@@ -10,9 +10,10 @@ use PhpRfcs\Php\User;
 /**
  * Represents a PHP wiki page revision.
  */
-readonly final class Revision
+final readonly class Revision
 {
     /**
+     * @param Rfc $rfc The RFC instance to which this revision belongs.
      * @param int $revision The ID (i.e., timestamp) of the revision.
      * @param DateTimeImmutable $date The date of the revision.
      * @param User | null $author The person who authored this revision.
@@ -21,6 +22,7 @@ readonly final class Revision
      *     recent, set of changes to the RFC.
      */
     public function __construct(
+        public Rfc $rfc,
         public int $revision,
         public DateTimeImmutable $date,
         public ?User $author,

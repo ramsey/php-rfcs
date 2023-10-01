@@ -25,14 +25,14 @@ use function trim;
 /**
  * Provides operations for getting wiki data.
  */
-final class Wiki
+final readonly class Wiki
 {
     private const FIRST_INCREMENT = 20;
 
     public function __construct(
-        readonly public ClientInterface & RequestFactoryInterface & UriFactoryInterface $http,
-        readonly public People $people,
-        readonly public Tidy $tidy,
+        public ClientInterface & RequestFactoryInterface & UriFactoryInterface $http,
+        public People $people,
+        public Tidy $tidy,
     ) {
     }
 
@@ -65,7 +65,7 @@ final class Wiki
             $summary = $this->getRevisionSummary($revision, $xpath);
             $user = $this->people->lookupUser($this->getRevisionAuthor($revision, $xpath));
 
-            yield new Revision($id ?: $date->getTimestamp(), $date, $user, $summary, $id === 0);
+            yield new Revision($rfc, $id ?: $date->getTimestamp(), $date, $user, $summary, $id === 0);
         }
 
         $nextNav = $xpath->query("//div[@class='pagenav-next']") ?: [];
