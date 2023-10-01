@@ -91,7 +91,6 @@ class WikiTest extends PhpRfcsTestCase
 
         $rfc = new Rfc(
             'an-rfc-slug',
-            'test section',
             (new UriFactory())->createUri('https://example.com/an-rfc-slug'),
         );
 
@@ -302,7 +301,6 @@ class WikiTest extends PhpRfcsTestCase
 
         $rfc = new Rfc(
             'an-rfc-slug',
-            'test section',
             (new UriFactory())->createUri('https://example.com/an-rfc-slug'),
         );
 

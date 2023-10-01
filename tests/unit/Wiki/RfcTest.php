@@ -18,7 +18,7 @@ class RfcTest extends TestCase
 {
     public function testAddRevisionAllowsAddingTheSameRevisionMultipleTimes(): void
     {
-        $rfc = new Rfc('my-cool-rfc', 'some section', new Uri('https://example.com/my-cool-rfc'));
+        $rfc = new Rfc('my-cool-rfc', new Uri('https://example.com/my-cool-rfc'));
         $revision = new Revision($rfc, 123, new DateTimeImmutable(), null, 'a summary', true);
 
         $rfc->addRevision($revision);
@@ -31,7 +31,7 @@ class RfcTest extends TestCase
 
     public function testAddRevisionThrowsExceptionWhenAttemptingToAddDifferentInstanceOfSameRevision(): void
     {
-        $rfc = new Rfc('my-cool-rfc', 'some section', new Uri('https://example.com/my-cool-rfc'));
+        $rfc = new Rfc('my-cool-rfc', new Uri('https://example.com/my-cool-rfc'));
         $revision1 = new Revision($rfc, 123, new DateTimeImmutable(), null, 'a summary', true);
         $revision2 = clone $revision1;
 
@@ -43,7 +43,7 @@ class RfcTest extends TestCase
 
     public function testAddRevisionThrowsExceptionWhenAttemptingToAddAnotherCurrentRevision(): void
     {
-        $rfc = new Rfc('my-cool-rfc', 'some section', new Uri('https://example.com/my-cool-rfc'));
+        $rfc = new Rfc('my-cool-rfc', new Uri('https://example.com/my-cool-rfc'));
         new Revision($rfc, 123, new DateTimeImmutable(), null, 'a summary', true);
 
         $this->expectException(LogicException::class);
@@ -54,7 +54,7 @@ class RfcTest extends TestCase
 
     public function testAddRevision(): void
     {
-        $rfc = new Rfc('my-cool-rfc', 'some section', new Uri('https://example.com/my-cool-rfc'));
+        $rfc = new Rfc('my-cool-rfc', new Uri('https://example.com/my-cool-rfc'));
 
         new Revision($rfc, 2, new DateTimeImmutable(), null, 'a summary', false);
         new Revision($rfc, 4, new DateTimeImmutable(), null, 'a summary', true);

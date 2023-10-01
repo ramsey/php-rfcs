@@ -20,9 +20,12 @@ final readonly class Rfc
      */
     private ArrayObject $revisions;
 
+    /**
+     * @param string $slug The URL slug of the RFC, which acts as an identifier.
+     * @param UriInterface $pageUrl The URL of the RFC.
+     */
     public function __construct(
         public string $slug,
-        public string $section,
         public UriInterface $pageUrl,
     ) {
         $this->revisions = new ArrayObject();
