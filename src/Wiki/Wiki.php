@@ -10,6 +10,7 @@ use DOMNodeList;
 use DOMXPath;
 use DateTimeImmutable;
 use Generator;
+use PhpRfcs\HtmlTidy;
 use PhpRfcs\Php\People;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
@@ -36,7 +37,7 @@ final readonly class Wiki
     public function __construct(
         public ClientInterface & RequestFactoryInterface & UriFactoryInterface $http,
         public People $people,
-        public Tidy $tidy,
+        public HtmlTidy $tidy,
     ) {
     }
 

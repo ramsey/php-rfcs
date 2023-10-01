@@ -14,13 +14,13 @@ use Mockery\MockInterface;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\Attributes\UsesClass;
+use PhpRfcs\HtmlTidy;
 use PhpRfcs\HttpFactory;
 use PhpRfcs\Php\People;
 use PhpRfcs\Php\User;
 use PhpRfcs\Test\PhpRfcsTestCase;
 use PhpRfcs\Wiki\Page;
 use PhpRfcs\Wiki\Revision;
-use PhpRfcs\Wiki\Tidy;
 use PhpRfcs\Wiki\Wiki;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestInterface;
@@ -35,7 +35,7 @@ use function str_contains;
 
 #[CoversClass(HttpFactory::class)]
 #[CoversClass(Revision::class)]
-#[CoversClass(Tidy::class)]
+#[CoversClass(HtmlTidy::class)]
 #[CoversClass(Wiki::class)]
 #[RunTestsInSeparateProcesses]
 #[UsesClass(Page::class)]
@@ -52,7 +52,7 @@ class WikiTest extends PhpRfcsTestCase
     {
         parent::setUp();
 
-        $tidy = new Tidy();
+        $tidy = new HtmlTidy();
 
         $this->client = Mockery::mock(ClientInterface::class);
 

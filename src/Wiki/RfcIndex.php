@@ -8,6 +8,7 @@ use DOMDocument;
 use DOMElement;
 use DOMNodeList;
 use DOMXPath;
+use PhpRfcs\HtmlTidy;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\UriFactoryInterface;
@@ -28,7 +29,7 @@ final readonly class RfcIndex
 
     public function __construct(
         public ClientInterface & RequestFactoryInterface & UriFactoryInterface $http,
-        public Tidy $tidy,
+        public HtmlTidy $tidy,
     ) {
     }
 

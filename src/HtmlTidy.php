@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace PhpRfcs\Wiki;
+namespace PhpRfcs;
 
 use Tidy as PhpTidy;
 
-final class Tidy extends PhpTidy
+final class HtmlTidy extends PhpTidy
 {
     private const CONFIG = [
         'bare' => true,

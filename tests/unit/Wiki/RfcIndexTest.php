@@ -12,13 +12,13 @@ use Mockery;
 use Mockery\MockInterface;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
+use PhpRfcs\HtmlTidy;
 use PhpRfcs\HttpFactory;
 use PhpRfcs\Test\PhpRfcsTestCase;
 use PhpRfcs\Wiki\Page;
 use PhpRfcs\Wiki\RfcIndex;
 use PhpRfcs\Wiki\RfcSection;
 use PhpRfcs\Wiki\Rfcs;
-use PhpRfcs\Wiki\Tidy;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
@@ -35,7 +35,7 @@ use function sprintf;
 #[UsesClass(Page::class)]
 #[UsesClass(RfcSection::class)]
 #[UsesClass(Rfcs::class)]
-#[UsesClass(Tidy::class)]
+#[UsesClass(HtmlTidy::class)]
 class RfcIndexTest extends PhpRfcsTestCase
 {
     use MatchesSnapshots;
@@ -47,7 +47,7 @@ class RfcIndexTest extends PhpRfcsTestCase
     {
         parent::setUp();
 
-        $tidy = new Tidy();
+        $tidy = new HtmlTidy();
 
         $this->client = Mockery::mock(ClientInterface::class);
 
