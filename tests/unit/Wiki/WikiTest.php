@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpRfcs\Test\Wiki;
 
 use Fig\Http\Message\StatusCodeInterface;
+use Hamcrest\Core\IsInstanceOf;
 use Laminas\Diactoros\RequestFactory;
 use Laminas\Diactoros\Response;
 use Laminas\Diactoros\StreamFactory;
@@ -109,24 +110,24 @@ class WikiTest extends PhpRfcsTestCase
                 'https://people.php.net/crell' => $peopleResponseCrell,
                 'https://people.php.net/girgias' => $peopleResponseGirgias,
                 'https://people.php.net/imsop' => $peopleResponseImsop,
-                'https://example.com/an-rfc-slug' => $wikiRawResponse('raw current'),
-                'https://example.com/an-rfc-slug?rev=1656814622' => $wikiRawResponse('raw 1656814622'),
-                'https://example.com/an-rfc-slug?rev=1656767562' => $wikiRawResponse('raw 1656767562'),
-                'https://example.com/an-rfc-slug?rev=1655481591' => $wikiRawResponse('raw 1655481591'),
-                'https://example.com/an-rfc-slug?rev=1655479066' => $wikiRawResponse('raw 1655479066'),
-                'https://example.com/an-rfc-slug?rev=1654606925' => $wikiRawResponse('raw 1654606925'),
-                'https://example.com/an-rfc-slug?rev=1647707947' => $wikiRawResponse('raw 1647707947'),
-                'https://example.com/an-rfc-slug?rev=1647707760' => $wikiRawResponse('raw 1647707760'),
-                'https://example.com/an-rfc-slug?rev=1647706437' => $wikiRawResponse('raw 1647706437'),
-                'https://example.com/an-rfc-slug?rev=1647704494' => $wikiRawResponse('raw 1647704494'),
-                'https://example.com/an-rfc-slug?rev=1636062963' => $wikiRawResponse('raw 1636062963'),
-                'https://example.com/an-rfc-slug?rev=1636061449' => $wikiRawResponse('raw 1636061449'),
-                'https://example.com/an-rfc-slug?rev=1636055573' => $wikiRawResponse('raw 1636055573'),
-                'https://example.com/an-rfc-slug?rev=1636055426' => $wikiRawResponse('raw 1636055426'),
-                'https://example.com/an-rfc-slug?rev=1636040908' => $wikiRawResponse('raw 1636040908'),
-                'https://example.com/an-rfc-slug?rev=1636040249' => $wikiRawResponse('raw 1636040249'),
-                'https://example.com/an-rfc-slug?rev=1636038797' => $wikiRawResponse('raw 1636038797'),
                 'https://example.com/an-rfc-slug?rev=1636038760' => $wikiRawResponse('raw 1636038760'),
+                'https://example.com/an-rfc-slug?rev=1636038797' => $wikiRawResponse('raw 1636038797'),
+                'https://example.com/an-rfc-slug?rev=1636040249' => $wikiRawResponse('raw 1636040249'),
+                'https://example.com/an-rfc-slug?rev=1636040908' => $wikiRawResponse('raw 1636040908'),
+                'https://example.com/an-rfc-slug?rev=1636055426' => $wikiRawResponse('raw 1636055426'),
+                'https://example.com/an-rfc-slug?rev=1636055573' => $wikiRawResponse('raw 1636055573'),
+                'https://example.com/an-rfc-slug?rev=1636061449' => $wikiRawResponse('raw 1636061449'),
+                'https://example.com/an-rfc-slug?rev=1636062963' => $wikiRawResponse('raw 1636062963'),
+                'https://example.com/an-rfc-slug?rev=1647704494' => $wikiRawResponse('raw 1647704494'),
+                'https://example.com/an-rfc-slug?rev=1647706437' => $wikiRawResponse('raw 1647706437'),
+                'https://example.com/an-rfc-slug?rev=1647707760' => $wikiRawResponse('raw 1647707760'),
+                'https://example.com/an-rfc-slug?rev=1647707947' => $wikiRawResponse('raw 1647707947'),
+                'https://example.com/an-rfc-slug?rev=1654606925' => $wikiRawResponse('raw 1654606925'),
+                'https://example.com/an-rfc-slug?rev=1655479066' => $wikiRawResponse('raw 1655479066'),
+                'https://example.com/an-rfc-slug?rev=1655481591' => $wikiRawResponse('raw 1655481591'),
+                'https://example.com/an-rfc-slug?rev=1656767562' => $wikiRawResponse('raw 1656767562'),
+                'https://example.com/an-rfc-slug?rev=1656814622' => $wikiRawResponse('raw 1656814622'),
+                'https://example.com/an-rfc-slug?rev=1674339123' => $wikiRawResponse('raw 1674339123'),
                 default => $this->fail(sprintf('Received unexpected request for %s', $request->getUri())),
             });
 
@@ -139,11 +140,10 @@ class WikiTest extends PhpRfcsTestCase
         foreach ($this->wiki->getRevisionsForPage($page) as $revision) {
             $revisions[] = [
                 'slug' => $revision->page->slug,
-                'id' => $revision->revision,
+                'id' => $revision->id,
                 'date' => $revision->date->format('Y/m/d H:i'),
                 'author' => ['name' => $revision->author?->name, 'email' => $revision->author?->email],
                 'summary' => $revision->summary,
-                'current' => $revision->isCurrent,
                 'content' => ['raw' => $revision->content->raw],
             ];
         }
@@ -222,67 +222,67 @@ class WikiTest extends PhpRfcsTestCase
                 'https://people.php.net/mbniebergall' => $peopleResponseNoSuchUser2,
                 'https://people.php.net/kocsismate' => $peopleResponseKocsismate,
                 'https://people.php.net/ilutov' => $peopleResponseIlutov,
-                'https://example.com/an-rfc-slug' => $wikiRawResponse('raw current'),
-                'https://example.com/an-rfc-slug?rev=1678725579' => $wikiRawResponse('raw 1678725579'),
-                'https://example.com/an-rfc-slug?rev=1677516791' => $wikiRawResponse('raw 1677516791'),
-                'https://example.com/an-rfc-slug?rev=1677516651' => $wikiRawResponse('raw 1677516651'),
-                'https://example.com/an-rfc-slug?rev=1677488382' => $wikiRawResponse('raw 1677488382'),
-                'https://example.com/an-rfc-slug?rev=1677227172' => $wikiRawResponse('raw 1677227172'),
-                'https://example.com/an-rfc-slug?rev=1677226823' => $wikiRawResponse('raw 1677226823'),
-                'https://example.com/an-rfc-slug?rev=1677226543' => $wikiRawResponse('raw 1677226543'),
-                'https://example.com/an-rfc-slug?rev=1677226393' => $wikiRawResponse('raw 1677226393'),
-                'https://example.com/an-rfc-slug?rev=1677226346' => $wikiRawResponse('raw 1677226346'),
-                'https://example.com/an-rfc-slug?rev=1677226281' => $wikiRawResponse('raw 1677226281'),
-                'https://example.com/an-rfc-slug?rev=1677167616' => $wikiRawResponse('raw 1677167616'),
-                'https://example.com/an-rfc-slug?rev=1677167313' => $wikiRawResponse('raw 1677167313'),
-                'https://example.com/an-rfc-slug?rev=1677167165' => $wikiRawResponse('raw 1677167165'),
-                'https://example.com/an-rfc-slug?rev=1677166549' => $wikiRawResponse('raw 1677166549'),
-                'https://example.com/an-rfc-slug?rev=1677165250' => $wikiRawResponse('raw 1677165250'),
-                'https://example.com/an-rfc-slug?rev=1677164837' => $wikiRawResponse('raw 1677164837'),
-                'https://example.com/an-rfc-slug?rev=1676493139' => $wikiRawResponse('raw 1676493139'),
-                'https://example.com/an-rfc-slug?rev=1675433821' => $wikiRawResponse('raw 1675433821'),
-                'https://example.com/an-rfc-slug?rev=1675235633' => $wikiRawResponse('raw 1675235633'),
-                'https://example.com/an-rfc-slug?rev=1675193907' => $wikiRawResponse('raw 1675193907'),
-                'https://example.com/an-rfc-slug?rev=1675120053' => $wikiRawResponse('raw 1675120053'),
-                'https://example.com/an-rfc-slug?rev=1675120007' => $wikiRawResponse('raw 1675120007'),
-                'https://example.com/an-rfc-slug?rev=1675119909' => $wikiRawResponse('raw 1675119909'),
-                'https://example.com/an-rfc-slug?rev=1675119883' => $wikiRawResponse('raw 1675119883'),
-                'https://example.com/an-rfc-slug?rev=1675119843' => $wikiRawResponse('raw 1675119843'),
-                'https://example.com/an-rfc-slug?rev=1675119686' => $wikiRawResponse('raw 1675119686'),
-                'https://example.com/an-rfc-slug?rev=1675119661' => $wikiRawResponse('raw 1675119661'),
-                'https://example.com/an-rfc-slug?rev=1675119527' => $wikiRawResponse('raw 1675119527'),
-                'https://example.com/an-rfc-slug?rev=1675116673' => $wikiRawResponse('raw 1675116673'),
-                'https://example.com/an-rfc-slug?rev=1675107440' => $wikiRawResponse('raw 1675107440'),
-                'https://example.com/an-rfc-slug?rev=1675107378' => $wikiRawResponse('raw 1675107378'),
-                'https://example.com/an-rfc-slug?rev=1671388041' => $wikiRawResponse('raw 1671388041'),
-                'https://example.com/an-rfc-slug?rev=1671381832' => $wikiRawResponse('raw 1671381832'),
-                'https://example.com/an-rfc-slug?rev=1671381813' => $wikiRawResponse('raw 1671381813'),
-                'https://example.com/an-rfc-slug?rev=1671255380' => $wikiRawResponse('raw 1671255380'),
-                'https://example.com/an-rfc-slug?rev=1671255328' => $wikiRawResponse('raw 1671255328'),
-                'https://example.com/an-rfc-slug?rev=1671254731' => $wikiRawResponse('raw 1671254731'),
-                'https://example.com/an-rfc-slug?rev=1648644637' => $wikiRawResponse('raw 1648644637'),
-                'https://example.com/an-rfc-slug?rev=1648608426' => $wikiRawResponse('raw 1648608426'),
-                'https://example.com/an-rfc-slug?rev=1648608270' => $wikiRawResponse('raw 1648608270'),
-                'https://example.com/an-rfc-slug?rev=1647902940' => $wikiRawResponse('raw 1647902940'),
-                'https://example.com/an-rfc-slug?rev=1594678424' => $wikiRawResponse('raw 1594678424'),
-                'https://example.com/an-rfc-slug?rev=1594678297' => $wikiRawResponse('raw 1594678297'),
-                'https://example.com/an-rfc-slug?rev=1594644402' => $wikiRawResponse('raw 1594644402'),
-                'https://example.com/an-rfc-slug?rev=1594644300' => $wikiRawResponse('raw 1594644300'),
-                'https://example.com/an-rfc-slug?rev=1594644286' => $wikiRawResponse('raw 1594644286'),
-                'https://example.com/an-rfc-slug?rev=1594643411' => $wikiRawResponse('raw 1594643411'),
-                'https://example.com/an-rfc-slug?rev=1594642942' => $wikiRawResponse('raw 1594642942'),
-                'https://example.com/an-rfc-slug?rev=1594642751' => $wikiRawResponse('raw 1594642751'),
-                'https://example.com/an-rfc-slug?rev=1594642629' => $wikiRawResponse('raw 1594642629'),
-                'https://example.com/an-rfc-slug?rev=1594641418' => $wikiRawResponse('raw 1594641418'),
-                'https://example.com/an-rfc-slug?rev=1594636597' => $wikiRawResponse('raw 1594636597'),
-                'https://example.com/an-rfc-slug?rev=1594634514' => $wikiRawResponse('raw 1594634514'),
-                'https://example.com/an-rfc-slug?rev=1594634453' => $wikiRawResponse('raw 1594634453'),
-                'https://example.com/an-rfc-slug?rev=1594119013' => $wikiRawResponse('raw 1594119013'),
-                'https://example.com/an-rfc-slug?rev=1594117320' => $wikiRawResponse('raw 1594117320'),
-                'https://example.com/an-rfc-slug?rev=1594066885' => $wikiRawResponse('raw 1594066885'),
-                'https://example.com/an-rfc-slug?rev=1594065422' => $wikiRawResponse('raw 1594065422'),
-                'https://example.com/an-rfc-slug?rev=1593957656' => $wikiRawResponse('raw 1593957656'),
                 'https://example.com/an-rfc-slug?rev=1593957617' => $wikiRawResponse('raw 1593957617'),
+                'https://example.com/an-rfc-slug?rev=1593957656' => $wikiRawResponse('raw 1593957656'),
+                'https://example.com/an-rfc-slug?rev=1594065422' => $wikiRawResponse('raw 1594065422'),
+                'https://example.com/an-rfc-slug?rev=1594066885' => $wikiRawResponse('raw 1594066885'),
+                'https://example.com/an-rfc-slug?rev=1594117320' => $wikiRawResponse('raw 1594117320'),
+                'https://example.com/an-rfc-slug?rev=1594119013' => $wikiRawResponse('raw 1594119013'),
+                'https://example.com/an-rfc-slug?rev=1594634453' => $wikiRawResponse('raw 1594634453'),
+                'https://example.com/an-rfc-slug?rev=1594634514' => $wikiRawResponse('raw 1594634514'),
+                'https://example.com/an-rfc-slug?rev=1594636597' => $wikiRawResponse('raw 1594636597'),
+                'https://example.com/an-rfc-slug?rev=1594641418' => $wikiRawResponse('raw 1594641418'),
+                'https://example.com/an-rfc-slug?rev=1594642629' => $wikiRawResponse('raw 1594642629'),
+                'https://example.com/an-rfc-slug?rev=1594642751' => $wikiRawResponse('raw 1594642751'),
+                'https://example.com/an-rfc-slug?rev=1594642942' => $wikiRawResponse('raw 1594642942'),
+                'https://example.com/an-rfc-slug?rev=1594643411' => $wikiRawResponse('raw 1594643411'),
+                'https://example.com/an-rfc-slug?rev=1594644286' => $wikiRawResponse('raw 1594644286'),
+                'https://example.com/an-rfc-slug?rev=1594644300' => $wikiRawResponse('raw 1594644300'),
+                'https://example.com/an-rfc-slug?rev=1594644402' => $wikiRawResponse('raw 1594644402'),
+                'https://example.com/an-rfc-slug?rev=1594678297' => $wikiRawResponse('raw 1594678297'),
+                'https://example.com/an-rfc-slug?rev=1594678424' => $wikiRawResponse('raw 1594678424'),
+                'https://example.com/an-rfc-slug?rev=1647902940' => $wikiRawResponse('raw 1647902940'),
+                'https://example.com/an-rfc-slug?rev=1648608270' => $wikiRawResponse('raw 1648608270'),
+                'https://example.com/an-rfc-slug?rev=1648608426' => $wikiRawResponse('raw 1648608426'),
+                'https://example.com/an-rfc-slug?rev=1648644637' => $wikiRawResponse('raw 1648644637'),
+                'https://example.com/an-rfc-slug?rev=1671254731' => $wikiRawResponse('raw 1671254731'),
+                'https://example.com/an-rfc-slug?rev=1671255328' => $wikiRawResponse('raw 1671255328'),
+                'https://example.com/an-rfc-slug?rev=1671255380' => $wikiRawResponse('raw 1671255380'),
+                'https://example.com/an-rfc-slug?rev=1671381813' => $wikiRawResponse('raw 1671381813'),
+                'https://example.com/an-rfc-slug?rev=1671381832' => $wikiRawResponse('raw 1671381832'),
+                'https://example.com/an-rfc-slug?rev=1671388041' => $wikiRawResponse('raw 1671388041'),
+                'https://example.com/an-rfc-slug?rev=1675107378' => $wikiRawResponse('raw 1675107378'),
+                'https://example.com/an-rfc-slug?rev=1675107440' => $wikiRawResponse('raw 1675107440'),
+                'https://example.com/an-rfc-slug?rev=1675116673' => $wikiRawResponse('raw 1675116673'),
+                'https://example.com/an-rfc-slug?rev=1675119527' => $wikiRawResponse('raw 1675119527'),
+                'https://example.com/an-rfc-slug?rev=1675119661' => $wikiRawResponse('raw 1675119661'),
+                'https://example.com/an-rfc-slug?rev=1675119686' => $wikiRawResponse('raw 1675119686'),
+                'https://example.com/an-rfc-slug?rev=1675119843' => $wikiRawResponse('raw 1675119843'),
+                'https://example.com/an-rfc-slug?rev=1675119883' => $wikiRawResponse('raw 1675119883'),
+                'https://example.com/an-rfc-slug?rev=1675119909' => $wikiRawResponse('raw 1675119909'),
+                'https://example.com/an-rfc-slug?rev=1675120007' => $wikiRawResponse('raw 1675120007'),
+                'https://example.com/an-rfc-slug?rev=1675120053' => $wikiRawResponse('raw 1675120053'),
+                'https://example.com/an-rfc-slug?rev=1675193907' => $wikiRawResponse('raw 1675193907'),
+                'https://example.com/an-rfc-slug?rev=1675235633' => $wikiRawResponse('raw 1675235633'),
+                'https://example.com/an-rfc-slug?rev=1675433821' => $wikiRawResponse('raw 1675433821'),
+                'https://example.com/an-rfc-slug?rev=1676493139' => $wikiRawResponse('raw 1676493139'),
+                'https://example.com/an-rfc-slug?rev=1677164837' => $wikiRawResponse('raw 1677164837'),
+                'https://example.com/an-rfc-slug?rev=1677165250' => $wikiRawResponse('raw 1677165250'),
+                'https://example.com/an-rfc-slug?rev=1677166549' => $wikiRawResponse('raw 1677166549'),
+                'https://example.com/an-rfc-slug?rev=1677167165' => $wikiRawResponse('raw 1677167165'),
+                'https://example.com/an-rfc-slug?rev=1677167313' => $wikiRawResponse('raw 1677167313'),
+                'https://example.com/an-rfc-slug?rev=1677167616' => $wikiRawResponse('raw 1677167616'),
+                'https://example.com/an-rfc-slug?rev=1677226281' => $wikiRawResponse('raw 1677226281'),
+                'https://example.com/an-rfc-slug?rev=1677226346' => $wikiRawResponse('raw 1677226346'),
+                'https://example.com/an-rfc-slug?rev=1677226393' => $wikiRawResponse('raw 1677226393'),
+                'https://example.com/an-rfc-slug?rev=1677226543' => $wikiRawResponse('raw 1677226543'),
+                'https://example.com/an-rfc-slug?rev=1677226823' => $wikiRawResponse('raw 1677226823'),
+                'https://example.com/an-rfc-slug?rev=1677227172' => $wikiRawResponse('raw 1677227172'),
+                'https://example.com/an-rfc-slug?rev=1677488382' => $wikiRawResponse('raw 1677488382'),
+                'https://example.com/an-rfc-slug?rev=1677516651' => $wikiRawResponse('raw 1677516651'),
+                'https://example.com/an-rfc-slug?rev=1677516791' => $wikiRawResponse('raw 1677516791'),
+                'https://example.com/an-rfc-slug?rev=1678725579' => $wikiRawResponse('raw 1678725579'),
+                'https://example.com/an-rfc-slug?rev=1679676035' => $wikiRawResponse('raw 1679676035'),
                 default => $this->fail(sprintf('Received unexpected request for %s', $request->getUri())),
             });
 
@@ -295,11 +295,10 @@ class WikiTest extends PhpRfcsTestCase
         foreach ($this->wiki->getRevisionsForPage($page) as $revision) {
             $revisions[] = [
                 'slug' => $revision->page->slug,
-                'id' => $revision->revision,
+                'id' => $revision->id,
                 'date' => $revision->date->format('Y/m/d H:i'),
                 'author' => ['name' => $revision->author?->name, 'email' => $revision->author?->email],
                 'summary' => $revision->summary,
-                'current' => $revision->isCurrent,
                 'content' => ['raw' => $revision->content->raw],
             ];
         }
@@ -322,8 +321,8 @@ class WikiTest extends PhpRfcsTestCase
             StatusCodeInterface::STATUS_OK,
         );
 
-        $peopleResponseGirgias = new Response(
-            fopen(__DIR__ . '/../Php/stubs/people-contents-girgias.txt', 'r') ?: '',
+        $peopleResponseCrell = new Response(
+            fopen(__DIR__ . '/../Php/stubs/people-contents-crell.txt', 'r') ?: '',
             StatusCodeInterface::STATUS_OK,
         );
 
@@ -346,9 +345,9 @@ class WikiTest extends PhpRfcsTestCase
             ->times(4)
             ->andReturnUsing(fn (RequestInterface $request): ResponseInterface => match ((string) $request->getUri()) {
                 'https://example.com/an-rfc-slug?do=revisions&first=0' => $wikiResponse,
-                'https://people.php.net/girgias' => $peopleResponseGirgias,
-                'https://example.com/an-rfc-slug' => $wikiRawResponse('raw current'),
-                'https://example.com/an-rfc-slug?rev=1656814622' => $revisionNotFoundResponse,
+                'https://people.php.net/crell' => $peopleResponseCrell,
+                'https://example.com/an-rfc-slug?rev=1636038760' => $wikiRawResponse('raw current'),
+                'https://example.com/an-rfc-slug?rev=1636038797' => $revisionNotFoundResponse,
                 default => $this->fail(sprintf('Received unexpected request for %s', $request->getUri())),
             });
 
@@ -358,12 +357,42 @@ class WikiTest extends PhpRfcsTestCase
         );
 
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Unable to find revision at https://example.com/an-rfc-slug?rev=1656814622');
+        $this->expectExceptionMessage('Unable to find revision at https://example.com/an-rfc-slug?rev=1636038797');
 
         // phpcs:disable
-        // Loop to advance the generator.
         foreach ($this->wiki->getRevisionsForPage($page) as $revision) {
-            // do nothing.
+            // Loop to advance the generator.
+        }
+        // phpcs:enable
+    }
+
+    public function testGetRevisionsForPageThrowsExceptionWhenRevisionIdIsMissing(): void
+    {
+        $wikiResponse = new Response(
+            fopen(__DIR__ . '/stubs/rfc-revision-id-missing-contents-01.txt', 'r') ?: '',
+            StatusCodeInterface::STATUS_OK,
+        );
+
+        $this->client
+            ->expects('sendRequest')
+            ->with(new IsInstanceOf(RequestInterface::class))
+            ->times(1)
+            ->andReturnUsing(fn (RequestInterface $request): ResponseInterface => match ((string) $request->getUri()) {
+                'https://example.com/an-rfc-slug?do=revisions&first=0' => $wikiResponse,
+                default => $this->fail(sprintf('Received unexpected request for %s', $request->getUri())),
+            });
+
+        $page = new Page(
+            'an-rfc-slug',
+            (new UriFactory())->createUri('https://example.com/an-rfc-slug'),
+        );
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Unable to find revision ID for node');
+
+        // phpcs:disable
+        foreach ($this->wiki->getRevisionsForPage($page) as $revision) {
+            // Loop to advance the generator.
         }
         // phpcs:enable
     }

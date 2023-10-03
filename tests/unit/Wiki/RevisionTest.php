@@ -24,11 +24,11 @@ class RevisionTest extends PhpRfcsTestCase
     {
         $page = new Page('a-page', new Uri('https://example.com/a-page'));
         $author = new User('My Name', 'me@example.com');
-        $revision = new Revision($page, 54321, new DateTimeImmutable('2023-10-03'), $author, 'A summary', false);
+        $revision = new Revision($page, 54321, new DateTimeImmutable('2023-10-03'), $author, 'A summary');
 
         $this->assertJsonStringEqualsJsonString(
             (string) json_encode([
-                'revision' => 54321,
+                'id' => 54321,
                 'date' => '2023-10-03T00:00:00+00:00',
                 'author' => ['name' => 'My Name', 'email' => 'me@example.com'],
                 'summary' => 'A summary',

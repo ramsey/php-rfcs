@@ -9,6 +9,8 @@ use JsonSerializable;
 use LogicException;
 use Psr\Http\Message\UriInterface;
 
+use function sprintf;
+
 use const SORT_NUMERIC;
 
 /**
@@ -34,24 +36,19 @@ final readonly class Page implements JsonSerializable
 
     public function addRevision(Revision $revision): void
     {
-        if ($this->revisions->offsetExists($revision->revision)) {
-            $existingRevision = $this->revisions->offsetGet($revision->revision);
+        if ($this->revisions->offsetExists($revision->id)) {
+            $existingRevision = $this->revisions->offsetGet($revision->id);
             if ($existingRevision === $revision) {
                 return;
             } else {
-                throw new LogicException('Unable to overwrite revision with a different instance');
+                throw new LogicException(sprintf(
+                    'Unable to overwrite revision %d with a different instance',
+                    $revision->id,
+                ));
             }
         }
 
-        if ($revision->isCurrent) {
-            foreach ($this->revisions as $existingRevision) {
-                if ($existingRevision->isCurrent) {
-                    throw new LogicException('Cannot add more than one "current" revision');
-                }
-            }
-        }
-
-        $this->revisions->offsetSet($revision->revision, $revision);
+        $this->revisions->offsetSet($revision->id, $revision);
         $this->revisions->ksort(SORT_NUMERIC);
     }
 

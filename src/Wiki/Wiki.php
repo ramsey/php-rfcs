@@ -12,6 +12,7 @@ use DateTimeImmutable;
 use Generator;
 use PhpRfcs\HtmlTidy;
 use PhpRfcs\Php\People;
+use PhpRfcs\Php\User;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\UriFactoryInterface;
@@ -26,6 +27,7 @@ use function parse_url;
 use function sprintf;
 use function str_replace;
 use function trim;
+use function usort;
 
 /**
  * Provides operations for getting wiki data.
@@ -46,13 +48,21 @@ final readonly class Wiki
      */
     public function getRevisionsForPage(Page $page): Generator
     {
-        return $this->getPageHistory($page);
+        foreach ($this->getPageHistory($page) as $revision) {
+            // We delayed looking up the user until this point, so we can limit
+            // the number of external HTTP requests we make per yield.
+            $revision->author = $this->people->lookupUser($revision->author?->name ?? '');
+            $revision->content->raw = $this->getRawContentForRevision($revision);
+            yield $revision;
+        }
     }
 
     /**
-     * @return Generator<Revision>
+     * @param array<int, Revision> $history
+     *
+     * @return array<int, Revision>
      */
-    private function getPageHistory(Page $page, int $first = 0): Generator
+    private function getPageHistory(Page $page, int $first = 0, array $history = []): array
     {
         $contents = $this->getRevisionPageContents($page, $first);
 
@@ -65,30 +75,30 @@ final readonly class Wiki
         $revisions = $xpath->query("//form[@id='page__revisions']/div/ul/li/div");
 
         foreach ($revisions as $revision) {
-            $date = $this->getRevisionDate($revision, $xpath);
             $id = $this->getRevisionId($revision, $xpath);
+            $date = new DateTimeImmutable("@$id");
+            $user = new User($this->getRevisionAuthor($revision, $xpath));
             $summary = $this->getRevisionSummary($revision, $xpath);
-            $user = $this->people->lookupUser($this->getRevisionAuthor($revision, $xpath));
 
-            $revision = new Revision($page, $id ?: $date->getTimestamp(), $date, $user, $summary, $id === 0);
-            $revision->content->raw = $this->getRawContentForRevision($revision);
-
-            yield $revision;
+            $history[] = new Revision($page, $id, $date, $user, $summary);
         }
 
         $nextNav = $xpath->query("//div[@class='pagenav-next']") ?: [];
 
         if (count($nextNav) > 0) {
-            foreach ($this->getPageHistory($page, $first + self::FIRST_INCREMENT) as $revision) {
-                yield $revision;
-            }
+            $history = $this->getPageHistory($page, $first + self::FIRST_INCREMENT, $history);
         }
+
+        // Sort by ID descending, so it is sorted from oldest to newest values.
+        usort($history, fn (Revision $a, Revision $b): int => $a->id <=> $b->id);
+
+        return $history;
     }
 
     private function getRawContentForRevision(Revision $revision): string
     {
         $queryParams = array_filter([
-            'rev' => $revision->isCurrent ? '' : $revision->revision,
+            'rev' => $revision->id,
         ]);
 
         $url = $revision->page->pageUrl->withQuery(http_build_query($queryParams));
@@ -120,26 +130,15 @@ final readonly class Wiki
         return $this->tidy->repairString($pageResponse->getBody()->getContents());
     }
 
-    private function getRevisionDate(DOMNode $revisionNode, DOMXPath $xpath): DateTimeImmutable
-    {
-        $linkNode = $xpath->query("span[@class='date']", $revisionNode) ?: null;
-        $dateSpan = $linkNode?->item(0);
-        $date = trim($dateSpan?->nodeValue ?? '');
-
-        assert($date !== '');
-
-        return new DateTimeImmutable($date);
-    }
-
     private function getRevisionId(DOMNode $revisionNode, DOMXPath $xpath): int
     {
-        $linkNode = $xpath->query("a[@class='wikilink1']", $revisionNode) ?: null;
+        $linkNode = $xpath->query("input[@type='checkbox']", $revisionNode) ?: null;
         $link = $linkNode?->item(0);
-        $uri = $link?->attributes?->getNamedItem('href')?->nodeValue ?? '';
-        parse_str(parse_url($uri)['query'] ?? '', $query);
+        $rev = $link?->attributes?->getNamedItem('value')?->nodeValue ?? '';
 
-        /** @var numeric-string $rev */
-        $rev = $query['rev'] ?? '0';
+        if (!$rev) {
+            throw new RuntimeException('Unable to find revision ID for node');
+        }
 
         return (int) $rev;
     }
