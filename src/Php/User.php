@@ -9,7 +9,7 @@ use JsonSerializable;
 /**
  * Represents a PHP user.
  */
-final readonly class User implements JsonSerializable
+final class User implements JsonSerializable
 {
     public function __construct(
         public string $name,

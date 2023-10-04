@@ -25,4 +25,20 @@ class UserTest extends TestCase
             (string) json_encode($user),
         );
     }
+
+    public function testUserAllowsModification(): void
+    {
+        $user = new User('My Name', 'me@example.com');
+
+        $user->name = 'My changed name';
+        $user->email = 'me.changed@example.com';
+
+        $this->assertJsonStringEqualsJsonString(
+            (string) json_encode([
+                'name' => 'My changed name',
+                'email' => 'me.changed@example.com',
+            ]),
+            (string) json_encode($user),
+        );
+    }
 }

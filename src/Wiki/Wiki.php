@@ -22,8 +22,6 @@ use function array_filter;
 use function assert;
 use function count;
 use function http_build_query;
-use function parse_str;
-use function parse_url;
 use function sprintf;
 use function str_replace;
 use function trim;
@@ -32,21 +30,21 @@ use function usort;
 /**
  * Provides operations for getting wiki data.
  */
-final readonly class Wiki
+class Wiki
 {
     private const FIRST_INCREMENT = 20;
 
     public function __construct(
-        public ClientInterface & RequestFactoryInterface & UriFactoryInterface $http,
-        public People $people,
-        public HtmlTidy $tidy,
+        public readonly ClientInterface & RequestFactoryInterface & UriFactoryInterface $http,
+        public readonly People $people,
+        public readonly HtmlTidy $tidy,
     ) {
     }
 
     /**
-     * @return Generator<Revision>
+     * @return iterable<Revision>
      */
-    public function getRevisionsForPage(Page $page): Generator
+    public function getRevisionsForPage(Page $page): iterable
     {
         foreach ($this->getPageHistory($page) as $revision) {
             // We delayed looking up the user until this point, so we can limit
